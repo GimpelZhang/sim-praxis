@@ -12,9 +12,14 @@ import numpy as np
 CONFIG_PATH = Path(__file__).with_name("embedding_config.json")
 
 # 顺序即优先级；(模型名, 标称维度, onnx 最小字节数)
+# mpnet onnx 约 1.0GB（fastembed 实际取 Xenova 转换仓 onnx/model.onnx）；
 # bge-small-zh onnx 约 96MB；multilingual-MiniLM-L12-v2 onnx 约 470MB。
 # 下载截断/损坏常常表现为几十 KB 的 HTML/错误页，min_bytes 直接拦掉。
+# 2026-10-12 经用户明确批准换型（AskUserQuestion 决策）：bge-small-zh 对 §12.4
+# Q3（cudaErrorIllegalAddress 精确错误名召回）存在模型能力天花板——681 个滑动窗
+# 穷举证明相关内容得分上限 0.511 < top5 门槛 0.533；mpnet 多语能力更强，置为首选。
 PREFERENCES = [
+    ("sentence-transformers/paraphrase-multilingual-mpnet-base-v2", 768, 800 * 1024 * 1024),
     ("BAAI/bge-small-zh-v1.5", 512, 80 * 1024 * 1024),
     ("sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", 384, 300 * 1024 * 1024),
 ]

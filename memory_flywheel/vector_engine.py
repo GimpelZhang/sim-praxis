@@ -110,6 +110,22 @@ class VectorEngine:
         if self.table_exists():
             self.db.drop_table(TABLE_NAME)
 
+    @staticmethod
+    def drop_existing(uri: str | None = None) -> bool:
+        """在不构造 VectorEngine 的前提下删表（--rebuild 跨维度换模型专用）。
+
+        __init__ 的维度守卫会拒绝 512→768 这类混维度构造，因此换模型后的
+        --rebuild 不能走「先实例化再 drop」；只连接 lancedb、不加载嵌入配置。
+        返回是否真的删过旧表。
+        """
+        uri = uri or os.environ.get(
+            "SIMPRAXIS_LANCEDB_URI", "/mnt/artifacts/simpraxis/lancedb")
+        db = lancedb.connect(uri)
+        if TABLE_NAME in db.table_names():
+            db.drop_table(TABLE_NAME)
+            return True
+        return False
+
     # ---------- write ----------
     def replace_by_relpaths(self, records: list[dict[str, Any]], relpaths: Iterable[str]):
         """文件级幂等替换：先删这些 kb_relpath 的旧 chunk，再整批写入。"""
