@@ -1,0 +1,29 @@
+# SimPraxis 三阶段模型配置（v4，用户直接指令）。本文件是仓库内【唯一】允许写模型 ID
+# 的地方：火山供应随时可能变，但【v4.2 决策 3】执行期任何 model_id 变更（含同家族日期
+# 版本兜底、含置 null）都必须先 STOP→inventory 清点→请示用户，获批后才允许改本文件，
+# 改后必须跑
+#   /mnt/venvs/simpraxis/bin/python -m orchestrator.gateway.router --validate-models
+# 三个 stage 全部 200 且 type=message 才算换供成功。禁止执行者自行换 ID/换供应商/猜 ID，
+# 禁止把模型 ID 写进任何代码；获批后的换供重验批次在计划 8 次预算之外，另计、逐次记录。
+# model_id 不是密钥，本文件直接提交；鉴权值只从 ~/.bashrc 的 ANTHROPIC_* 族经环境注入。
+# null 合规路径（对任何 stage 保留）：供应侧确无可用模型时，经用户批准允许 model_id: null，
+#   但必须同时给 open_question，且其文本逐字出现在 .omc/plans/open-questions.md 中；
+#   null stage 跳过付费校验并报告 SKIP-DUE-TO-NULL（显式缺口，不是假通过），调用期
+#   抛 StageUnresolvedError，不触网。
+meta:
+  schema_version: "1.0"
+  endpoint: anthropic-messages
+  base_url_env: ANTHROPIC_BASE_URL
+stage_models:
+  macro_ideation:
+    model_id: deepseek-v4.1-flash   # 请求用点号 ID；响应回显规范化为 deepseek-v4-1-flash
+    capabilities: [text]
+    purpose: "方向探索与可行性调研（Macro Ideation）"
+  coding_debug:
+    model_id: glm-5.3-flash         # 响应回显 glm-5-3-flash
+    capabilities: [text]
+    purpose: "环境适配与代码编写（Coding & Debugging）"
+  visual_rollout:
+    model_id: ark-code-latest       # 响应回显 "auto"；视觉能力 2026-10-12 实证（32x32 红/蓝）
+    capabilities: [text, vision]
+    purpose: "闭环仿真评估与视频审阅（Visual & Rollout Evaluation）"
