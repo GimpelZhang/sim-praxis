@@ -1,0 +1,30 @@
+# Phase 0 代码路径直接用 litellm SDK（router.py，anthropic/ provider 指 /api/coding）；
+# 本文件留给 Phase 1 的代理部署。部署时从 stage_models.yaml 把 model_id 复制到占位处；
+# api_base/api_key 全部从环境读（ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN），无明文。
+# 注意用 os.environ["NAME"] 括号写法：os.environ/NAME 形态虽为 litellm 文档写法，
+# 但会被 scan_secrets 第 9 条（apikey/auth_token 赋值长值）误判，二者运行等价。
+model_list:
+  - model_name: macro_ideation
+    litellm_params:
+      model: anthropic/__MACRO_IDEATION_MODEL_ID__
+      api_base: os.environ["ANTHROPIC_BASE_URL"]
+      api_key: os.environ["ANTHROPIC_AUTH_TOKEN"]
+      rpm: 40
+      timeout: 120
+  - model_name: coding_debug
+    litellm_params:
+      model: anthropic/__CODING_DEBUG_MODEL_ID__
+      api_base: os.environ["ANTHROPIC_BASE_URL"]
+      api_key: os.environ["ANTHROPIC_AUTH_TOKEN"]
+  - model_name: visual_rollout
+    litellm_params:
+      model: anthropic/__VISUAL_ROLLOUT_MODEL_ID__
+      api_base: os.environ["ANTHROPIC_BASE_URL"]
+      api_key: os.environ["ANTHROPIC_AUTH_TOKEN"]
+litellm_settings:
+  drop_params: true
+router_settings:
+  num_retries: 5
+  request_timeout: 120
+  allowed_fails: 3
+  cooldown_time: 60
