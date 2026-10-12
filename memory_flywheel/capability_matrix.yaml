@@ -1,0 +1,136 @@
+# Phase 0 Task4-1.C 仿真引擎能力矩阵
+# 铁律：每条 fact 必须回指 KB（commit aac53313）原文；全局层不新增事实；
+# 查不到证据的能力写 coverage: absent + gaps 含“未提及”。
+# 取证范围：仅 $KB/knowledge/ 下 32 个 md；引擎自身能力与 tour 项目用法已在 claim 中区分。
+meta:
+  schema_version: "1.0"
+  kb_commit: "aac53313c620efa6217fd51a55834b006d78e689"
+  generated_by: "Phase0 Task4"
+  discipline: "每条 fact 必须回指 KB；全局层不新增事实；无证据标 absent"
+
+engines:
+  - slug: genesis
+    display_name: "Genesis World"
+    kind: "通用多物理仿真平台（自研统一多物理栈）"
+    coverage: detailed
+    facts:
+      - claim: "统一多物理栈在同一场景、同一份状态中落地 8 个求解器：Rigid / FEM / MPM / SPH / PBD / Stable-Fluid / Kinematic / Tool，分别覆盖机器人刚体、弹性体软体布料、颗粒弹塑性材料、流体、快速布料/位置约束流体、欧拉场烟雾、纯运动学对象与工具实体。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.1 求解器表（genesis/engine/solvers/，L95-108）", level: "[CODE]"}
+      - claim: "提供三种可互换耦合器：LegacyCoupler（默认、快速通用显式耦合）、SAPCoupler（Drake 风格半解析原-对偶，配合 hydroelastic 接触）、IPCCoupler（无相交接触 penetration-free，需 pyuipc）；Scene 构造期传 coupler_options 一行切换，None 回落 LegacyCouplerOptions。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.2 耦合器表与切换代码（genesis/engine/couplers/、scene.py:105,126，L114-133）", level: "[CODE]"}
+      - claim: "传感器子系统已实现 RGB 相机（Rasterizer/Raytracer/BatchRenderer 三实现）、深度（相机深度 + DepthCameraSensor 两条独立路径）、激光雷达 RaycasterSensor、点云触觉（Proximity/Elastomer Taxel）、温度场、表面距离探针、三合一 IMU、接触探针等，并通过 __init_subclass__ 自动注册、SensorManager 统一调度。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.5.1-§2.5.2 已实现传感器清单表（L192-213）", level: "[CODE]"}
+      - claim: "硬件缺陷建模为两层继承：SensorOptions 提供 history_length/delay/jitter；SimpleSensorOptions 再提供 resolution（量化）/bias/noise（白噪声标准差）/random_walk；但全部缺陷参数默认值均为 0.0，即不显式配置时传感器输出理想真值。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.5.3 两层参数表、§2.5.7 默认理想化（options.py:69-121,219-243，L219-244, L308-312）", level: "[CODE]"}
+      - claim: "相机直接继承 Sensor 而非 SimpleSensor（源码注释明示），因此相机只有 delay/jitter，没有 noise/bias/random_walk/resolution；图像层传感器噪声不由该机制提供，视觉域随机化需自行在图像上加。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.5.3 相机不在第二层（options.py:222-224，L239-243）", level: "[CODE]"}
+      - claim: "大规模并行以 scene.build(n_envs=N) 为唯一开关，n_envs=0 与 =1 语义不同（有无 batch 维）；PARA_LEVEL 分 NEVER/PARTIAL/ALL，只有 GPU 且 n_envs>0 才吃满并行；gs.init 支持 cpu/gpu(自动)/cuda/amdgpu(ROCm)/metal 后端。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§4.1 并行环境、§4.2 后端表（scene.py:864、constants.py:166-192，L553-584）", level: "[CODE]"}
+      - claim: "支持可微仿真：SimOptions.requires_grad（默认 False）配合 scene.backward(loss) 开启反向模式自动微分；硬约束 substeps_local % substeps == 0（违反直接 raise_exception），显存占用随 substeps_local 线性增长。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§4.3 可微分仿真（solvers.py:56,63-77、scene.py:1021，L586-596）", level: "[CODE]"}
+      - claim: "多格式资产加载（gs.morphs.*）：MJCF、URDF（依赖 xacro，.urdf.xacro 先预处理成纯 URDF）、Mesh/MeshSet（经 trimesh 支持 obj/stl/dae/glb 含 Draco 压缩）、USD、Terrain 高度场（rtree 射线投射）、Drone（带螺旋桨模型）及程序化几何。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§4.5 多格式资产加载（genesis/options/morphs.py，L615-625）", level: "[CODE]"}
+      - claim: "提供状态快照与断点续跑 API：get_state/reset(state,envs_idx)/save_checkpoint/load_checkpoint/dump_ckpt_to_numpy；reset 支持按环境子集重置，RL 训练中可只重置已 terminate 的环境。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§4.7 状态 API 表（scene.py:975,1063,1524,1546,1565，L631-643）", level: "[CODE]"}
+      - claim: "激光雷达 RaycasterSensor 走 BVH 加速的光线投射（非渲染管线），支持 GridPattern / SphericalPattern（典型旋转 lidar）/ DepthCameraPattern 三种投射模式；min_range 默认 0、max_range 默认 20.0 m，no_hit_value 未指定时回落 max_range，默认配置下“打空”与“打到 20 m”读数无法区分。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.5.6 激光雷达/深度光线投射路径（raycaster.py:504,47、options.py:610-645，L295-306）", level: "[CODE]"}
+      - claim: "弹性体触觉 ElastomerTaxelSensor 实现 HydroShear 风格 marker displacement，数据来源是 Genesis 的 SDF 查询而非真跑 FEM 弹性体；建模膨胀（高斯核）、剪切、可压缩性混合（0=不可压缩全局体积守恒，1=完全可压缩局部隆起）与胶层厚度响应，网格布局走 FFT 加速。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§2.5.5 路线 B 弹性体标记位移触觉（point_cloud_tactile.py:1949、tactile.py:396-470，L265-290）", level: "[CODE]"}
+      - claim: "刚体动力学以 MuJoCo 为参考实现（主依赖 mujoco>=3.2.5，无上界），碰撞检测参考 libccd；技术血缘另含 Quadrants 编译器（2025-06 fork 自 Taichi）、IPC 后端 libuipc、MPM 参考 FluidLab、SPH 参考 SPH_Taichi。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§5.3 核心依赖清单刚体参考实现行（L691）与 §9.3 技术血缘表（L1153-1168）", level: "[CODE]"}
+      - claim: "支持 hybrid_entity 混合实体：同一物体的不同部分可使用不同求解器（engine/entities/hybrid_entity.py）。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§3.3 genesis/engine 结构表 hybrid_entity.py 行（L481）", level: "[CODE]"}
+    gaps:
+      - "多机器人 / 多智能体协作：KB 未提及（toolchain_comparison §2.2 对四工具链均标 ❌ 未提及），待 Phase1 补"
+      - "ROS / ROS 2 集成：KB 明确未提及（已 grep 确认无证据），待 Phase1 补"
+      - "遥操作采数：KB 未提及，待 Phase1 补"
+      - "官方博客宣称的 sim-real 相关性与加速数字（Pearson 0.8996、103× IPC、4 ms/帧）仅 [官网] 级，仓库内无可复现基准脚本；14 任务×200 episodes 真机评测集未开源"
+
+  - slug: physx_isaac
+    display_name: "NVIDIA PhysX 5 / Isaac Sim"
+    kind: "GPU 刚体物理引擎与 Isaac Sim 仿真底座"
+    coverage: detailed
+    facts:
+      - claim: "genie_sim_v3 三物理后端中 isaac_physx 为默认稳定参考路径，即 PhysX 5 via omni.physx（IsaacPhysXEngine，ENG/scripts/kit/isaac_physx.py）；裸写 physics_engine=physx 会被 _validate_engine_id 拒绝，规范 id 为 isaac_physx。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.1 两抽象层与三后端表（base.py、docs/engines.md，L150-168）", level: "[CODE]"}
+      - claim: "genie_sim_v3 的 Benchmark / Data-collection 栈物理直接使用 Isaac Sim PhysX（单进程 Kit），与 RT Engine、RLinf 栈物理路径完全不同。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.1.4 三套共存仿真栈对照表（L126-135）", level: "[CODE]"}
+      - claim: "lw_benchhub 默认物理为 PhysX（GPU）via Isaac Sim，自身不实现物理；Arena 基类把 PhysxCfg() 留在 Isaac Lab 默认值，未覆盖求解器类型与迭代次数，contact_offset/rest_offset 在 lw_benchhub 与 Arena 两仓库均未设置，全部沿用 Isaac Lab/USD 资产默认。"
+        evidence: {kb_relpath: "knowledge/projects/lw_benchhub/background_knowledge.md", locator: "§2.6.10 物理引擎段（Arena isaaclab_arena_cli.py:89-95，L449-451）", level: "[CODE]"}
+      - claim: "接触力感知走 isaaclab.sensors.ContactSensorCfg，即 PhysX 的接触上报：消费 data.net_forces_w（传感器 body 合力）与 data.force_matrix_w（per body×被过滤 body 的分项力，需配 filter_prim_paths_expr 才有值）两个张量。"
+        evidence: {kb_relpath: "knowledge/projects/lw_benchhub/background_knowledge.md", locator: "§2.6.7 接触力：PhysX 接触上报（L360-372）", level: "[CODE]"}
+      - claim: "物理属性经 PhysX USD schema 表达：PhysxSchema 含 PhysxJointAPI:armature、PhysxMimicJointAPI、PhysxRigidBodyAPI；mimic 主从夹爪在 isaac_physx 后端用 PhysxMimicJointAPI 实现（C++ 求解器层刚性约束，naturalFrequency=0/dampingRatio=0 即刚性）。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.1 USD schema 列表（L85-91）与 §2.2.4 三套 mimic 实现（L275）", level: "[CODE]"}
+      - claim: "存在 PhysX 启动种子效应：World.reset() 会跑约 5 个 init tick，无种子时 PhysX 采用 URDF importer 默认增益（夹爪 kp=625、kd=0），表现为夹爪下垂约 80 ms。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.4 两层 PD 增益授权种子 1（L254）", level: "[CODE]"}
+      - claim: "isaac_physx 后端不支持布料；PhysX 布料能力在上游处于 “not actively maintained” 状态，genie_sim_v3 中布料/软体只有 newton_standalone 一条路径。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§8.1 功能性限制表“布料/软体只有一条路径”行（L1491）", level: "[README]"}
+      - claim: "Isaac Sim 版本在 genie_sim_v3 中两版共存：5.1 位于基础镜像 /isaac-sim 经 omni_python 调用，6.0 经 pip 装入系统 python3.12 经 python3 调用（Newton 后端需要）；lw_benchhub 侧实测锁 Isaac Sim 5.1.0 / Isaac Lab v2.3.2，硬件要求 NVIDIA RTX（需光追核心）GPU 与 ≥570.169 驱动。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.1 两个 Isaac Sim 版本共存（docker/AGENTS.md、Dockerfile.5.1，L141）；lw_benchhub §5.1 硬件底线（L967-971）", level: "[CODE]"}
+    gaps:
+      - "PhysX 求解器迭代次数、solver type、CCD、GPU pipeline 等细节：genie_sim_v3 与 lw_benchhub 两仓库均未显式设置（KB 标“未提及”，ENG/docs/perf.md 仅有待核实建议片段），待 Phase1 查上游文档补"
+      - "PhysX 的软体/流体/颗粒能力在 KB 中未提及（仅记录布料“not actively maintained”），待 Phase1 补"
+      - "GPU 向量化多环境物理：genie_sim_v3 三栈均无 Isaac Lab 式 GPU 向量化物理（RL 走 CPU MuJoCo 多进程）；KB 未记录 PhysX GPU 大规模并行的直接实测"
+
+  - slug: mujoco
+    display_name: "MuJoCo（含 MuJoCo-Warp）"
+    kind: "CPU 刚体物理引擎 / 多关节接触动力学"
+    coverage: referenced
+    facts:
+      - claim: "Genesis World 的刚体动力学与碰撞以 MuJoCo 为参考实现：主依赖 mujoco>=3.2.5（无上界），[dev] extra 则收紧为 mujoco>=3.10.0,<3.11.0，二者存在真实版本冲突，KB 建议 Genesis 单独开环境。"
+        evidence: {kb_relpath: "knowledge/projects/genesis_world/background_knowledge.md", locator: "§5.3 依赖表刚体参考实现行（L691）、§5.5 dev extras 冲突警告（L713-716）", level: "[CODE]"}
+      - claim: "genie_sim_v3 的 RLinf 栈物理使用 CPU MuJoCo：每个环境一个 MuJoCo 进程（N 个 MuJoCo 进程 + 1 个渲染进程），进程间经共享内存（SHM）传输，是该项目唯一的 RL 训练物理路径；KB 同时明确其没有 GPU 向量化物理。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.1.4 三栈对照表 RLinf 物理/进程模型行（L133-135）", level: "[CODE]"}
+      - claim: "MuJoCo 接触柔度参数在 genie_sim_v3 的默认值：solref=(0.002, 1.0)（timeconst, dampratio）、solimp=(0.9, 0.95, 0.001, 0.5, 2.0)、摩擦=(1.0 滑动, 0.005 扭转, 0.0001 滚动)；物体五类分类（robot/floor/passive/static_prop/other）当前共用同一套参数。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.3 接触与摩擦模型（object_classification.py:183-206，L204-212）", level: "[CODE]"}
+      - claim: "MuJoCo-Warp 不允许直接写 geom_solref：每步从 shape_material_ke/shape_material_kd 经内部 convert_solref 重算，工程上必须按 kd=2/timeconst、ke=(kd/(2·dampratio))² 反演；并有 solref 时间常数与子步数耦合的启动期硬检查（mjc_contact.py:150-167）。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.3 solref↔ke/kd 反演（ENG/scripts/engine/newton/mjc_contact.py:62-105,150-167，L218-228）", level: "[CODE]"}
+      - claim: "跨引擎资产链路以 USD 属性为中介：同一份驱动增益经 PhysX USD parser 初始化、经 Newton add_usd 变为 model.joint_target_ke/kd，再 dump 成 MJCF 里的 actuator gainprm/biasprm；AS3 资产 payload 分层中专有 mujoco.usda（MuJoCo/Newton 专属层）。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.1 OpenUSD 真值源（L85-95）与 payload 分层（L119-120）", level: "[CODE]"}
+      - claim: "mjwarp 路径用 MuJoCo 等式约束实现 mimic 关节：mimic_eq_solref=[-10000,-100]，负值代表刚性直接模式；注释警告比 [-50000,-500] 更硬会在典型 2 ms 子步下数值爆炸。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.4 三套 mimic 实现（L275）", level: "[CODE]"}
+      - claim: "lw_benchhub 的 Arena 底座除默认 PhysX 外另带实验性 Newton / MuJoCo-Warp 后端，经 --presets physx|newton 选择。"
+        evidence: {kb_relpath: "knowledge/projects/lw_benchhub/background_knowledge.md", locator: "§2.6.10 物理引擎段（isaaclab_arena_cli.py:89-95，L449）", level: "[CODE]"}
+    gaps:
+      - "KB 未为 MuJoCo 引擎本体单独立章：引擎版本路线、求解器类型、渲染与传感器自有能力仅散见于三个 tour 项目的用法，未提及，待 Phase1 补"
+      - "MuJoCo MJX（XLA/JAX 向量化）自身能力在 KB 中未提及（仅 Genesis 血缘表出现 Madrona-mjx 名称），待 Phase1 补"
+
+  - slug: newton
+    display_name: "Isaac Newton（Newton / MuJoCo-Warp 栈）"
+    kind: "NVIDIA Warp GPU 物理求解栈（刚体 + 布料软体实验路径）"
+    coverage: referenced
+    facts:
+      - claim: "genie_sim_v3 的 isaac_newton 后端是 isaacsim.physics.newton 包装器（IsaacNewtonEngine），强制 physics_solver=mujoco-warp，标记 🧪 UNSTABLE，仅支持 MuJoCo-Warp 刚体，不支持布料。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.1 三后端表 isaac_newton 行（L165）与 §8.1 限制表（L1492）", level: "[CODE]"}
+      - claim: "newton_standalone（NewtonHeadlessEngine，ENG/scripts/engine/newton/）为 Kit-free Newton 直连，是三后端中唯一支持布料/软体的路径；实际布料求解器有四种：VBD（默认）、XPBD、Style3D、AVBD，存在布料条目时 physics_solver 必须是 {vbd,xpbd,style3d} 之一。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.1 后端表 newton 行（L166）与 §2.2.5 布料段（cloth.py、engine_base.py:134-152，L290-303）", level: "[CODE]"}
+      - claim: "newton-standalone 内有引擎级 PhysicsEngine ABC 与求解器级 SolverAdapter ABC 两层抽象，适配器含 MuJoCoWarpAdapter、FeatherstoneAdapter、AVBDAdapter；SolverAdapter 契约要求 substep 可被 CUDA graph 捕获（循环内不得有 host 侧分支或分配），用 wp.ScopedCapture 录制一次、wp.capture_launch 重放，全程 NVIDIA Warp 数组。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.1 抽象层类树与 substep 契约（L150-170）、§2.3 Warp/CUDA graph（L311）", level: "[CODE]"}
+      - claim: "newton launcher 实测时间步配置：mujoco-warp 为 physics_hz=100、10 子步（sim_dt=1 ms）、render 30 Hz；mjvbd 60 Hz/10 子步、mjxpbd 60 Hz（FEM 场景 24 子步）、avbd/fsvbd 60 Hz；设计取舍是在求解器内细分子步以避免外层 tick 约 9 ms 的 Kit/USD 更新开销。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.2 launcher 配置表与核心权衡注释（BRINGUP/config/launcher_*.yaml，L180-201）", level: "[CODE]"}
+      - claim: "Newton USD importer 存在 actuator 存在性种子：ModelBuilder.finalize() 依 stiffness/damping 决定是否分配 POSITION actuator；stiffness=0,damping=0 时落入 EFFORT 模式、没有位置 actuator，apply_action 的 joint_target_pos 无处施力（URDF→USD 转换留下的 mimic follower 正是此状态，需 Newton-only DriveAPI 种子）。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.4 种子 2 Newton actuator 存在性（L255）", level: "[CODE]"}
+      - claim: "newton 后端的控制律是运动学式速度注入 joint_qd ← q⋆−q，不通过力/力矩，不产生真实关节力矩，接触力的物理性也随之改变；KB 警告选它做 RL 训练或力控研究前必须知道这一点。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§2.2.4 三后端控制律表与警告（L281-286）、§8.1 限制表（L1493）", level: "[CODE]"}
+      - claim: "isaac_newton 后端下 snapshot_joint_states 返回全零：Newton wrapper 不把关节状态回写到 PhysX 所写的 USD state:angular:physics:position 属性，导致 proprioception 不可用，属真实功能缺口而非配置问题。"
+        evidence: {kb_relpath: "knowledge/projects/genie_sim_v3/background_knowledge.md", locator: "§7 已知问题快照回写段（ENG/docs/engines.md，L689）", level: "[CODE]"}
+    gaps:
+      - "newton-standalone 无独立渲染进程（launcher.renders: []），rerun/ovrtx 可视化器为 TODO，lidars 字段保留但未实现（§8.1）；KB 未提及 Newton 的原生传感器集，待 Phase1 补"
+      - "KB 中 Newton 信息全部来自 genie_sim_v3 / lw_benchhub 两个 tour 项目的用法：Newton 引擎本体版本号、许可、API 稳定性与独立能力清单未提及，待 Phase1 补"
+      - "Newton 在 lw_benchhub 仅以 --presets newton 实验性存在，KB 未记录该路径下的任务实测，待 Phase1 补"
+
+  - slug: sapien
+    display_name: "SAPIEN"
+    kind: "刚体物理/机器人仿真"
+    coverage: absent
+    facts: []
+    gaps:
+      - "KB knowledge/ 全目录 PCRE 词边界 grep（(?<![A-Za-z0-9_])sapien(?![A-Za-z0-9_])，与校验器同口径）零命中：未提及；待 Phase1 补"
+
+  - slug: bullet
+    display_name: "Bullet / PyBullet"
+    kind: "刚体物理引擎"
+    coverage: absent
+    facts: []
+    gaps:
+      - "KB knowledge/ 全目录 PCRE 词边界 grep（(?<![A-Za-z0-9_])bullet(?![A-Za-z0-9_])，与校验器同口径；panda_bullet、bulletproof 等子串不计命中）零命中：未提及；待 Phase1 补"
