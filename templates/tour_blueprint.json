@@ -1,0 +1,96 @@
+{
+  "schema_version": "1.0",
+  "derived_from": {
+    "method": "逐个阅读克隆仓库 README/脚本，并对照 KB code_knowledge.md 人工核对",
+    "kb_readonly": true,
+    "normative_note": "canonical_spine 是面向未来 tour 的规范；observed_stage_maps 是历史事实，二者不要求强行对齐"
+  },
+  "naming_convention": "<toolchain>_tour",
+  "canonical_spine": [
+    {"stage_id": "Stage 0", "name": "环境探活与无头渲染探针",
+     "objective": "依赖最小集安装、GPU EGL 离屏渲染、torch.cuda、Xvfb 可用性逐项断言",
+     "exit_criteria": ["真实 GPU 渲染 1080p MP4 + ffprobe 判定", "torch.cuda 设备名断言"],
+     "required_artifacts": ["probe_egl.mp4", "probe_egl.json"]},
+    {"stage_id": "Stage 1", "name": "最小闭环 Demo 跑通",
+     "objective": "官方 quickstart 的最小 demo/单场景闭环成功，产物可复现",
+     "exit_criteria": ["确定性启动命令", "产物帧数/结果与官方口径一致"],
+     "required_artifacts": ["stage1 demo 产物", "运行日志"]},
+    {"stage_id": "Stage 2", "name": "场景泛化 / 域随机化 / 批量数据",
+     "objective": "参数化场景生成或 DR，批量跑出统计意义上的多场景结果",
+     "exit_criteria": ["批量产物计数与元数据行数对账", "配置改动经 grep 定位（防静默无效）"],
+     "required_artifacts": ["批量产物", "场景/DR 配置文件"]},
+    {"stage_id": "Stage 3", "name": "量化评测 / World Judge / 报告",
+     "objective": "形式化判定指标 + 成功率报表，数字全部可溯源到结果快照",
+     "exit_criteria": ["报告中每个数字可回指结果文件", "判分器来源显式标注（官方/自补）"],
+     "required_artifacts": ["eval_summary.json", "report.md"]}
+  ],
+  "observed_stage_maps": {
+    "ge_sim_v2": {
+      "repo": "GimpelZhang/GE-Sim-V2-tour", "commit": "43baf9472fc5efae459f38655ca1b3dee46a0416", "clone_status": "ok",
+      "stages": [
+        {"observed_id": "Stage 1", "title": "基于 GE-Sim 2.0 的 VLA 闭环仿真基准评测（π₀.₅ + MiMo World Judge，3 个基准 demo 闭环）",
+         "evidence": ["README.md", "run_stage1.sh"], "maps_to_canonical": "Stage 1"},
+        {"observed_id": "Stage 2", "title": "Real2Edit2Real 场景编辑与泛化仿真数据衍生（3D 重建→空间编辑→批量 50 场景）",
+         "evidence": ["README.md", "run_stage2.sh"], "maps_to_canonical": "Stage 2"},
+        {"observed_id": "Stage 3", "title": "大规模批量闭环推演与空间泛化能力诊断（46 场景 rollout + 衰减分析 + 失败归因）",
+         "evidence": ["README.md", "run_stage3.sh"], "maps_to_canonical": "Stage 3"},
+        {"observed_id": "Stage 4", "title": "世界模型内的策略强化学习自我进化（RWR flow-matching，成功率 30%→80%）",
+         "evidence": ["README.md", "run_stage4.sh"], "maps_to_canonical": null,
+         "note": "策略自进化属 canonical 之外的扩展，Phase 1 不默认编排"},
+        {"observed_id": "Stage 5", "title": "RoboColiseum 第三方线上基准盲测（反向 WebSocket 隧道，跨本体零样本 vs 官方 baseline）",
+         "evidence": ["README.md", "run_stage5.sh"], "maps_to_canonical": "Stage 3"}
+      ]
+    },
+    "genesis_world": {
+      "repo": "GimpelZhang/genesis-world-tour", "commit": "e5dba98d3796d15c0dbe2323a0949ac49787efe0",
+      "clone_status": "ok",
+      "stages": [
+        {"observed_id": "Stage 1", "title": "基于 OpenVLA 的端到端闭环仿真测试（Franka Panda，视觉→推理→IK→物理步进→视频）",
+         "evidence": ["README.md", "vla_closed_loop_demo.py"], "maps_to_canonical": "Stage 1"},
+        {"observed_id": "Stage 2", "title": "配置驱动的自动化场景生成与批量鲁棒性评估（scene_factory 8 场景双相机闸门）",
+         "evidence": ["README.md", "scene_factory.py", "batch_eval_vla.py", "verify_stage2.py"], "maps_to_canonical": "Stage 2"},
+        {"observed_id": "Stage 3", "title": "基于 PPO 的极速单卡大规模并发强化学习（Taichi CUDA，Unitree Go2 步态）",
+         "evidence": ["README.md", "stage3/go2_train.py", "stage3/verify_stage3.py"], "maps_to_canonical": null,
+         "note": "RL 训练属 canonical 之外的扩展，Phase 1 不默认编排"},
+        {"observed_id": "Stage 4", "title": "多物理场刚柔/刚流耦合无穿透交互仿真（布料折叠、海绵挤压、含水玻璃杯）",
+         "evidence": ["README.md", "stage4/cloth_grasp_demo.py", "stage4/verify_stage4.py"], "maps_to_canonical": null,
+         "note": "引擎能力演示而非量化评测，属 canonical 之外的能力探查"}
+      ]
+    },
+    "lw_benchhub": {
+      "repo": "GimpelZhang/lw_benchhub_tour", "commit": "e88ba359483ba821c4676857e2cbf415da8cd6a6",
+      "clone_status": "ok",
+      "stages": [
+        {"observed_id": "Stage 1", "title": "VLA 闭环仿真评测基线（smolvla-double-piper-pnp 双臂 Piper，40% 4/10）",
+         "evidence": ["README.md", "run_eval_docker.sh", "Dockerfile.eval"], "maps_to_canonical": "Stage 1"},
+        {"observed_id": "Stage 2", "title": "LLM 驱动的场景自适应生成 + cuRobo 物理可达性闸门（一进程内生成-过滤-闭环-录屏）",
+         "evidence": ["README.md", "generate_scenes_with_live_reach.py", "validate_scene_objects_reach.py", "verify_stage2.py"], "maps_to_canonical": "Stage 2"},
+        {"observed_id": "Stage 3", "title": "跨本体 benchmark 驱动（auto_stage3_benchmark.py）；README 明确记载 Stage 3 主线效果不好被作者丢弃",
+         "evidence": ["README.md", "auto_stage3_benchmark.py"], "maps_to_canonical": null,
+         "note": "作者在 README 明示 Stage 3 被丢弃；仓库仅留跨本体 benchmark 驱动，无成功产物，不强行映射"},
+        {"observed_id": "Stage 4", "title": "自过滤数据自生成飞轮（课程裂变 + SmolVLA 闭环自过滤，10 个黄金 episode / 6527 帧）",
+         "evidence": ["README.md", "stage4_flywheel/stage4_flywheel_report.md"], "maps_to_canonical": null,
+         "note": "数据自生长/策略进化飞轮属 canonical 之外的扩展（与 GE Stage 4 同类），Phase 1 不默认编排"}
+      ]
+    },
+    "genie_sim_v3": {
+      "repo": "GimpelZhang/genie_sim_v3_tour", "commit": "c23e652e4771474cda2ea8168c80de6e1fd02153",
+      "clone_status": "ok",
+      "stages": [
+        {"observed_id": "Stage 1", "title": "Headless 容器化部署 Genie Sim 3.0 + π0 推理服务的 VLA 闭环基线（Vulkan/OpenGL 离屏渲染，输出控制轨迹）",
+         "evidence": ["README.md", "docs/Complete_Stage1.md", "scripts/start_headless.sh"], "maps_to_canonical": "Stage 1"},
+        {"observed_id": "Stage 2", "title": "绕过 WebUI 的 LLM CLI 场景生成流水线（DeepSeek 生成 DSL + 无约束物理碰撞失效边界探索）",
+         "evidence": ["README.md", "docs/Complete_Stage2.md", "stage2_generate_scenes.py", "render_validation.py"], "maps_to_canonical": "Stage 2"},
+        {"observed_id": "Stage 3", "title": "实采视频 Real-to-Sim（COLMAP SfM + 3DGS/PGSR 重建 + 隐形物理碰撞代理注入）并在重建场景跑策略测试",
+         "evidence": ["README.md", "docs/Complete_Stage3.md", "scene_recon_scripts/validate_gates.py"], "maps_to_canonical": "Stage 3",
+         "note": "作者自陈重建场景闭环未取得高分、无形式化成功率报表；canonical Stage 3 的量化报表缺口在 Phase 1 编排时须由评测器补齐，禁止把流水线走通外推为成功率"}
+      ]
+    }
+  },
+  "repo_requirements": [
+    "README 含分阶段导航与可复制命令",
+    "环境变量以 *.example 形式给出且可读自环境（禁止硬编码绝对路径/密钥）",
+    "每阶段有 verify/断言脚本，判定数字来自产物而非日志措辞",
+    "判分器是自补替身时必须显式标注且分数不外推"
+  ]
+}

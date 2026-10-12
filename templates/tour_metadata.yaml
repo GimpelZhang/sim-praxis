@@ -1,0 +1,29 @@
+# 由真实克隆采集（执行者按 git rev-parse 输出填 sha）；本机路径不入开源仓的范式结论，
+# 这里只记录 GitHub 坐标与 sha，任何机器可重新克隆核对。
+schema_version: "1.0"
+tours:
+  - project: ge_sim_v2
+    repo: GimpelZhang/GE-Sim-V2-tour
+    url: https://github.com/GimpelZhang/GE-Sim-V2-tour
+    commit: "43baf9472fc5efae459f38655ca1b3dee46a0416"
+    submodules:
+      - {path: gesim, url: https://github.com/AgibotTech/GE-Sim-V2.git}
+    clone_lfs_skipped: true
+  - project: genesis_world
+    repo: GimpelZhang/genesis-world-tour
+    url: https://github.com/GimpelZhang/genesis-world-tour
+    commit: "e5dba98d3796d15c0dbe2323a0949ac49787efe0"
+    submodules: []
+    clone_lfs_skipped: true
+  - project: lw_benchhub
+    repo: GimpelZhang/lw_benchhub_tour
+    url: https://github.com/GimpelZhang/lw_benchhub_tour
+    commit: "e88ba359483ba821c4676857e2cbf415da8cd6a6"
+    submodules: []
+    clone_lfs_skipped: true
+  - project: genie_sim_v3
+    repo: GimpelZhang/genie_sim_v3_tour
+    url: https://github.com/GimpelZhang/genie_sim_v3_tour
+    commit: "c23e652e4771474cda2ea8168c80de6e1fd02153"
+    submodules: []
+    clone_lfs_skipped: true
