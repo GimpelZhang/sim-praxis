@@ -1,0 +1,38 @@
+services:
+  sim-sandbox:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    image: sim-praxis/sandbox:phase0
+    container_name: sim_praxis_sandbox
+    restart: "no"          # 不用 unless-stopped：GPU 必须能被显式释放
+    init: true
+    ipc: host              # 多进程仿真共享内存
+    network_mode: host
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: "graphics,utility,compute,display"
+      PYOPENGL_PLATFORM: egl
+      DISPLAY: ":99"
+      HF_HOME: /root/.cache/huggingface
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      # HF_TOKEN 仅运行期注入（m11）：不进 Dockerfile、不进镜像层、不进 build-arg
+      HF_TOKEN: ${HF_TOKEN:-}
+      SIMPRAXIS_RUN_DIR: /root/runs
+      # 代理从宿主机 shell 显式继承（source scripts/00_env.sh 后再 compose）
+      http_proxy: ${http_proxy:-}
+      https_proxy: ${https_proxy:-}
+      no_proxy: ${no_proxy:-}
+    volumes:
+      - ..:/workspace
+      - /mnt/caches/hf:/root/.cache/huggingface
+      - /mnt/caches/modelscope:/root/.cache/modelscope
+      - /mnt/weights:/root/weights
+      - ${SIMPRAXIS_RUN_DIR:-/mnt/artifacts/simpraxis/runs}:/root/runs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
