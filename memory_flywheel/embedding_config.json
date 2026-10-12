@@ -1,15 +1,15 @@
 {
   "_machine_note": "cache_dir/onnx_path 为本机 /mnt 绝对路径（机器绑定）；跨机只认 model_name 与 dim，路径需重新生成",
-  "model_name": "BAAI/bge-small-zh-v1.5",
-  "dim": 512,
+  "model_name": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+  "dim": 768,
   "cache_dir": "/mnt/caches/fastembed",
   "hf_endpoint": "https://hf-mirror.com",
-  "selected_at": "2026-10-12T19:13:11+0800",
+  "selected_at": "2026-10-12T20:28:42+0800",
   "sanity": {
-    "sim_related": 0.8145,
-    "sim_unrelated": 0.2202
+    "sim_related": 0.8789,
+    "sim_unrelated": 0.0343
   },
-  "onnx_path": "/mnt/caches/fastembed/models--Qdrant--bge-small-zh-v1.5/snapshots/46fbe35fd4374a00fee7de77dfddaeb6dd6a2c59/model_optimized.onnx",
-  "onnx_bytes": 94781076,
-  "onnx_sha256": "1294ea4b6331115a353d81f96b85e8c8d7fdcc284453d5b2fab5b016230aad38"
+  "onnx_path": "/mnt/caches/fastembed/models--Xenova--paraphrase-multilingual-mpnet-base-v2/snapshots/e5d116277351513fd260955ece953ecddde7046e/onnx/model.onnx",
+  "onnx_bytes": 1110059084,
+  "onnx_sha256": "92f682c55d39e728187c6bffd488f17462d4e05e3c5fe86ef9ba6f38d66122ed"
 }
