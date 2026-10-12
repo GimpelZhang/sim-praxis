@@ -1,0 +1,21 @@
+# 运营与本地状态
+.omc/
+.env
+*.log
+build.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+# 大型/二进制产物（实际数据层在 /mnt，这里是双保险）
+*.mp4
+*.gif
+lancedb/
+gateway_state/
+
+# 运行时网关产物（清点/实呼证据只留 /mnt；state 是双保险）
+orchestrator/gateway/state/

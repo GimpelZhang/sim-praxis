@@ -1,0 +1,16 @@
+# Track 1 样本：工具链复现输入。Phase 0 仅固化为 fixture，不执行。
+schema_version: "1.0"
+track: toolchain_reproduction
+samples:
+  - id: maniskill
+    name: ManiSkill
+    urls:
+      repo: https://github.com/mani-skill/ManiSkill
+      site: https://maniskill.ai/
+      paper: https://arxiv.org/pdf/2410.00425
+  - id: mujoco
+    name: MuJoCo
+    urls:
+      repo: https://github.com/google-deepmind/mujoco
+      site: https://mujoco.org/
+      docs: https://mujoco.readthedocs.io/en/stable/overview.html
