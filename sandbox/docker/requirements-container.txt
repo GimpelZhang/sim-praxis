@@ -1,0 +1,5 @@
+# 容器内：渲染探针最小依赖（torch 在 Dockerfile 中单独装，源可回退）
+numpy==1.26.4
+PyOpenGL==3.1.7
+PyOpenGL_accelerate==3.1.7
+imageio[ffmpeg]==2.36.1
