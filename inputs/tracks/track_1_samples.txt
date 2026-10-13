@@ -1,0 +1,11 @@
+Track 1: tools
+1. ManiSkill:
+https://github.com/mani-skill/ManiSkill
+https://maniskill.ai/
+https://arxiv.org/pdf/2410.00425
+
+2. mujoco:
+https://github.com/google-deepmind/mujoco
+https://mujoco.org/
+https://mujoco.readthedocs.io/en/stable/overview.html
+

@@ -145,3 +145,28 @@ if [ "${SIMPRAXIS_USE_PROXY:-1}" = "0" ]; then
 fi
 
 echo "[00_env] OK：~/access 三凭据 + ~/.bashrc ANTHROPIC_* 网关三件按形状注入（值已隐藏）；endpoint host=$(printf '%s' "$SIMPRAXIS_LLM_BASE_URL" | sed -E 's#^(https://[^/]+).*#\1#')；HF_ENDPOINT=$HF_ENDPOINT；数据根=$SIMPRAXIS_DATA_ROOT"
+
+# ---- Phase 1：飞书自建应用凭据（Task1 起需要；可选，缺失只告警，不阻断 Phase 0 命令）----
+# 值只从 ~/access/feishu_access.txt 按整行标签等值解析（复用 _sp_value，无正则提取），不回显。
+# 三件套标签与三条形状正则已于 2026-10-13 对真实凭据文件实读核验通过（Phase 1 详细计划 v1.2 §2 Task0）。
+FEISHU_ACCESS="$ACCESS_DIR/feishu_access.txt"
+FEISHU_APP_ID="$(_sp_value "$FEISHU_ACCESS" 'feishu app id' 2>/dev/null || true)"
+FEISHU_APP_SECRET="$(_sp_value "$FEISHU_ACCESS" 'feishu app secret' 2>/dev/null || true)"
+FEISHU_RECEIVE_ID="$(_sp_value "$FEISHU_ACCESS" 'feishu receive id' 2>/dev/null || true)"
+if [ -n "$FEISHU_APP_ID" ] && [ -n "$FEISHU_APP_SECRET" ] && [ -n "$FEISHU_RECEIVE_ID" ]; then
+  _sp_check_shape FEISHU_APP_ID "$FEISHU_APP_ID" '^cli_[A-Za-z0-9]{10,}$' \
+    '检查 ~/access/feishu_access.txt 的 feishu app id 标签' || return 1
+  _sp_check_shape FEISHU_APP_SECRET "$FEISHU_APP_SECRET" '^[A-Za-z0-9_-]{20,}$' \
+    '检查 ~/access/feishu_access.txt 的 feishu app secret 标签' || return 1
+  _sp_check_shape FEISHU_RECEIVE_ID "$FEISHU_RECEIVE_ID" '^ou_[A-Za-z0-9]{30,}$' \
+    '检查 ~/access/feishu_access.txt 的 feishu receive id 标签' || return 1
+  export FEISHU_APP_ID FEISHU_APP_SECRET FEISHU_RECEIVE_ID
+else
+  echo "[00_env] 提示：飞书三件套未解析全（Task1 前需 feishu app id/secret/receive id 三个整行标签）" >&2
+fi
+
+# Phase 1 证据/状态根（全部 /mnt；state/quota 700；LangGraph checkpoint 与 pending gates 均在此）
+export SIMPRAXIS_PHASE1_ROOT="${SIMPRAXIS_PHASE1_ROOT:-$SIMPRAXIS_DATA_ROOT/phase1}"
+mkdir -p "$SIMPRAXIS_PHASE1_ROOT"/{task0_env,task1_feishu,task2_direction,task3_graph,task4_runner,task5_judge,task6_learnings,task9_milestone,state,quota} \
+         "$SIMPRAXIS_RUN_DIR/phase1"
+chmod 700 "$SIMPRAXIS_PHASE1_ROOT/state" "$SIMPRAXIS_PHASE1_ROOT/quota" 2>/dev/null || true

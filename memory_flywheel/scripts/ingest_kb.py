@@ -21,6 +21,10 @@ from pathlib import Path
 from memory_flywheel.vector_engine import VectorEngine, make_record
 
 KB_ROOT = Path(os.environ.get("KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
+# 锁内适配（Phase 1 Task0，计划 v1.2 §2 Task0）：原为 main() 内局部字面量，提升为模块
+# 常量供 tests/milestone1/test_kb_invariants.py 导入断言，避免 Phase 1 新测试再抄字面量
+# 形成第四处真值；值与提升前的局部量逐字相同，main() 断言语义不变。
+KB_BASELINE_SHA = "aac53313c620efa6217fd51a55834b006d78e689"
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 EVID_RE = re.compile(r"(?<![A-Za-z0-9])([PDLQ])(\d{2})(?!\d)")
@@ -266,7 +270,7 @@ def main() -> int:
     commit = subprocess.run(["git", "-C", str(kb_root), "rev-parse", "HEAD"],
                             capture_output=True, text=True, check=True).stdout.strip()
     # v4.1 M3：只查工作区干净可被"先向 KB 提交再清工作区"绕过；钉死 HEAD 全 SHA。
-    KB_BASELINE_SHA = "aac53313c620efa6217fd51a55834b006d78e689"
+    # （Phase 1 Task0：字面量已提升为模块常量 KB_BASELINE_SHA）
     assert commit == KB_BASELINE_SHA, (
         f"KB HEAD 已移动（只读违规）：{commit} != 基线 {KB_BASELINE_SHA}；"
         "Phase 0 禁止 KB 任何提交，见铁律第 6/9/10 条")
