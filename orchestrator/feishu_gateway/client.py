@@ -1,0 +1,807 @@
+"""飞书真实审批网关客户端（详细计划 §2 Task 1，L397-407 逐段契约）。
+
+职责边界：
+  - 凭据只从构造函数注入（cli/main 入口才读 FEISHU_APP_ID/FEISHU_APP_SECRET/
+    FEISHU_RECEIVE_ID 环境变量）；token 仅内存缓存，绝不写库/写日志；
+  - requests 直连 open.feishu.cn，超时 15s，code != 0 抛 FeishuAPIError 并落 ws_run.log；
+  - WS 生产参数 auto_reconnect=True / log_level=WARNING / on_reconnecting|reconnected 落日志；
+  - 回调只做校验→落库→set Event→回 toast（3s 内返回），重活一律不在回调线程；
+  - 永不自动批准：任何分支都没有硬编码 approve，等待只发提醒（8h/16h 各一次，共 2 次）。
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import subprocess
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Callable
+
+import requests
+
+from .cards import (
+    NOT_OWNER_TOAST,
+    REJECT_EMPTY_TOAST,
+    build_gate1_card,
+    build_gate1_card_v2,
+    build_gate2_card,
+    build_gate2_card_v2,
+    build_reminder_card,
+    build_reminder_card_v2,
+    parse_card_event,
+    parse_message_event,
+)
+from .store import PendingStore, now_ms
+from .video import (
+    HARD_LIMIT,
+    compress_command,
+    expected_outputs,
+    host_to_container_path,
+    next_ladder_step,
+    select_ladder_step,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+class FeishuAPIError(RuntimeError):
+    """飞书 OpenAPI 返回 code != 0（或 HTTP 层失败）。"""
+
+    def __init__(self, code: Any, msg: str, *, api: str = "") -> None:
+        self.code = code
+        self.msg = msg
+        self.api = api
+        super().__init__(f"[{api}] code={code} msg={msg}")
+
+
+class FeishuGateway:
+    BASE = "https://open.feishu.cn/open-apis"
+    SESSION_WINDOW_MS = 10 * 60 * 1000          # 通道② 会话窗 10 分钟
+    WAIT_TICK_S = 60                            # 阻塞等待节拍
+    # 锁内适配（详细计划 §2 Task1 L403“24h/最多 1 次”与主控任务书冲突）：以主控
+    # 任务书为准——超 8h、16h 各发一次提醒卡片（共 2 次），任何情况绝不代决。
+    REMIND_AFTER_S = (8 * 3600, 16 * 3600)
+    HTTP_TIMEOUT = 15
+
+    # 探针 D 裁决点（详细计划 §1.4）：media content 的官方文档形态为
+    # {"file_key","image_key"}；image_key 是否必填以实测为准，故 send_media 按
+    # 下表顺序尝试，成功形态在运行结果与证据 JSON 中记录。
+    MEDIA_CONTENT_SHAPE = {
+        "attempt_order": [
+            {"name": "file_key+image_key",
+             "content": {"file_key": "<files 接口>", "image_key": "<images 接口>"},
+             "note": "官方文档形态：视频 file_key + 首帧封面 image_key"},
+            {"name": "file_key_only",
+             "content": {"file_key": "<files 接口>"},
+             "note": "备选：仅 file_key（image_key 是否必填待探针 D 实测裁决）"},
+        ],
+    }
+
+    def __init__(
+        self,
+        app_id: str,
+        app_secret: str,
+        owner_open_id: str,
+        *,
+        db_path: "str | Path | None" = None,
+        evidence_dir: "str | Path | None" = None,
+        run_dir: "str | Path | None" = None,
+        start_ws: bool = True,
+        on_p2p_text: "Callable[[dict], None] | None" = None,
+        on_card_action: "Callable[[dict], None] | None" = None,
+    ) -> None:
+        self.app_id = app_id
+        self._app_secret = app_secret
+        self.owner_open_id = owner_open_id
+        self.store = PendingStore(db_path)
+        self.evidence_dir = Path(
+            evidence_dir
+            or os.path.join(os.environ.get("SIMPRAXIS_PHASE1_ROOT",
+                                           "/mnt/artifacts/simpraxis/phase1"),
+                            "task1_feishu")
+        )
+        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.run_dir = run_dir or os.environ.get("SIMPRAXIS_RUN_DIR",
+                                                 "/mnt/artifacts/simpraxis/runs")
+        self._on_p2p_text = on_p2p_text
+        self._on_card_action = on_card_action
+
+        self._token: "str | None" = None
+        self._token_expire_at = 0.0
+        self._token_lock = threading.Lock()
+        self._events: dict[tuple[str, int], threading.Event] = {}
+        self._events_lock = threading.Lock()
+        # 测试/探针计数（重启不重发断言也用 message_id 本身，计数仅便于取证）
+        self.send_counts = {"interactive": 0, "media": 0, "text": 0,
+                            "files": 0, "images": 0}
+
+        self._log = self._build_logger()
+        self._ws_client = None
+        self._ws_thread: "threading.Thread | None" = None
+        if start_ws:
+            self.start_ws()
+
+    # ---------- 基础设施：日志 / token / HTTP ----------
+
+    def _build_logger(self) -> logging.Logger:
+        logger = logging.getLogger(f"feishu_gateway.{id(self)}")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        if not logger.handlers:
+            fh = logging.FileHandler(self.evidence_dir / "ws_run.log", encoding="utf-8")
+            fh.setFormatter(logging.Formatter(
+                "%(asctime)s %(levelname)s %(message)s"))
+            logger.addHandler(fh)
+        return logger
+
+    def _tenant_token(self) -> str:
+        """tenant_access_token 内存缓存，过期前 60s 主动刷新（线程安全）。"""
+        with self._token_lock:
+            if self._token and time.time() < self._token_expire_at:
+                return self._token
+            resp = requests.post(
+                f"{self.BASE}/auth/v3/tenant_access_token/internal",
+                json={"app_id": self.app_id, "app_secret": self._app_secret},
+                timeout=self.HTTP_TIMEOUT,
+            )
+            body = resp.json()
+            if body.get("code") != 0:
+                self._log.error("tenant_token 获取失败 code=%s msg=%s",
+                                body.get("code"), body.get("msg"))
+                raise FeishuAPIError(body.get("code"), body.get("msg", ""),
+                                     api="tenant_token")
+            self._token = body["tenant_access_token"]
+            # 过期前 60s 刷新；无 expire 字段时保守按 90 分钟
+            self._token_expire_at = time.time() + int(body.get("expire", 5400)) - 60
+            return self._token
+
+    def _post_json(self, url: str, payload: dict, *, api: str) -> dict:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {self._tenant_token()}"},
+            json=payload, timeout=self.HTTP_TIMEOUT,
+        )
+        return self._check(resp, api)
+
+    def _post_multipart(self, url: str, *, data: dict, files: dict,
+                        api: str) -> dict:
+        resp = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {self._tenant_token()}"},
+            data=data, files=files, timeout=self.HTTP_TIMEOUT,
+        )
+        return self._check(resp, api)
+
+    def _check(self, resp: requests.Response, api: str) -> dict:
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            self._log.error("%s 非 JSON 响应 http=%s", api, resp.status_code)
+            raise FeishuAPIError(resp.status_code, "non-json response", api=api) from exc
+        if body.get("code") != 0:
+            # 只记路径/返回码/msg，绝不记录 Authorization 与请求体（含 token/密钥纪律）
+            self._log.error("%s 失败 code=%s msg=%s", api, body.get("code"),
+                            body.get("msg"))
+            raise FeishuAPIError(body.get("code"), body.get("msg", ""), api=api)
+        return body
+
+    # ---------- 发消息 / 上传 ----------
+
+    def send_text(self, receive_id: str, text: str) -> str:
+        body = self._post_json(
+            f"{self.BASE}/im/v1/messages?receive_id_type=open_id",
+            {"receive_id": receive_id, "msg_type": "text",
+             "content": json.dumps({"text": text}, ensure_ascii=False)},
+            api="im.messages.text",
+        )
+        self.send_counts["text"] += 1
+        return body["data"]["message_id"]
+
+    def _send_interactive(self, receive_id: str, card1: dict, card2: dict,
+                          *, form_required: bool = False) -> dict:
+        """发 interactive 卡片；首选形态失败（返回码非 0）自动改发另一形态。
+
+        # 锁内适配（基础计划 §5.1 卡片版本，探针 C 2026-10-14 实测裁决）：
+        # 原设计「1.0 先发、非 0 再退 2.0」在真实接口上不成立——1.0 卡混排
+        # form/textarea/form_submit 时发送接口【静默返回 code=0】，飞书客户端
+        # 只渲染 markdown 文字、form 控件整块消失（空意见打回都无法操作）。
+        # 故：含表单的 Gate1/Gate2 卡 form_required=True，2.0 先发；
+        # 无表单的提醒卡保持 1.0 先发。两种尝试都落日志。
+        """
+        if form_required:
+            primary, fallback, primary_name, fallback_name = (
+                card2, card1, "2.0", "1.0")
+            fallback_api = "im.messages.interactive.v1"
+        else:
+            primary, fallback, primary_name, fallback_name = (
+                card1, card2, "1.0", "2.0")
+            fallback_api = "im.messages.interactive.v2"
+        resp = requests.post(
+            f"{self.BASE}/im/v1/messages?receive_id_type=open_id",
+            headers={"Authorization": f"Bearer {self._tenant_token()}"},
+            json={"receive_id": receive_id, "msg_type": "interactive",
+                  "content": json.dumps(primary, ensure_ascii=False)},
+            timeout=self.HTTP_TIMEOUT,
+        )
+        body = resp.json()
+        used = primary_name
+        if body.get("code") != 0:
+            self._log.warning(
+                "interactive 卡片 %s 被拒 code=%s msg=%s → 改发 schema %s%s",
+                primary_name, body.get("code"), body.get("msg"), fallback_name,
+                "（注意：1.0 卡不含可用表单控件）" if form_required else "")
+            body = self._post_json(
+                f"{self.BASE}/im/v1/messages?receive_id_type=open_id",
+                {"receive_id": receive_id, "msg_type": "interactive",
+                 "content": json.dumps(fallback, ensure_ascii=False)},
+                api=fallback_api,
+            )
+            used = fallback_name
+        else:
+            self._log.info("interactive 卡片 %s 发送成功", primary_name)
+        self.send_counts["interactive"] += 1
+        data = body.get("data", {})
+        return {"message_id": data.get("message_id"),
+                "chat_id": data.get("chat_id"),
+                "schema": used}
+
+    def upload_file(self, path: "str | Path", duration_ms: "int | None" = None) -> str:
+        path = Path(path)
+        data: dict[str, Any] = {"file_type": "mp4",
+                                "file_name": path.name}
+        if duration_ms is not None:
+            data["duration"] = str(int(duration_ms))
+        with path.open("rb") as fh:
+            body = self._post_multipart(
+                f"{self.BASE}/im/v1/files",
+                data=data,
+                files={"file": (path.name, fh, "video/mp4")},
+                api="im.files",
+            )
+        self.send_counts["files"] += 1
+        return body["data"]["file_key"]
+
+    def upload_image(self, path: "str | Path") -> str:
+        path = Path(path)
+        with path.open("rb") as fh:
+            body = self._post_multipart(
+                f"{self.BASE}/im/v1/images",
+                data={"image_type": "message"},
+                files={"image": (path.name, fh, "image/png")},
+                api="im.images",
+            )
+        self.send_counts["images"] += 1
+        return body["data"]["image_key"]
+
+    def send_media(self, receive_id: str, file_key: str,
+                   image_key: "str | None" = None) -> dict:
+        """按 MEDIA_CONTENT_SHAPE 两种形态顺序尝试，返回 message_id 与成功形态名。"""
+        attempts: list[dict] = []
+        if image_key:
+            attempts.append(("file_key+image_key",
+                             {"file_key": file_key, "image_key": image_key}))
+        attempts.append(("file_key_only", {"file_key": file_key}))
+        last_err: "FeishuAPIError | None" = None
+        for name, content in attempts:
+            try:
+                body = self._post_json(
+                    f"{self.BASE}/im/v1/messages?receive_id_type=open_id",
+                    {"receive_id": receive_id, "msg_type": "media",
+                     "content": json.dumps(content, ensure_ascii=False)},
+                    api=f"im.messages.media.{name}",
+                )
+                self.send_counts["media"] += 1
+                self._log.info("media 发送成功 shape=%s message_id=%s", name,
+                               body["data"].get("message_id"))
+                return {"message_id": body["data"]["message_id"],
+                        "shape": name}
+            except FeishuAPIError as exc:
+                last_err = exc
+                self._log.warning("media 形态 %s 被拒 code=%s msg=%s", name,
+                                  exc.code, exc.msg)
+        assert last_err is not None
+        raise last_err
+
+    # ---------- Gate2 视频：阶梯压缩 + 上传 + 降级 ----------
+
+    @staticmethod
+    def _file_size(path: "str | Path") -> int:
+        """文件字节数（单测 mock 点：无需造 31MB 实体文件即可驱动阶梯判定）。"""
+        return Path(path).stat().st_size
+
+    def _compress_in_container(self, host_video: Path, step: int) -> tuple[Path, Path]:
+        """经 docker compose run 在 sim-sandbox 容器内执行 ffmpeg（宿主机不装 ffmpeg）。
+
+        Task1 单测全部 mock 本方法/subprocess；真实执行发生在 Task7/8。
+        """
+        out_host, cover_host = expected_outputs(host_video, step)
+        in_c = host_to_container_path(host_video, self.run_dir)
+        out_c = host_to_container_path(out_host, self.run_dir)
+        cover_c = host_to_container_path(cover_host, self.run_dir)
+        cmd = compress_command(in_c, step, out_c, cover_c)
+        argv = [
+            "docker", "compose",
+            "-f", str(_REPO_ROOT / "sandbox" / "docker-compose.yml"),
+            "run", "--rm", "sim-sandbox", "bash", "-lc", cmd,
+        ]
+        self._log.info("容器压缩 step=%s argv=%s", step,
+                       " ".join(argv[:6]) + " bash -lc <ffmpeg>")
+        subprocess.run(argv, check=True, timeout=1800)
+        return Path(out_host), Path(cover_host)
+
+    def send_video_native(
+        self,
+        video_path: "str | Path",
+        duration_ms: "int | None" = None,
+        cover_png: "str | Path | None" = None,
+    ) -> dict:
+        """完整五级阶梯：体积判定→容器压缩→files/images/media→失败逐级→step5 降级。
+
+        返回 {ok, video_fallback, ladder_step, media_message_id, media_shape,
+              detail, attempts:[...]}。任何分支都不抛 FeishuAPIError（失败收敛为
+        video_fallback=True），但 docker/本地文件错误不在此吞（属调用方环境故障）。
+        """
+        video = Path(video_path)
+        cover = Path(cover_png) if cover_png else None
+        size = self._file_size(video)
+        step = select_ladder_step(size)
+        attempts_log: list[dict] = []
+        self._log.info("send_video_native size=%d 初始阶梯=%d", size, step)
+        while True:
+            if step == 5:
+                attempts_log.append({"step": 5, "action": "fallback_intranet"})
+                return {"ok": False, "video_fallback": True, "ladder_step": 5,
+                        "media_message_id": None, "media_shape": None,
+                        "detail": "压缩/上传全部失败，降级为内网链接",
+                        "attempts": attempts_log}
+            if step == 1:
+                cur_video, cur_cover = video, cover
+            else:
+                out_video, out_cover = self._compress_in_container(video, step)
+                out_size = self._file_size(out_video)
+                attempts_log.append(
+                    {"step": step, "action": "compress", "size": out_size})
+                if out_size > HARD_LIMIT:
+                    self._log.warning("step=%d 压缩后 %d 仍超 30MB，推进阶梯",
+                                      step, out_size)
+                    step = next_ladder_step(step)
+                    continue
+                cur_video, cur_cover = out_video, out_cover
+            try:
+                file_key = self.upload_file(cur_video, duration_ms)
+                image_key = None
+                if cur_cover is not None:
+                    try:
+                        image_key = self.upload_image(cur_cover)
+                    except FeishuAPIError as exc:
+                        # 封面失败不致命：按 file_key_only 形态尝试（MEDIA_CONTENT_SHAPE）
+                        self._log.warning("封面上传失败 code=%s，仅用 file_key",
+                                          exc.code)
+                media = self.send_media(self.owner_open_id, file_key, image_key)
+                attempts_log.append({"step": step, "action": "media_ok",
+                                     "shape": media["shape"]})
+                return {"ok": True, "video_fallback": False, "ladder_step": step,
+                        "media_message_id": media["message_id"],
+                        "media_shape": media["shape"],
+                        "detail": f"原生视频发送成功（step={step}, "
+                                  f"shape={media['shape']}）",
+                        "attempts": attempts_log}
+            except FeishuAPIError as exc:
+                attempts_log.append({"step": step, "action": "api_error",
+                                     "code": exc.code, "msg": exc.msg})
+                self._log.warning("step=%d 上传/发送失败 code=%s，推进阶梯",
+                                  step, exc.code)
+                step = next_ladder_step(step)
+
+    # ---------- WebSocket 长连接 ----------
+
+    def start_ws(self) -> None:
+        import lark_oapi as lark
+
+        handler = (
+            lark.EventDispatcherHandler.builder("", "")
+            .register_p2_card_action_trigger(self._handle_card)
+            .register_p2_im_message_receive_v1(self._handle_message)
+            .build()
+        )
+
+        def _reconnecting() -> None:
+            self._log.warning("WS on_reconnecting：长连接重连中")
+
+        def _reconnected() -> None:
+            self._log.warning("WS on_reconnected：长连接已恢复")
+
+        client = lark.ws.Client(
+            self.app_id, self._app_secret,
+            event_handler=handler,
+            log_level=lark.LogLevel.WARNING,
+            auto_reconnect=True,
+        )
+        # 锁内适配（lark-oapi 1.7.4 实测）：on_reconnecting/on_reconnected 是
+        # ws.Client 的可写实例属性（ws/client.py L44-45），不是 __init__ kwarg；
+        # 必须在 start() 前赋值，内部 _reconnect 会 try/except 包裹回调。
+        client.on_reconnecting = _reconnecting
+        client.on_reconnected = _reconnected
+        self._ws_client = client
+        self._ws_thread = threading.Thread(
+            target=self._ws_thread_main, name="feishu-ws", daemon=True)
+        self._ws_thread.start()
+
+    def _ws_thread_main(self) -> None:
+        try:
+            self._ws_client.start()  # type: ignore[union-attr]
+        except Exception:
+            self._log.exception("WS 线程异常退出（auto_reconnect 仍在内部兜底）")
+
+    def stop_ws(self) -> None:
+        # 锁内适配（lark-oapi 1.7.4 实测）：websockets Connection.close() 是协程，
+        # 且连接绑定在 WS 线程的模块级 event loop 上（ws/client.py 模块全局 loop）；
+        # 从主线程直接同步调用只会产生 "coroutine never awaited" 警告而连接不关。
+        # 必须 run_coroutine_threadsafe 投递到该 loop，最多等 3s（close 在探针/
+        # 进程退出路径调用，绝不允许阻塞主流程）。
+        client = self._ws_client
+        if client is None:
+            return
+        conn = getattr(client, "_conn", None)
+        if conn is None:
+            return
+        try:
+            from lark_oapi.ws import client as _lark_ws_mod
+
+            fut = asyncio.run_coroutine_threadsafe(conn.close(), _lark_ws_mod.loop)
+            try:
+                fut.result(timeout=3)
+            except Exception:
+                self._log.warning("WS close 协程执行异常/超时（忽略）", exc_info=True)
+        except Exception:
+            self._log.warning("关闭 WS 连接时异常（忽略）", exc_info=True)
+
+    # ---------- 回调①：卡片 form_submit ----------
+
+    def _toast(self, toast: dict) -> "Any":
+        from lark_oapi.event.callback.model.p2_card_action_trigger import (
+            P2CardActionTriggerResponse,
+        )
+        return P2CardActionTriggerResponse({"toast": toast})
+
+    def _handle_card(self, data: Any) -> "Any":
+        """卡片回调整体 try/except：异常只落日志、回 error toast，绝不杀 WS 线程。"""
+        info: dict[str, Any] = {}
+        try:
+            value, feedback, operator, _chat_id, open_message_id = parse_card_event(data)
+            info.update({"value": value, "operator": operator,
+                         "feedback": feedback, "message_id": open_message_id})
+            # 1) owner 白名单：他人点击拒绝且不落决策
+            if operator != self.owner_open_id:
+                self._log.warning("非 owner 点击已拒绝 operator=%s", operator)
+                info.update({"toast": NOT_OWNER_TOAST, "decided": False,
+                             "reason": "not_owner"})
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(NOT_OWNER_TOAST)
+
+            gate = int(value.get("gate", 0))
+            decision = value.get("decision")
+            choice = value.get("choice")
+            if gate not in (1, 2) or decision not in (
+                    "approve", "reject_with_comments"):
+                toast = {"type": "error", "content": "非法按钮值，已忽略"}
+                info.update({"toast": toast, "decided": False,
+                             "reason": "bad_value"})
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(toast)
+
+            # 2) 按卡片 message_id 找 PENDING 行
+            row = self._find_pending_by_card(open_message_id)
+            if row is None:
+                toast = {"type": "info", "content": "该审批已结束或不存在"}
+                info.update({"toast": toast, "decided": False,
+                             "reason": "no_pending"})
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(toast)
+
+            # 3) 打回空意见二次校验（服务端 form 对 textarea 无强制必填）
+            if decision == "reject_with_comments" and not (feedback or "").strip():
+                info.update({"toast": REJECT_EMPTY_TOAST, "decided": False,
+                             "reason": "empty_feedback",
+                             "thread_id": row["thread_id"], "gate": gate})
+                self._log.warning("gate=%s 打回意见为空，已拒绝落库", gate)
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(REJECT_EMPTY_TOAST)
+
+            choice_val = int(choice) if choice is not None else None
+            ok = self.store.mark_decided(
+                row["thread_id"], gate,
+                decision=decision, source="card_form",
+                choice=choice_val if gate == 1 else None,
+                human_notes=feedback or "",
+                operator_open_id=operator,
+            )
+            if not ok:
+                toast = {"type": "info", "content": "该审批已有结论，重复点击已忽略"}
+                info.update({"toast": toast, "decided": False,
+                             "reason": "race_decided"})
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(toast)
+
+            self._set_event(row["thread_id"], gate)
+            toast = {"type": "success",
+                     "content": ("已批准，继续执行" if decision == "approve"
+                                 else "已打回并记录意见")}
+            info.update({"toast": toast, "decided": True,
+                         "thread_id": row["thread_id"], "gate": gate,
+                         "decision": decision, "choice": choice_val})
+            self._log.info("card_form 落库 thread=%s gate=%s decision=%s choice=%s",
+                           row["thread_id"], gate, decision, choice_val)
+            if self._on_card_action:
+                self._on_card_action(dict(info))
+            return self._toast(toast)
+        except Exception:
+            self._log.exception("card 回调异常（已吞掉以保护 WS 线程）")
+            toast = {"type": "error", "content": "服务内部错误，请稍后重试或用 P2P 文本"}
+            info.update({"toast": toast, "decided": False, "reason": "exception"})
+            if self._on_card_action:
+                try:
+                    self._on_card_action(dict(info))
+                except Exception:
+                    pass
+            return self._toast(toast)
+
+    def _find_pending_by_card(self, card_message_id: "str | None") -> "dict | None":
+        if not card_message_id:
+            return None
+        for row in self.store.list_pending(status="PENDING"):
+            if row["card_message_id"] == card_message_id:
+                return row
+        return None
+
+    # ---------- 回调②：P2P 文本 ----------
+
+    def _handle_message(self, data: Any) -> None:
+        try:
+            ev = parse_message_event(data)
+            info = dict(ev)
+            if ev["chat_type"] != "p2p":
+                return
+            if ev["sender_open_id"] != self.owner_open_id:
+                self._log.warning("非 owner 文本已忽略 sender=%s",
+                                  ev["sender_open_id"])
+                return
+            text = (ev["text"] or "").strip()
+            if not text:
+                return
+            # 关联该会话最近一个 gate 行（含已 DECIDED：仅追加留痕）
+            rows = [r for r in self.store.list_pending(open_chat_id=ev["chat_id"])]
+            if not rows:
+                # 无关联 gate 行：静默不回复，但探针 B 需要观察原始到达事件
+                self._log.info("p2p 文本无关联 gate 行，静默不回复 chat=%s",
+                               ev["chat_id"])
+                self._on_card_safe({**info, "accepted": False,
+                                    "reason": "no_pending"})
+                return
+            row = rows[-1]  # created_at ASC，最后一条即最近
+            age_ms = now_ms() - int(row["created_at"])
+            if age_ms > self.SESSION_WINDOW_MS:
+                self._log.info(
+                    "p2p 文本超出 10 分钟会话窗（%dms），忽略 thread=%s gate=%s",
+                    age_ms, row["thread_id"], row["gate"])
+                info.update({"accepted": False, "reason": "outside_window"})
+                if self._on_p2p_text:
+                    self._on_card_safe(info)
+                return
+            stamp = datetime.now().strftime("%H:%M:%S")
+            line = f"[文本 {stamp}] {text}"
+            self.store.append_human_note(
+                row["thread_id"], int(row["gate"]), line,
+                open_chat_id=ev["chat_id"])
+            self._log.info("p2p 意见已记录 %d 字 thread=%s gate=%s status=%s",
+                           len(text), row["thread_id"], row["gate"], row["status"])
+            try:
+                self.send_text(ev["chat_id"], f"已记录意见 {len(text)} 字")
+            except FeishuAPIError:
+                # 回执失败不影响意见已落库；静默不报错（通道②主流程不依赖回执）
+                self._log.warning("p2p 回执发送失败（意见已落库）", exc_info=True)
+            info.update({"accepted": True, "line": line,
+                         "thread_id": row["thread_id"], "gate": row["gate"],
+                         "status": row["status"]})
+            if self._on_p2p_text:
+                self._on_card_safe(info)
+        except Exception:
+            self._log.exception("message 回调异常（已吞掉以保护 WS 线程）")
+
+    def _on_card_safe(self, info: dict) -> None:
+        if self._on_p2p_text:
+            try:
+                self._on_p2p_text(info)
+            except Exception:
+                self._log.warning("on_p2p_text 探针回调异常（已忽略）", exc_info=True)
+
+    # ---------- Event 绑定 / 阻塞等待 ----------
+
+    def _event_for(self, thread_id: str, gate: int) -> threading.Event:
+        key = (thread_id, gate)
+        with self._events_lock:
+            ev = self._events.get(key)
+            if ev is None:
+                ev = threading.Event()
+                self._events[key] = ev
+            return ev
+
+    def _set_event(self, thread_id: str, gate: int) -> None:
+        self._event_for(thread_id, gate).set()
+
+    def _await_decision(
+        self, thread_id: str, gate: int, *, max_wait: "float | None" = None
+    ) -> dict:
+        ev = self._event_for(thread_id, gate)
+        start = time.monotonic()
+        reminder_idx = 0
+        while True:
+            ev.wait(self.WAIT_TICK_S)
+            row = self.store.get_pending(thread_id, gate)
+            if row is not None and row["status"] == "DECIDED":
+                return {"decision": row["decision"],
+                        "choice": row["choice"],
+                        "human_notes": row["human_notes"],
+                        "source": row["source"]}
+            elapsed = time.monotonic() - start
+            if (reminder_idx < len(self.REMIND_AFTER_S)
+                    and elapsed >= self.REMIND_AFTER_S[reminder_idx]):
+                self._send_reminder(gate, reminder_idx + 1)
+                reminder_idx += 1
+            if max_wait is not None and elapsed >= max_wait:
+                # 绝不代决：超时仅抛出，由上层决定是否继续等待
+                raise TimeoutError(
+                    f"Gate{gate} 等待 {elapsed:.0f}s 未决策（禁止自动批准）")
+
+    def _send_reminder(self, gate: int, nth: int) -> None:
+        try:
+            waited_hours = 8 if nth == 1 else 16
+            self._send_interactive(
+                self.owner_open_id,
+                build_reminder_card(gate, nth, waited_hours),
+                build_reminder_card_v2(gate, nth, waited_hours))
+            self._log.warning("Gate%s 第 %d 次等待提醒卡片已发送", gate, nth)
+        except FeishuAPIError:
+            self._log.warning("Gate%s 第 %d 次提醒发送失败（下一节拍重试计数不增）",
+                              gate, nth, exc_info=True)
+
+    # ---------- 对外主入口 ----------
+
+    def request_gate1_approval(
+        self,
+        thread_id: str,
+        task_title: str,
+        proposals: list[dict[str, Any]],
+        *,
+        max_wait: "float | None" = None,
+    ) -> dict:
+        """发卡（或重启重挂）并阻塞等待 Gate1 决策。禁止任何硬编码 return approve。"""
+        gate = 1
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
+            # 重启路径：已有 PENDING 行且卡片已发——不重发，复用 message_id 重挂 Event
+            self._log.info("Gate1 重启重挂 thread=%s message_id=%s（不重发卡片）",
+                           thread_id, row["card_message_id"])
+        else:
+            sent = self._send_interactive(
+                self.owner_open_id,
+                build_gate1_card(task_title, proposals),
+                build_gate1_card_v2(task_title, proposals),
+                form_required=True,
+            )
+            self.store.upsert_pending(
+                thread_id, gate,
+                card_message_id=sent["message_id"],
+                open_chat_id=sent["chat_id"])
+            # 极端竞态：upsert 前行已存在但无 message_id，attach 再保底回填一次
+            self.store.attach_message_ids(
+                thread_id, gate, card_message_id=sent["message_id"],
+                open_chat_id=sent["chat_id"])
+            self._log.info("Gate1 卡片已发出 thread=%s schema=%s",
+                           thread_id, sent["schema"])
+        self._event_for(thread_id, gate)
+        return self._await_decision(thread_id, gate, max_wait=max_wait)
+
+    def request_gate2_approval(
+        self,
+        thread_id: str,
+        task_title: str,
+        metrics: dict[str, Any],
+        video_path: "str | None" = None,
+        intranet_url: "str | None" = None,
+        *,
+        duration_ms: "int | None" = None,
+        cover_png: "str | None" = None,
+        max_wait: "float | None" = None,
+    ) -> dict:
+        """先发原生视频（五级阶梯，可能降级）再发 Gate2 卡片，阻塞等待验收结论。"""
+        gate = 2
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
+            self._log.info("Gate2 重启重挂 thread=%s message_id=%s（不重发卡片）",
+                           thread_id, row["card_message_id"])
+        else:
+            media_message_id = None
+            video_fallback = False
+            video_detail = "未提供视频"
+            ladder_step = None
+            if video_path:
+                vr = self.send_video_native(video_path, duration_ms=duration_ms,
+                                            cover_png=cover_png)
+                video_fallback = bool(vr["video_fallback"])
+                media_message_id = vr["media_message_id"]
+                video_detail = vr["detail"]
+                ladder_step = vr["ladder_step"]
+                if intranet_url is None and video_fallback:
+                    video_detail += "（且未提供 intranet_url，仅能查看证据目录原片）"
+            url = intranet_url
+            sent = self._send_interactive(
+                self.owner_open_id,
+                build_gate2_card(task_title, metrics, url,
+                                 video_fallback=video_fallback),
+                build_gate2_card_v2(task_title, metrics, url,
+                                    video_fallback=video_fallback),
+                form_required=True,
+            )
+            self.store.upsert_pending(
+                thread_id, gate,
+                card_message_id=sent["message_id"],
+                media_message_id=media_message_id,
+                open_chat_id=sent["chat_id"])
+            self.store.attach_message_ids(
+                thread_id, gate, card_message_id=sent["message_id"],
+                media_message_id=media_message_id,
+                open_chat_id=sent["chat_id"])
+            self._log.info(
+                "Gate2 卡片已发出 thread=%s schema=%s video=%s step=%s",
+                thread_id, sent["schema"], video_detail, ladder_step)
+        self._event_for(thread_id, gate)
+        return self._await_decision(thread_id, gate, max_wait=max_wait)
+
+    def close(self) -> None:
+        self.stop_ws()
+        self.store.close()
+
+
+def get_gateway(app_ctx: dict[str, Any]) -> FeishuGateway:
+    """显式工厂（基础计划 L328 模块级单例不利重启与测试；计划 §1.1/§2 Task1 改为本函数）。
+
+    app_ctx 必含：app_id / app_secret / owner_open_id；
+    可选：db_path / evidence_dir / run_dir / start_ws / on_p2p_text / on_card_action。
+    """
+    required = ("app_id", "app_secret", "owner_open_id")
+    missing = [k for k in required if not app_ctx.get(k)]
+    if missing:
+        raise ValueError(f"app_ctx 缺少必填项: {missing}")
+    return FeishuGateway(
+        app_ctx["app_id"], app_ctx["app_secret"], app_ctx["owner_open_id"],
+        db_path=app_ctx.get("db_path"),
+        evidence_dir=app_ctx.get("evidence_dir"),
+        run_dir=app_ctx.get("run_dir"),
+        start_ws=app_ctx.get("start_ws", True),
+        on_p2p_text=app_ctx.get("on_p2p_text"),
+        on_card_action=app_ctx.get("on_card_action"),
+    )
+
+
+def gateway_from_env(**overrides: Any) -> FeishuGateway:
+    """cli/main 入口专用：从 FEISHU_* 环境变量构造；缺失即报错（禁止默认批准兜底）。"""
+    app_id = os.environ.get("FEISHU_APP_ID", "")
+    app_secret = os.environ.get("FEISHU_APP_SECRET", "")
+    owner = os.environ.get("FEISHU_RECEIVE_ID", "")
+    if not (app_id and app_secret and owner):
+        raise RuntimeError(
+            "FEISHU_APP_ID/FEISHU_APP_SECRET/FEISHU_RECEIVE_ID 未配置全；"
+            "无 --cli 旁路时禁止启动（不存在默认批准）")
+    overrides.setdefault("start_ws", True)
+    return get_gateway({"app_id": app_id, "app_secret": app_secret,
+                        "owner_open_id": owner, **overrides})
