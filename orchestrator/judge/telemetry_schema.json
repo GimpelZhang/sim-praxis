@@ -1,0 +1,87 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "simpraxis/phase1/telemetry_schema/v1",
+  "title": "SimPraxis Phase 1 rollout telemetry (Task5)",
+  "description": "运行契约（详细计划 L512-514）：penetrations 按物理子步、其余时序按帧；Rung1 对所有数值字段做 finite 全检。_fixture/_formula 仅允许测试夹具自标（No-Fake-Physics）。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "dt",
+    "ee_positions",
+    "object_poses",
+    "goal_box",
+    "penetrations",
+    "contact_forces",
+    "contact_active",
+    "substeps_per_frame",
+    "engine",
+    "run_id"
+  ],
+  "properties": {
+    "dt": {"type": "number", "exclusiveMinimum": 0, "description": "帧间隔（秒）"},
+    "ee_positions": {
+      "type": "array",
+      "minItems": 6,
+      "items": {"type": "array", "minItems": 3, "maxItems": 3,
+                "items": {"type": "number"}}
+    },
+    "object_poses": {
+      "type": "array",
+      "minItems": 6,
+      "description": "每项至少 [x,y,z]（允许 6/7 元位姿，判定只取前 3 维）",
+      "items": {"type": "array", "minItems": 3,
+                "items": {"type": "number"}}
+    },
+    "goal_box": {
+      "type": "object",
+      "required": ["center", "half_extents"],
+      "properties": {
+        "center": {"type": "array", "minItems": 3, "maxItems": 3,
+                   "items": {"type": "number"}},
+        "half_extents": {"type": "array", "minItems": 3, "maxItems": 3,
+                         "items": {"type": "number", "exclusiveMinimum": 0}}
+      }
+    },
+    "penetrations": {
+      "type": "array",
+      "description": "每物理子步最大穿模深度（米，非负）；长度必须 = T*substeps_per_frame",
+      "items": {"type": "number"}
+    },
+    "contact_forces": {
+      "type": "array",
+      "description": "每帧接触法向力幅值（N）",
+      "items": {"type": "number"}
+    },
+    "contact_active": {
+      "type": "array",
+      "items": {"type": "boolean"}
+    },
+    "joint_torques": {
+      "type": "array",
+      "description": "可选；每帧各关节力矩（N·m），与 joint_limits.torque 同形时做越界检查",
+      "items": {"type": "array", "items": {"type": "number"}}
+    },
+    "joint_limits": {
+      "type": "object",
+      "description": "可选；torque[i]=[lo,hi] 与 joint_torques 关节数一致",
+      "properties": {
+        "torque": {"type": "array",
+                   "items": {"type": "array", "minItems": 2, "maxItems": 2,
+                             "items": {"type": "number"}}}
+      }
+    },
+    "substeps_per_frame": {"type": "integer", "minimum": 1},
+    "engine": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "ccd": {
+      "type": "object",
+      "description": "可选；引擎是否提供 swept/连续碰撞接口（默认 false=仅子步接触深度）",
+      "properties": {"swept": {"type": "boolean"}}
+    },
+    "goal_reached": {
+      "description": "允许出现但 Rung2 绝不读取（锁内适配 L702：goal 由位姿时序计算）"
+    },
+    "_fixture": {"type": "boolean"},
+    "_formula": {"type": "string"}
+  }
+}

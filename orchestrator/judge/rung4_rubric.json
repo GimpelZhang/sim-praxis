@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "stage": "visual_rollout",
+  "answer_set": ["yes", "no"],
+  "instruction": "只根据拼图中的 6 个视频帧回答；逐题返回 yes/no 与置信度，禁止推测帧外信息。",
+  "questions": [
+    {"id": "q1",
+     "text": "夹爪、物体与桌面三者之间是否不存在可见的几何交叠/穿模（无相互嵌入、无穿透缝隙）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q2",
+     "text": "物体与夹爪的运动是否平滑连续，没有帧间高频抖动或像素级来回跳动？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q3",
+     "text": "夹爪闭合后物体是否被稳定夹持（无滑落、无相对滑移）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q4",
+     "text": "接触/提升瞬间物体是否没有出现非物理的瞬移、跳变位置？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q5",
+     "text": "画面中的刚体轮廓是否保持几何一致（无闪烁、无形状畸变、无穿模拉线）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q6",
+     "text": "末帧物体是否静止停留在目标区域（桌面上方被夹持或盒内），没有掉落或悬空？",
+     "good_answer": "yes",
+     "defect_if": "no"}
+  ],
+  "low_confidence_flag": "low_confidence",
+  "scoring": {
+    "defect_answer": "任一 defect_if 方向作答即记该题检出缺陷",
+    "n_defects": "defect_if 命中的题数",
+    "auto_power": "Rung4 永不单独放行；规则/VLM 分歧仅升级人工（D8）"
+  }
+}

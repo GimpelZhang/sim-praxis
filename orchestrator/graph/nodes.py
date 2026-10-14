@@ -16,7 +16,8 @@ persist_learning / human_failure / done。
   单测④明文「2 次打回即结案」，图编排以 Task3 为准（2 张卡）。run_gate1_loop
   作为 Task2 CLI 路径原样保留、不改其语义与既测。
 - No Fake Physics（L490）：evaluate 默认实现只从 telemetry_uri 指向的文件读数，
-  节点代码里没有任何指标字面量；Rung1–4 判定是 Task5 接缝。
+  节点代码里没有任何指标字面量；Task5 起 Rung1–3 判定委托
+  orchestrator.judge.seam.assemble_file_metrics，Rung4（视觉）Task7 接入。
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from langgraph.graph import END, StateGraph
+
+from orchestrator.judge.seam import assemble_file_metrics
 
 from .state import SimPraxisState, run_dir_for
 
@@ -185,11 +188,11 @@ def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
 
 
 def file_backed_evaluate(state: dict) -> dict:
-    """Task3/Task5 接缝：metrics 只从 telemetry_uri 指向的真实文件读取。
+    """Task5 接缝：metrics 只从 telemetry_uri 指向的真实文件读取并做 Rung1–3。
 
-    文件由 agent_run（Task4 真实运行/Task3 测试夹具）写出；本函数不构造任何
-    指标数值。夹具要求：数值由公式生成并在文件内自标 fixture，禁止「按期望
-    结果倒填」（契约 L490）。Rung1–4 分级判定在 Task5 替换本函数实现。
+    文件由 agent_run（Task7 真实运行/测试夹具）写出；本函数不构造任何指标数值。
+    夹具要求：数值由公式生成并在文件内自标 fixture，禁止「按期望结果倒填」
+    （契约 L490）。判定装配委托 judge.seam；Rung4 视觉判定 Task7 接入。
     """
     uri = state.get("telemetry_uri")
     if not uri:
@@ -201,15 +204,7 @@ def file_backed_evaluate(state: dict) -> dict:
         data = json.load(fh)
     if not isinstance(data, dict):
         raise GraphStateError("evaluate：telemetry 顶层必须是对象")
-    return {
-        "telemetry_uri": uri,
-        "fixture": bool(data.get("_fixture", False)),
-        "engine": data.get("engine"),
-        "run_id": data.get("run_id"),
-        "data": data,
-        "provenance": "file:telemetry_uri",
-        "rungs": None,  # Task5 接缝：Rung1–4 判定尚未实现
-    }
+    return assemble_file_metrics(uri, data)
 
 
 def node_evaluate(state: SimPraxisState, deps: GraphDeps) -> dict:
