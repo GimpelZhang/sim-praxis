@@ -69,7 +69,8 @@ def build_gate1_card(
     for idx, p in enumerate(proposals):
         engine = p.get("sim_engine") or p.get("simulator") or "-"
         focus = p.get("first_principles") or p.get("focus") or "-"
-        artifacts = p.get("expected_artifacts") or p.get("artifacts") or "-"
+        artifacts = _format_artifacts(p.get("expected_artifacts")
+                                       or p.get("artifacts"))
         elements.append({
             "tag": "markdown",
             "content": f"**方案 {idx + 1}：{p.get('name', '-')}**\n"
@@ -178,6 +179,16 @@ def _div_lark_md(content: str) -> dict:
     return {"tag": "div", "text": {"tag": "lark_md", "content": content}}
 
 
+def _format_artifacts(value) -> str:
+    """Task2 起 expected_artifacts 规范为文件名数组；兼容旧字符串形态。"""
+    if isinstance(value, list):
+        items = [str(v).strip() for v in value if str(v).strip()]
+        return "、".join(items) if items else "-"
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "-"
+
+
 def _gate1_form_2(i: int) -> dict:
     # 2.0 表单语法：form.elements 内直接放多行输入框与 form_submit 按钮。
     # 锁内适配（探针 C 2026-10-14 实测，服务端码 200621）：多行输入没有
@@ -222,7 +233,8 @@ def build_gate1_card_v2(
     for idx, p in enumerate(proposals):
         engine = p.get("sim_engine") or p.get("simulator") or "-"
         focus = p.get("first_principles") or p.get("focus") or "-"
-        artifacts = p.get("expected_artifacts") or p.get("artifacts") or "-"
+        artifacts = _format_artifacts(p.get("expected_artifacts")
+                                       or p.get("artifacts"))
         body.append(_div_lark_md(
             f"**方案 {idx + 1}：{p.get('name', '-')}**\n"
             f"- 物理基座：`{engine}`\n- 思路/重点：{focus}\n"

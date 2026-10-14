@@ -60,9 +60,37 @@ import zlib
 from pathlib import Path
 from typing import Any, Callable
 
+# 锁内适配（Task2 首次实呼取证 2026-10-14，litellm==1.99.4 / py3.10）：
+# litellm.experimental_pass_through 直接 `from typing import NotRequired`
+# （3.11+ 才有）；生产链里此前靠 transformers 等前置包偶然回填，裸导入即崩。
+# 硬规则8 不松 pinned 版本——这里在 import litellm 前做确定性 typing 回填。
+if sys.version_info < (3, 11):
+    import typing as _typing
+    import typing_extensions as _typing_ext
+    for _name in ("NotRequired", "Required"):
+        if not hasattr(_typing, _name) and hasattr(_typing_ext, _name):
+            setattr(_typing, _name, getattr(_typing_ext, _name))
+    del _typing, _typing_ext, _name
+
 import litellm
 import requests
 import yaml
+
+# 锁内适配（Task2 首次实呼取证 2026-10-14，litellm==1.99.4 / pydantic==2.11.10）：
+# types.utils 的 Message/Delta.reasoning_items 引用 ChatCompletionReasoningItem
+# （TypedDict），其 summary 字段是字符串前向引用 "ChatCompletionReasoningSummaryTextBlock"；
+# litellm 在 utils 命名空间只导入了 Item 未导入 Block，pydantic 2.11 严格 model_rebuild
+# 时在该命名空间找不到名字 → ModelResponse() 构造即 PydanticUserError（响应对象在
+# 发网前构造，故该失败 0 计费，ledger seq=1 为保守记账）。
+# 修复不动版本：把 Block 注入 utils 命名空间后强制重建 Message/Delta。
+import litellm.types.llms.openai as _litellm_oai_types
+import litellm.types.utils as _litellm_utils
+if not hasattr(_litellm_utils, "ChatCompletionReasoningSummaryTextBlock"):
+    _litellm_utils.ChatCompletionReasoningSummaryTextBlock = (
+        _litellm_oai_types.ChatCompletionReasoningSummaryTextBlock)
+    _litellm_utils.Message.model_rebuild(force=True)
+    _litellm_utils.Delta.model_rebuild(force=True)
+
 from litellm.exceptions import (
     APIConnectionError,
     AuthenticationError,
