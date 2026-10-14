@@ -80,7 +80,8 @@ class GraphDeps:
     agent_run: Optional[Seam] = None
     evaluate: Optional[Seam] = None      # None → file_backed_evaluate
     gate2: Optional[Seam] = None
-    persist: Optional[Seam] = None       # None → TaskSeamError（不伪造回写）
+    persist: Optional[Seam] = None       # Task6：LearningStore 接缝；None 时
+    #   accept 路径硬失败、failure 路径不回写（仅 Task3 风格单测/拓扑允许）
     task_title: Optional[str] = None
     run_dir: Optional[Path] = None
 
@@ -235,7 +236,9 @@ def node_gate2(state: SimPraxisState, deps: GraphDeps) -> dict:
 
 
 def node_persist_learning(state: SimPraxisState, deps: GraphDeps) -> dict:
-    summary = deps.require("persist", state)  # Task6：默认拒走，不伪造回写
+    # Task6：persist 接缝=LearningStore 回写（生产装配见 graph.learning）；
+    # 未注入仍硬失败——验收通过却不回写是协议违规，不允许静默跳过。
+    summary = deps.require("persist", {**state, "_learning": {"kind": "accept"}})
     return {"events": [_ev("persist_learning", summary=summary)]}
 
 
@@ -246,18 +249,22 @@ def _run_dir(state: dict, deps: GraphDeps) -> Path:
     return run_dir_for(state["thread_id"])
 
 
-def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
+def failure_classification(state: dict) -> tuple[str, str]:
+    """human_failure 结案分类（节点与 Task6 学习回写共用，禁止两处各写一份）。"""
     if _last_event(state, "agent_run_failed"):
         ev = _last_event(state, "agent_run_failed")
-        stage, reason = "agent_run", ev["reason"]
-    elif _last_event(state, "gate1_hard_failure"):
-        stage, reason = "gate1", _last_event(state, "gate1_hard_failure")["reason"]
-    elif _last_event(state, "gate2_hard_failure"):
-        stage, reason = "gate2", _last_event(state, "gate2_hard_failure")["reason"]
-    else:
-        stage = "gate2" if state.get("gate2_rejects", 0) >= GATE_REJECT_LIMIT \
-            else "gate1"
-        reason = f"{stage} 连续 {GATE_REJECT_LIMIT} 次打回（D10），结案转人工"
+        return "agent_run", ev["reason"]
+    if _last_event(state, "gate1_hard_failure"):
+        return "gate1", _last_event(state, "gate1_hard_failure")["reason"]
+    if _last_event(state, "gate2_hard_failure"):
+        return "gate2", _last_event(state, "gate2_hard_failure")["reason"]
+    stage = "gate2" if state.get("gate2_rejects", 0) >= GATE_REJECT_LIMIT \
+        else "gate1"
+    return stage, f"{stage} 连续 {GATE_REJECT_LIMIT} 次打回（D10），结案转人工"
+
+
+def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
+    stage, reason = failure_classification(state)
     payload = {
         "status": "human_failure",
         "thread_id": state.get("thread_id"),
@@ -273,8 +280,19 @@ def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
     os.chmod(out, 0o600)
-    return {"events": [_ev("human_failure", stage=stage, reason=reason,
-                           failure_json=str(out))]}
+    # Task6（计划 L534）：失败也是学习——FAILURE.json 落盘后经同一 persist
+    # 接缝写 rung=0 一条。未注入 persist（Task3 风格单测/拓扑导出）则不回写，
+    # 生产装配（graph.cli）从 Task6 起恒注入。
+    learning: "dict | None" = None
+    if deps.persist is not None:
+        learning = deps.persist({**state, "_learning": {
+            "kind": "failure", "stage": stage, "reason": reason,
+            "evidence": str(out)}})
+    ev_fields: dict[str, Any] = {"stage": stage, "reason": reason,
+                                 "failure_json": str(out)}
+    if learning is not None:
+        ev_fields["learning"] = learning
+    return {"events": [_ev("human_failure", **ev_fields)]}
 
 
 def node_done(state: SimPraxisState, deps: GraphDeps) -> dict:

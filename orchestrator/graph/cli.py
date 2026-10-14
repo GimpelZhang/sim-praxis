@@ -14,8 +14,9 @@ resume 以 invoke(None)+同 thread_id 重放：卡片不重发（pending_gates �
 Task1 语义），SqliteSaver 从 $SIMPRAXIS_GRAPH_SQLITE 或
 $SIMPRAXIS_PHASE1_ROOT/state/langgraph_checkpoints.db 恢复。
 
-Task3 生产图走到 agent_run/persist_learning 会抛 TaskSeamError——那是
-Task4/Task6 的接缝，完整实跑在 Task7/8。
+Task3 生产图走到 agent_run 会抛 TaskSeamError——Task4 接缝在 Task7 真实
+运行时由装配代码注入；persist_learning 自 Task6 起接 LearningStore
+（phase1_learnings 新表，0 付费本地嵌入）。
 """
 from __future__ import annotations
 
@@ -28,11 +29,13 @@ from typing import Any
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from memory_flywheel.phase1.learning_store import LearningStore
 from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.direction.inputs import get_input
 from orchestrator.direction.setter import DirectionSetter
 from orchestrator.gateway.quota_ledger import QuotaLedger, billing_context
 from orchestrator.gateway.router import ModelGateway
+from orchestrator.graph.learning import make_learning_seam
 from orchestrator.graph.nodes import (
     GraphDeps,
     build_graph,
@@ -105,13 +108,16 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             duration_ms=rec.get("duration_ms"),
             cover_png=rec.get("cover_png"))
 
+    # Task6：学习回写走同库独立新表 phase1_learnings（mpnet 768 复用，0 付费）
+    learning = make_learning_seam(LearningStore())
+
     deps = GraphDeps(
         direction=direction_seam,
         gate1=gate1_seam,
-        agent_run=None,       # Task4 接缝：真实走到即 TaskSeamError
+        agent_run=None,       # Task4 接缝：真实走到即 TaskSeamError（Task7 接线）
         evaluate=None,        # 默认 file_backed_evaluate（只读 telemetry 文件）
         gate2=gate2_seam,
-        persist=None,         # Task6 接缝
+        persist=learning,     # Task6：结案即写 phase1_learnings（无证据不写）
         task_title=title,
     )
     return deps, payload, feishu
