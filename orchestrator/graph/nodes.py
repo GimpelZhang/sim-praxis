@@ -155,11 +155,23 @@ def node_gate1(state: SimPraxisState, deps: GraphDeps) -> dict:
 
 def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
     record = deps.require("agent_run", state)
+    runs = list(state.get("agent_runs", []))
+    runs.append(record)
+    # Task4：runner 5 轮用尽/补丁越界 → 失败态带轨迹进 human_failure，
+    # 绝不进入 evaluate 伪造成功（计划 L502；§6.3 显式 FAILURE 原则）。
+    if record.get("status") == "failed":
+        return {
+            "agent_runs": runs,
+            "coding_round": record.get("coding_round",
+                                       state.get("coding_round", 0)),
+            "events": [_ev("agent_run_failed", run_index=len(runs),
+                           coding_round=record.get("coding_round", 0),
+                           reason=record.get("reason", "agent_run 失败"),
+                           failure_json=record.get("failure_json"))],
+        }
     uri = record.get("telemetry_uri")
     if not uri:
         raise GraphStateError("agent_run 接缝未返回 telemetry_uri")
-    runs = list(state.get("agent_runs", []))
-    runs.append(record)
     update = {
         "agent_runs": runs,
         "telemetry_uri": uri,
@@ -240,7 +252,10 @@ def _run_dir(state: dict, deps: GraphDeps) -> Path:
 
 
 def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
-    if _last_event(state, "gate1_hard_failure"):
+    if _last_event(state, "agent_run_failed"):
+        ev = _last_event(state, "agent_run_failed")
+        stage, reason = "agent_run", ev["reason"]
+    elif _last_event(state, "gate1_hard_failure"):
         stage, reason = "gate1", _last_event(state, "gate1_hard_failure")["reason"]
     elif _last_event(state, "gate2_hard_failure"):
         stage, reason = "gate2", _last_event(state, "gate2_hard_failure")["reason"]
@@ -298,6 +313,12 @@ def route_track(state: dict) -> str:
     return track
 
 
+def route_after_agent_run(state: dict) -> str:
+    if _last_event(state, "agent_run_failed"):
+        return TO_HUMAN_FAILURE
+    return "evaluate"
+
+
 def route_after_gate1(state: dict) -> str:
     if _last_event(state, "gate1_approved"):
         return TO_AGENT_RUN
@@ -346,7 +367,11 @@ def build_graph(deps: "GraphDeps | None" = None):
         TO_DIRECTION: "direction",
         TO_HUMAN_FAILURE: "human_failure",
     })
-    graph.add_edge("agent_run", "evaluate")
+    # Task4：agent_run 失败（5 轮用尽/补丁越界）→ human_failure，否则进 evaluate
+    graph.add_conditional_edges("agent_run", route_after_agent_run, {
+        TO_HUMAN_FAILURE: "human_failure",
+        "evaluate": "evaluate",
+    })
     graph.add_edge("evaluate", "gate2")
     graph.add_conditional_edges("gate2", route_after_gate2, {
         TO_PERSIST: "persist_learning",

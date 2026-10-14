@@ -22,6 +22,9 @@ _NODE_LABEL = {
 }
 
 _CONDITIONAL = {
+    ("agent_run",): ("route_after_agent_run",
+                     {"ok": "evaluate",
+                      "failed (5 轮用尽/补丁越界)": "human_failure"}),
     ("gate1",): ("route_after_gate1",
                  {"approve": "agent_run",
                   "reject & gate1_rejects<2": "direction",
