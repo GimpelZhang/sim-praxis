@@ -23,7 +23,7 @@ from typing import Any, Callable
 import yaml
 
 from memory_flywheel.vector_engine import VectorEngine
-from orchestrator.gateway.quota_ledger import QuotaLedger
+from orchestrator.gateway.quota_ledger import set_current_evidence
 from orchestrator.gateway.router import ModelGateway, redact
 
 STAGE = "macro_ideation"
@@ -352,12 +352,12 @@ def _write_evidence(stem: str, kind: str, payload: dict) -> str:
 
 class DirectionSetter:
     def __init__(self, gateway: ModelGateway, vector_engine: VectorEngine,
-                 *, ledger: "QuotaLedger | None" = None, task: int = 2,
-                 evidence_writer: "Callable | None" = None):
+                 *, evidence_writer: "Callable | None" = None):
+        # Task3（§6.3）：本类不再持账本——preflight/记账统一由 ModelGateway.call
+        # 经 BillingGate 在 billing_context 内完成；构造网关时必须传 ledger=，
+        # 生产 CLI 用 billing_context(task=2, batch_id=...) 包住整个运行。
         self.gateway = gateway
         self.vector_engine = vector_engine
-        self.ledger = ledger or QuotaLedger()
-        self.task = task
         self._write_evidence = evidence_writer or _write_evidence
         self.catalog = load_engine_catalog()
 
@@ -401,7 +401,8 @@ class DirectionSetter:
                 if not isinstance(mm.get("content"), str):
                     raise DirectionError(
                         "macro_ideation 消息含非文本块（硬规则1 禁止 image）")
-            self.ledger.preflight(STAGE, task=self.task, batch_id=batch_id)
+            # Task3：preflight/记账在 gateway.call 内部（BillingGate）；这里只把
+            # 本次实呼的 req 证据引用挂到 billing_context，成功/失败账行都能指回它。
             model = self.gateway.model_id(STAGE)
             req_ref = self._write_evidence(stem, "req", {
                 "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -413,27 +414,18 @@ class DirectionSetter:
                 "messages": json.loads(redact(json.dumps(
                     messages, ensure_ascii=False))),
             })
+            set_current_evidence(req_ref)
             try:
-                raw = self.gateway.call(STAGE, messages,
-                                        max_tokens=MAX_TOKENS,
-                                        temperature=TEMPERATURE)
+                raw, _usage = self.gateway.call(STAGE, messages,
+                                                max_tokens=MAX_TOKENS,
+                                                temperature=TEMPERATURE)
             except Exception as exc:
-                # 锁内适配（计划 §6.3 seq 口径，评审 M3）：StageUnresolvedError 按
-                # router 契约「不发起任何网络调用」（model_id=null），不占整数 seq；
-                # 其余异常（含发网后才可能触发的 GatewayPausedError）保守按一次调用
-                # 记账（宁紧勿松）。Task3 记账移入 call() 后凭 HTTP attempt 可见性细化。
-                from orchestrator.gateway.router import StageUnresolvedError as _Unresolved
+                # 记账已在 call() 出口完成（成功一行 ok=true；任何越过 preflight 的
+                # 失败一行 ok=false，含 GatewayPausedError；StageUnresolvedError 在
+                # preflight 之前抛出，不占整数 seq）。setter 只补失败响应证据后原样抛。
                 self._write_evidence(stem, "resp", {"ok": False,
                                                     "error": redact(str(exc))[:1000]})
-                if isinstance(exc, _Unresolved):
-                    raise
-                self.ledger.record(STAGE, task=self.task, batch_id=batch_id,
-                                   ok=False, model=model, thread_id=thread_id,
-                                   err=f"{type(exc).__name__}: {exc}",
-                                   evidence=req_ref)
                 raise
-            self.ledger.record(STAGE, task=self.task, batch_id=batch_id, ok=True,
-                               model=model, thread_id=thread_id, evidence=req_ref)
             parse_error = None
             try:
                 obj = parse_json_object(raw)

@@ -25,6 +25,7 @@ from orchestrator.direction.inputs import get_input
 from orchestrator.direction.setter import (
     DirectionError, DirectionSchemaError, DirectionSetter, _evidence_dir,
 )
+from orchestrator.gateway.quota_ledger import QuotaLedger, billing_context
 from orchestrator.gateway.router import ModelGateway
 
 
@@ -40,7 +41,9 @@ def main(argv: "list[str] | None" = None) -> int:
     args = ap.parse_args(argv)
 
     payload = get_input(args.track, args.index)
-    gateway = ModelGateway()
+    # Task3（§6.3）：账本挂在网关上；task/batch 归属经 billing_context 透传，
+    # 缺上下文的付费调用在 BillingGate fail-closed（禁止裸跑烧预算）。
+    gateway = ModelGateway(ledger=QuotaLedger())
     ve = VectorEngine()
     setter = DirectionSetter(gateway, ve)
 
@@ -49,9 +52,10 @@ def main(argv: "list[str] | None" = None) -> int:
             print("ERROR: --no-gate 需显式 SIMPRAXIS_ALLOW_NO_GATE=1（Gate1 不可默认旁路）",
                   file=sys.stderr)
             return 2
-        result = setter.run_direction(
-            track=args.track, payload=payload, thread_id=args.thread,
-            batch_id=args.batch_id, bypass_stamp=True)
+        with billing_context(task=2, batch_id=args.batch_id, thread_id=args.thread):
+            result = setter.run_direction(
+                track=args.track, payload=payload, thread_id=args.thread,
+                batch_id=args.batch_id, bypass_stamp=True)
         out = _evidence_dir() / f"proposals_{args.thread}_r0.json"
         print(f"[LOCAL-ONLY] gate_bypassed_locally=true；{out} 带红印，不得作为 Gate1 证据")
         return 0
@@ -60,10 +64,11 @@ def main(argv: "list[str] | None" = None) -> int:
     from orchestrator.feishu_gateway.client import gateway_from_env
     feishu = gateway_from_env()
     try:
-        outcome = setter.run_gate1_loop(
-            feishu, track=args.track, payload=payload,
-            thread_id=args.thread, batch_id=args.batch_id,
-            task_title=args.task_title)
+        with billing_context(task=2, batch_id=args.batch_id, thread_id=args.thread):
+            outcome = setter.run_gate1_loop(
+                feishu, track=args.track, payload=payload,
+                thread_id=args.thread, batch_id=args.batch_id,
+                task_title=args.task_title)
     finally:
         feishu.close()
 

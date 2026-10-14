@@ -161,7 +161,9 @@ def test_swap_model_id_routes_to_new_id(tmp_path, monkeypatch):
 
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
     gw2 = R.ModelGateway(stage_models_path=map_path, transport=fake_completion)
-    assert gw2.call("coding_debug", [{"role": "user", "content": "hi"}]) == "ok"
+    # Task3：call() 返回 (text, (tokens_in, tokens_out))——内容与 usage 同时断言
+    text_out, usage = gw2.call("coding_debug", [{"role": "user", "content": "hi"}])
+    assert text_out == "ok" and usage == (3, 1)
     assert captured["model"] == "anthropic/glm-5-3-flash-260828"
     assert captured["api_base"].endswith("/api/coding")
 
@@ -332,7 +334,8 @@ def test_429_retry_after_then_success(tmp_path, monkeypatch):
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
     gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps.append,
                         transport=fake_completion)
-    assert gw.call("coding_debug", [{"role": "user", "content": "hi"}]) == "ok"
+    text_out, usage = gw.call("coding_debug", [{"role": "user", "content": "hi"}])
+    assert text_out == "ok" and usage == (5, 2)
     assert calls["n"] == 3
     assert sleeps[0] == 3 and sleeps[1] == 3
 
@@ -467,7 +470,8 @@ def test_structured_rate_limit_type_beats_quota_text(tmp_path, monkeypatch):
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
     gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps.append,
                         transport=fake_completion)
-    assert gw.call("coding_debug", [{"role": "user", "content": "hi"}]) == "ok"
+    text_out, usage = gw.call("coding_debug", [{"role": "user", "content": "hi"}])
+    assert text_out == "ok" and usage == (5, 2)
     assert calls["n"] == 3
     # Retry-After: 3 被两跳严格尊重（不是指数退避的近似值）
     assert sleeps == [3, 3]
@@ -501,7 +505,8 @@ def test_5xx_retry_after_honored_both_transports(tmp_path, monkeypatch):
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
     gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps_a.append,
                         transport=fake_completion)
-    assert gw.call("coding_debug", [{"role": "user", "content": "hi"}]) == "ok"
+    text_out, usage = gw.call("coding_debug", [{"role": "user", "content": "hi"}])
+    assert text_out == "ok" and usage == (4, 1)
     assert sleeps_a == [7], f"litellm 路径必须严格尊重 Retry-After: {sleeps_a}"
 
     # (b) 直 POST 路径：503 带头 retry-after: 9，第二跳 200

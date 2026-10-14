@@ -13,20 +13,23 @@ HTTP 分类/退避仍在 router.py，m9/m12 逻辑零改动（§6.3）。
 is_paused() 直接复用 router 实现（不复制其逻辑）。预算类暂停 resume_at_epoch=null
 （无票不自动恢复），在既有 7 键上追加 schema_version=2 的超集键（§6.1）。
 
-锁内适配（接线时点，§6.3「倾向并入 Task3」）：Task2 的步骤要求「宏观调用前后写
-ledger」，故账本模块在 Task2 先行，direction_setter 显式 preflight/record；
-Task3 再把同一对门接进 ModelGateway.call/call_visual 入口，并移除 setter 的
-显式记账改由 call() 统一记账，避免双计数。
+接线状态（Task3 已收口，§6.3「倾向并入 Task3」）：Task2 阶段账本先行，
+direction_setter 显式 preflight/record；Task3 起同一对门只在
+ModelGateway.call/call_visual 内部各执行一次（BillingGate），setter 的显式
+记账已移除，杜绝双计数。一次逻辑调用 = 一次 preflight + 至多一行整数 seq
+（出口成功/失败都记），call 内部 HTTP 退避重试不重复记账。
 
 口径签收（2026-10-14 代码评审 L1/L4）：
 - resume_ticket：§6.1 设想双方把持（人工写票、操作者持票解封）；Phase 1 单机
   单人操作，当前 resume CLI 只校验票非空并记入 resume_audit.jsonl（票仅留痕、
   不与暂停文件中的值比对）。多机/多人运行前必须升级为双向校验。
-- 并发：preflight 与 record 分持文件锁（TOCTOU 窗口）。Phase 1 形态是单机顺序
-  CLI，故接受该窗口；Task3 若在 call() 内接线且出现多线程 runner，必须在
-  record() 内复检上限或把 preflight+record 收进同一把锁。
-- tokens_in/out：§6.3 示例含该字段；call() 现只返回文本，Task2 记 null，Task3
-  统一接线时由 call() 回填 usage（router 已取 usage 但仅打日志，见 L510-516）。
+- 并发：preflight 与 record 分持文件锁（TOCTOU 窗口）。Phase 1 形态是单机
+  顺序 CLI；Task3 收口后唯一触网线程是 LangGraph invoke 主线程（飞书 WS 回调
+  线程只写 pending_gates + set Event，不调模型），保持单调用方语义，接受该窗口；
+  出现并发 runner 前必须在 record() 内复检上限或把 preflight+record 收进同一把锁。
+- tokens_in/out：Task3 收口后由 call/call_visual 从 usage 回填
+  （litellm input/output_tokens，直 POST body.usage.input_tokens/output_tokens）；
+  Task2 的 9 行历史记录维持 null 不回改。
 """
 from __future__ import annotations
 
@@ -36,6 +39,9 @@ import json
 import os
 import time
 import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -358,6 +364,87 @@ class QuotaLedger:
             "tokens_in": None, "tokens_out": None,
             "ok": False, "err": err, "approval_ref": None, "evidence": None,
         })
+
+
+# ---------- Task3：调用方记账上下文 + 网关统一记账门 ----------
+
+@dataclass
+class BillingContext:
+    """一次业务运行（CLI 进程 / graph 线程）的记账归属。
+
+    task/batch_id 是 preflight 校验批次凭据的输入；thread_id/evidence 写入每行
+    ledger。evidence 是每次实呼粒度，由调用方在 call() 前通过
+    set_current_evidence() 刷新（如 direction 的 *.req.json 落盘后）。
+    """
+
+    task: int
+    batch_id: str
+    thread_id: str = ""
+    evidence: "str | None" = None
+
+
+_BILLING_CTX: ContextVar["BillingContext | None"] = ContextVar(
+    "simpraxis_billing_ctx", default=None)
+
+
+@contextmanager
+def billing_context(*, task: int, batch_id: str, thread_id: str = ""):
+    """生产入口必须用本上下文包住实呼；无上下文的挂账本网关 fail-closed。"""
+    ctx = BillingContext(task=task, batch_id=batch_id, thread_id=thread_id)
+    token = _BILLING_CTX.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _BILLING_CTX.reset(token)
+
+
+def current_billing() -> "BillingContext | None":
+    return _BILLING_CTX.get()
+
+
+def set_current_evidence(ref: "str | None") -> None:
+    """把「本次实呼」的证据引用挂到当前上下文（无上下文时静默 no-op，
+    供 monkeypatch/未挂账本的测试路径使用）。"""
+    ctx = _BILLING_CTX.get()
+    if ctx is not None:
+        ctx.evidence = ref
+
+
+class BillingGate:
+    """ModelGateway.call/call_visual 入口/出口的唯一记账门（§1.5/§6.3）。
+
+    入口：复用 router.is_paused → ledger.preflight（含凭据/全局/任务/批次六段）；
+    出口：成功与失败都 ledger.record 一行整数 seq。preflight 拦截自身的
+    seq=null 审计行由 QuotaLedger 负责，出口不重复记账。
+    BillingGate 自身不含任何网络代码。
+    """
+
+    def __init__(self, ledger: "QuotaLedger | None" = None) -> None:
+        self.ledger = ledger or QuotaLedger()
+
+    @staticmethod
+    def _ctx() -> BillingContext:
+        ctx = _BILLING_CTX.get()
+        if ctx is None:
+            raise QuotaError(
+                "网关挂了账本但缺少 billing_context（task/batch_id/thread_id）："
+                "生产入口必须用 quota_ledger.billing_context(...) 包住实呼，"
+                "无记账上下文的付费调用 fail-closed（禁止裸跑烧预算）")
+        return ctx
+
+    def preflight(self, stage: str) -> dict[str, Any]:
+        ctx = self._ctx()
+        return self.ledger.preflight(stage, task=ctx.task, batch_id=ctx.batch_id)
+
+    def record(self, stage: str, *, ok: bool,
+               model: "str | None" = None,
+               tokens_in: "int | None" = None, tokens_out: "int | None" = None,
+               err: "str | None" = None) -> dict[str, Any]:
+        ctx = self._ctx()
+        return self.ledger.record(
+            stage, task=ctx.task, batch_id=ctx.batch_id, ok=ok, model=model,
+            thread_id=ctx.thread_id, tokens_in=tokens_in, tokens_out=tokens_out,
+            err=err, evidence=ctx.evidence)
 
 
 # ---------- 批次批准凭据 / 恢复（只接受显式参数的 CLI） ----------

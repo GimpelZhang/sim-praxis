@@ -35,12 +35,18 @@ FAILURE.json 且 latest 不移动（m4）。
 - 视觉：Ark 实测最小边 14px（8px 报 InvalidParameter: Image dimensions are too
   small）；校验图为 stdlib 现场生成的 32x32 纯色 PNG，不引用任何外部资产。
 
-两条传输路径共用同一退避/熔断分类层：
-- 运行期 call()：litellm completion，model="anthropic/<id>"（Phase 1 LangGraph 用）；
+三条出口共用同一退避/熔断分类层：
+- 运行期 call()（仅文本 stage）：litellm completion，model="anthropic/<id>"
+  （Phase 1 LangGraph 用）；macro/coding 永不发 image block，入口即拒；
+- 运行期 call_visual()（硬规则1 唯一视觉入口，stage 硬绑 visual_rollout）：
+  requests 直 POST /v1/messages（与视觉校验同传输，2026-10-12 实证 200）；
 - --validate-models：requests 直 POST /v1/messages，以便如实记录 http_status 与
   响应 type=message（litellm 标准化后不透出这两个字段）。
+Task3（§1.5/§6.3）：构造传 ledger= 时 call/call_visual 统一 preflight+记账
+（BillingGate + billing_context，ContextVar 透传 task/batch/thread），
+一次逻辑调用至多一行整数 seq，内部重试不双计数；ledger=None 不碰账本。
 若 litellm anthropic/ provider 对 Ark 非 Claude 浮动别名不兼容（§18 开放问题），
-允许把运行期路径也切到直 POST，但必须复用本文件同一分类/退避/熔断层，断言不放宽。
+允许把文本运行期路径也切到直 POST，但必须复用本文件同一分类/退避/熔断层，断言不放宽。
 
 状态文件：$SIMPRAXIS_GATEWAY_STATE/quota_pause.json（0600）。日志经脱敏过滤器，
 绝不输出 token 或认证头。
@@ -359,6 +365,35 @@ def _litellm_text(resp: Any) -> str:
     return str(content)
 
 
+def _litellm_usage(resp: Any) -> "tuple[int | None, int | None]":
+    """从 litellm 响应取 token 用量（Anthropic 形态 input_tokens，OpenAI 形态 prompt_tokens）。"""
+    usage = getattr(resp, "usage", None)
+
+    def _num(*names: str) -> int | None:
+        for n in names:
+            v = getattr(usage, n, None)
+            if isinstance(v, int) and v >= 0:
+                return v
+        return None
+
+    return (_num("input_tokens", "prompt_tokens"),
+            _num("output_tokens", "completion_tokens"))
+
+
+def _messages_contain_image(messages: list[dict[str, Any]]) -> bool:
+    """硬规则1 守卫：macro/coding 的 Anthropic Messages 体里出现 image block 即拒。
+
+    content 可以是字符串或 content block 列表（dict 含 type）；两种形态都扫。
+    """
+    for msg in messages or []:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "image":
+                    return True
+    return False
+
+
 def _solid_png_b64(rgb: tuple[int, int, int] = (255, 0, 0), size: int = 32) -> str:
     """stdlib 生成 size×size 纯色 RGB PNG（无外部资产；视觉校验的确定性输入）。"""
     def chunk(tag: bytes, data: bytes) -> bytes:
@@ -397,7 +432,8 @@ class ModelGateway:
                  quota_pause_sec: int = 1800,
                  sleep: Callable[[float], None] = time.sleep,
                  transport: Callable[..., Any] | None = None,
-                 raw_transport: Callable[..., Any] | None = None):
+                 raw_transport: Callable[..., Any] | None = None,
+                 ledger: Any = None):
         self.stage_models_path = Path(stage_models_path)
         self.max_attempts = max_attempts
         self.base_backoff = base_backoff
@@ -408,6 +444,14 @@ class ModelGateway:
         # 测试注入点：transport=litellm.completion 替身；raw_transport=requests.post 替身
         self._transport = transport
         self._raw_transport = raw_transport
+        # Task3（§1.5/§6.3）：ledger 非 None 时，call/call_visual 入口统一
+        # preflight、出口统一记账；None = --validate-models / monkeypatch 单测路径。
+        # 惰性导入避免 router ↔ quota_ledger 循环依赖（ledger 单向依赖 router）。
+        if ledger is not None:
+            from orchestrator.gateway.quota_ledger import BillingGate
+            self._billing: "Any" = BillingGate(ledger)
+        else:
+            self._billing = None
         self.config = self._load_config()
 
     # ---- 配置（schema + null 锚点；无任何目录成员资格断言） ----
@@ -482,7 +526,16 @@ class ModelGateway:
 
     def call(self, stage: str, messages: list[dict[str, Any]], *,
              max_tokens: int = 512, temperature: float = 0.2,
-             timeout: int = 120) -> str:
+             timeout: int = 120) -> tuple[str, "tuple[int | None, int | None]"]:
+        """文本阶段统一入口（macro_ideation / coding_debug），返回 (text, (in_tok, out_tok))。
+
+        Task3（§1.5/§6.3）计费契约：构造网关传 ledger= 即挂 BillingGate——
+        一次逻辑调用 = preflight 一次 + 整数 seq 记账至多一行（ok=true/false），
+        _chat_loop 内部的 HTTP 退避重试绝不重复记账；ledger=None（--validate-models /
+        全 monkeypatch 单测）时完全不碰账本。null stage / 入口熔断 / visual 误走文本入口 / image block
+        四类编程或配置错误在 preflight 之前拒绝：不触网、不占 seq、不记账。
+        tokens 取不到时为 None（Task2 的 9 行历史账保持 NULL，不回填）。
+        """
         model_id = self.model_id(stage)
         if model_id is None:
             anchor = str(self.entry(stage).get("open_question", ""))
@@ -490,9 +543,40 @@ class ModelGateway:
         paused = is_paused(stage)
         if paused:
             raise GatewayPausedError(paused)
+        # 硬规则1两道守卫（均在 preflight 之前——编程错误不发网、不占 seq、不记账）：
+        # (a) visual_rollout 是视觉专用阶段，禁止走文本入口，视觉唯一入口 call_visual；
+        if stage == VISION_STAGE:
+            raise NonRetryableError(
+                "visual_rollout 禁止走文本 call()（硬规则1）；视觉请求只能走 call_visual()")
+        # (b) macro/coding 消息体永不允许 image block。
+        if _messages_contain_image(messages):
+            raise NonRetryableError(
+                f"{stage} 阶段禁止图像 block（硬规则1）；视觉请求只能走 call_visual()")
+        if self._billing is not None:
+            self._billing.preflight(stage)
         token, base_url = _creds()
         completion = self._transport or litellm.completion
+        try:
+            content, usage = self._chat_loop(
+                stage=stage, model_id=model_id, token=token, base_url=base_url,
+                completion=completion, messages=messages,
+                max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 —— 越过 preflight 的任何出口恰好一行 ok=false
+            if self._billing is not None:
+                self._billing.record(
+                    stage, ok=False, model=model_id,
+                    err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+            raise
+        if self._billing is not None:
+            self._billing.record(stage, ok=True, model=model_id,
+                                 tokens_in=usage[0], tokens_out=usage[1])
+        return content, usage
 
+    def _chat_loop(self, *, stage: str, model_id: str, token: str, base_url: str,
+                   completion: Callable[..., Any], messages: list[dict[str, Any]],
+                   max_tokens: int, temperature: float, timeout: int
+                   ) -> tuple[str, "tuple[int | None, int | None]"]:
+        """call() 的退避/熔断重试循环（不含计费；内部重试多少次都只算一次逻辑调用）。"""
         attempt = 0
         wait_total = 0.0
         while True:
@@ -507,15 +591,11 @@ class ModelGateway:
                     timeout=timeout,
                 )
                 content = _litellm_text(resp)
-                usage = getattr(resp, "usage", None)
-                in_tok = getattr(usage, "input_tokens", None) or \
-                    getattr(usage, "prompt_tokens", "?")
-                out_tok = getattr(usage, "output_tokens", None) or \
-                    getattr(usage, "completion_tokens", "?")
+                in_tok, out_tok = _litellm_usage(resp)
                 logger.info("chat ok stage=%s requested=%s echo=%s tokens in=%s out=%s",
                             stage, model_id, getattr(resp, "model", "?"), in_tok, out_tok)
                 _clear_stale_pause_state()
-                return content
+                return content, (in_tok, out_tok)
             except RateLimitError as exc:
                 if _is_quota_error(exc):
                     state = _write_pause_state(stage, _error_text(exc), self.quota_pause_sec)
@@ -572,6 +652,48 @@ class ModelGateway:
                 self._sleep(min(self.max_backoff, self.base_backoff))
                 wait_total += self.base_backoff
                 attempt += 1
+
+    def call_visual(self, prompt: str, image_b64: str, *,
+                    media_type: str = "image/png", max_tokens: int = 512,
+                    timeout: int = 120) -> tuple[str, "tuple[int | None, int | None]"]:
+        """硬规则1 唯一视觉入口：stage 硬绑 visual_rollout，禁止文本路径发 image block。
+
+        走与 --validate-models 同一条直 POST /v1/messages 传输（如实保留 HTTP 语义；
+        litellm 对 Ark 浮动别名的视觉兼容性未在 §18 开放问题关闭前假定）。
+        计费契约与 call() 相同：preflight 一次、整数 seq 至多一行、内部重试不重复记账。
+        返回 (text, (input_tokens, output_tokens))。
+        """
+        stage = VISION_STAGE
+        model_id = self.model_id(stage)
+        if model_id is None:
+            anchor = str(self.entry(stage).get("open_question", ""))
+            raise StageUnresolvedError(stage, anchor)
+        paused = is_paused(stage)
+        if paused:
+            raise GatewayPausedError(paused)
+        if self._billing is not None:
+            self._billing.preflight(stage)
+        blocks = [
+            {"type": "image",
+             "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+            {"type": "text", "text": prompt},
+        ]
+        try:
+            _resp, body = self._post_messages(
+                stage, model_id, blocks, max_tokens=max_tokens, timeout=timeout)
+            usage_body = body.get("usage") or {}
+            usage = (usage_body.get("input_tokens"), usage_body.get("output_tokens"))
+            text = _message_text(body)
+        except Exception as exc:  # noqa: BLE001 —— 与 call() 同契约：恰好一行 ok=false
+            if self._billing is not None:
+                self._billing.record(
+                    stage, ok=False, model=model_id,
+                    err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+            raise
+        if self._billing is not None:
+            self._billing.record(stage, ok=True, model=model_id,
+                                 tokens_in=usage[0], tokens_out=usage[1])
+        return text, usage
 
     # ---- 实呼校验：直 POST /v1/messages（如实记录 http_status / type=message） ----
 

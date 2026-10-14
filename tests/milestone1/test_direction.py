@@ -1,11 +1,15 @@
 """Phase 1 Task 2 direction_setter 单测（0 付费 0 联网）。
 
-网关与向量库全部注入合成实现：FakeGateway 只回放脚本化 JSON 字符串并记录调用，
-FakeVector 只回放合成 KB 命中；配额根目录与网关暂停态目录全部隔离到 tmp_path，
-每个用例自写批次批准凭据（quota_ledger.write_approval）。
+网关与向量库全部注入合成实现：FakeGateway 只回放脚本化 JSON 字符串并记录调用
+（Task3 起 call 契约返回 (text, (tokens_in, tokens_out))，与 ModelGateway 同形），
+FakeVector 只回放合成 KB 命中；证据根目录与网关暂停态目录全部隔离到 tmp_path。
+
+Task3（§6.3）记账收口后，setter 不再持账本：preflight/seq 记账统一由
+ModelGateway(ledger=...) 内的 BillingGate 完成，其集成断言在
+tests/milestone1/test_gateway_billing.py（含原「无批次凭据不发网拦截」用例）。
 
 用例：
-  1  首轮合法 2 方案 → 通过，ledger seq=1，证据落盘；
+  1  首轮合法 2 方案 → 通过，证据落盘；
   2  首轮坏 JSON → 恰好重问 1 次后通过（共 2 次调用，无第 3 次）；
   3  sim_engine 不在矩阵可用集 → 校验失败重问，第 2 次合法通过；
   4  两次均不过校验 → DirectionSchemaError，调用恰好 2 次；
@@ -13,7 +17,6 @@ FakeVector 只回放合成 KB 命中；配额根目录与网关暂停态目录�
   6  Gate1 打回 1 次：human_notes 进第 2 轮 prompt（最高优先级标记原样出现）；
   7  Gate1 第 3 次仍打回 → human_failure（首轮 + 2 次再问，共 3 轮 macro）；
   8  源码红线：direction 包 .py 零裸引擎名字面量（白名单仅矩阵数据文件）；
-  9  无批次凭据 → preflight 不发网拦截 + 审计行，且不写持久熔断文件；
   10 macro 阶段永不发 image：每次实呼消息 content 全是 str；
   11 capabilities 检索 0 行 → DirectionError，0 次实呼；
   12 parse_json_object 围栏/噪声提取；
@@ -58,7 +61,8 @@ class FakeGateway:
                            "max_tokens": max_tokens, "temperature": temperature})
         if not self.raws:
             raise AssertionError("FakeGateway 脚本耗尽：出现计划外的额外 macro 调用")
-        return self.raws.pop(0)
+        # Task3 call() 契约：(text, (tokens_in, tokens_out))；合成网关不造用量
+        return self.raws.pop(0), (None, None)
 
 
 class FakeVector:
@@ -107,17 +111,14 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     catalog = load_engine_catalog()
-    ledger = QuotaLedger()
-    ql_mod.write_approval(batch_id=BATCH, task=2, stage=STAGE, approved=8,
-                          beyond_normal=False, note="fixture 批次（零付费单测）")
     payload = get_input("track2", 1)
-    return {"tmp": tmp_path, "catalog": catalog, "ledger": ledger,
+    return {"tmp": tmp_path, "catalog": catalog,
             "slugs": sorted(catalog), "payload": payload}
 
 
 def make_setter(isolated, raws, *, hits=None):
-    return DirectionSetter(FakeGateway(raws), FakeVector(hits),
-                           ledger=isolated["ledger"])
+    # Task3：setter 不接账本；FakeGateway 无 BillingGate（纯回放，0 付费语义）
+    return DirectionSetter(FakeGateway(raws), FakeVector(hits))
 
 
 # ---------- 用例 ----------
@@ -132,13 +133,9 @@ def test_01_valid_first_round(isolated):
     assert out["kb_sources"][0]["ref"] == "S1"
     gw = s.gateway
     assert len(gw.calls) == 1 and gw.calls[0]["stage"] == STAGE
-    # ledger 记一行成功账，seq 全局递增、批次计数正确
-    lines = [json.loads(l) for l in
-             (isolated["tmp"] / "phase1/quota/ledger.jsonl").read_text().splitlines()]
-    calls = [r for r in lines if r.get("seq") is not None]
-    assert len(calls) == 1 and calls[0]["seq"] == 1
-    assert calls[0]["ok"] is True and calls[0]["batch_id"] == BATCH
-    assert calls[0]["batch_used_after"] == 1 and calls[0]["global_used_after"] == 1
+    # Task3：seq 记账已收口进 gateway.call（BillingGate），不在 setter 侧写账本；
+    # 本用例（无账本 FakeGateway）不得生成任何 ledger 文件。
+    assert not (isolated["tmp"] / "phase1/quota/ledger.jsonl").exists()
     # 证据文件（脱敏 req/resp + proposals）
     ev = isolated["tmp"] / "phase1/task2_direction"
     assert len(list(ev.glob("macro_fx01_r0_a0.req.json"))) == 1
@@ -245,21 +242,10 @@ def test_08_no_engine_literal_in_direction_source():
     assert not hits, f"direction 包出现裸引擎名字面量：{hits}"
 
 
-def test_09_missing_credential_blocks_without_net(tmp_path, monkeypatch):
-    monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
-    monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
-    ledger = QuotaLedger()                    # 不写任何批次凭据
-    s = DirectionSetter(FakeGateway([]), FakeVector(), ledger=ledger)
-    with pytest.raises(GatewayPausedError) as ei:
-        s.run_direction(track="track2", payload=get_input("track2", 1),
-                        thread_id="fx09", batch_id="NO-SUCH-BATCH")
-    assert s.gateway.calls == []             # 不发网
-    assert ei.value.state["reason"] == "batch_approval_missing"
-    # 审计行存在（seq=null），但持久熔断文件不得出现（§6.2 无此熔断原因）
-    rows = [json.loads(l) for l in
-            (tmp_path / "phase1/quota/ledger.jsonl").read_text().splitlines()]
-    assert rows and rows[0]["event"] == "preflight_blocked" and rows[0]["seq"] is None
-    assert not (tmp_path / "gwstate/quota_pause.json").exists()
+# 原 test_09（无批次凭据 → preflight 不发网拦截 + seq=null 审计行 + 不写持久
+# 熔断文件）Task3 已随记账收口移入 tests/milestone1/test_gateway_billing.py
+# （test_preflight_missing_credential_blocks_without_net），在真 ModelGateway +
+# BillingGate + billing_context 上断言，比旧 FakeGateway 路径更贴近生产。
 
 
 def test_10_never_send_image_blocks(isolated):
