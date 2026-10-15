@@ -19,6 +19,21 @@ services:
       # HF_TOKEN 仅运行期注入（m11）：不进 Dockerfile、不进镜像层、不进 build-arg
       HF_TOKEN: ${HF_TOKEN:-}
       SIMPRAXIS_RUN_DIR: /root/runs
+      # 锁内适配（Task7 图整体在容器内运行）：Gate2 视频阶梯据此跳过
+      # `docker compose run` 嵌套，/mnt 同路径挂载下直接调镜像内 ffmpeg
+      SIMPRAXIS_IN_SANDBOX: "1"
+      # 锁内适配（Task7 图整体容器内运行）：LLM 网关凭据与飞书长连接三变量、
+      # LanceDB/fastembed 路径按「名」从宿主 shell（source scripts/00_env.sh）
+      # 插值透传；值绝不写入本文件/镜像层/日志（硬规则4）。
+      SIMPRAXIS_LLM_TOKEN: ${SIMPRAXIS_LLM_TOKEN:-}
+      SIMPRAXIS_LLM_BASE_URL: ${SIMPRAXIS_LLM_BASE_URL:-}
+      ANTHROPIC_AUTH_TOKEN: ${ANTHROPIC_AUTH_TOKEN:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_RECEIVE_ID: ${FEISHU_RECEIVE_ID:-}
+      SIMPRAXIS_LANCEDB_URI: ${SIMPRAXIS_LANCEDB_URI:-}
+      FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-}
       # 代理从宿主机 shell 显式继承（source scripts/00_env.sh 后再 compose）
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
@@ -29,6 +44,14 @@ services:
       - /mnt/caches/modelscope:/root/.cache/modelscope
       - /mnt/weights:/root/weights
       - ${SIMPRAXIS_RUN_DIR:-/mnt/artifacts/simpraxis/runs}:/root/runs
+      # 锁内适配（计划 Task7 L545-548「容器调用方式锁内适配」）：图整体在容器内
+      # 运行，ledger/批次凭据/检查点/lancedb/fastembed 缓存/venv/tours 必须与宿主
+      # 同路径单份可见，否则 quota 账本与证据根会在容器内外分裂。以下挂载只暴露
+      # simpraxis 自有 /mnt 字面路径（硬规则 6）；tours 只读。
+      - /mnt/venvs/simpraxis:/mnt/venvs/simpraxis
+      - /mnt/artifacts:/mnt/artifacts
+      - /mnt/caches:/mnt/caches
+      - /mnt/assets:/mnt/assets:ro
     deploy:
       resources:
         reservations:

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -506,6 +507,57 @@ def test_08_gate_cards_v2_first_with_1_fallback(gw, monkeypatch):
     assert json.loads(seen[1]["content"]) == c1
 
 
+# ---------- ⑨ Task7 锁内适配：图在容器内时视频压缩不嵌套 docker、同路径直连 ffmpeg ----------
+
+def test_09_compress_execution_position_branch(gw, tmp_path, monkeypatch):
+    from orchestrator.feishu_gateway import video as video_mod
+    video = tmp_path / "runs" / "v.mp4"
+    video.parent.mkdir(parents=True, exist_ok=True)
+    video.write_bytes(b"0")
+
+    captured: dict = {}
+
+    def fake_run(argv, check=True, timeout=None):
+        captured["argv"] = argv
+        out, cov = video_mod.expected_outputs(video, int(captured["step"]))
+        Path(out).write_bytes(b"x")
+        Path(cov).write_bytes(b"x")
+        return SimpleNamespace(returncode=0)
+
+    def call(step):
+        captured["step"] = step
+        return gw._compress_in_container(video, step)
+
+    monkeypatch.setattr(client_mod.subprocess, "run", fake_run)
+
+    # 宿主模式（默认）：docker compose run 起一次性容器；/root/runs 映射
+    monkeypatch.delenv("SIMPRAXIS_IN_SANDBOX", raising=False)
+    out2, cov2 = call(2)
+    argv = captured["argv"]
+    assert argv[:2] == ["docker", "compose"] and "sim-sandbox" in argv
+    assert argv[-3:-1] == ["bash", "-lc"]
+    cmd_host = argv[-1]
+    assert "/root/runs/v.mp4" in cmd_host
+    assert str(video) not in cmd_host          # 宿主字面路径不得漏进容器命令
+    assert out2 == tmp_path / "runs" / "v_s2.mp4"
+
+    # 容器内模式（compose 注入 SIMPRAXIS_IN_SANDBOX=1）：无 docker 嵌套、同路径直连
+    monkeypatch.setenv("SIMPRAXIS_IN_SANDBOX", "1")
+    out3, cov3 = call(3)
+    argv2 = captured["argv"]
+    assert argv2[:1] == ["bash"] and "docker" not in argv2
+    cmd_in = argv2[-1]
+    assert str(video) in cmd_in and "/root/runs" not in cmd_in
+    assert "crf 28" in cmd_in and "fps=20" in cmd_in   # step3 命令语义不变
+    assert out3 == tmp_path / "runs" / "v_s3.mp4"
+
+    # 宿主模式对 RUN_DIR 外产物仍硬报错（守卫不回归）；容器内同路径无需该改写
+    monkeypatch.delenv("SIMPRAXIS_IN_SANDBOX")
+    foreign = tmp_path / "elsewhere" / "x.mp4"
+    with pytest.raises(ValueError, match="容器内不可见"):
+        gw._compress_in_container(foreign, 2)
+
+
 # ---------- 附：事件解析纯函数 ----------
 
 def test_parse_card_event_duck_typing():
@@ -525,3 +577,166 @@ def test_parse_card_event_duck_typing():
     with pytest.raises(FeishuAPIError) as exc:
         raise FeishuAPIError(999, "x", api="unit")
     assert exc.value.code == 999 and "unit" in str(exc.value)
+
+
+# ---------- ⑩ D10 多轮 Gate：终态行归档 + history 仅追加（store 层） ----------
+
+def test_10_archive_decided_roundtrip(gw):
+    s = gw.store
+    s.upsert_pending("t10", 2, card_message_id="om_10a", open_chat_id=CHAT)
+    # PENDING 行绝不归档（上一轮还在等真人，重发由「不重发」分支处理）
+    assert s.archive_decided("t10", 2) is False
+    assert s.get_pending("t10", 2)["status"] == "PENDING"
+    assert s.list_history("t10", 2) == []
+
+    assert s.mark_decided("t10", 2, decision="reject_with_comments",
+                          source="card_form", human_notes="第一轮打回意见")
+    assert s.archive_decided("t10", 2) is True
+    assert s.get_pending("t10", 2) is None
+    hist = s.list_history("t10", 2)
+    assert len(hist) == 1
+    assert hist[0]["decision"] == "reject_with_comments"
+    assert hist[0]["human_notes"] == "第一轮打回意见"
+    assert hist[0]["card_message_id"] == "om_10a"
+    assert isinstance(hist[0]["archived_at"], int)
+
+    # 新一轮：插全新 PENDING（新卡 id），history 仅追加保留第一轮
+    s.upsert_pending("t10", 2, card_message_id="om_10b", open_chat_id=CHAT)
+    row = s.get_pending("t10", 2)
+    assert row["status"] == "PENDING" and row["card_message_id"] == "om_10b"
+    assert len(s.list_history("t10", 2)) == 1
+    assert s.mark_decided("t10", 2, decision="approve", source="cli")
+    assert s.archive_decided("t10", 2) is True
+    rounds = s.list_history("t10", 2)
+    assert [r["decision"] for r in rounds] == ["reject_with_comments", "approve"]
+    # 已无终态行：再次归档 no-op
+    assert s.archive_decided("t10", 2) is False
+
+
+# ---------- ⑪ Gate2 打回→重开：旧卡点击失效、新卡点击才算第二轮 + 自解释卡 ----------
+
+def _nested_task7_metrics():
+    r4 = {"status": "ok", "mode": "record_only",
+          "items": [{"id": f"q{i}", "answer": "yes", "defect": False}
+                    for i in range(1, 7)],
+          "n_defects": 0, "low_confidence": False, "disagreement": None,
+          "raw_text_ref": None}
+    return {
+        "engine": "mujoco", "run_id": "fix-r1", "ok": True, "schema_errors": [],
+        "rungs": {
+            "rung1": {"pass": True, "checks": {
+                "all_finite": True, "max_penetration_m": 0.000223,
+                "penetration_limit_m": 0.005, "penetration_within_limit": True,
+                "ccd_method": "per_substep_contact_depth",
+                "joint_torque_within_limits": True}},
+            "rung2": {"pass": True, "checks": {
+                "inside_box_frames": 89, "last_window_frames": 32,
+                "last_window_all_inside_box": True,
+                "contact_longest_run_s": 2.544, "duration_required_s": 1.0,
+                "contact_force_mean_n": 0.528, "contact_cv": 0.173,
+                "cv_max": 0.3, "stable_contact": True}},
+            "rung3": {"pass": True, "checks": {
+                "dt_band_ok": True, "dt": 0.016, "jerk_max_mps3": 105.87,
+                "jerk_threshold_mps3": 565.14, "over_threshold_count": 0}},
+            "rung4": r4},
+        "vector": {"rung1": True, "rung2": True, "rung3": True},
+        "rules_pass": True, "rung4": r4,
+        "auto_release": True, "escalate_human": False}
+
+
+def _wait_pending_card(gw, thread, gate, old_mid=None, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        row = gw.store.get_pending(thread, gate)
+        if row and row["status"] == "PENDING" and row["card_message_id"] \
+                and row["card_message_id"] != old_mid:
+            return row["card_message_id"]
+        time.sleep(0.02)
+    raise AssertionError("等不到新的 PENDING 卡片行")
+
+
+def test_11_gate2_reject_reopens_with_new_card_and_explanation(gw):
+    thread = "t11"
+    metrics = _nested_task7_metrics()
+    explanation = {"task": "做最小接触推送", "problem": "验证物理可信",
+                   "video": "看推块入盒"}
+    box: dict = {}
+
+    def request_round(key):
+        try:
+            box[key] = gw.request_gate2_approval(
+                thread, "Task7 验收", metrics, explanation=explanation, max_wait=30)
+        except BaseException as exc:  # noqa: BLE001
+            box[key] = exc
+
+    # —— 第一轮：等卡片，校验自解释内容与真实嵌套指标 ——
+    t1 = threading.Thread(target=request_round, args=("r1",))
+    t1.start()
+    mid1 = _wait_pending_card(gw, thread, 2)
+    sent1 = _interactive_calls(gw)
+    assert len(sent1) == 1
+    assert json.loads(sent1[0]["content_raw"])["schema"] == "2.0"
+    card1 = sent1[0]["content_raw"]
+    assert "审批前请先读" in card1          # 真人 Gate2 三问说明块
+    assert "做最小接触推送" in card1
+    assert "最大穿模" in card1 and "0.000223" in card1   # 真实 Rung1 值，不再是 '-'
+    assert "record_only" in card1
+    assert "位姿误差" not in card1          # 嵌套指标不再走扁平兜底
+
+    # 真人打回（带意见）→ 第一轮 await 返回 reject
+    resp = gw._handle_card(card_event(
+        {"gate": 2, "decision": "reject_with_comments"},
+        feedback="请说明任务背景", message_id=mid1))
+    assert resp.toast.type == "success"
+    t1.join(5)
+    assert not t1.is_alive() and not isinstance(box["r1"], BaseException)
+    assert box["r1"]["decision"] == "reject_with_comments"
+    assert box["r1"]["human_notes"] == "请说明任务背景"
+
+    # —— 第二轮：归档后必须发新卡；旧卡点击天然失效 ——
+    t2 = threading.Thread(target=request_round, args=("r2",))
+    t2.start()
+    mid2 = _wait_pending_card(gw, thread, 2, old_mid=mid1)
+    assert mid2 != mid1
+    assert len(_interactive_calls(gw)) == 2          # 真的重发了一张新卡
+
+    stale = gw._handle_card(card_event(
+        {"gate": 2, "decision": "approve"}, message_id=mid1))
+    assert stale.toast.type == "info"                # 该审批已结束或不存在
+    still = gw.store.get_pending(thread, 2)
+    assert still["status"] == "PENDING" and still["card_message_id"] == mid2
+
+    # 真人在新卡上批准 → 第二轮 await 返回 approve
+    gw._handle_card(card_event(
+        {"gate": 2, "decision": "approve"}, message_id=mid2))
+    t2.join(5)
+    assert not t2.is_alive() and not isinstance(box["r2"], BaseException)
+    assert box["r2"]["decision"] == "approve"
+
+    final = gw.store.get_pending(thread, 2)
+    assert final["status"] == "DECIDED" and final["decision"] == "approve"
+    assert final["card_message_id"] == mid2
+    history = gw.store.list_history(thread, 2)
+    assert [h["decision"] for h in history] == ["reject_with_comments"]
+    assert history[0]["card_message_id"] == mid1
+
+
+# ---------- ⑫ 卡片纯渲染：1.0 说明块/hr + 扁平 metrics 兜底不回归 ----------
+
+def test_12_gate2_card_explanation_block_and_flat_fallback():
+    from orchestrator.feishu_gateway.cards import (
+        build_gate2_card, build_gate2_card_v2,
+    )
+    expl = {"task": "T", "problem": "P", "video": "V"}
+    for builder in (build_gate2_card, build_gate2_card_v2):
+        nested = builder("tt", _nested_task7_metrics(), explanation=expl)
+        blob = json.dumps(nested, ensure_ascii=False)
+        assert "审批前请先读" in blob and "解决 / 验证什么问题" in blob
+        assert '"tag": "hr"' in blob
+        # 无 explanation 时不出说明块、不抛错
+        bare = builder("tt", _nested_task7_metrics())
+        assert "审批前请先读" not in json.dumps(bare, ensure_ascii=False)
+        # 旧式扁平 metrics 仍走原兜底（Task3/合成 Gate2）
+        flat = builder("tt", {"pose_error": "0.02", "jerk": "阈值内"})
+        flat_blob = json.dumps(flat, ensure_ascii=False)
+        assert "位姿误差" in flat_blob and "审批前请先读" not in flat_blob

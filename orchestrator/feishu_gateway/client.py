@@ -313,23 +313,41 @@ class FeishuGateway:
         """文件字节数（单测 mock 点：无需造 31MB 实体文件即可驱动阶梯判定）。"""
         return Path(path).stat().st_size
 
-    def _compress_in_container(self, host_video: Path, step: int) -> tuple[Path, Path]:
-        """经 docker compose run 在 sim-sandbox 容器内执行 ffmpeg（宿主机不装 ffmpeg）。
+    @staticmethod
+    def _in_sandbox() -> bool:
+        """Task7/8 图整体在 sim-sandbox 容器内运行（compose 注入
+        SIMPRAXIS_IN_SANDBOX=1）：此时 /mnt 同路径挂载、ffmpeg 已在镜像内，
+        不得再嵌套 `docker compose run`，路径也不做 /root/runs 改写。"""
+        return os.environ.get("SIMPRAXIS_IN_SANDBOX", "") == "1"
 
+    def _compress_in_container(self, host_video: Path, step: int) -> tuple[Path, Path]:
+        """在 sim-sandbox 环境内执行 ffmpeg（宿主机不装 ffmpeg）。
+
+        两种执行位置（锁内适配，Task7 图在容器内跑）：
+          - 宿主：经 `docker compose run` 起一次性容器，RUN_DIR 路径映射成
+            /root/runs（host_to_container_path）；
+          - 容器内（SIMPRAXIS_IN_SANDBOX=1）：产物在 /mnt 同路径挂载下，直接
+            `bash -lc <ffmpeg>` 调镜像内 ffmpeg，禁止嵌套 docker。
         Task1 单测全部 mock 本方法/subprocess；真实执行发生在 Task7/8。
         """
         out_host, cover_host = expected_outputs(host_video, step)
-        in_c = host_to_container_path(host_video, self.run_dir)
-        out_c = host_to_container_path(out_host, self.run_dir)
-        cover_c = host_to_container_path(cover_host, self.run_dir)
-        cmd = compress_command(in_c, step, out_c, cover_c)
-        argv = [
-            "docker", "compose",
-            "-f", str(_REPO_ROOT / "sandbox" / "docker-compose.yml"),
-            "run", "--rm", "sim-sandbox", "bash", "-lc", cmd,
-        ]
-        self._log.info("容器压缩 step=%s argv=%s", step,
-                       " ".join(argv[:6]) + " bash -lc <ffmpeg>")
+        if self._in_sandbox():
+            in_c, out_c, cover_c = str(host_video), str(out_host), str(cover_host)
+            cmd = compress_command(in_c, step, out_c, cover_c)
+            argv = ["bash", "-lc", cmd]
+            self._log.info("容器内直压 step=%s（同路径 /mnt 挂载，无嵌套 docker）", step)
+        else:
+            in_c = host_to_container_path(host_video, self.run_dir)
+            out_c = host_to_container_path(out_host, self.run_dir)
+            cover_c = host_to_container_path(cover_host, self.run_dir)
+            cmd = compress_command(in_c, step, out_c, cover_c)
+            argv = [
+                "docker", "compose",
+                "-f", str(_REPO_ROOT / "sandbox" / "docker-compose.yml"),
+                "run", "--rm", "sim-sandbox", "bash", "-lc", cmd,
+            ]
+            self._log.info("宿主起容器压缩 step=%s argv=%s", step,
+                           " ".join(argv[:6]) + " bash -lc <ffmpeg>")
         subprocess.run(argv, check=True, timeout=1800)
         return Path(out_host), Path(cover_host)
 
@@ -626,6 +644,20 @@ class FeishuGateway:
 
     # ---------- Event 绑定 / 阻塞等待 ----------
 
+    def _reopen_round(self, thread_id: str, gate: int) -> bool:
+        """Gate 打回后新一轮请求：归档终态行、清旧 Event（Task7 D10 多轮语义）。
+
+        不归档时（无终态行，如极端竞态下只有无 card 的 PENDING/无行）原样继续；
+        归档后旧卡片消息 id 只存在于 history，_find_pending_by_card 匹配不到
+        PENDING 行，旧卡点击自动失效。
+        """
+        archived = self.store.archive_decided(thread_id, gate)
+        if archived:
+            self._event_for(thread_id, gate).clear()
+            self._log.info("Gate%s 新一轮请求：上一轮决策已归档重发卡片 thread=%s",
+                           gate, thread_id)
+        return archived
+
     def _event_for(self, thread_id: str, gate: int) -> threading.Event:
         key = (thread_id, gate)
         with self._events_lock:
@@ -688,10 +720,12 @@ class FeishuGateway:
         gate = 1
         row = self.store.get_pending(thread_id, gate)
         if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
-            # 重启路径：已有 PENDING 行且卡片已发——不重发，复用 message_id 重挂 Event
+            # 重启重挂路径：已有 PENDING 行且卡片已发——不重发，复用 message_id
             self._log.info("Gate1 重启重挂 thread=%s message_id=%s（不重发卡片）",
                            thread_id, row["card_message_id"])
         else:
+            # Task7 D10：上一轮已决策（打回）时先归档终态行，保证是新卡片新点击
+            self._reopen_round(thread_id, gate)
             sent = self._send_interactive(
                 self.owner_open_id,
                 build_gate1_card(task_title, proposals),
@@ -721,15 +755,25 @@ class FeishuGateway:
         *,
         duration_ms: "int | None" = None,
         cover_png: "str | None" = None,
+        explanation: "dict[str, str] | None" = None,
         max_wait: "float | None" = None,
     ) -> dict:
-        """先发原生视频（五级阶梯，可能降级）再发 Gate2 卡片，阻塞等待验收结论。"""
+        """先发原生视频（五级阶梯，可能降级）再发 Gate2 卡片，阻塞等待验收结论。
+
+        explanation 为卡片顶部的人话说明块（dict：task/problem/video 三问，
+        见 cards._EXPLAIN_LABELS），由 Task7 真人 Gate2 打回逐字要求引入
+        （2026-10-15：「说明这个仿真任务是做什么的，解决什么问题，发来的
+        视频是什么意思」）。
+        """
         gate = 2
         row = self.store.get_pending(thread_id, gate)
         if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
             self._log.info("Gate2 重启重挂 thread=%s message_id=%s（不重发卡片）",
                            thread_id, row["card_message_id"])
         else:
+            # 打回后的新一轮：先归档上一轮终态行，否则旧 reject 会被本轮
+            # _await_decision 首 tick 读到而秒判第二次打回（见 store._DDL_HISTORY）。
+            self._reopen_round(thread_id, gate)
             media_message_id = None
             video_fallback = False
             video_detail = "未提供视频"
@@ -747,9 +791,11 @@ class FeishuGateway:
             sent = self._send_interactive(
                 self.owner_open_id,
                 build_gate2_card(task_title, metrics, url,
-                                 video_fallback=video_fallback),
+                                 video_fallback=video_fallback,
+                                 explanation=explanation),
                 build_gate2_card_v2(task_title, metrics, url,
-                                    video_fallback=video_fallback),
+                                    video_fallback=video_fallback,
+                                    explanation=explanation),
                 form_required=True,
             )
             self.store.upsert_pending(

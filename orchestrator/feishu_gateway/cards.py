@@ -92,21 +92,178 @@ def build_gate1_card(
     }
 
 
+def _tick(ok: Any) -> str:
+    return "✅" if bool(ok) else "❌"
+
+
+def _yn(ok: Any) -> str:
+    return "是" if bool(ok) else "否"
+
+
+def _rungs_metrics_md(metrics: dict[str, Any]) -> "str | None":
+    """Task5/7 嵌套 metrics（metrics['rungs'].rungN.pass/checks）的自解释渲染。
+
+    真人 Gate2 打回逐字要求（2026-10-15）：「指标不能全是 -」。这里只读真实
+    判定结果，不出任何指标字面量；schema 失败时 rungs 只有 pass，按结构判负展示。
+    无嵌套 rungs 的旧式扁平 metrics 返回 None，由调用方走扁平兜底。
+    """
+    rungs = metrics.get("rungs")
+    if not isinstance(rungs, dict):
+        return None
+    engine = metrics.get("engine") or "-"
+    run_id = metrics.get("run_id") or "-"
+    lines = [f"**Rung 1–4 验收指标**（引擎 `{engine}`；run `{run_id}`）"]
+
+    errs = metrics.get("schema_errors") or []
+    vector = metrics.get("vector") if isinstance(metrics.get("vector"), dict) else {}
+    if errs:
+        lines.append("")
+        lines.append("🚧 telemetry 结构校验未通过，Rung1–3 一律保守判负：")
+        for e in list(errs)[:8]:
+            lines.append(f"  - {e}")
+        lines.append("")
+        lines.append("Rung1–3：" + " / ".join(
+            f"R{i} {_tick(vector.get(f'rung{i}'))}" for i in (1, 2, 3)))
+        return "\n".join(lines)
+
+    r1 = rungs.get("rung1") if isinstance(rungs.get("rung1"), dict) else {}
+    c1 = r1.get("checks") if isinstance(r1.get("checks"), dict) else {}
+    if c1:
+        lines += [
+            "",
+            f"{_tick(r1.get('pass'))} **Rung1 数值合法 / 穿模 / 关节力矩**",
+            f"  - 最大穿模 `{c1.get('max_penetration_m')}` m，阈值 "
+            f"`{c1.get('penetration_limit_m')}` m："
+            f"{_tick(c1.get('penetration_within_limit'))}",
+            f"  - 全部数值有限（无 NaN/Inf）：{_tick(c1.get('all_finite'))}",
+            f"  - 关节力矩在限位内：{_tick(c1.get('joint_torque_within_limits'))}",
+            f"  - 穿模检测口径：{c1.get('ccd_method', '-')}",
+        ]
+    else:
+        lines += ["", f"{_tick(r1.get('pass'))} **Rung1**（无明细）"]
+
+    r2 = rungs.get("rung2") if isinstance(rungs.get("rung2"), dict) else {}
+    c2 = r2.get("checks") if isinstance(r2.get("checks"), dict) else {}
+    if c2:
+        lines += [
+            "",
+            f"{_tick(r2.get('pass'))} **Rung2 物体是否真进目标区 + 稳定接触**"
+            "（只按位姿时序算，不读 telemetry 自带的 goal_reached）",
+            f"  - 在目标盒内共 {c2.get('inside_box_frames')} 帧；末 "
+            f"{c2.get('last_window_frames')} 帧全程在盒："
+            f"{_tick(c2.get('last_window_all_inside_box'))}",
+            f"  - 最长连续接触 {c2.get('contact_longest_run_s')} s / 要求 ≥"
+            f"{c2.get('duration_required_s')} s；接触力均值 "
+            f"{c2.get('contact_force_mean_n')} N",
+            f"  - 接触力波动 CV {c2.get('contact_cv')} / 上限 {c2.get('cv_max')}"
+            f"；稳定接触：{_tick(c2.get('stable_contact'))}",
+        ]
+    else:
+        lines += ["", f"{_tick(r2.get('pass'))} **Rung2**（无明细）"]
+
+    r3 = rungs.get("rung3") if isinstance(rungs.get("rung3"), dict) else {}
+    c3 = r3.get("checks") if isinstance(r3.get("checks"), dict) else {}
+    if c3 and c3.get("dt_band_ok"):
+        lines += [
+            "",
+            f"{_tick(r3.get('pass'))} **Rung3 末端运动平顺度（jerk 三阶差分）**",
+            f"  - 帧 dt={c3.get('dt')} s；jerk 峰值 "
+            f"`{c3.get('jerk_max_mps3')}` m/s³，随 dt 锚定阈值 "
+            f"`{c3.get('jerk_threshold_mps3')}` m/s³",
+            f"  - 超阈帧数 {c3.get('over_threshold_count')}：{_tick(r3.get('pass'))}",
+        ]
+    elif c3:
+        lines += ["", f"{_tick(r3.get('pass'))} **Rung3**："
+                  f"dt={c3.get('dt')} 超出锚定带，保守判负（不出 jerk 值）"]
+    else:
+        lines += ["", f"{_tick(r3.get('pass'))} **Rung3**（无明细）"]
+
+    r4 = rungs.get("rung4")
+    if not isinstance(r4, dict):
+        r4 = metrics.get("rung4") if isinstance(metrics.get("rung4"), dict) else None
+    lines.append("")
+    if isinstance(r4, dict):
+        lines.append(f"**Rung4 视觉模型独立核片**（mode={r4.get('mode')}，"
+                     "只给意见，永不单独放行）")
+        status, mode = r4.get("status"), r4.get("mode")
+        items = r4.get("items") if isinstance(r4.get("items"), list) else []
+        if status == "uncalibrated" or mode == "uncalibrated":
+            lines.append("  - 未标定：本次未发视觉判定（零网络），"
+                         "以 Rung1–3 规则 + 你本人看片为准")
+        elif status == "vlm_error":
+            lines.append("  - ⚠️ 视觉模型调用失败（不伪造成通过），以你本人看片为准")
+        else:
+            n_clean = sum(1 for it in items if not it.get("defect"))
+            lines.append(
+                f"  - {len(items)} 道原子题：{n_clean}/{len(items)} 未见缺陷，"
+                f"报缺陷 {r4.get('n_defects')}；低置信：{_yn(r4.get('low_confidence'))}")
+            if mode == "record_only":
+                lines.append("  - 当前为 record_only 标定模式：VLM 结果仅展示留痕，"
+                             "不参与任何自动放行，本 Gate2 完全由你裁决")
+            if r4.get("disagreement"):
+                lines.append(f"  - ⚠️ 规则/视觉分歧（{r4.get('disagreement')}）："
+                             "以 Rung1–3 规则为准，由你裁决（D8）")
+    else:
+        lines.append("**Rung4 视觉模型独立核片**：本次无结果")
+
+    rules_pass = metrics.get("rules_pass")
+    lines += [
+        "",
+        f"**Rung1–3 规则汇总：{_tick(rules_pass)}**"
+        f"（R1 {_tick(vector.get('rung1'))} / R2 {_tick(vector.get('rung2'))} "
+        f"/ R3 {_tick(vector.get('rung3'))}）。自动放行只看 Rung1–3；"
+        "Rung4 仅提供意见，任何情况都不单独放行。",
+    ]
+    banner = metrics.get("banner")
+    if banner:
+        lines.append(f"⚠️ {banner}")
+    return "\n".join(lines)
+
+
+# 真人 Gate2 打回（2026-10-15）：卡片顶部必须自解释任务背景与视频含义。
+# 三个键分别回答审批人的三个问题；缺省键不渲染。
+_EXPLAIN_LABELS = (
+    ("task", "这个仿真在做什么"),
+    ("problem", "解决 / 验证什么问题"),
+    ("video", "发来的视频怎么看"),
+)
+
+
+def _explanation_md(explanation: "dict[str, str] | None") -> "str | None":
+    if not isinstance(explanation, dict):
+        return None
+    blocks: list[str] = []
+    for key, label in _EXPLAIN_LABELS:
+        val = explanation.get(key)
+        if isinstance(val, str) and val.strip():
+            blocks.append(f"**{label}**\n{val.strip()}")
+    if not blocks:
+        return None
+    return ("📋 **审批前请先读：任务背景与视频解读（真人 Gate2 要求补充）**\n\n"
+            + "\n\n".join(blocks))
+
+
 def _gate2_metrics_md(
     task_title: str,
     metrics: dict[str, Any],
     intranet_url: "str | None",
     video_fallback: bool = False,
 ) -> str:
-    lines = [f"**任务目标**：{task_title}",
-             "**Rung 1-4 验收指标**：",
-             f"- 位姿误差：{metrics.get('pose_error', '-')}",
-             f"- 最大接触深度：{metrics.get('max_contact_depth', '-')}",
-             f"- 接触持续：{metrics.get('contact_duration', '-')}",
-             f"- jerk 平顺度：{metrics.get('jerk', '-')}"]
-    rung4 = metrics.get("rung4_atomic")
-    if rung4 is not None:
-        lines.append(f"- Rung4 原子题结果：{rung4}")
+    lines = [f"**任务目标**：{task_title}"]
+    nested = _rungs_metrics_md(metrics)
+    if nested is not None:
+        lines.append(nested)
+    else:
+        # 旧式扁平 metrics 兜底（Task3/合成 Gate2 测试仍用这组键）。
+        lines += [
+            "**Rung 1-4 验收指标**：",
+            f"- 位姿误差：{metrics.get('pose_error', '-')}",
+            f"- 最大接触深度：{metrics.get('max_contact_depth', '-')}",
+            f"- 接触持续：{metrics.get('contact_duration', '-')}",
+            f"- jerk 平顺度：{metrics.get('jerk', '-')}"]
+        rung4 = metrics.get("rung4_atomic")
+        if rung4 is not None:
+            lines.append(f"- Rung4 原子题结果：{rung4}")
     if video_fallback:
         lines.append("")
         lines.append("⚠️ 原生视频上传失败，已降级（video_fallback=true），"
@@ -148,23 +305,29 @@ def build_gate2_card(
     intranet_url: "str | None" = None,
     *,
     video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
 ) -> dict:
-    """Gate2 1.0 卡：指标 markdown（含内网链接）+ form（验收通过/打回并提出意见）。"""
+    """Gate2 1.0 卡：（可选）任务背景说明 + 指标 markdown（含内网链接）
+    + form（验收通过/打回并提出意见）。"""
+    elements: list[dict] = []
+    explain_md = _explanation_md(explanation)
+    if explain_md:
+        elements.append({"tag": "markdown", "content": explain_md})
+        elements.append({"tag": "hr"})
+    elements.append({"tag": "markdown",
+                     "content": _gate2_metrics_md(task_title, metrics, intranet_url,
+                                                  video_fallback)})
     form = _gate2_form_1()
     if video_fallback:
         for btn in form["elements"][1]["actions"]:
             btn["value"] = dict(btn["value"], video_fallback=True)
+    elements.append(form)
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "green",
                    "title": {"tag": "plain_text",
                              "content": "【SimPraxis】Gate 2：仿真结果验收"}},
-        "elements": [
-            {"tag": "markdown",
-             "content": _gate2_metrics_md(task_title, metrics, intranet_url,
-                                          video_fallback)},
-            form,
-        ],
+        "elements": elements,
     }
 
 
@@ -279,16 +442,21 @@ def build_gate2_card_v2(
     intranet_url: "str | None" = None,
     *,
     video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
 ) -> dict:
+    body: list[dict] = []
+    explain_md = _explanation_md(explanation)
+    if explain_md:
+        body.append(_div_lark_md(explain_md))
+        body.append({"tag": "hr"})
+    body.append(_div_lark_md(_gate2_metrics_md(
+        task_title, metrics, intranet_url, video_fallback)))
+    body.append(_gate2_form_2(video_fallback))
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "wide_screen_mode": True},
         "header": _v2_header("green", "【SimPraxis】Gate 2：仿真结果验收"),
-        "body": {"elements": [
-            _div_lark_md(_gate2_metrics_md(task_title, metrics, intranet_url,
-                                           video_fallback)),
-            _gate2_form_2(video_fallback),
-        ]},
+        "body": {"elements": body},
     }
 
 

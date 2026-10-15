@@ -78,6 +78,11 @@ class RunSpec:
     env_extra: dict[str, str] = field(default_factory=dict)
     run_timeout_s: int = RUN_TIMEOUT_S
     task_title: str = ""
+    # Task7：真实 rollout 视频产物（相对 workdir）。存在才回填视频四字段；
+    # duration_ms 优先读场景 manifest（n_frames×frame_dt_s），缺失再 imageio 解码。
+    video_relpath: Optional[str] = None
+    cover_relpath: Optional[str] = None
+    manifest_relpath: Optional[str] = None
 
 
 @dataclass
@@ -373,6 +378,49 @@ class AgentRunner:
         os.chmod(p, 0o600)
         return f"phase1/task4_runner/{root.name}/{p.name}"
 
+    @staticmethod
+    def _video_artifacts(workdir: Path, spec: "RunSpec") \
+            -> "tuple[Optional[str], Optional[int], Optional[str]]":
+        """Task7：从 workdir 真实产物回填视频四字段（不存在即 None，不合成）。
+
+        duration_ms 优先取场景 manifest 的 n_frames×frame_dt_s（免解码）；
+        manifest 缺失再用 imageio 读 fps 并逐帧计数（venv pin 2.36.1）。
+        intranet_url 恒 None：Gate2 先走原生视频 ≤28MB 直传，全失败才由
+        feishu video 阶梯自行降级，runner 不编造内网地址。
+        """
+        if not spec.video_relpath:
+            return None, None, None
+        video = (workdir / spec.video_relpath)
+        if not video.is_file():
+            return None, None, None
+        duration_ms: "Optional[int]" = None
+        if spec.manifest_relpath:
+            mf = workdir / spec.manifest_relpath
+            if mf.is_file():
+                try:
+                    meta = json.loads(mf.read_text(encoding="utf-8"))
+                    n_frames = meta.get("n_frames")
+                    frame_dt = meta.get("frame_dt_s")
+                    if isinstance(n_frames, int) and n_frames > 0 \
+                            and isinstance(frame_dt, (int, float)) and frame_dt > 0:
+                        duration_ms = int(round(n_frames * float(frame_dt) * 1000))
+                except (OSError, ValueError):
+                    duration_ms = None
+        if duration_ms is None:
+            try:
+                import imageio.v3 as iio  # type: ignore
+                meta_i = iio.immeta(video)
+                fps = float(meta_i.get("fps") or 0.0)
+                if fps > 0:
+                    duration_ms = int(round(
+                        sum(1 for _ in iio.imiter(video)) / fps * 1000))
+            except Exception:  # noqa: BLE001 - 解码失败不伪造，交 Gate2 降级
+                duration_ms = None
+        cover = None
+        if spec.cover_relpath and (workdir / spec.cover_relpath).is_file():
+            cover = str(workdir / spec.cover_relpath)
+        return str(video), duration_ms, cover
+
     def run(self, spec: RunSpec) -> dict:
         """执行一次 run：失败 → 至多 5 轮 coding 补救 → 重跑。"""
         workdir = Path(spec.workdir)
@@ -402,11 +450,12 @@ class AgentRunner:
                              "stderr_tail": _tb_tail(result)[-500:]})
             last_result = result
             if result.rc == 0 and telemetry.is_file():
+                vp, dur_ms, cover = self._video_artifacts(workdir, spec)
                 return {"status": "ok", "telemetry_uri": str(telemetry),
                         "coding_round": coding_calls, "executions": exec_no,
                         "timeline": timeline,
-                        "video_path": None, "duration_ms": None,
-                        "cover_png": None, "intranet_url": None}
+                        "video_path": vp, "duration_ms": dur_ms,
+                        "cover_png": cover, "intranet_url": None}
 
             # —— 失败路径：5 次调用用尽即结案，结构上不存在第 6 次调用 ——
             if coding_calls >= MAX_CODING_ROUNDS:

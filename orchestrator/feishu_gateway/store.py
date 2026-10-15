@@ -36,6 +36,37 @@ CREATE TABLE IF NOT EXISTS pending_gates(
 );
 """
 
+# 锁内适配（Task7，2026-10-15 真实 Gate2 打回实证）：计划 D10 允许 Gate1/Gate2
+# 各打回 2 次（打回后重跑再发新卡片），而 §1.2 单行主键使 upsert 无法重开
+# DECIDED 行——实测后果：唯一一次真人「打回+补充说明」被第二轮 _await_decision
+# 读到的旧行瞬时算作第二次打回，线程误终 human_failure。处置：主表 DDL 一字
+# 不动，新一轮请求前把终态行整体归档到仅追加的 history 表（纯增量迁移），
+# 主表再插新 PENDING 行；旧卡片点击因匹配不到 PENDING 行而失效。
+_DDL_HISTORY = """
+CREATE TABLE IF NOT EXISTS pending_gates_history(
+  thread_id TEXT NOT NULL,
+  gate INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  choice INTEGER,
+  decision TEXT,
+  human_notes TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL,
+  card_message_id TEXT,
+  media_message_id TEXT,
+  open_chat_id TEXT,
+  operator_open_id TEXT,
+  created_at INTEGER NOT NULL,
+  decided_at INTEGER,
+  archived_at INTEGER NOT NULL
+);
+"""
+
+_HISTORY_COLS = (
+    "thread_id, gate, status, choice, decision, human_notes, source, "
+    "card_message_id, media_message_id, open_chat_id, operator_open_id, "
+    "created_at, decided_at"
+)
+
 # PENDING 行允许被回填的消息列（只允许 NULL -> 非 NULL，禁止覆盖，重启重挂用）
 _FILLABLE = ("card_message_id", "media_message_id", "open_chat_id")
 
@@ -73,6 +104,7 @@ class PendingStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute(_DDL)
+        self._conn.execute(_DDL_HISTORY)
         try:
             os.chmod(self.db_path, 0o600)
         except OSError:
@@ -99,8 +131,9 @@ class PendingStore:
     ) -> None:
         """插入 PENDING 行；同主键 PENDING 行只回填缺失消息列，绝不覆盖已发消息。
 
-        已 DECIDED/EXPIRED 的同主键行：WHERE 守卫使 UPDATE 成为 no-op（业务侧不应
-        对同一 thread_id+gate 再次请求；这里静默保护不重开历史决策）。
+        已 DECIDED/EXPIRED 的同主键行：WHERE 守卫使 UPDATE 成为 no-op，绝不重开
+        历史决策。Gate 打回后的新一轮卡片必须先调 archive_decided 归档，再走本
+        插入（Task7 D10 多轮语义，见 _DDL_HISTORY 注释）。
         """
         created_at = created_at_ms if created_at_ms is not None else now_ms()
         # source NOT NULL 但决策前无来源：插入空串占位，mark_decided 写真实来源。
@@ -254,6 +287,40 @@ class PendingStore:
                 (merged, thread_id, gate),
             )
         return True
+
+    def archive_decided(self, thread_id: str, gate: int) -> bool:
+        """Gate 多轮重发（Task7 D10）：把终态行（DECIDED/EXPIRED）整体移入
+        pending_gates_history（仅追加），删主表行，给新一轮 PENDING 行腾位。
+
+        PENDING 行绝不动（上一轮仍在等真人，重发由 upsert 的「不重发」分支
+        处理）；无终态行时 no-op 返回 False。同一事务内 INSERT+DELETE。
+        """
+        with self._conn:
+            cur = self._conn.execute(
+                f"""
+                INSERT INTO pending_gates_history({_HISTORY_COLS}, archived_at)
+                SELECT {_HISTORY_COLS}, ?
+                  FROM pending_gates
+                 WHERE thread_id = ? AND gate = ?
+                   AND status IN ('DECIDED', 'EXPIRED')
+                """,
+                (now_ms(), thread_id, gate),
+            )
+            moved = cur.rowcount
+            self._conn.execute(
+                "DELETE FROM pending_gates WHERE thread_id = ? AND gate = ? "
+                "AND status IN ('DECIDED', 'EXPIRED')",
+                (thread_id, gate),
+            )
+        return moved > 0
+
+    def list_history(self, thread_id: str, gate: int) -> "list[dict[str, Any]]":
+        cur = self._conn.execute(
+            "SELECT * FROM pending_gates_history WHERE thread_id = ? AND gate = ? "
+            "ORDER BY archived_at ASC",
+            (thread_id, gate),
+        )
+        return [dict(r) for r in cur.fetchall()]
 
     def mark_expired(self, thread_id: str, gate: int) -> bool:
         cur = self._conn.execute(

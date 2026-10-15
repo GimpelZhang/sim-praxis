@@ -45,6 +45,7 @@ from orchestrator.graph.state import graph_db_path, phase1_root
 from orchestrator.graph.topology import export_svg, export_text
 
 RECURSION_LIMIT = 25  # 契约 L487
+TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 stage 批次）
 
 
 def _last_event(state: dict, kind: str) -> "dict | None":
@@ -101,21 +102,53 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     def gate2_seam(state: dict) -> dict:
         runs = state.get("agent_runs", [])
         rec = runs[-1] if runs else {}
+        # Task7 真人 Gate2 打回（2026-10-15）：卡片须自解释任务/问题/视频。
+        # 仅 Task7 真实 rollout 有场景叙事；其余任务退回纯指标卡。
+        explanation = None
+        if args.task == TASK7:
+            from orchestrator.graph.task7 import build_gate2_explanation
+            explanation = build_gate2_explanation(state, rec)
         return feishu.request_gate2_approval(
             thread, title, state["metrics"],
             video_path=rec.get("video_path"),
             intranet_url=rec.get("intranet_url"),
             duration_ms=rec.get("duration_ms"),
-            cover_png=rec.get("cover_png"))
+            cover_png=rec.get("cover_png"),
+            explanation=explanation)
 
     # Task6：学习回写走同库独立新表 phase1_learnings（mpnet 768 复用，0 付费）
     learning = make_learning_seam(LearningStore())
 
+    # Task7 Track1：注入真实 agent_run（容器/子进程实跑场景脚本，coding 批次）
+    # 与真实 evaluate（Rung1–3 文件判定 + Rung4 视频实呼，visual 批次）。
+    # 三 stage 凭据相互独立：direction 走外层 billing_context（macro 批次），
+    # coding/visual 在各自接缝内开自己的 billing_context(task=7)；非 Task7
+    # 保持 Task3 语义（接缝为 None，真实走到即 TaskSeamError / file_backed）。
+    agent_run_seam_impl = None
+    evaluate_seam_impl = None
+    if args.task == TASK7:
+        if not args.coding_batch_id or not args.visual_batch_id:
+            raise SystemExit(
+                "Task7 必须同时提供 --coding-batch-id 与 --visual-batch-id；"
+                "--batch-id 为 direction 的 macro_ideation 批次")
+        from orchestrator.agent_runner.runner import (
+            AgentRunner, agent_run_seam as _agent_run_seam,
+        )
+        from orchestrator.graph.task7 import (
+            make_evaluate_seam, make_spec_factory,
+        )
+        runner = AgentRunner(gateway, VectorEngine())
+        spec_factory = make_spec_factory(
+            thread, args.coding_batch_id, task_title=title)
+        agent_run_seam_impl = _agent_run_seam(runner, spec_factory)
+        evaluate_seam_impl = make_evaluate_seam(
+            gateway, args.visual_batch_id, thread)
+
     deps = GraphDeps(
         direction=direction_seam,
         gate1=gate1_seam,
-        agent_run=None,       # Task4 接缝：真实走到即 TaskSeamError（Task7 接线）
-        evaluate=None,        # 默认 file_backed_evaluate（只读 telemetry 文件）
+        agent_run=agent_run_seam_impl,  # Task7 注入；否则 TaskSeamError
+        evaluate=evaluate_seam_impl,    # Task7 注入 Rung4；否则 file_backed
         gate2=gate2_seam,
         persist=learning,     # Task6：结案即写 phase1_learnings（无证据不写）
         task_title=title,
@@ -125,21 +158,24 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
 
 def _invoke(args: argparse.Namespace, resume: bool) -> int:
     deps, _payload_obj, feishu = _production_deps(args)
-    # 锁内适配（计划 L487）：langgraph 0.2.28 的 invoke 不接受 recursion_limit
-    # 关键字参数，须放进 config（Pregel.stream 签名）。
+    # 锁内适配（计划 L487；Task7 首次容器内真跑实证）：langgraph 0.2.28 的
+    # invoke/stream 均不接受 recursion_limit 关键字（TypeError），只能放进
+    # config（Pregel 在 config 内读取），两分支都不得再以 kwarg 传入。
     config = {"configurable": {"thread_id": args.thread},
               "recursion_limit": RECURSION_LIMIT}
     try:
-        with billing_context(task=2, batch_id=args.batch_id, thread_id=args.thread):
+        # direction（macro_ideation）在此外层账套内；Task7 的 coding/visual
+        # 接缝内部各自开 task=7 的账套（ContextVar 进入重置、退出恢复外层）。
+        with billing_context(task=args.task, batch_id=args.batch_id,
+                             thread_id=args.thread):
             with _compiled(deps) as graph:
                 if resume:
-                    final = graph.invoke(None, config=config,
-                                         recursion_limit=RECURSION_LIMIT)
+                    final = graph.invoke(None, config=config)
                 else:
                     final = graph.invoke(
                         initial_state(thread_id=args.thread, track=args.track,
                                       question=args.question or ""),
-                        config=config, recursion_limit=RECURSION_LIMIT)
+                        config=config)
     finally:
         feishu.close()
 
@@ -180,7 +216,14 @@ def main(argv: "list[str] | None" = None) -> int:
         p.add_argument("--index", type=int, default=None,
                        help="inputs/tracks 冻结样本序号（与 --question 二选一）")
         p.add_argument("--question", default=None)
-        p.add_argument("--batch-id", required=True, dest="batch_id")
+        p.add_argument("--batch-id", required=True, dest="batch_id",
+                       help="direction/macro_ideation 批次凭据")
+        p.add_argument("--task", type=int, default=2,
+                       help="计费任务号（Task2 方向=2，Task7 Track1=7）")
+        p.add_argument("--coding-batch-id", dest="coding_batch_id", default=None,
+                       help="Task7 coding_debug 批次凭据（task=7 必填）")
+        p.add_argument("--visual-batch-id", dest="visual_batch_id", default=None,
+                       help="Task7 visual_rollout 批次凭据（task=7 必填）")
         p.add_argument("--task-title", default=None)
 
     p_run = sub.add_parser("run", help="首次运行（gate 处阻塞等真人）")

@@ -42,11 +42,18 @@ RUN python3 -m pip install --no-cache-dir -r /tmp/requirements-container.txt
 # 4b) m-d：容器侧依赖一致性在构建期锁死——pip check 零冲突 + 关键包精确版本断言，
 #     防止容器内隐式升级（如 numpy 2.x）导致探针/torch 运行期才爆。
 RUN python3 -m pip check
+# Task7：追加 mujoco/mani_skill/sapien 精确版本断言（探针 attempt2 钉死，只加不放）
 RUN python3 -c "import numpy, imageio, OpenGL; \
     assert numpy.__version__ == '1.26.4', numpy.__version__; \
     assert imageio.__version__ == '2.36.1', imageio.__version__; \
     assert OpenGL.__version__ == '3.1.7', OpenGL.__version__; \
     print('container versions OK')"
+RUN python3 -c "import mujoco, mani_skill, sapien, gymnasium; \
+    assert mujoco.__version__ == '3.15.0', mujoco.__version__; \
+    assert mani_skill.__version__ == '3.0.1', mani_skill.__version__; \
+    assert sapien.__version__ == '3.0.3', sapien.__version__; \
+    assert gymnasium.__version__ == '1.4.0', gymnasium.__version__; \
+    print('container task7 versions OK')"
 
 # 5) NVIDIA 无头渲染声明 + 镜像/网络默认
 # 注意：HF_TOKEN 绝不作为 --build-arg 传入、绝不写进镜像层（m11）；

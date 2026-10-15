@@ -65,9 +65,18 @@ def roots(tmp_path):
 
 
 @pytest.fixture
-def store(roots):
+def runs_root(tmp_path):
+    """Task7 §1.8 第二证据根 $SIMPRAXIS_RUN_DIR（真实 rollout 产物）。"""
+    p = tmp_path / "runsroot"
+    p.mkdir(parents=True)
+    return p
+
+
+@pytest.fixture
+def store(roots, runs_root):
     uri, ev_root = roots
-    return LearningStore(uri=str(uri), evidence_root=ev_root)
+    return LearningStore(uri=str(uri), evidence_root=ev_root,
+                         runs_evidence_root=runs_root)
 
 
 def _evidence(ev_root: Path, thread: str, name: str = "telemetry.json") -> str:
@@ -240,9 +249,18 @@ def test_07_field_validation(store, roots):
         store.add_learning(**{**base, "rung": 0})
     with pytest.raises(ValueError, match="gate_source"):
         store.add_learning(**{**base, "gate_source": "phase1_sync"})
+    # Task7 锁内适配：空三项的 gate2_accepted（一次通过的干净 run）允许写入
+    # （计划 L534 要求验收通过即写；rung/engine/证据原件即内容）；空三项的
+    # 失败结案仍必须拒——失败却无任何现象/动作/意见才是无内容行。
     with pytest.raises(ValueError, match="全空"):
-        store.add_learning(**{**base, "failure_symptom": "",
+        store.add_learning(**{**base, "gate_source": "human_failure_gate1",
+                              "rung": 0, "effective": False,
+                              "failure_symptom": "",
                               "fix_action": "", "human_opinion": ""})
+    store.add_learning(**{**base, "run_id": "clean-accept",
+                          "failure_symptom": "",
+                          "fix_action": "", "human_opinion": ""})
+    store.table().delete("run_id = 'clean-accept'")  # 保持本用例末尾 0 行
     with pytest.raises(ValueError, match="effective"):
         store.add_learning(**{**base, "effective": "yes"})
     with pytest.raises(ValueError, match="失败结案 effective"):
@@ -409,6 +427,45 @@ def test_15_seam_guardrails(store, roots):
         seam({"thread_id": "t1", "track": "track1", "events": [],
               "_learning": {"kind": "failure"}})
     assert store.count() == 0
+
+
+def test_16_runs_root_tagged_evidence_and_clean_accept(store, roots,
+                                                        runs_root):
+    """Task7 §1.8：真实 rollout telemetry 在 $SIMPRAXIS_RUN_DIR 下，relpath
+    必须带 @runs/ 标记并被接受写库；Gate2 一次通过的干净 run（无打回/补丁/
+    意见，三项摘要全空）仍写一条 rung=4 学习（计划 L534）。"""
+    from orchestrator.graph.learning import make_learning_seam
+    from memory_flywheel.phase1.learning_store import RUNS_ROOT_TAG
+    tele = runs_root / "phase1" / "task7_track1" / "run_t_1" / "telemetry.json"
+    tele.parent.mkdir(parents=True, exist_ok=True)
+    tele.write_text(json.dumps({"_fixture": True}), encoding="utf-8")
+    state = {
+        "thread_id": "t-clean", "track": "track1",
+        "chosen": {"name": "MuJoCo 最小接触", "sim_engine": "mujoco"},
+        "agent_runs": [{"status": "ok", "telemetry_uri": str(tele),
+                        "coding_round": 0, "timeline": []}],
+        "metrics": {"rungs": {"rung1": {"pass": True}, "rung2": {"pass": True},
+                              "rung3": {"pass": True}, "rung4": {"status": "ok"}},
+                    "rung4": {"status": "ok"}, "rules_pass": True},
+        "events": [{"type": "gate2_accepted"}],
+    }
+    summary = make_learning_seam(store)({**state, "_learning":
+                                         {"kind": "accept"}})
+    expected = RUNS_ROOT_TAG + "phase1/task7_track1/run_t_1/telemetry.json"
+    assert summary["evidence_relpath"] == expected and summary["rung"] == 4
+    assert store.count() == 1
+    row = store.query("Gate2 验收通过 MuJoCo", top_k=1)[0]
+    assert row["run_id"] == "t-clean"
+    assert row["evidence_relpath"] == expected
+    assert "（无：本轮一次通过）" in row["text"]
+
+    # @runs/ 标记下的 ../ 越界同样拒绝（逃出 runs 根）；直接喂标记 relpath
+    # 走 store 层守卫（seam 只接受绝对路径换算，不接受 relpath 直喂）。
+    with pytest.raises(ValueError, match="越界"):
+        store.add_learning(run_id="t-x", track="track1", rung=1,
+                           sim_engine="m", gate_source="gate2_accepted",
+                           evidence_relpath=RUNS_ROOT_TAG + "../escape.json",
+                           failure_symptom="越界探测", effective=True)
 
 
 if __name__ == "__main__":

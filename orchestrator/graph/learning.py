@@ -6,13 +6,13 @@
 - 回写触发点在图节点：Gate2 验收通过走 persist_learning（rung 取本次评测
   实际到达的最高层级）；human_failure 结案走 rung=0（失败也是学习）。
 - 无证据不写：accept 证据=最近一次成功 agent_run 的 telemetry 文件（evaluate
-  已读过它），failure 证据=刚落盘的 FAILURE.json；两者都必须真实位于
-  $SIMPRAXIS_PHASE1_ROOT 之下。
+  已读过它），failure 证据=刚落盘的 FAILURE.json。证据根按计划 §1.8 双路：
+  $SIMPRAXIS_PHASE1_ROOT（宿主侧证据）或 $SIMPRAXIS_RUN_DIR（Task7/8 真实
+  rollout 产物），由 LearningStore.relativize_evidence 统一换算与越界校验。
 - kill -9 resume 幂等由 LearningStore 的确定性主键保证（同结案重放先删后写）。
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Callable
 
 from memory_flywheel.phase1.learning_store import (
@@ -63,17 +63,11 @@ def _fix_actions(state: dict) -> str:
 
 
 def _rel_evidence(store: LearningStore, abs_path: str) -> str:
-    root = store.evidence_root.resolve()
-    target = Path(abs_path).resolve()
+    """证据路径换算委托 store：phase1/runs 双根（Task7 §1.8），无证据不写。"""
     try:
-        rel = target.relative_to(root).as_posix()
-    except ValueError as exc:
-        raise GraphStateError(
-            f"学习证据 {target} 不在 $SIMPRAXIS_PHASE1_ROOT（{root}）之下；"
-            f"无证据不写") from exc
-    if not target.is_file():
-        raise GraphStateError(f"学习证据文件不存在：{target}（无证据不写）")
-    return rel
+        return store.relativize_evidence(abs_path)
+    except (ValueError, FileNotFoundError) as exc:
+        raise GraphStateError(f"学习证据换算被拒：{exc}") from exc
 
 
 def _rung_from_metrics(metrics: dict) -> int:

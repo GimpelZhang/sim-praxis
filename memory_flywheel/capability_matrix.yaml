@@ -2,11 +2,15 @@
 # 铁律：每条 fact 必须回指 KB（commit aac53313）原文；全局层不新增事实；
 # 查不到证据的能力写 coverage: absent + gaps 含“未提及”。
 # 取证范围：仅 $KB/knowledge/ 下 32 个 md；引擎自身能力与 tour 项目用法已在 claim 中区分。
+# 锁内适配（Task7，2026-10-15 用户书面批准「[实践]证据扩展」）：coverage 新增
+# phase1_probed 值——KB 零提及但 Phase1 已有 0 付费一手探针证据的引擎（sapien），
+# 其 fact 只能用 level [实践] + repo_relpath 指仓内证据索引（校验器强制：禁配
+# kb_relpath、文件必须在本仓内）；KB 只读/HEAD 钉死与 absent 零命中规则均不变。
 meta:
   schema_version: "1.0"
   kb_commit: "aac53313c620efa6217fd51a55834b006d78e689"
-  generated_by: "Phase0 Task4"
-  discipline: "每条 fact 必须回指 KB；全局层不新增事实；无证据标 absent"
+  generated_by: "Phase0 Task4（Phase1 Task7 追加 sapien [实践] facts）"
+  discipline: "每条 fact 必须回指 KB；全局层不新增事实；无证据标 absent；例外仅 phase1_probed 引擎的 [实践] 一手证据（repo_relpath，校验器与 KB 引用互斥）"
 
 engines:
   - slug: genesis
@@ -121,11 +125,27 @@ engines:
 
   - slug: sapien
     display_name: "SAPIEN"
-    kind: "刚体物理/机器人仿真"
-    coverage: absent
-    facts: []
+    kind: "刚体物理/机器人仿真（ManiSkill 3.0.1 默认物理内核）"
+    # 锁内适配（Task7，2026-10-15 用户书面批准）：KB 对 sapien 仍零提及，
+    # 但 2026-10-14 已在 Task7 付费跑前完成 0 付费一手探针（安装/真渲染/
+    # 接触测量/持位机制/GPU 后端缺口），证据索引见 repo_relpath 仓内文件。
+    coverage: phase1_probed
+    facts:
+      - claim: "SAPIEN 3.0.3 与 ManiSkill 3.0.1 可在 sim-sandbox 容器 pip 安装并 import（Python 3.10.12，torch 2.4.1+cu124、numpy 1.26.4 pin 未松），版本已钉入 sandbox/docker/requirements-container.txt + lock。"
+        evidence: {repo_relpath: "memory_flywheel/capability_evidence/sapien_phase1_probe.md", locator: "§1 版本、安装与钉版", level: "[实践]"}
+      - claim: "官方 PushCube-v1 在 headless 容器内真实离屏渲染：env.render() 回读 512×512 uint8 帧，首帧像素方差 4973.8、首末帧均值差 5.30（硬自检阈值的数百倍，非纯色非静止），渲染走 SAPIEN Vulkan，torch.cuda 可用。"
+        evidence: {repo_relpath: "memory_flywheel/capability_evidence/sapien_phase1_probe.md", locator: "§2 官方 PushCube-v1 headless 真渲染探针", level: "[实践]"}
+      - claim: "physx_cpu 物理后端（渲染仍 gpu/Vulkan）100Hz、frame_dt=0.01s 可完整跑通 reach→push→hold 573 帧，env_success_end=true（末点距成功圆心 0.0515m < r=0.1m），同场景独立参数组 486 帧复现成功。"
+        evidence: {repo_relpath: "memory_flywheel/capability_evidence/sapien_phase1_probe.md", locator: "§3 PushCube reach-push-hold 全流程一手复现（physx_cpu 物理）", level: "[实践]"}
+      - claim: "physx_cpu 后端 scene.get_contacts() 逐接触对可用（基础计划 L517 Rung1 点名接口实测落地）：首接 frame 237、最长连续接触 3.36s、段内力均值 0.2276N/CV 0.246，穿模深度 max 7.6e-6m（远低于 Rung1 0.005m 阈值），Rung1/Rung2 有真实逐帧数据支撑。"
+        evidence: {repo_relpath: "memory_flywheel/capability_evidence/sapien_phase1_probe.md", locator: "§4 接触测量能力：get_contacts、接触力稳定性与穿模深度", level: "[实践]"}
+      - claim: "持位机制实测为指尖骑块后上棱的摩擦楔紧（μ=2.0，水平合力 0.19N、竖直分量≈0、桌面法向 0.72N），非墙面（wall_s=5.028s 在任务完成后）、非水平预紧；静态窗 100 帧净位移 3.9e-4m。"
+        evidence: {repo_relpath: "memory_flywheel/capability_evidence/sapien_phase1_probe.md", locator: "§5 持位力学机制判定（楔紧，非墙/非水平预紧）", level: "[实践]"}
+      - claim: "GPU 物理后端存在真实功能缺口：PhysxGpuSystem 无 get_contacts（三次 dump 全 AttributeError），持位 60/120 帧指尖力坍塌为 0；Rung1–3 测量必须 physx_cpu 物理后端，GPU 仅渲染。"
+        evidence: {repo_relpath: "memory_flywheel/capability_evidence/sapien_phase1_probe.md", locator: "§6 已知缺口：GPU 物理后端接触接口缺失（诚实负面证据）", level: "[实践]"}
     gaps:
-      - "KB knowledge/ 全目录 PCRE 词边界 grep（(?<![A-Za-z0-9_])sapien(?![A-Za-z0-9_])，与校验器同口径）零命中：未提及；待 Phase1 补"
+      - "KB knowledge/ 词边界口径（与校验器同正则）对 sapien 仍零命中：无 tour/论文/官网二手证据，上述 facts 全部是 Phase1 一手探针（[实践]）；引擎许可、API 稳定性清单、传感器/光学噪声模型仍待后续 tour 或 Phase1 backlog 补"
+      - "GPU 物理后端（PhysxGpuSystem）无 get_contacts 且持位力 60 帧后坍塌（§6 实测）：Rung1–3 测量只能 physx_cpu 物理 + GPU 渲染；大规模并行 GPU 物理能力本次未验证"
 
   - slug: bullet
     display_name: "Bullet / PyBullet"

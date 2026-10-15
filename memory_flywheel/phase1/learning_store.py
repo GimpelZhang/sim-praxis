@@ -7,8 +7,11 @@
 - 同一套嵌入：``select_embedding()`` 读 ``embedding_config.json`` 钉死的 mpnet
   768（ONNX 已缓存 /mnt/caches/fastembed），懒加载同一个 ``TextEmbedding``
   封装，不复制模型文件、不触发下载、不 rebuild。
-- 无证据不写：每条学习必须带相对 $SIMPRAXIS_PHASE1_ROOT 的 evidence_relpath，
-  写入时该文件必须真实存在（越界/不存在直接拒写）。
+- 无证据不写：每条学习必须带可解析的 evidence_relpath，写入时该文件必须真实
+  存在（越界/不存在直接拒写）。两个证据根（锁内适配，Task7 计划 §1.8 两路
+  区分）：宿主侧证据相对 $SIMPRAXIS_PHASE1_ROOT 用裸 relpath（Task2-6 既有
+  行格式不变）；真实 rollout 产物在 $SIMPRAXIS_RUN_DIR 下，用带标记前缀
+  "@runs/" 的 relpath；标记集中在 RUNS_ROOT_TAG 一处，禁止裸 ../ 跨根。
 - 过程级信号（RSI survey §5.5）：记录「失败现象/修复动作/人工意见/生效与否」
   的失败-修复过程结构，不是单轮结果数字。
 
@@ -54,9 +57,19 @@ GATE_SOURCES = frozenset({
 _FAILURE_RE = re.compile(r"^human_failure_(agent_run|gate1|gate2)$")
 
 
+# evidence_relpath 根标记：裸 relpath = phase1 证据根（Task2-6 既有行）；
+# 该前缀 = run 产物根 $SIMPRAXIS_RUN_DIR（Task7 真实 rollout，计划 §1.8 两路）。
+RUNS_ROOT_TAG = "@runs/"
+
+
 def phase1_root() -> Path:
     return Path(os.environ.get("SIMPRAXIS_PHASE1_ROOT",
                                "/mnt/artifacts/simpraxis/phase1"))
+
+
+def runs_root() -> Path:
+    return Path(os.environ.get("SIMPRAXIS_RUN_DIR",
+                               "/mnt/artifacts/simpraxis/runs"))
 
 
 def compose_text(*, gate_source: str, run_id: str, sim_engine: str, rung: int,
@@ -80,7 +93,8 @@ class LearningStore:
     """phase1_learnings 表的唯一合法读写者（同 uri 独立连接，768 维 mpnet）。"""
 
     def __init__(self, uri: "str | None" = None,
-                 evidence_root: "str | Path | None" = None):
+                 evidence_root: "str | Path | None" = None,
+                 runs_evidence_root: "str | Path | None" = None):
         self.uri = uri or os.environ.get(
             "SIMPRAXIS_LANCEDB_URI", "/mnt/artifacts/simpraxis/lancedb")
         Path(self.uri).mkdir(parents=True, exist_ok=True)
@@ -88,6 +102,9 @@ class LearningStore:
         self.dim = int(self.config["dim"])
         self.evidence_root = Path(evidence_root) if evidence_root \
             else phase1_root()
+        # Task7（§1.8 双证据根）：真实 rollout 产物根；单测可注入临时根。
+        self.runs_evidence_root = Path(runs_evidence_root) if runs_evidence_root \
+            else runs_root()
         self.db = lancedb.connect(self.uri)
         self._assert_own_vector_dim()
         self._embedder = None
@@ -145,26 +162,60 @@ class LearningStore:
                                  mode="create")
         return self.db.open_table(TABLE_NAME)
 
-    # ---------- 证据校验：无证据不写 ----------
+    # ---------- 证据校验：无证据不写（phase1 / runs 双根，Task7 §1.8） ----------
+    def _evidence_base(self, rel: str) -> "tuple[Path, str, bool]":
+        """按根标记选证据根，返回 (root, 去标记 payload, 是否带 runs 标记)。"""
+        if rel.startswith(RUNS_ROOT_TAG):
+            return self.runs_evidence_root.resolve(), rel[len(RUNS_ROOT_TAG):], True
+        return self.evidence_root.resolve(), rel, False
+
+    def relativize_evidence(self, abs_path: "str | Path") -> str:
+        """绝对证据路径 → 落库 relpath（先 phase1 根，再 runs 根）；文件必须存在。
+
+        phase1 根下返回裸 relpath（Task2-6 既有格式不变）；runs 根下返回
+        "@runs/<rel>"。两根都不命中或文件不存在即拒（无证据不写）。
+        """
+        target = Path(abs_path).resolve()
+        if not target.is_file():
+            raise FileNotFoundError(f"证据文件不存在，拒写学习：{target}（无证据不写）")
+        phase = self.evidence_root.resolve()
+        try:
+            return target.relative_to(phase).as_posix()
+        except ValueError:
+            pass
+        runs = self.runs_evidence_root.resolve()
+        try:
+            return RUNS_ROOT_TAG + target.relative_to(runs).as_posix()
+        except ValueError as exc:
+            raise ValueError(
+                f"证据 {target} 既不在 phase1 根 {phase} 也不在 runs 根 "
+                f"{runs} 之下（无证据不写）") from exc
+
     def _resolve_evidence(self, evidence_relpath: str) -> str:
         if not isinstance(evidence_relpath, str) or not evidence_relpath.strip():
             raise ValueError("evidence_relpath 必填：无证据不写学习条目")
         rel = evidence_relpath.strip().replace("\\", "/")
         if rel.startswith("/"):
             raise ValueError(
-                f"evidence_relpath 必须是相对 $SIMPRAXIS_PHASE1_ROOT 的路径，"
-                f"收到绝对路径：{evidence_relpath}")
-        root = self.evidence_root.resolve()
-        target = (root / rel).resolve()
-        # 越界守卫：禁 ../ 逃出证据根
+                "evidence_relpath 必须是相对证据根的路径（runs 根用 "
+                f"{RUNS_ROOT_TAG!r} 前缀标记），收到绝对路径：{evidence_relpath}")
+        root, payload, tagged = self._evidence_base(rel)
+        if not payload or payload.startswith("/"):
+            raise ValueError(
+                f"evidence_relpath 标记 {RUNS_ROOT_TAG!r} 后必须接根内相对路径："
+                f"{evidence_relpath}")
+        target = (root / payload).resolve()
+        # 越界守卫：禁 ../ 逃出对应证据根（tagged 路径同样按 runs 根校验）
         if not str(target).startswith(str(root) + os.sep) and target != root:
+            kind = "$SIMPRAXIS_RUN_DIR" if tagged else "$SIMPRAXIS_PHASE1_ROOT"
             raise ValueError(
                 f"evidence_relpath 越界（{evidence_relpath} → {target} 不在 "
-                f"{root} 之下）")
+                f"{kind} {root} 之下）")
         if not target.is_file():
             raise FileNotFoundError(
                 f"证据文件不存在，拒写学习：{target}（无证据不写）")
-        return target.relative_to(root).as_posix()
+        return target.relative_to(root).as_posix() if not tagged else \
+            RUNS_ROOT_TAG + target.relative_to(root).as_posix()
 
     @staticmethod
     def _id_for(run_id: str, gate_source: str, rung: int, text: str,
@@ -201,11 +252,17 @@ class LearningStore:
             raise ValueError("gate2_accepted 的 rung 必须 >=1")
         if not isinstance(sim_engine, str):
             raise ValueError("sim_engine 必须是字符串（Gate1 前失败可传 ''）")
-        if not any(str(x).strip() for x in
-                   (failure_symptom, fix_action, human_opinion)):
+        # 锁内适配（Task7 首条真实 Gate2 一次通过 run 取证，2026-10-15
+        # t7-mujoco-20261015b）：计划 L534 要求「Gate2 验收通过…写一条」，
+        # 而无打回/无补丁/无意见的干净 run 三项摘要必然全空——rung/engine/
+        # effective/证据原件本身即该条学习的内容（compose_text 显式渲染「无」）。
+        # 故空洞守卫只保留给失败结案：human_failure_* 却没有任何现象/动作/意见
+        # 才是无内容行；accepted 的干净 run 允许写入。
+        if is_failure and not any(str(x).strip() for x in
+                                  (failure_symptom, fix_action, human_opinion)):
             raise ValueError(
-                "结构化摘要三项（失败现象/修复动作/人工意见）全空：拒绝写入"
-                "无内容学习")
+                "失败结案结构化摘要三项（失败现象/修复动作/人工意见）全空："
+                "拒绝写入无内容学习（gate2_accepted 干净 run 不在此限）")
         if effective is not None and not isinstance(effective, bool):
             raise ValueError("effective 必须是 bool 或 None")
         if is_failure and effective is True:
