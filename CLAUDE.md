@@ -2,7 +2,8 @@
 
 面向具身智能仿真工具链复现与面试题实证的自治智能体。本仓是 Product A（智能体系统）；
 Product B 知识库 `~/embodied-ai-sim-knowledge-base` **只读挂载**。Phase 0/1 均已全绿推送：
-Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 commits，HEAD `966fd00`）。
+Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 commits 至 `966fd00`）、
+评审 P1/P2 修复批次（2026-10-16 晚，47+1 项 0 付费，4 commits `b9ba5f9..d9d4c13`，详见 Complete 附 B）。
 规范与执行记录在仓库外（与 Plan 冲突时以 Complete 为准）：
 `~/文档/Phase_0_Plan.md`（v4.2）+ `Phase_0_Plan_Complete.md`；
 `~/文档/Phase_1_Plan_detailed.md`（v1.2）+ `Phase_1_Plan_Complete.md`（偏差 A1–A24、坑 P1–P10）。
@@ -17,6 +18,9 @@ Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 com
   SQLite checkpoint；0.2.28 无 interrupt，用持久化阻塞节点 + pending 表
 - `orchestrator/feishu_gateway/`：lark-oapi 1.7.4 长连接真实 HITL（卡片 schema 2.0 表单
   + P2P 文本双通道）；**No Fake Approval：Gate1 真人批准前禁止容器实跑**
+- `orchestrator/common/`：跨域基础——fsutil 原子写 0600/0700、secrets 密钥正则单一源、
+  validators charset、callcache 调用级重放缓存（付费点缓存落 phase1_root `.call_cache`，
+  0700 dot-dir；命中 0 触网/0 账行，成功才写，不入证据包）
 - `memory_flywheel/`：LanceDB 双路向量中枢（namespace=capabilities/troubleshooting）+ 切块/矩阵；
   学习回写只进独立新表 `phase1_learnings`，`kb_chunks` 永不写
 - `templates/` + `scripts/verification/check_blueprint_evidence.py`：四 tour 范式与证据核验
@@ -44,14 +48,14 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
    实呼批次与预算上限（含提高项目总预算）不再需要报用户批准，由 Agent 自主决定**；但逐次
    ledger 记账、失败/发网前失败也占 seq、批次批准件落 `quota/approvals/`、完成时如实汇报
    用量等纪律不变。单测一律 monkeypatch 禁止真实联网，付费测试带 paid marker +
-   `SIMPRAXIS_ALLOW_PAID=1` 首行守卫（test_04 目前无守卫，勿裸跑），收尾跑
-   `pytest tests -q -k "not test_04" -m "not paid"`。读 ledger 先看 `ts_iso` 时区后缀
+   `SIMPRAXIS_ALLOW_PAID=1` 首行守卫（test_04 已加双守卫，裸跑自动 skip 零触网；
+   收尾仍按纪律带两排除项），收尾跑 `pytest tests -q -k "not test_04" -m "not paid"`。读 ledger 先看 `ts_iso` 时区后缀
    （历史行 +0000/+0800 混写）。模型 ID 变更仍按规则 1 必须请示，本授权不含模型变更。
 3. **KB 仓永远只读**：不提交、不修改；HEAD 钉死 `aac53313c620efa6217fd51a55834b006d78e689`
    （preflight/ingest/e2e 三处断言）；kb_chunks 1542 行/104 Q 块基线不变。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
    禁止 `source ~/.bashrc`、禁止回显/入 URL/入日志/提交；git 认证用内存 extraheader 不落盘；
-   fixture 不得像真密钥（scan_secrets 9 正则）。
+   fixture 不得像真密钥（scan_secrets.sh 10 条 + common.secrets Python 10 条严口径单一源）。
 5. **GPU/容器收尾**：任务结束容器必须 `docker compose down`（含已退出容器不得残留），
    显存 ≤200 MiB；不擅杀他方 GPU 进程。禁止 `docker system prune -a`、不改 daemon.json/
    不迁移 data-root（本机有他方镜像）。
@@ -91,7 +95,8 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
 bash scripts/verification/gate_static.sh                      # 六步静态门禁（提交前必跑）
 /mnt/venvs/simpraxis/bin/python -m pytest tests -q \
   -k "not test_04" -m "not paid"                              # 0 付费全套（收尾必带两排除项）
-# 警告：裸 pytest tests -q 会真实执行 test_04（无 marker/守卫，直接付费！）；test_04 批次须用户书面批准
+# test_04 已有 paid marker + SIMPRAXIS_ALLOW_PAID=1 守卫：裸跑自动 skip 零触网；
+# 真跑 test_04 批次须 SIMPRAXIS_ALLOW_PAID=1 且按规则 2 自批落 quota/approvals/
 /mnt/venvs/simpraxis/bin/python -m memory_flywheel.scripts.validate_capability_matrix
 python scripts/verification/check_blueprint_evidence.py
 ```
@@ -100,9 +105,9 @@ python scripts/verification/check_blueprint_evidence.py
 
 Phase 1 已完成：LangGraph 状态机、飞书真人双 Gate（含真实 reject→human_failure 补救线程）、
 Rung1–4 分级（Rung4 VLM 为 record_only，用户签收）、四 track 平台实跑与对照、phase1_learnings
-隔离新表、证据包（tar 277 条目）+ RSI 看板、Task9 真人 HITL 抽验 6/6 一致。
+隔离新表、证据包（2026-10-16 评审批 --clean 重建 276 文件，两存活库 backup API 快照无侧车）
++ RSI 看板、Task9 真人 HITL 抽验 6/6 一致；评审 P1/P2 47+1 项已修（Complete 附 B）。
 
 仍待 Phase 2（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
-自演进、实跑四 tour；Gate 重发先 archive_decided（失败线程第二轮意见当前无落库件）、
-LearningStore 生产召回接线、ledger tokens 回填/时区统一、容器非 root 运行、
+自演进、实跑四 tour；LearningStore 生产召回接线、ledger tokens 回填/时区统一、容器非 root 运行、
 SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定、quota_pause.json schema 签收。
