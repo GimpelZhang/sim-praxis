@@ -423,8 +423,11 @@ def main() -> int:
          "evidence_ids": ["E3.1", "E3.2", "E3.3"],
          "tests": "tests/milestone1/test_graph.py（含 kill-9 重启）"},
         {"item": 2, "name": "Gate1/Gate2 真实阻断（No Fake Approval）",
-         "evidence_ids": ["E1.1", "E1.2", "E1.3", "E1.4", "E1.5", "E7.2"],
-         "tests": "tests/milestone1/test_feishu_gateway.py + 本包 state/gates_export.json"},
+         "evidence_ids": ["E1.1", "E1.2", "E1.3", "E1.4", "E1.5", "E7.2", "E8.2"],
+         "tests": "tests/milestone1/test_feishu_gateway.py + 本包 state/gates_export.json"
+                  "；Q2（D9 条件闸门无 Gate1）由 scripts/milestone1/q2_human_gate.py "
+                  "事后补真人 Gate2（thread=t8-q2carla-hitl-20261016，0 付费，"
+                  "decision.json 在 E8.2 human_gate/）"},
         {"item": 3, "name": "物理真值（No Fake Physics）",
          "evidence_ids": ["E5.2", "E7.1", "E8.1"],
          "tests": "tests/milestone1/test_judge.py（五夹具）"},

@@ -740,3 +740,48 @@ def test_12_gate2_card_explanation_block_and_flat_fallback():
         flat = builder("tt", {"pose_error": "0.02", "jerk": "阈值内"})
         flat_blob = json.dumps(flat, ensure_ascii=False)
         assert "位姿误差" in flat_blob and "审批前请先读" not in flat_blob
+
+
+def test_13_q2_report_metrics_branch_real_numbers_only():
+    """Q2 Gate2 卡（D9 补点验）：outcome/mechanism 双结论分支，数字全部外给。
+
+    模板自身不含指标字面量；旧式 Rung 扁平兜底不得串到 Q2 卡上。
+    """
+    from orchestrator.feishu_gateway.cards import (
+        build_gate2_card, build_gate2_card_v2,
+    )
+    metrics = {
+        "metrics_kind": "q2_invariance_report",
+        "outcome": {
+            "bit_identical": {"comparisons": 80, "failures": 0,
+                              "cross_repeat": 20},
+            "z_vs_clear": {"rain_hard": -1.1159, "fog_dense": -1.0091},
+            "z_negative_control": {"rain_hard": -1.0767, "fog_dense": -0.9736},
+            "survivor_max_abs_dI": "4.45e-05",
+            "engine_has_snow": False,
+        },
+        "mechanism": [
+            {"label": "rain 100 mm/h", "surface_kept_pct": 71.7,
+             "weather_false": 6346, "near_blind": 3747, "transmission": 0.871},
+            {"label": "snow 100 mm/h（融化当量）", "surface_kept_pct": 1.7,
+             "weather_false": 8078, "near_blind": 3740, "transmission": 0.024},
+            {"label": "fog V=6 m（Koschmieder）", "surface_kept_pct": 10.7,
+             "weather_false": 0, "near_blind": None, "transmission": 0.013},
+        ],
+        "residual": "Qback 等参数未用真实数据标定，只断言量级与单调性。",
+        "d9_note": "Q2 走 D9 条件闸门，本卡为事后补真人点验（无 Gate1）。",
+    }
+    for builder in (build_gate2_card, build_gate2_card_v2):
+        blob = json.dumps(builder("tt", metrics), ensure_ascii=False)
+        assert "逐 bit 相等" in blob and "80" in blob and "失败 0" in blob
+        assert "阴性对照" in blob and "rain -1.12" in blob and "fog -1.01" in blob
+        assert "4.45e-05" in blob and "无 snow 字段" in blob
+        assert "71.7%" in blob and "1.7%" in blob and "10.7%" in blob
+        assert "is_weather" in blob and "残差声明" in blob and "D9" in blob
+        # 绝不走 Rung 扁平兜底
+        assert "位姿误差" not in blob
+    # 缺 outcome/mechanism 时不抛错，只渲染结论头
+    minimal = json.dumps(
+        build_gate2_card("tt", {"metrics_kind": "q2_invariance_report"}),
+        ensure_ascii=False)
+    assert "Q2 实验结论" in minimal

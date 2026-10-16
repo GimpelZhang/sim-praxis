@@ -279,6 +279,71 @@ def _task8_batch_metrics_md(metrics: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _q2_report_metrics_md(metrics: dict[str, Any]) -> str:
+    """Task8 Q2（Carla 固态 LiDAR 雨雪雾）Gate2 渲染：outcome/mechanism 双结论。
+
+    Q2 走计划 D9 条件闸门（不经图、无 Rung1-4 telemetry），2026-06 月补真人
+    点验卡片时新增。所有数字由调用方 scripts/milestone1/q2_human_gate.py 从
+    invariance_checks.json / control/analysis/invariance_checks.json /
+    optics_sweep.csv 实读传入，模板内不写任何指标字面量。
+    """
+    lines = ["**Q2 实验结论（outcome 与 mechanism 分开报告，矛盾不调参，L571）**"]
+    oc = metrics.get("outcome")
+    if isinstance(oc, dict):
+        lines += ["", "**① Outcome：Carla 0.10.0 原生 LiDAR 无天气物理通道**"]
+        geo = oc.get("bit_identical") if isinstance(oc.get("bit_identical"), dict) else {}
+        lines.append(
+            f"  - 语义几何射线 {geo.get('comparisons', '-')} 组对照逐 bit 相等"
+            f"（失败 {geo.get('failures', '-')}）；跨进程重复 "
+            f"{geo.get('cross_repeat', '-')} 组同样逐 bit 相等")
+        z = oc.get("z_vs_clear") if isinstance(oc.get("z_vs_clear"), dict) else {}
+        zc = (oc.get("z_negative_control")
+              if isinstance(oc.get("z_negative_control"), dict) else {})
+        if z:
+            line = ("  - ray_cast 点数跨天气 z="
+                    f"rain {z.get('rain_hard', '-'):.2f} / "
+                    f"fog {z.get('fog_dense', '-'):.2f}")
+            if zc:
+                line += ("；三段全 clear 的阴性对照 z="
+                         f"rain {zc.get('rain_hard', '-'):.2f} / "
+                         f"fog {zc.get('fog_dense', '-'):.2f}")
+            line += "（同号同量级 → ~0.5% 漂移是 dropoff RNG 段位置伪相关）"
+            lines.append(line)
+        di = oc.get("survivor_max_abs_dI")
+        if di is not None:
+            lines.append(
+                f"  - 共有坐标点 intensity 逐点恒等：max|ΔI|={di}"
+                "（float32 舍入量级）")
+        if oc.get("engine_has_snow") is False:
+            lines.append("  - 引擎 WeatherParameters 无 snow 字段：雪不伪造引擎预设，"
+                         "只在机制层建模")
+    mech = metrics.get("mechanism")
+    if isinstance(mech, list) and mech:
+        lines += ["",
+                  "**② Mechanism：引擎外物理光学材质层**"
+                  "（双程 Beer–Lambert / Marshall–Palmer 雨谱 / "
+                  "Gunn–Marshall 雪谱 / Koschmieder 雾）"]
+        for row in mech:
+            if not isinstance(row, dict):
+                continue
+            line = (f"  - {row.get('label', '-')}：表面点保留 "
+                    f"{float(row['surface_kept_pct']):.1f}%，天气伪回波 "
+                    f"{float(row['weather_false']):.0f}，双程透射 "
+                    f"{float(row['transmission']):.3f}")
+            if row.get("near_blind") is not None:
+                line += f"，近场盲丢 {float(row['near_blind']):.0f}"
+            lines.append(line)
+        lines.append("  - 天气伪回波带 is_weather 独立标签，绝不伪装为表面点；"
+                     "clear 基线严格恒等；10 个零付费单测可复现")
+    residual = metrics.get("residual")
+    if isinstance(residual, str) and residual.strip():
+        lines += ["", f"**残差声明**：{residual.strip()}"]
+    d9 = metrics.get("d9_note")
+    if isinstance(d9, str) and d9.strip():
+        lines += ["", f"ℹ️ {d9.strip()}"]
+    return "\n".join(lines)
+
+
 def _rungs_metrics_md(metrics: dict[str, Any]) -> "str | None":
     """Task5/7 嵌套 metrics（metrics['rungs'].rungN.pass/checks）的自解释渲染。
 
@@ -287,9 +352,13 @@ def _rungs_metrics_md(metrics: dict[str, Any]) -> "str | None":
     无嵌套 rungs 的旧式扁平 metrics 返回 None，由调用方走扁平兜底。
     Task8 Track2 batch 指标（metrics_kind=task8_gait_batch）走独立渲染器：
     三臂组统计 + 预注册对照与单 rollout 语义不同，不可复用 Task7 明细。
+    Task8 Q2（metrics_kind=q2_invariance_report）同样无 Rung1-4 telemetry：
+    它是 D9 条件闸门的物理对照实验，卡片渲染 outcome/mechanism 双结论。
     """
     if metrics.get("metrics_kind") == "task8_gait_batch":
         return _task8_batch_metrics_md(metrics)
+    if metrics.get("metrics_kind") == "q2_invariance_report":
+        return _q2_report_metrics_md(metrics)
     rungs = metrics.get("rungs")
     if not isinstance(rungs, dict):
         return None

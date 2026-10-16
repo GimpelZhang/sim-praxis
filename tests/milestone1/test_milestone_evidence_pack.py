@@ -178,8 +178,17 @@ def test_05_run_family_required_artifacts(manifest):
     q2 = PACK / "runs/task8_track2/q2_carla"
     for rel in ("analysis/SUMMARY.md", "analysis/q2_overlay.mp4",
                 "analysis/invariance_checks.json", "q2_closeout.json",
-                "pull_result.txt"):
+                "pull_result.txt",
+                "human_gate/decision.json", "human_gate/q2_gate.log"):
         assert (q2 / rel).is_file(), f"Q2 缺 {rel}"
+    # 事后补的真人 Gate2 必须是真人 card_form approve、0 付费（D9 闭环）
+    hg = json.loads((q2 / "human_gate/decision.json").read_text(encoding="utf-8"))
+    assert hg["schema"] == "simpraxis.q2_human_gate.v1"
+    assert hg["human_decision"]["decision"] == "approve"
+    assert hg["human_decision"]["source"] == "card_form"
+    assert hg["human_decision"]["choice"] is None
+    assert hg["paid_llm_calls"]["delta"] == 0
+    assert hg["metrics"]["metrics_kind"] == "q2_invariance_report"
     for run in ("run_t7-mujoco-20261015_2", "run_t7-mujoco-20261015b_1",
                 "run_t7-maniskill-20261015a_1"):
         d = PACK / "runs/task7_track1" / run
@@ -286,6 +295,14 @@ def test_09_traceability_matrix_seven_items(manifest):
     for tid in ("t7-mujoco-20261015b", "t7-maniskill-20261015a",
                 "t8-genesis-20261016a"):
         assert (tid, 1) in decided and (tid, 2) in decided
+    # Q2（D9 条件闸门）无 Gate1，事后补的 Gate2 必须有真人 card_form 签收
+    assert ("t8-q2carla-hitl-20261016", 2) in decided
+    q2_gate = next(g for g in gates
+                   if g["thread_id"] == "t8-q2carla-hitl-20261016"
+                   and g["gate"] == 2)
+    assert q2_gate["decision"] == "approve" and q2_gate["choice"] is None
+    assert not any(g["thread_id"] == "t8-q2carla-hitl-20261016"
+                   and g["gate"] == 1 for g in gates), "D9 路径不应存在 Gate1 行"
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +334,13 @@ def test_10_rsi_dashboard_schema_and_counts(manifest):
                   if r["thread_id"] == "t7-mujoco-20261015")
     assert any(a["type"] == "human_oracle_vs_proxies"
                for a in failed["proxy_decoupling_alarms"])
+    # Q2（D9 条件闸门）事后补的真人 Gate2：passed/card_form/0 付费
+    q = d["q2_human_gate"]
+    assert q["status"] == "passed"
+    assert q["thread_id"] == "t8-q2carla-hitl-20261016"
+    assert q["paid_llm_calls_delta"] == 0
+    assert q["human_decision"]["decision"] == "approve"
+    assert q["human_decision"]["source"] == "card_form"
 
 
 def test_11_hitl_drill_log_present():

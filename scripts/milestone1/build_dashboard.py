@@ -346,6 +346,33 @@ def _hitl_block(ledger: list[dict]) -> dict:
     }
 
 
+def _q2_gate_block() -> dict:
+    """Q2（D9 条件闸门）事后补的真人 Gate2：未点验时如实报 pending。
+
+    Q2 不经 LangGraph 图，四任务中唯独它原无 card_form 签收；
+    scripts/milestone1/q2_human_gate.py 发卡，0 付费，裁决原件落
+    q2_carla/human_gate/decision.json（E8.2 递归收录）。
+    """
+    thread_id = "t8-q2carla-hitl-20261016"
+    rp = RUNS_ROOT / "task8_track2" / "q2_carla" / "human_gate" / "decision.json"
+    if not rp.is_file():
+        return {"status": "pending", "thread_id": thread_id,
+                "note": "D9 条件闸门原无 card_form 签收；q2_human_gate.py "
+                        "发卡后待真人点验"}
+    r = _load_json(rp)
+    hd = r["human_decision"]
+    return {
+        "status": "passed" if hd["decision"] == "approve" else "rejected",
+        "thread_id": r["thread_id"], "schema": r["schema"],
+        "gate_path": r["gate_path"],
+        "paid_llm_calls_delta": r["paid_llm_calls"]["delta"],
+        "human_decision": {"decision": hd["decision"], "source": hd["source"],
+                           "human_notes": hd["human_notes"],
+                           "card_message_id": hd["card_message_id"],
+                           "media_message_id": hd["media_message_id"]},
+    }
+
+
 def _paid_block(ledger: list[dict]) -> dict:
     by_stage = Counter(r["stage"] for r in ledger)
     by_task = Counter(r["task"] for r in ledger)
@@ -393,6 +420,7 @@ def main() -> int:
             list(gates.values()), _envelopes()),
         "learnings": _learnings_block(),
         "hitl_drill": _hitl_block(ledger),
+        "q2_human_gate": _q2_gate_block(),
         "paid_calls": _paid_block(ledger),
     }
     out = PHASE1_ROOT / "task9_milestone" / "rsi_dashboard.json"
