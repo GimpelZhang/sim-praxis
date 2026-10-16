@@ -352,14 +352,51 @@ def test_11_seam_accept_writes_structured_entry(store, roots):
 
 
 def test_12_seam_rung4_activated_bumps_rung(store, roots):
+    """L-5：仅 mode=="active" 且 status ok 的 Rung4 记 rung=4。"""
     from orchestrator.graph.learning import make_learning_seam
     _, ev_root = roots
     state = _accept_state(ev_root)
-    state["metrics"]["rungs"]["rung4"] = {"status": "ok", "n_defects": 0}
-    state["metrics"]["rung4"] = {"status": "ok"}
+    state["metrics"]["rungs"]["rung4"] = {"status": "ok", "mode": "active",
+                                          "n_defects": 0}
+    state["metrics"]["rung4"] = {"status": "ok", "mode": "active"}
     summary = make_learning_seam(store)({**state, "_learning":
                                          {"kind": "accept"}})
     assert summary["rung"] == 4
+    # active 模式不需要封顶注记
+    assert "rung4_mode" not in summary
+
+
+@pytest.mark.parametrize("mode", ["record_only", "uncalibrated"])
+def test_12b_seam_rung4_non_active_caps_at_3(store, roots, mode):
+    """L-5：record_only/uncalibrated 的 Rung4 无自动升级效力，封顶 3，
+    返回摘要带 rung4_mode/rung4_note 注记（learning_store 12 列冻结，
+    注记只在返回值上，不写表）。"""
+    from orchestrator.graph.learning import make_learning_seam
+    _, ev_root = roots
+    state = _accept_state(ev_root)
+    r4 = {"status": "ok", "mode": mode}
+    state["metrics"]["rungs"]["rung4"] = dict(r4)
+    state["metrics"]["rung4"] = dict(r4)
+    summary = make_learning_seam(store)({**state, "_learning":
+                                         {"kind": "accept"}})
+    assert summary["rung"] == 3
+    assert summary["rung4_mode"] == mode
+    assert mode in summary["rung4_note"]
+    # 落库行本身仍是普通 accept 行，gate_source 不被污染
+    assert summary["gate_source"] == "gate2_accepted"
+
+
+def test_12c_seam_rung4_status_ok_without_mode_caps_at_3(store, roots):
+    """L-5 防御：缺 mode 字段的旧形态 rung4 不得升到 4（按非 active 处理）。"""
+    from orchestrator.graph.learning import make_learning_seam
+    _, ev_root = roots
+    state = _accept_state(ev_root)
+    state["metrics"]["rungs"]["rung4"] = {"status": "ok"}
+    state["metrics"]["rung4"] = {"status": "ok"}
+    summary = make_learning_seam(store)({**state, "_learning":
+                                         {"kind": "accept"}})
+    assert summary["rung"] == 3
+    assert "rung4_mode" not in summary
 
 
 def test_13_human_failure_node_writes_rung0(store, roots):
@@ -445,8 +482,10 @@ def test_16_runs_root_tagged_evidence_and_clean_accept(store, roots,
         "agent_runs": [{"status": "ok", "telemetry_uri": str(tele),
                         "coding_round": 0, "timeline": []}],
         "metrics": {"rungs": {"rung1": {"pass": True}, "rung2": {"pass": True},
-                              "rung3": {"pass": True}, "rung4": {"status": "ok"}},
-                    "rung4": {"status": "ok"}, "rules_pass": True},
+                              "rung3": {"pass": True},
+                              "rung4": {"status": "ok", "mode": "active"}},
+                    "rung4": {"status": "ok", "mode": "active"},
+                    "rules_pass": True},
         "events": [{"type": "gate2_accepted"}],
     }
     summary = make_learning_seam(store)({**state, "_learning":

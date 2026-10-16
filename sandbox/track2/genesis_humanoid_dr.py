@@ -477,6 +477,11 @@ def run_rollout(params: dict, telemetry_path: str | None,
             vx_l.append(vx)
             ci = human.get_contacts(with_entity=ground)
             forces, la, lb = contact_rows(ci)
+            # L-8 钉死：2.5s 推后方窗必须与
+            # orchestrator/judge/gait_thresholds.py 的 POSTPUSH_WINDOW_S
+            # 及 push_window_calibration.json v2 selected_window 一致。
+            # 容器内不能 import 仓库包，故此处保留字面量；改值必须两处同改，
+            # tests/milestone1/test_task8_seam.py 的 AST 跨文件常量测试会拦截单边改动。
             in_window = (push["t"] <= t < push["t"] + 2.5)
             for s in ("R", "L"):
                 fid = foot_idx[s]
@@ -490,6 +495,10 @@ def run_rollout(params: dict, telemetry_path: str | None,
                 foot_slip[s].append(vxy)
                 if fmag > 2.0:
                     contact_frames[s] += 1
+                    # L-13 口径钉死：滑移距离 = Σ|v_xy|·dt。此处 vxy 是足部
+                    # 水平面速度向量的 L2 范数（见上方 np.linalg.norm(fv[:2])），
+                    # 恒 ≥0，abs 隐含；判定器 gait_rungs.recompute_run 用
+                    # 显式 abs(v)*dt，两侧数值口径一致（真实 telemetry 零差异）。
                     slip_dist[s] += vxy * (1.0 / TELEM_HZ)
                 if in_window:
                     slip_vmax_window[s] = max(slip_vmax_window[s], vxy)

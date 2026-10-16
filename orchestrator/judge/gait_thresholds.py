@@ -15,6 +15,13 @@ sandbox/track2/genesis_humanoid_dr.py 的跌倒检测（控制器冻结载体口
 接触积分力门 CONTACT_FORCE_N=2.0、telemetry 帧 TELEM_HZ=50、期望帧数 400
 （8 s）：同脚本 telemetry 口径；滑移距离 = Σ|v_xy|·dt（仅接触帧）。
 
+推力后峰速窗 POSTPUSH_WINDOW_S=2.5：取自推力窗口标定件 v2 选定窗口
+（/mnt/caches/simpraxis/genesis_probe/push_window_calibration.json，
+selected_window）与生产脚本 sandbox/track2/genesis_humanoid_dr.py 推后方窗
+字面量（in_window = push_t <= t < push_t + 2.5）。容器脚本不能 import
+仓库包，那边保留字面量并加注释钉死本常量；改值必须两处同改，
+test_task8_seam 的 AST 常量一致性测试会拦截单边改动。
+
 滑移速度物理界 SLIP_V_MAX_MPS=50：A800 上 8 s 片段里自由倾覆的实测峰速
 sw4 最大 16.8 m/s（push_window_calibration.json v2），50 是数值爆炸
 （NaN 邻帧/求解器发散）界，不是行为阈值。
@@ -38,6 +45,9 @@ CONTACT_FORCE_N = 2.0
 TELEM_HZ = 50
 DUR_S = 8.0
 EXPECTED_FRAMES = 400
+# 推力后峰速积分窗（与标定件 v2/生产脚本 genesis_humanoid_dr.py 字面量共用，
+# 溯源见模块 docstring；容器脚本侧字面量由跨文件常量一致性测试钉死）。
+POSTPUSH_WINDOW_S = 2.5
 
 SLIP_V_MAX_MPS = 50.0
 # sw4 名义臂实测峰 6032 N（Kp≈1.1e4 倾覆冲击），取 10 kN 数值界。

@@ -263,9 +263,48 @@ def failure_classification(state: dict) -> tuple[str, str]:
     return stage, f"{stage} 连续 {GATE_REJECT_LIMIT} 次打回（D10），结案转人工"
 
 
-def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
-    stage, reason = failure_classification(state)
-    payload = {
+def _read_json_if_present(path: Path) -> "dict | None":
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _patch_workdir_failure_ref(workdir_failure: str, graph_failure: Path) -> None:
+    """L-4：在 runner workdir 级 FAILURE.json 上反向登记 graph_failure_json。
+
+    只增字段、保留首写 ts_iso 与既有字段；文件缺失/损坏不抛（图级结案不能
+    被反向引用失败拖住），runner 侧自身的 _fail 已做同样的首 ts 保留。
+    """
+    wpath = Path(workdir_failure)
+    data = _read_json_if_present(wpath)
+    if data is None:
+        return
+    if data.get("graph_failure_json") == str(graph_failure):
+        return
+    data["graph_failure_json"] = str(graph_failure)
+    tmp = wpath.with_suffix(wpath.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, ensure_ascii=False, indent=2)
+    os.replace(tmp, wpath)
+    os.chmod(wpath, 0o600)
+
+
+def write_graph_failure(state: dict, deps: GraphDeps, *, stage: str,
+                        reason: str, error_type: "str | None" = None) -> Path:
+    """写图级 run_dir/FAILURE.json（节点结案与 CLI 异常归一结案共用）。
+
+    L-4 语义：kill-9 重放/二次结案时保留首次写入的 ts_iso（结案时间不可被
+    重放刷新）；若最近一次 agent_run_failed 带 workdir FAILURE.json，则写入
+    agent_failure_json 交叉引用，并反向回写 workdir 文件的 graph_failure_json。
+    """
+    d = _run_dir(state, deps)
+    out = d / FAILURE_JSON
+    prev = _read_json_if_present(out)
+    prev_ts = prev.get("ts_iso") if prev else None
+    payload: dict[str, Any] = {
         "status": "human_failure",
         "thread_id": state.get("thread_id"),
         "track": state.get("track"),
@@ -273,13 +312,34 @@ def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
         "reason": reason,
         "gate1_rejects": state.get("gate1_rejects", 0),
         "gate2_rejects": state.get("gate2_rejects", 0),
-        "ts_iso": _ev("x")["ts"],
+        "ts_iso": prev_ts or _ev("x")["ts"],
     }
-    d = _run_dir(state, deps)
-    out = d / FAILURE_JSON
+    if error_type:
+        # L-2：节点外异常归一结案时标注原始异常类型，与常规 reject 结案区分。
+        payload["error_type"] = error_type
+    failed_ev = _last_event(state, "agent_run_failed")
+    workdir_failure = None
+    if isinstance(failed_ev, dict):
+        workdir_failure = failed_ev.get("failure_json")
+    if workdir_failure:
+        payload["agent_failure_json"] = workdir_failure
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
     os.chmod(out, 0o600)
+    if workdir_failure:
+        _patch_workdir_failure_ref(workdir_failure, out)
+    return out
+
+
+def close_graph_failure(state: dict, deps: GraphDeps, *, stage: str,
+                        reason: str, error_type: "str | None" = None) -> dict:
+    """L-2/L-4 共用失败结案：图 FAILURE.json + rung=0 学习 + human_failure 事件。
+
+    节点常规结案（node_human_failure）与 CLI 捕获节点外协议异常后的归一结案
+    都走这里，保证两处字段/目录/学习语义一致，不各写一份。
+    """
+    out = write_graph_failure(state, deps, stage=stage, reason=reason,
+                              error_type=error_type)
     # Task6（计划 L534）：失败也是学习——FAILURE.json 落盘后经同一 persist
     # 接缝写 rung=0 一条。未注入 persist（Task3 风格单测/拓扑导出）则不回写，
     # 生产装配（graph.cli）从 Task6 起恒注入。
@@ -290,9 +350,16 @@ def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
             "evidence": str(out)}})
     ev_fields: dict[str, Any] = {"stage": stage, "reason": reason,
                                  "failure_json": str(out)}
+    if error_type:
+        ev_fields["error_type"] = error_type
     if learning is not None:
         ev_fields["learning"] = learning
     return {"events": [_ev("human_failure", **ev_fields)]}
+
+
+def node_human_failure(state: SimPraxisState, deps: GraphDeps) -> dict:
+    stage, reason = failure_classification(state)
+    return close_graph_failure(state, deps, stage=stage, reason=reason)
 
 
 def node_done(state: SimPraxisState, deps: GraphDeps) -> dict:

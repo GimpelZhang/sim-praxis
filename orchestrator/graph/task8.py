@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from orchestrator.agent_runner.runner import RunSpec
+from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -162,6 +163,9 @@ def make_spec_factory(thread_id: str, coding_batch: str,
         if not template.is_file():
             raise GraphStateError(f"Task8 场景模板不存在：{template}")
 
+        # L-12 编号钉死（两阶段索引关系，禁止改号）：工厂在 agent_runs 追加
+        # 之前预占 len(agent_runs)+1；evaluate 接缝在追加之后用 len(agent_runs)
+        # 复核（见 make_evaluate_seam 注释）——同一 run 两处同号（首 run=r1）。
         run_idx = len(state.get("agent_runs", [])) + 1
         workdir = task8_run_dir(thread_id, run_idx)
 
@@ -198,6 +202,7 @@ def make_spec_factory(thread_id: str, coding_batch: str,
                  "--seeds", str(SEEDS),
                  "--calibration-json", str(cal)],
             telemetry_relpath=SUMMARY_NAME,
+            run_idx=run_idx,             # L-1：coding 重放 key 稳定序号
             batch_id=coding_batch,
             billing_task=TASK,
             gate2_notes=notes,
@@ -232,30 +237,60 @@ def _write_evidence(stem: str, kind: str, payload: dict) -> str:
 
 class _VisualEvidenceGateway:
     """同 task7._VisualEvidenceGateway：call_visual 前后落脱敏证据，
-    evidence 在 billing_context 内挂接（task=8 visual 批次）。"""
+    evidence 在 billing_context 内挂接（task=8 visual 批次）。
+
+    L-1：稳定 key task8_rung4_{run_id}_{split} + 请求指纹的调用级重放；
+    命中零付费零证据写。L-7：实呼异常在 except 内补脱敏失败 resp 后抛出。
+    """
+
+    KIND = "task8_split_rung4"
+    REF_PREFIX = "phase1/task8_track2/evidence"
 
     def __init__(self, gateway, *, thread: str, run_id: str, batch_id: str,
-                 split_key: str, collage_path: str):
+                 split_key: str, collage_path: str,
+                 cache: "CallReplay | None" = None,
+                 cache_key: "str | None" = None):
         self._g = gateway
         self._thread = thread
         self._run_id = run_id
         self._batch = batch_id
         self._split = split_key
         self._collage = collage_path
+        self._cache = cache
+        self._cache_key = cache_key
         self.req_ref: "str | None" = None
 
     def model_id(self, stage: str) -> str:
         return self._g.model_id(stage)
 
+    @staticmethod
+    def _usage_ints(usage: Any) -> "tuple[int, int] | None":
+        if (isinstance(usage, (list, tuple)) and len(usage) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0 for v in usage)):
+            return int(usage[0]), int(usage[1])
+        return None
+
     def call_visual(self, prompt: str, image_b64: str, **kwargs):
         stem = f"rung4_{self._run_id}_{self._split}"
+        fp = request_fingerprint(prompt, image_b64, dict(kwargs))
+        if self._cache is not None and self._cache_key is not None:
+            hit = self._cache.get(self._cache_key, fp)
+        else:
+            hit = None
+        if hit is not None:
+            # 重放命中：零付费、零证据写；req_ref 用首调确定性证据名补戳。
+            self.req_ref = f"{self.REF_PREFIX}/{stem}.req.json"
+            return hit["raw"], tuple(hit["usage"])
+
+        model = self._g.model_id("visual_rollout")
         req_ref = _write_evidence(stem, "req", {
             "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "stage": "visual_rollout",
-            "model": self._g.model_id("visual_rollout"),
+            "model": model,
             "thread_id": self._thread, "batch_id": self._batch,
             "run_id": self._run_id, "split": self._split,
-            "kind": "task8_split_rung4",
+            "kind": self.KIND,
             "collage_png": self._collage, "image_b64_len": len(image_b64),
             "max_tokens": kwargs.get("max_tokens", 512),
             "prompt": redact(prompt),
@@ -264,10 +299,21 @@ class _VisualEvidenceGateway:
         with billing_context(task=TASK, batch_id=self._batch,
                              thread_id=self._thread):
             set_current_evidence(req_ref)
-            raw, usage = self._g.call_visual(prompt, image_b64, **kwargs)
+            try:
+                raw, usage = self._g.call_visual(prompt, image_b64, **kwargs)
+            except Exception as exc:
+                # L-7：账行已由网关记账；补脱敏失败 resp 证据后原样抛出。
+                _write_evidence(stem, "resp",
+                                {"ok": False, "error": redact(str(exc))[:1000]})
+                raise
         _write_evidence(stem, "resp",
                         {"ok": True, "text": redact(raw),
                          "tokens_in": usage[0], "tokens_out": usage[1]})
+        if self._cache is not None and self._cache_key is not None:
+            usage_ints = self._usage_ints(usage)
+            if usage_ints is not None:
+                self._cache.put(self._cache_key, kind=self.KIND, model=model,
+                                raw=raw, usage=usage_ints, fingerprint=fp)
         return raw, usage
 
 
@@ -350,6 +396,14 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
         workdir = summary.parent
 
         result = evaluate_batch(workdir)
+        # L-6：telemetry/CSV 结构错误必须在任何 Rung4 实呼之前熔断（未标定
+        # 模式虽不发网，也不得继续装配）；同时避免下面 result["vector"] 等键
+        # 在 evaluate_batch 短路返回（无 vector）上抛裸 KeyError。
+        if result.get("schema_errors"):
+            raise GraphStateError(
+                "task8 evaluate：telemetry/CSV 结构校验失败，"
+                "禁止发 Rung4 视觉调用："
+                + "；".join(map(str, result["schema_errors"][:10])))
 
         # 两张对照分屏是 Gate2 的核心证据：缺一是协议违规，不许降级放行。
         missing = [name for _, name in SPLITS
@@ -359,9 +413,14 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
                 f"task8 evaluate：对照分屏视频缺失 {missing}（目录 {workdir}）")
 
         runs = state.get("agent_runs", [])
+        # L-12：节点在 agent_run 追加之后执行，len(runs) 与工厂预占 +1 同号
+        # （首 run=r1）；与 make_spec_factory 注释配对，禁止改号。
         run_idx = len(runs)
         run_id = f"{thread_id}-r{run_idx}"
 
+        # L-1：两张分屏各有稳定 key（task8_rung4_{run_id}_{split}），共用
+        # 一个 0700 点目录缓存；kill-9 后整节点重放零二次付费。
+        call_cache = CallReplay(phase1_root() / ".call_cache")
         rubric = load_gait_rubric()
         split_results: list[dict] = []
         for key, name in SPLITS:
@@ -378,7 +437,8 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
             ev_gateway = _VisualEvidenceGateway(
                 gateway, thread=thread_id, run_id=run_id,
                 batch_id=visual_batch, split_key=key,
-                collage_path=str(collage_png))
+                collage_path=str(collage_png), cache=call_cache,
+                cache_key=f"task8_rung4_{run_id}_{key}")
             judge = Rung4Judge(
                 ev_gateway, rubric=rubric,
                 calibration_file=gait_calibration_file())

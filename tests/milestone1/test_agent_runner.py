@@ -29,8 +29,10 @@ from orchestrator.agent_runner import (
     agent_run_seam,
 )
 from orchestrator.agent_runner.runner import _collect_snippets
+from orchestrator.common.callcache import SCHEMA as REPLAY_SCHEMA, CallReplay
 from orchestrator.gateway.router import GatewayPausedError
 from orchestrator.graph import GraphDeps, build_graph, file_backed_evaluate, initial_state
+from orchestrator.graph.nodes import write_graph_failure
 
 # 图级复用件（定义在 test_graph，同包导入）
 from tests.milestone1.test_graph import (  # noqa: E402
@@ -62,8 +64,9 @@ raise RuntimeError("fixture failure: always fails")
 
 
 class FakeGateway:
-    def __init__(self, responses: list[str]):
+    def __init__(self, responses: list[str], usage=(None, None)):
         self.responses = list(responses)
+        self.usage = usage
         self.calls: list[dict] = []
 
     def model_id(self, stage):
@@ -79,7 +82,7 @@ class FakeGateway:
         self.calls.append({"stage": stage, "messages": messages, "kw": kw})
         if not self.responses:
             raise AssertionError("第 6 次 coding 调用：硬上限被突破")
-        return self.responses.pop(0), (None, None)
+        return self.responses.pop(0), self.usage
 
 
 class FakeVector:
@@ -108,13 +111,13 @@ def _runner(root: Path, gw: FakeGateway) -> AgentRunner:
 
 
 def _real_cmd_spec(thread, wd, *, notes=None, billing_task=4,
-                   batch="T4-FIXTURE"):
+                   batch="T4-FIXTURE", run_idx=None):
     import sys
     return RunSpec(thread_id=thread, workdir=wd,
                    cmd=[sys.executable, str(wd / "script.py")],
                    telemetry_relpath="telemetry.json",
                    batch_id=batch, billing_task=billing_task,
-                   gate2_notes=notes)
+                   gate2_notes=notes, run_idx=run_idx)
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +295,47 @@ def test_03b_failed_run_routes_graph_to_human_failure(tmp_path):
     assert "agent_run_failed" in kinds
     assert kinds[-1] == "human_failure"
     assert "evaluate" not in kinds                  # 失败不进 evaluate
-    assert (tmp_path / "g" / "runs" / "FAILURE.json").is_file()
+    graph_failure_p = tmp_path / "g" / "runs" / "FAILURE.json"
+    assert graph_failure_p.is_file()
     assert len(gw.calls) == 5
+
+    # L-4：图级 / workdir 级 FAILURE.json 双向交叉引用，workdir 既有字段保留
+    gf = json.loads(graph_failure_p.read_text(encoding="utf-8"))
+    assert gf["status"] == "human_failure" and gf["stage"] == "agent_run"
+    assert gf["agent_failure_json"] == str(wd / "FAILURE.json")
+    wf = json.loads((wd / "FAILURE.json").read_text(encoding="utf-8"))
+    assert wf["graph_failure_json"] == str(graph_failure_p)
+    assert wf["coding_round"] == 5 and wf["status"] == "failed"
+
+    # L-4：结案被整节点重放时图级 ts_iso 不滚动（预置旧时间戳必须保留）
+    old_ts = "2020-01-01T00:00:00+0000"
+    gf["ts_iso"] = old_ts
+    (graph_failure_p).write_text(
+        json.dumps(gf, ensure_ascii=False), encoding="utf-8")
+    write_graph_failure(final, deps, stage="agent_run",
+                        reason=wf.get("reason", "x"))
+    gf2 = json.loads(graph_failure_p.read_text(encoding="utf-8"))
+    assert gf2["ts_iso"] == old_ts
+    assert gf2["agent_failure_json"] == str(wd / "FAILURE.json")
+
+
+def test_03c_runner_fail_preserves_first_ts_on_node_replay(tmp_path):
+    """L-4：runner _fail 重入时保留首写 ts_iso（结案时间不被重放刷新）。"""
+    from orchestrator.agent_runner.runner import _ExecResult
+
+    wd = _write_workdir(tmp_path / "h", ALWAYS_FAIL_SCRIPT, fix="x=0")
+    runner = _runner(tmp_path, FakeGateway([]))
+    spec = _real_cmd_spec("t4-ts", wd)
+    (wd / "FAILURE.json").write_text(json.dumps({
+        "status": "failed", "ts_iso": "2020-01-01T00:00:00+0000",
+        "reason": "stale"}), encoding="utf-8")
+    root = runner._root(spec)
+    rec = runner._fail(root, spec, [{"exec": 1}],
+                       _ExecResult(1, "", "boom"), reason="再次结案")
+    assert rec["status"] == "failed"
+    payload = json.loads((wd / "FAILURE.json").read_text(encoding="utf-8"))
+    assert payload["ts_iso"] == "2020-01-01T00:00:00+0000"
+    assert payload["reason"] == "再次结案"
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +400,101 @@ def test_04_counters_independent_across_gate2_reject(tmp_path):
     second_prompt = gw.calls[1]["messages"][1]["content"]
     assert "Gate2 意见：参数重选" in second_prompt
     assert gw.calls[0]["messages"][1]["content"] != second_prompt
+
+
+# ---------------------------------------------------------------------------
+# L-1 调用级幂等：kill-9 落在实呼返回后、节点返回前 → 整节点重放 0 二次付费
+# ---------------------------------------------------------------------------
+
+def test_05_call_replay_node_replay_zero_rebill(tmp_path, monkeypatch):
+    import contextlib
+
+    thread = "t4-replay"
+    wd = _write_workdir(tmp_path, CONVERGING_SCRIPT)
+    patch_json = json.dumps(
+        {"patches": [{"path": "fix.txt", "old": "NEEDS_FIX",
+                      "new": "PATCHED"}]})
+    # 备 2 条响应：重放命中不消耗；末段指纹失配按 miss 正常重呼才消耗第 2 条。
+    gw = FakeGateway([patch_json, patch_json], usage=(123, 456))
+    # L-1/C2：命中不得进 billing_context（ledger preflight/record 只可能在
+    # 该上下文内发生）；spy 计数上下文进入次数。
+    import orchestrator.agent_runner.runner as runner_mod
+    billing_entries: list[dict] = []
+    real_billing = runner_mod.billing_context
+
+    @contextlib.contextmanager
+    def _spy_billing(**kw):
+        billing_entries.append(kw)
+        with real_billing(**kw) as ctx:
+            yield ctx
+
+    monkeypatch.setattr(runner_mod, "billing_context", _spy_billing)
+    cache_dir = tmp_path / "cache"
+    cache = CallReplay(cache_dir)
+    ev_root = tmp_path / "ev"
+    runner = AgentRunner(gw, FakeVector(), evidence_root=ev_root,
+                         call_cache=cache)
+    spec = _real_cmd_spec(thread, wd, run_idx=1)
+
+    rec = runner.run(spec)
+    assert rec["status"] == "ok" and rec["coding_round"] == 1
+    assert len(gw.calls) == 1
+    assert len(billing_entries) == 1        # miss 实呼恰进一次计费上下文
+
+    cache_file = cache_dir / "coding_t4-replay_r1_round1.json"
+    assert cache_file.is_file()
+    cached = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert cached["schema"] == REPLAY_SCHEMA
+    assert cached["kind"] == "coding_debug" and cached["usage"] == [123, 456]
+    assert cached["raw"] == patch_json
+    assert stat_mode(cache_dir) == 0o700 and stat_mode(cache_file) == 0o600
+
+    ev_dir = ev_root / thread
+    req_p = ev_dir / "coding_round1.req.json"
+    resp_p = ev_dir / "coding_round1.resp.json"
+    frozen = {p: (p.read_bytes(), p.stat().st_mtime_ns)
+              for p in (req_p, resp_p)}
+
+    # 模拟 kill-9 落在「实呼已返回、补丁/产物落盘与节点返回之前」：
+    # 清掉补丁效果与成功产物，保留缓存与证据（新进程从检查点重放整个节点）。
+    (wd / "telemetry.json").unlink()
+    (wd / "fix.txt").write_text("NEEDS_FIX", encoding="utf-8")
+
+    runner2 = AgentRunner(gw, FakeVector(), evidence_root=ev_root,
+                          call_cache=cache)
+    rec2 = runner2.run(_real_cmd_spec(thread, wd, run_idx=1))
+
+    # 重放：0 次新增发网；补丁从缓存 raw 重放应用并再次收敛
+    assert rec2["status"] == "ok" and rec2["coding_round"] == 1
+    assert rec2["executions"] == 2
+    assert len(gw.calls) == 1
+    assert len(billing_entries) == 1       # 命中：不进 billing_context
+    assert (wd / "telemetry.json").is_file()
+    assert (wd / "fix.txt").read_text() == "PATCHED"
+    # req/resp 证据字节与 mtime 均不得被重写（decision 允许重写，不在断言内）
+    for p, (blob, mt) in frozen.items():
+        assert p.read_bytes() == blob, f"{p.name} 内容被重放重写"
+        assert p.stat().st_mtime_ns == mt, f"{p.name} mtime 被重放刷新"
+    assert not (ev_dir / "coding_round2.req.json").is_file()
+
+    # 指纹失配（等价于重放产生了不同请求）：必须按 miss 正常计费重呼，
+    # 禁止把旧补丁/旧判定复用到不同请求——第 2 条响应此时才被消耗。
+    rec_json = json.loads(cache_file.read_text(encoding="utf-8"))
+    rec_json["req_sha256"] = "0" * 64
+    cache_file.write_text(json.dumps(rec_json), encoding="utf-8")
+    (wd / "telemetry.json").unlink()
+    (wd / "fix.txt").write_text("NEEDS_FIX", encoding="utf-8")
+    runner3 = AgentRunner(gw, FakeVector(), evidence_root=ev_root,
+                          call_cache=cache)
+    rec3 = runner3.run(_real_cmd_spec(thread, wd, run_idx=1))
+    assert rec3["status"] == "ok"
+    assert len(gw.calls) == 2 and len(billing_entries) == 2
+    # miss 重呼重写 req/resp 证据（mtime 前进），随后以新指纹重新落缓存
+    for p, (blob, mt) in frozen.items():
+        assert p.stat().st_mtime_ns > mt, f"{p.name} miss 重呼未重写证据"
+    rec_after = json.loads(cache_file.read_text(encoding="utf-8"))
+    assert rec_after["req_sha256"] != "0" * 64
+
+
+def stat_mode(p: Path) -> int:
+    return p.stat().st_mode & 0o777

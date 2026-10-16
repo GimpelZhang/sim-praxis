@@ -362,6 +362,22 @@ def write_summary(out: Path, root: Path, checks: dict, recs: list,
     ctrl_path = root / "control" / "analysis" / "invariance_checks.json"
     z_ctrl = json.loads(ctrl_path.read_text(encoding="utf-8"))[
         "geo_count_z_vs_clear"] if ctrl_path.is_file() else None
+    # L-10：本批次未跑 --control-all-clear（阴性对照缺采）时显式缺省，
+    # 绝不用主实验 z 冒充对照、绝不伪造 z 值；下面所有 z_ctrl 引用均走本分支。
+    if z_ctrl is not None:
+        ctrl_line = (
+            "- 阴性对照（三段物理上全部下发 clear，仅段位置不同）z = "
+            f"{z_ctrl['rain_hard']:+.2f} / {z_ctrl['fog_dense']:+.2f}，"
+            "与真实天气实验同号同量级——漂移在无天气时复现，证伪天气因果。")
+        ctrl_evidence_line = (
+            "- 阴性对照：control/ 目录（三段全 clear，1 重复 10 帧），分析于 control/analysis/。")
+        ctrl_scope = "（三重复+阴性对照）"
+    else:
+        ctrl_line = (
+            "- 阴性对照：未采集（本批次不做天气因果证伪）；"
+            "段位置伪相关解释仅有跨进程重复侧证，结论不做天气因果断言，待补对照批次。")
+        ctrl_evidence_line = "- 阴性对照：未采集（无 control/ 目录；补跑需 --control-all-clear）。"
+        ctrl_scope = "（三重复）"
     lines = [
         "# Task8 Q2 — Carla 0.10.0 固态式 LiDAR 雨雪雾实验报告",
         "",
@@ -386,9 +402,7 @@ def write_summary(out: Path, root: Path, checks: dict, recs: list,
         f"{checks['geo_count_preset_stats']['fog_dense']['std']:.0f}"
         "（30 帧/预设）；跨天气 z = "
         f"{z['rain_hard']:+.2f} / {z['fog_dense']:+.2f}（以预设内帧间抖动为池，|z|≈1）。",
-        f"- 阴性对照（三段物理上全部下发 clear，仅段位置不同）z = "
-        f"{z_ctrl['rain_hard']:+.2f} / {z_ctrl['fog_dense']:+.2f}，"
-        "与真实天气实验同号同量级——漂移在无天气时复现，证伪天气因果。",
+        ctrl_line,
         f"- 共有坐标点的 intensity 逐点恒等："
         f"{checks['survivor_intensity_identity'][0]['preset']} max|ΔI|="
         f"{checks['survivor_intensity_identity'][0]['max_abs_dI']:.2e}，"
@@ -427,8 +441,8 @@ def write_summary(out: Path, root: Path, checks: dict, recs: list,
         "",
         "## 5. 复现与证据",
         f"- 服务端：{meta.get('server_version')}，map={meta.get('map')}，"
-        f"车辆 {meta.get('vehicle')}；采集用时 {_collect_wall(root)}（三重复+阴性对照）。",
-        "- 阴性对照：control/ 目录（三段全 clear，1 重复 10 帧），分析于 control/analysis/。",
+        f"车辆 {meta.get('vehicle')}；采集用时 {_collect_wall(root)}{ctrl_scope}。",
+        ctrl_evidence_line,
         "- 镜像 32.6 GB、拉取 1103 s（见 ../pull_result.txt）；拉取前后 df、本实验前后 df 已入证据。",
         "- 文件：native_frames.csv / native_per_tag.csv / invariance_checks.json /",
         "  optics_sweep.csv / fig_native_invariance.png / fig_optics_mechanism.png /",

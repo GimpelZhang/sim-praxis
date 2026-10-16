@@ -132,37 +132,46 @@ class OpticsParams:
     wet_factor: dict = field(default_factory=lambda: dict(WET_FACTOR))
 
 
-def _exp_dsd_integrals(n0: float, lam: float) -> tuple[float, float]:
+def _exp_dsd_integrals(n0: float, lam: float, *,
+                       qback: float = QBACK_DEFAULT) -> tuple[float, float]:
     """指数滴谱 N(D)=N0 e^-ΛD 的截面积分（D 以 mm，N 以 mm^-1·m^-3）。
 
     ∫₀∞ D² e^-ΛD dD = 2/Λ³；返回 (消光系数, 后向散射系数)，单位 1/m。
     截面 πD²/4 以 mm² 计 → ×1e-6 转 m²。
+
+    L-9：qback（大球后向散射效率）此前是 OpticsParams 上的零消费字段；
+    现显式穿到积分里，默认 QBACK_DEFAULT 保证数值与历史结果逐位一致。
+    alpha 只依赖 QEXT_LARGE_SPHERE（消光悖论 =2），不受 qback 影响。
     """
     d2 = 2.0 / lam ** 3
     cross_m2_sum = (math.pi / 4.0) * n0 * d2 * 1e-6
     alpha = QEXT_LARGE_SPHERE * cross_m2_sum
-    beta = QBACK_DEFAULT * cross_m2_sum
+    beta = qback * cross_m2_sum
     return alpha, beta
 
 
-def extinction_coefficients(w: WeatherSpec) -> dict:
+def extinction_coefficients(w: WeatherSpec, *,
+                            qback: float = QBACK_DEFAULT) -> dict:
     """返回 {'alpha': 单程消光 1/m, 'beta_pi': 后向散射 1/(m·sr) 近似,
-    'source': 溯源标签}。clear 时严格为 0（恒等模型，测试可断言）。"""
+    'source': 溯源标签}。clear 时严格为 0（恒等模型，测试可断言）。
+
+    L-9：qback 关键字参数由 apply_optics 从 OpticsParams.qback 透传；
+    默认 QBACK_DEFAULT，alpha（消光通道）任何取值下都不变。"""
     if w.kind == "clear":
         return {"alpha": 0.0, "beta_pi": 0.0, "source": "clear"}
     if w.kind == "rain":
         lam = RAIN_LAMBDA_K * w.rate_mmh ** RAIN_LAMBDA_EXP
-        a, b = _exp_dsd_integrals(RAIN_N0, lam)
+        a, b = _exp_dsd_integrals(RAIN_N0, lam, qback=qback)
         return {"alpha": a, "beta_pi": b,
                 "source": "Marshall-Palmer(1948), Λ=4.1R^-0.21"}
     if w.kind == "snow":
         lam = SNOW_LAMBDA_K * w.rate_mmh ** SNOW_LAMBDA_EXP
-        a, b = _exp_dsd_integrals(SNOW_N0, lam)
+        a, b = _exp_dsd_integrals(SNOW_N0, lam, qback=qback)
         return {"alpha": a, "beta_pi": b,
                 "source": "Gunn-Marshall(1958), Λ=2.29S^-0.45"}
     # fog：能见度反演
     a = FOG_LAMBDA_RATIO_905 * KOSCHMIEDER_K / w.visibility_m
-    return {"alpha": a, "beta_pi": a * QBACK_DEFAULT / QEXT_LARGE_SPHERE,
+    return {"alpha": a, "beta_pi": a * qback / QEXT_LARGE_SPHERE,
             "source": "Koschmieder(1924), α=3.912/V @905nm≈550nm"}
 
 
@@ -188,7 +197,9 @@ def apply_optics(points: np.ndarray, intensity: np.ndarray,
     pts = np.asarray(points, dtype=np.float64)
     inten = np.asarray(intensity, dtype=np.float64)
     n = len(pts)
-    coeff = extinction_coefficients(weather)
+    # L-9：积分实际消费 OpticsParams.qback（此前该字段零消费）；默认值
+    # QBACK_DEFAULT，默认参数下天气注入与历史批次数值逐位一致，alpha 不变。
+    coeff = extinction_coefficients(weather, qback=p.qback)
     alpha, beta = coeff["alpha"], coeff["beta_pi"]
 
     o = np.zeros(3) if origin is None else np.asarray(origin, dtype=np.float64)

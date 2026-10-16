@@ -62,6 +62,14 @@ def _fix_actions(state: dict) -> str:
     return "\n".join(lines)
 
 
+def _last_event(state: dict, event_type: str) -> dict | None:
+    """取事件流中最后一个指定类型事件（失败归类看最近一次信号）。"""
+    for ev in reversed(state.get("events", []) or []):
+        if isinstance(ev, dict) and ev.get("type") == event_type:
+            return ev
+    return None
+
+
 def _rel_evidence(store: LearningStore, abs_path: str) -> str:
     """证据路径换算委托 store：phase1/runs 双根（Task7 §1.8），无证据不写。"""
     try:
@@ -70,8 +78,13 @@ def _rel_evidence(store: LearningStore, abs_path: str) -> str:
         raise GraphStateError(f"学习证据换算被拒：{exc}") from exc
 
 
-def _rung_from_metrics(metrics: dict) -> int:
-    """从评测结果取实际判定到的最高 rung（不臆造：rungs 全缺即 GraphStateError）。"""
+def _rung_from_metrics(metrics: dict) -> "tuple[int, str | None]":
+    """从评测结果取实际判定到的最高 rung（不臆造：rungs 全缺即 GraphStateError）。
+
+    L-5：rung=4 仅当 Rung4 ``mode=="active"`` 且 status ok——record_only /
+    uncalibrated 的视觉意见不具自动升级效力（D8：Rung4 永不单独放行），
+    此时封顶 3，并返回 mode 供接缝在回写摘要上做注记。
+    """
     rungs = metrics.get("rungs") if isinstance(metrics, dict) else None
     if not isinstance(rungs, dict):
         raise GraphStateError("persist：metrics 缺 rungs 结构，无法确定 rung")
@@ -80,11 +93,34 @@ def _rung_from_metrics(metrics: dict) -> int:
         if rungs.get(f"rung{i}") is not None:
             rule = i
     r4 = metrics.get("rung4")
-    if isinstance(r4, dict) and r4.get("status") == "ok":
-        rule = 4
+    r4_mode: "str | None" = None
+    if isinstance(r4, dict):
+        mode = r4.get("mode")
+        if mode == "active" and r4.get("status") == "ok":
+            rule = 4
+        elif mode in ("record_only", "uncalibrated"):
+            # 视觉已跑/未标定但无自动升级效力：规则层最高 3，附 mode 注记。
+            r4_mode = str(mode)
     if rule == 0:
         raise GraphStateError("persist：metrics.rungs 无任何已判定层级")
-    return rule
+    return rule, r4_mode
+
+
+def classify_failure_stage(state: dict) -> str:
+    """L-2：节点外异常（GraphStateError/KeyError/JSONDecodeError，含 evaluate
+    接缝抛出者）归一到学习通道既有的 gate_source。
+
+    学习表 gate_source 白名单只有 agent_run/gate1/gate2（learning_store 钉死，
+    不在本 lane 修改）：evaluate/state 协议异常按 agent_run 失败归类，精确
+    异常阶段由 reason 文案携带（CLI 侧拼接），不新增白名单值。
+    """
+    if _last_event(state, "agent_run_failed"):
+        return "agent_run"
+    if _last_event(state, "gate1_hard_failure"):
+        return "gate1"
+    if _last_event(state, "gate2_hard_failure"):
+        return "gate2"
+    return "agent_run"
 
 
 def _accept_entry(state: dict, store: LearningStore) -> dict[str, Any]:
@@ -98,10 +134,11 @@ def _accept_entry(state: dict, store: LearningStore) -> dict[str, Any]:
         raise GraphStateError("persist：state 缺 metrics（Gate2 验收依据）")
     telemetry_uri = ok_runs[-1]["telemetry_uri"]
     notes = _human_notes(state)
-    return dict(
+    rung, r4_mode = _rung_from_metrics(metrics)
+    kwargs = dict(
         run_id=state["thread_id"],
         track=state["track"],
-        rung=_rung_from_metrics(metrics),
+        rung=rung,
         sim_engine=(state.get("chosen") or {}).get("sim_engine", ""),
         gate_source=GATE_ACCEPTED,
         evidence_relpath=_rel_evidence(store, telemetry_uri),
@@ -110,6 +147,7 @@ def _accept_entry(state: dict, store: LearningStore) -> dict[str, Any]:
         human_opinion=notes,
         effective=True,
     )
+    return kwargs, r4_mode
 
 
 def _failure_entry(state: dict, ctx: dict, store: LearningStore) -> dict[str, Any]:
@@ -147,14 +185,22 @@ def make_learning_seam(store: "LearningStore | None" = None) -> Seam:
             kind = "accept" if any(
                 ev.get("type") == "gate2_accepted"
                 for ev in state.get("events", [])) else "failure"
+        r4_mode: "str | None" = None
         if kind == "accept":
-            kwargs = _accept_entry(state, store)
+            kwargs, r4_mode = _accept_entry(state, store)
         elif kind == "failure":
             if "stage" not in ctx or "reason" not in ctx or "evidence" not in ctx:
                 raise GraphStateError("failure 学习回写缺 stage/reason/evidence")
             kwargs = _failure_entry(state, ctx, store)
         else:
             raise GraphStateError(f"未知 _learning.kind：{kind!r}")
-        return store.add_learning(**kwargs)
+        row = store.add_learning(**kwargs)
+        # L-5：learning_store 12 列 schema 冻结，非 active 的 Rung4 封顶 3 已落库；
+        # mode 信息只在返回摘要上做注记，供接缝/调用方可见，不写表。
+        if r4_mode is not None and isinstance(row, dict):
+            row["rung4_mode"] = r4_mode
+            row["rung4_note"] = (
+                f"Rung4 mode={r4_mode}：视觉意见无自动升级效力，rung 封顶 3")
+        return row
 
     return seam

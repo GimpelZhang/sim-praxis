@@ -32,6 +32,7 @@ from .gait_thresholds import (
     FALL_TILT_DEG,
     FALL_Z_M,
     MIN_SEEDS,
+    POSTPUSH_WINDOW_S,
     SLIP_DIST_REL_TOL,
     SLIP_V_MAX_MPS,
     TELEM_HZ,
@@ -53,6 +54,13 @@ ARTIFACTS = (
 )
 DT_FRAME = 1.0 / TELEM_HZ
 
+# rung2 CSV 对质实际消费的列（L-3：缺列→schema 错误；与生产脚本
+# genesis_humanoid_dr.py CSV_FIELDS 的子集对应）。
+CSV_REQUIRED_FIELDS = (
+    "run_id", "fell", "fall_frame", "torso_z_min",
+    "slip_vmax_R_mps", "slip_vmax_L_mps",
+)
+
 
 # ---------------------------------------------------------------------------
 # 结构校验
@@ -69,6 +77,48 @@ def _finite_leaves(data: Any, prefix: str = "") -> list[tuple[str, float]]:
     elif isinstance(data, (int, float)) and not isinstance(data, bool):
         out.append((prefix, float(data)))
     return out
+
+
+def _is_num(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+# rung2 对质实际消费的 outcomes 形状（L-3：缺键/坏形状在此转 schema 错误，
+# 不允许裸 KeyError 逃出 evaluate_batch；生产脚本 genesis_humanoid_dr.py
+# 的 outcomes 块是该形状的唯一生产来源）。
+_OUTCOME_FEET_NUMERIC = ("slip_dist_m", "slip_v_max_mps",
+                         "slip_v_max_postpush_mps", "contact_force_peak_N")
+
+
+def _validate_outcomes_shape(out: dict, run_id: str) -> list[str]:
+    errs: list[str] = []
+    if not isinstance(out.get("fell"), bool):
+        errs.append(f"{run_id}: outcomes.fell 必须是布尔")
+    ff = out.get("fall_frame")
+    if ff is not None and (not isinstance(ff, int) or isinstance(ff, bool)
+                           or ff < 0):
+        errs.append(f"{run_id}: outcomes.fall_frame 必须是 null 或非负整数")
+    for k in ("torso_z_min", "tilt_max_deg"):
+        if not _is_num(out.get(k)):
+            errs.append(f"{run_id}: outcomes.{k} 必须是数值")
+    for k in _OUTCOME_FEET_NUMERIC:
+        d = out.get(k)
+        if not isinstance(d, dict):
+            errs.append(f"{run_id}: outcomes.{k} 必须是 {{R,L}} 对象")
+            continue
+        for foot in ("R", "L"):
+            if not _is_num(d.get(foot)):
+                errs.append(f"{run_id}: outcomes.{k}.{foot} 必须是数值")
+    cf = out.get("contact_frames")
+    if not isinstance(cf, dict):
+        errs.append(f"{run_id}: outcomes.contact_frames 必须是 {R,L} 对象")
+    else:
+        for foot in ("R", "L"):
+            v = cf.get(foot)
+            if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                errs.append(
+                    f"{run_id}: outcomes.contact_frames.{foot} 必须是非负整数")
+    return errs
 
 
 def validate_telemetry_structure(data: Any, run_id: str) -> list[str]:
@@ -114,6 +164,8 @@ def validate_telemetry_structure(data: Any, run_id: str) -> list[str]:
     out = data.get("outcomes")
     if not isinstance(out, dict):
         errs.append(f"{run_id}: 缺 outcomes 块")
+    else:
+        errs.extend(_validate_outcomes_shape(out, run_id))
     params = data.get("params")
     if not isinstance(params, dict) or params.get("arm") not in ARMS:
         errs.append(f"{run_id}: params.arm 必须属于 {ARMS}")
@@ -142,10 +194,14 @@ def recompute_run(data: dict) -> dict:
     for foot in ("R", "L"):
         force = s[f"contact_force_{foot}"]
         slip = s[f"slip_v_{foot}"]
-        slip_dist = sum(v * dt for f, v in zip(force, slip)
+        # 滑移距离 = Σ|v_xy|·dt（接触帧）：生产脚本的 vxy 是水平面速度向量
+        # 的范数（恒 ≥0），故对真实 telemetry 数值结论零变化；abs 只把文档
+        # 口径（Σ|v_xy|·dt）落实成代码，防止带符号 slip 被正负抵消（L-13）。
+        slip_dist = sum(abs(v) * dt for f, v in zip(force, slip)
                         if f > CONTACT_FORCE_N)
+        # 推后方窗与生产脚本/标定件 v2 共用 POSTPUSH_WINDOW_S（L-8）。
         in_win = [v for tt, v in zip(t, slip)
-                  if push_t <= tt < push_t + 2.5]
+                  if push_t <= tt < push_t + POSTPUSH_WINDOW_S]
         per_foot[foot] = {
             "slip_dist_m": round(slip_dist, 4),
             "slip_vmax_mps": round(max(slip), 3),
@@ -243,7 +299,9 @@ def _close(a: float, b: float, rel: float, abs_tol: float) -> bool:
 
 def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict]) -> dict:
     diffs: list[dict] = []
-    csv_by_id = {r["run_id"]: r for r in csv_rows}
+    # L-3：缺列在 load_batch 已转 schema 错误短路；这里 row.get 只是第二道
+    # 防线，保证直接调用 rung2_check 也不会抛裸 KeyError。
+    csv_by_id = {r.get("run_id"): r for r in csv_rows if r.get("run_id")}
     for run_id, data in telemetries.items():
         rec = recompute_run(data)
         o = data["outcomes"]
@@ -291,18 +349,30 @@ def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict]) -> dict:
         if row is None:
             d["csv_row"] = "缺失"
         else:
-            if int(row["fell"]) != int(o["fell"]) \
-                    or _csv_blank(row["fall_frame"]) != (o["fall_frame"] is None):
-                d["csv_fell"] = {"csv": (row["fell"], row["fall_frame"]),
+            # 缺列已在 load_batch 转 schema 错误；row.get 防直接调用裸 KeyError。
+            csv_fell, csv_ff = row.get("fell"), row.get("fall_frame")
+            if (csv_fell is None or csv_ff is None
+                    or int(csv_fell) != int(o["fell"])
+                    or _csv_blank(csv_ff) != (o["fall_frame"] is None)):
+                d["csv_fell"] = {"csv": (csv_fell, csv_ff),
                                  "telemetry": (o["fell"], o["fall_frame"])}
-            if not _close(float(row["torso_z_min"]), o["torso_z_min"], 1e-3, 0):
-                d["csv_torso_z_min"] = {"csv": row["torso_z_min"],
+            csv_tz = row.get("torso_z_min")
+            if csv_tz is None:
+                d["csv_torso_z_min"] = {"csv": "缺列",
+                                        "telemetry": o["torso_z_min"]}
+            elif not _close(float(csv_tz), o["torso_z_min"], 1e-3, 0):
+                d["csv_torso_z_min"] = {"csv": csv_tz,
                                         "telemetry": o["torso_z_min"]}
             for foot in ("R", "L"):
-                if not _close(float(row[f"slip_vmax_{foot}_mps"]),
-                              o["slip_v_max_mps"][foot], 1e-3, 0):
+                csv_v = row.get(f"slip_vmax_{foot}_mps")
+                if csv_v is None:
                     d[f"csv_slip_vmax_{foot}"] = {
-                        "csv": row[f"slip_vmax_{foot}_mps"],
+                        "csv": "缺列",
+                        "telemetry": o["slip_v_max_mps"][foot]}
+                elif not _close(float(csv_v),
+                                o["slip_v_max_mps"][foot], 1e-3, 0):
+                    d[f"csv_slip_vmax_{foot}"] = {
+                        "csv": csv_v,
                         "telemetry": o["slip_v_max_mps"][foot]}
         if len(d) > 1:
             diffs.append(d)
@@ -462,8 +532,15 @@ def load_batch(workdir: str | Path) -> tuple[dict[str, dict], list[dict],
     rows: list[dict] = []
     with open(wd / "dr_controls_vs_experimental.csv", newline="",
               encoding="utf-8") as fh:
-        rows = list(csv.DictReader(line for line in fh
-                                   if not line.startswith("#")))
+        reader = csv.DictReader(line for line in fh
+                                if not line.startswith("#"))
+        rows = list(reader)
+        header = set(reader.fieldnames or [])
+    # L-3：CSV 缺列转 schema 错误（evaluate_batch 在发任何视觉调用前短路），
+    # 而不是让 rung2 的 row[...] 抛裸 KeyError。
+    missing_cols = [c for c in CSV_REQUIRED_FIELDS if c not in header]
+    if missing_cols:
+        errs.append(f"dr_controls_vs_experimental.csv 缺列：{missing_cols}")
     return telemetries, rows, summary, errs
 
 

@@ -22,23 +22,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from memory_flywheel.phase1.learning_store import LearningStore
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.validators import validate_batch_id, validate_thread_id
 from orchestrator.direction.inputs import get_input
 from orchestrator.direction.setter import DirectionSetter
 from orchestrator.gateway.quota_ledger import QuotaLedger, billing_context
 from orchestrator.gateway.router import ModelGateway
-from orchestrator.graph.learning import make_learning_seam
+from orchestrator.graph.learning import classify_failure_stage, make_learning_seam
 from orchestrator.graph.nodes import (
     GraphDeps,
+    GraphStateError,
     build_graph,
+    close_graph_failure,
     initial_state,
 )
 from orchestrator.graph.state import graph_db_path, phase1_root
@@ -48,12 +53,155 @@ RECURSION_LIMIT = 25  # 契约 L487
 TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 stage 批次）
 TASK8 = 8             # Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）
 
+# H-2/C1：Gate2 卡片 30s 截窗（飞书侧视频大小/可看性约束）；纯函数
+# compute_gate2_trim 决定窗口，request_gate2_approval 的 trim 形参由
+# feishu_gateway（HITL lane）实现，本模块只按 C1 传参。
+GATE2_TRIM_SECONDS = 30.0
+
+# L-2：节点外协议异常（含 task7/8 evaluate 接缝主动抛的 GraphStateError、
+# telemetry/状态缺键的 KeyError、JSON 解码错误）一律归一 human_failure 结案。
+# GatewayPausedError（含其子类 CodingLimitError）刻意不在元组内：预算熔断
+# 必须原样上抛交回配额处置，严禁被包装成 agent 失败而落 rung=0 学习。
+_CLOSURE_EXC = (GraphStateError, KeyError, json.JSONDecodeError)
+
 
 def _last_event(state: dict, kind: str) -> "dict | None":
     for ev in reversed(state.get("events", [])):
         if ev.get("type") == kind:
             return ev
     return None
+
+
+# ---------------------------------------------------------------------------
+# H-2/C1：Gate2 30s 截窗（纯函数；只允许本地 ffprobe 探测，不发网）
+# ---------------------------------------------------------------------------
+
+def _is_pos_num(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0
+
+
+def _ffprobe_duration_s(video_path: Any) -> "float | None":
+    """本地 ffprobe 取片长（秒）；无 ffprobe/非本地文件/探测失败一律 None。"""
+    if not video_path or not shutil.which("ffprobe"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", str(video_path)],
+            capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        data = json.loads(proc.stdout or "{}")
+        return float(data["format"]["duration"])
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _task7_contact_and_duration(
+        rec: dict, state: dict) -> "tuple[float | None, float | None]":
+    """从 telemetry/manifest 取 (首次有效接触时刻 s, telemetry 侧片长 s)。
+
+    接触时刻 = contact_active 首个 true 帧下标 / fps；fps 优先级：
+    manifest.frame_dt_s → manifest.n_frames/duration_ms → telemetry.dt。
+    """
+    uri = rec.get("telemetry_uri") or state.get("telemetry_uri")
+    if not uri:
+        return None, None
+    tele_path = Path(uri)
+    if not tele_path.is_file():
+        return None, None
+    try:
+        data = json.loads(tele_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    contact_idx = None
+    contact_active = data.get("contact_active")
+    if isinstance(contact_active, list):
+        contact_idx = next(
+            (i for i, v in enumerate(contact_active) if v is True), None)
+
+    manifest: dict[str, Any] = {}
+    mp = tele_path.parent / "manifest.json"
+    try:
+        loaded = json.loads(mp.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            manifest = loaded
+    except (OSError, json.JSONDecodeError):
+        manifest = {}
+
+    fps: "float | None" = None
+    frame_dt = manifest.get("frame_dt_s")
+    n_frames = manifest.get("n_frames")
+    manifest_dur_ms = manifest.get("duration_ms")
+    if _is_pos_num(frame_dt):
+        fps = 1.0 / float(frame_dt)
+    elif isinstance(n_frames, int) and not isinstance(n_frames, bool) \
+            and n_frames > 0 and _is_pos_num(manifest_dur_ms):
+        fps = n_frames * 1000.0 / float(manifest_dur_ms)
+    elif _is_pos_num(data.get("dt")):
+        fps = 1.0 / float(data["dt"])
+
+    tel_duration = None
+    if isinstance(n_frames, int) and not isinstance(n_frames, bool) \
+            and n_frames > 0 and fps:
+        tel_duration = n_frames / fps
+    contact_moment_s = contact_idx / fps \
+        if contact_idx is not None and fps else None
+    return contact_moment_s, tel_duration
+
+
+def compute_gate2_trim(task: int, state: dict,
+                       rec: "dict | None") -> "dict | None":
+    """算 Gate2 视频 30s 截窗（纯函数，H-2）。
+
+    返回精确 4 键：trim_start/trim_seconds/contact_moment_s/source_duration_s；
+    不截窗（源片 ≤30s 或时长不可判定）返回 None。
+    - Task7：以首次有效接触为中心取窗，边界夹紧 [0, duration−30]；接触缺失
+      从 0 起；时长优先 ffprobe，否则 rec.duration_ms，再否则 manifest 推算。
+    - Task8：batch 双分屏无单一接触时刻，contact_moment_s=None、从头截。
+    """
+    rec = rec or {}
+    contact_moment_s: "float | None" = None
+    source_duration_s: "float | None" = None
+    trim_start = 0.0
+
+    if task == TASK7:
+        contact_moment_s, tel_duration = _task7_contact_and_duration(rec, state)
+        source_duration_s = _ffprobe_duration_s(rec.get("video_path"))
+        if source_duration_s is None and _is_pos_num(rec.get("duration_ms")):
+            source_duration_s = float(rec["duration_ms"]) / 1000.0
+        if source_duration_s is None and tel_duration is not None:
+            source_duration_s = tel_duration
+        # 时长完全不可判定时不截窗（无法保证窗口落在片内）。
+        if source_duration_s is None:
+            return None
+        if contact_moment_s is not None:
+            upper = max(0.0, source_duration_s - GATE2_TRIM_SECONDS)
+            trim_start = min(
+                max(contact_moment_s - GATE2_TRIM_SECONDS / 2.0, 0.0), upper)
+    elif task == TASK8:
+        source_duration_s = _ffprobe_duration_s(rec.get("video_path"))
+        if source_duration_s is None and _is_pos_num(rec.get("duration_ms")):
+            source_duration_s = float(rec["duration_ms"]) / 1000.0
+        trim_start = 0.0
+    else:
+        return None
+
+    if source_duration_s is not None and source_duration_s <= GATE2_TRIM_SECONDS:
+        return None
+    return {
+        "trim_start": float(trim_start),
+        "trim_seconds": float(GATE2_TRIM_SECONDS),
+        "contact_moment_s": (float(contact_moment_s)
+                             if contact_moment_s is not None else None),
+        "source_duration_s": (float(source_duration_s)
+                              if source_duration_s is not None else None),
+    }
 
 
 @contextmanager
@@ -112,13 +260,17 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
         elif args.task == TASK8:
             from orchestrator.graph.task8 import build_gate2_explanation
             explanation = build_gate2_explanation(state, rec)
+        # H-2/C1：30s 截窗参数由本侧纯函数算定；trim 形参由 feishu_gateway
+        # （HITL lane）按 C1 接收（≤30s 短片/时长不可判时为 None=不截）。
+        trim = compute_gate2_trim(args.task, state, rec)
         return feishu.request_gate2_approval(
             thread, title, state["metrics"],
             video_path=rec.get("video_path"),
             intranet_url=rec.get("intranet_url"),
             duration_ms=rec.get("duration_ms"),
             cover_png=rec.get("cover_png"),
-            explanation=explanation)
+            explanation=explanation,
+            trim=trim)
 
     # Task6：学习回写走同库独立新表 phase1_learnings（mpnet 768 复用，0 付费）
     learning = make_learning_seam(LearningStore())
@@ -175,21 +327,52 @@ def _invoke(args: argparse.Namespace, resume: bool) -> int:
     # config（Pregel 在 config 内读取），两分支都不得再以 kwarg 传入。
     config = {"configurable": {"thread_id": args.thread},
               "recursion_limit": RECURSION_LIMIT}
+    closure_exc: "BaseException | None" = None
+    closure_state: "dict | None" = None
+    closure_next: str = ""
     try:
         # direction（macro_ideation）在此外层账套内；Task7 的 coding/visual
         # 接缝内部各自开 task=7 的账套（ContextVar 进入重置、退出恢复外层）。
         with billing_context(task=args.task, batch_id=args.batch_id,
                              thread_id=args.thread):
             with _compiled(deps) as graph:
-                if resume:
-                    final = graph.invoke(None, config=config)
-                else:
-                    final = graph.invoke(
-                        initial_state(thread_id=args.thread, track=args.track,
-                                      question=args.question or ""),
-                        config=config)
+                try:
+                    if resume:
+                        final = graph.invoke(None, config=config)
+                    else:
+                        final = graph.invoke(
+                            initial_state(thread_id=args.thread,
+                                          track=args.track,
+                                          question=args.question or ""),
+                            config=config)
+                except _CLOSURE_EXC as exc:
+                    # L-2：不重发任何卡片——从最后一个超步检查点取状态，归一为
+                    # human_failure 结案（图级 FAILURE.json + rung=0 学习）。
+                    # GatewayPausedError/CodingLimitError 不在 _CLOSURE_EXC，
+                    # 从此处原样穿透（feishu.close 仍在 finally 执行）。
+                    snapshot = graph.get_state(config)
+                    values = snapshot.values if snapshot is not None \
+                        and isinstance(snapshot.values, dict) else {}
+                    closure_state = values
+                    closure_exc = exc
+                    if snapshot is not None and snapshot.next:
+                        closure_next = ",".join(map(str, snapshot.next))
     finally:
         feishu.close()
+
+    if closure_exc is not None:
+        base = initial_state(thread_id=args.thread, track=args.track,
+                             question=args.question or "")
+        state = {**base, **(closure_state or {})}
+        stage = classify_failure_stage(state)
+        node_hint = f"（异常时待执行节点：{closure_next}）" if closure_next else ""
+        reason = (f"[{type(closure_exc).__name__}] 节点外协议异常{node_hint}，"
+                  f"按 {stage} 失败结案：{closure_exc}")
+        update = close_graph_failure(
+            state, deps, stage=stage, reason=reason,
+            error_type=type(closure_exc).__name__)
+        final = {**state,
+                 "events": list(state.get("events", [])) + update["events"]}
 
     kinds = [ev.get("type") for ev in final.get("events", [])]
     print(json.dumps({"thread_id": args.thread, "events": kinds,
@@ -252,6 +435,21 @@ def main(argv: "list[str] | None" = None) -> int:
     p_topo.set_defaults(func=_topology)
 
     args = ap.parse_args(argv)
+    # C4：线程/批次 ID 在 CLI 边界先验（只允许 1-64 位 [A-Za-z0-9_-]），
+    # 非法值直接退出 2，不进账套、不构网关、不建 run 目录。
+    if args.cmd in ("run", "resume"):
+        try:
+            validate_thread_id(args.thread)
+            validate_batch_id(args.batch_id, what="batch_id(macro_ideation)")
+            if args.coding_batch_id:
+                validate_batch_id(args.coding_batch_id,
+                                  what="coding_batch_id")
+            if args.visual_batch_id:
+                validate_batch_id(args.visual_batch_id,
+                                  what="visual_batch_id")
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     return args.func(args)
 
 

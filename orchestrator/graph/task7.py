@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from orchestrator.agent_runner.runner import RunSpec, agent_run_seam
+from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -121,6 +122,10 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             raise GraphStateError(
                 f"Task7 场景模板不存在：{template}（引擎 {engine} 探针/脚本未就位）")
 
+        # L-12 编号钉死（两阶段索引关系，禁止改号）：工厂在 agent_runs 追加
+        # 之前预占序号 len(agent_runs)+1；evaluate 接缝在追加之后用
+        # len(agent_runs) 复核（见 make_evaluate_seam 注释）——同一 run 两处
+        # 同号（首个 run 都是 r1）。run_id/证据文件名/callcache key 以此为准。
         run_idx = len(state.get("agent_runs", [])) + 1
         workdir = task7_run_dir(thread_id, run_idx)
 
@@ -136,6 +141,7 @@ def make_spec_factory(thread_id: str, coding_batch: str,
 
         ev = _last_event(state, "gate2_rejected")
         notes = ev["human_notes"] if ev else None
+        # 与 --run-id、证据 stem、callcache key task7_rung4_{run_id} 同一字符串。
         run_id = f"{thread_id}-r{run_idx}"
         env_extra = {
             # SAPIEN PhysX GPU 库按 ~/.sapien/physx 下载（无 env 覆盖，只认 HOME）：
@@ -153,6 +159,7 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             cmd=[VENV_PY, str(target), "--out-dir", str(workdir),
                  "--run-id", run_id],
             telemetry_relpath=TELEMETRY_NAME,
+            run_idx=run_idx,             # L-1：coding 重放 key 稳定序号
             batch_id=coding_batch,
             billing_task=TASK,
             gate2_notes=notes,
@@ -190,28 +197,61 @@ class _VisualEvidenceGateway:
 
     对外只暴露 call_visual/model_id（judge 仅需这两个）。req 证据在实呼前
     落盘并记到 self.req_ref，供接缝把 raw_text_ref 补戳进 Rung4Result。
+
+    L-1 调用级幂等：实呼前按稳定 key task7_rung4_{run_id} + 请求指纹查
+    CallReplay。命中直接返回缓存 raw/usage——不发网、不进 billing_context、
+    不写 ledger、不重写 req/resp 证据（首调 req 仍在盘上，req_ref 用同一
+    确定性证据引用补戳）；未命中才实呼，成功后才 put。L-7：实呼异常在
+    except 内补脱敏失败 resp（先例 gait_calibrate.py），随后原样抛出，
+    异常路径绝不写缓存。
     """
 
+    KIND = "task7_real_rollout_rung4"
+    REF_PREFIX = "phase1/task7_track1/evidence"
+
     def __init__(self, gateway, *, thread: str, run_id: str, batch_id: str,
-                 collage_path: str):
+                 collage_path: str, cache: "CallReplay | None" = None,
+                 cache_key: "str | None" = None):
         self._g = gateway
         self._thread = thread
         self._run_id = run_id
         self._batch = batch_id
         self._collage = collage_path
+        self._cache = cache
+        self._cache_key = cache_key
         self.req_ref: "str | None" = None
 
     def model_id(self, stage: str) -> str:
         return self._g.model_id(stage)
 
+    @staticmethod
+    def _usage_ints(usage: Any) -> "tuple[int, int] | None":
+        if (isinstance(usage, (list, tuple)) and len(usage) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0 for v in usage)):
+            return int(usage[0]), int(usage[1])
+        return None
+
     def call_visual(self, prompt: str, image_b64: str, **kwargs):
         stem = f"rung4_{self._run_id}"
+        fp = request_fingerprint(prompt, image_b64, dict(kwargs))
+        if self._cache is not None and self._cache_key is not None:
+            hit = self._cache.get(self._cache_key, fp)
+        else:
+            hit = None
+        if hit is not None:
+            # 重放命中：零付费、零证据写；req_ref 与首调确定性同名，保证
+            # raw_text_ref 补戳结果与首调逐字一致。
+            self.req_ref = f"{self.REF_PREFIX}/{stem}.req.json"
+            return hit["raw"], tuple(hit["usage"])
+
+        model = self._g.model_id("visual_rollout")
         req_ref = _write_evidence(stem, "req", {
             "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "stage": "visual_rollout",
-            "model": self._g.model_id("visual_rollout"),
+            "model": model,
             "thread_id": self._thread, "batch_id": self._batch,
-            "run_id": self._run_id, "kind": "task7_real_rollout_rung4",
+            "run_id": self._run_id, "kind": self.KIND,
             "collage_png": self._collage, "image_b64_len": len(image_b64),
             "max_tokens": kwargs.get("max_tokens", 512),
             "prompt": redact(prompt),
@@ -220,10 +260,22 @@ class _VisualEvidenceGateway:
         with billing_context(task=TASK, batch_id=self._batch,
                              thread_id=self._thread):
             set_current_evidence(req_ref)
-            raw, usage = self._g.call_visual(prompt, image_b64, **kwargs)
+            try:
+                raw, usage = self._g.call_visual(prompt, image_b64, **kwargs)
+            except Exception as exc:
+                # L-7：账行已由网关记账；补脱敏失败 resp 证据后原样抛出。
+                _write_evidence(stem, "resp",
+                                {"ok": False, "error": redact(str(exc))[:1000]})
+                raise
         _write_evidence(stem, "resp",
                         {"ok": True, "text": redact(raw),
                          "tokens_in": usage[0], "tokens_out": usage[1]})
+        # 成功（含证据落盘）后才入缓存；fake/无计量 usage 不入。
+        if self._cache is not None and self._cache_key is not None:
+            usage_ints = self._usage_ints(usage)
+            if usage_ints is not None:
+                self._cache.put(self._cache_key, kind=self.KIND, model=model,
+                                raw=raw, usage=usage_ints, fingerprint=fp)
         return raw, usage
 
 
@@ -247,6 +299,9 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
 
         runs = state.get("agent_runs", [])
         rec = runs[-1] if runs else {}
+        # L-12：evaluate 节点在 agent_run 追加之后运行，故这里 len(runs) 与
+        # 工厂预占的 len(agent_runs)+1 同号（首个 run 即 r1）；两阶段索引关系
+        # 钉死，禁止改号（run_id 同时进 --run-id/证据名/callcache key）。
         run_idx = len(runs)
         run_id = f"{thread_id}-r{run_idx}"
         video = rec.get("video_path")
@@ -267,9 +322,13 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
         os.chmod(collage_png, 0o600)
         image_b64 = collage_b64(chosen, labels)
 
+        # L-1：Rung4 实呼级重放缓存（0700 点目录，证据包不收录），key 按
+        # task7_rung4_{run_id}，kill-9 后整节点重放零二次付费。
+        call_cache = CallReplay(phase1_root() / ".call_cache")
         ev_gateway = _VisualEvidenceGateway(
             gateway, thread=thread_id, run_id=run_id, batch_id=visual_batch,
-            collage_path=str(collage_png))
+            collage_path=str(collage_png), cache=call_cache,
+            cache_key=f"task7_rung4_{run_id}")
         judge = Rung4Judge(ev_gateway)
         # uncalibrated 时 judge 内部不发网（Task5 闸门语义）；record_only 照实呼、
         # 卡片照显 items 但分歧标志强制清空。

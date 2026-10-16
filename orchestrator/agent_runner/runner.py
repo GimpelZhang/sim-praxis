@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.callcache import CallReplay, request_fingerprint
+from orchestrator.common.fsutil import chmod_keep_user_exec
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -73,6 +75,10 @@ class RunSpec:
     cmd: list[str]
     telemetry_relpath: str                 # 成功产物（相对 workdir）
     batch_id: str
+    # L-1：本 run 在 thread 内的稳定序号（与证据文件名 r{run_idx} 同一约定，
+    # 工厂用 len(agent_runs)+1 预占、接缝用 len(agent_runs) 复核，二者同号）。
+    # 仅当显式给出时启用调用级重放缓存；None（如 Task4 直连）不查不写缓存。
+    run_idx: Optional[int] = None
     billing_task: int = 4                  # Task7/8 联调时传 7/8（锁内适配 L506）
     gate2_notes: Optional[str] = None      # 图侧 gate2_rejected 事件注入
     env_extra: dict[str, str] = field(default_factory=dict)
@@ -237,7 +243,8 @@ def _apply_unified_diff(workdir: Path, diff_text: str) -> list[str]:
         result.extend(old_lines[cursor:])
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text("".join(result), encoding="utf-8")
-        os.chmod(target, 0o600)
+        # L-11：收敛到属主 rw，但保留补丁目标文件原有的属主执行位（0700 脚本）。
+        chmod_keep_user_exec(target)
         applied.append(str(target.relative_to(workdir.resolve())))
     return applied
 
@@ -256,7 +263,8 @@ def _apply_structured_patch(workdir: Path, patch: dict) -> str:
             f"old 块命中 {text.count(old)} 次（需恰好 1 次）：{rel}")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text.replace(old, new, 1), encoding="utf-8")
-    os.chmod(target, 0o600)
+    # L-11：0700/0755 可执行脚本补丁后保留属主执行位，不再被抹成 0600。
+    chmod_keep_user_exec(target)
     return str(target.relative_to(workdir.resolve()))
 
 
@@ -354,12 +362,35 @@ class AgentRunner:
     def __init__(self, gateway: ModelGateway, vector_engine: VectorEngine, *,
                  evidence_root: "Path | None" = None,
                  subprocess_runner: "SubprocessRunner | None" = None,
-                 evidence_writer: "Callable | None" = None):
+                 evidence_writer: "Callable | None" = None,
+                 call_cache: "CallReplay | None" = None):
         self.gateway = gateway
         self.vector_engine = vector_engine
         self._evidence_root = evidence_root
         self._run = subprocess_runner or _default_subprocess
         self._write_evidence = evidence_writer  # 测试注入：(root, stem, kind, payload)->ref
+        # L-1：None=调用方未注入；默认目录 phase1_root()/.call_cache 延迟到
+        # 首用（且 spec.run_idx 非 None）才建，避免 Task4 直连在 /mnt 留件。
+        self._call_cache: "Optional[CallReplay]" = call_cache
+
+    def _replay_cache(self, spec: "RunSpec") -> "Optional[CallReplay]":
+        """L-1：仅 run_idx 显式给出时启用（稳定 key coding_{t}_r{idx}_round{n}
+        的前提）；默认缓存目录延迟创建。run_idx=None 一律不查不写。"""
+        if spec.run_idx is None:
+            return None
+        if self._call_cache is None:
+            self._call_cache = CallReplay(phase1_root() / ".call_cache")
+        return self._call_cache
+
+    @staticmethod
+    def _usage_ints(usage: Any) -> "Optional[tuple[int, int]]":
+        """真实网关返回两个非负 int；fake/无计量网关可能给 (None, None)——
+        此类结果不入重放缓存（CallReplay.put 不接受非 int）。"""
+        if (isinstance(usage, (list, tuple)) and len(usage) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0 for v in usage)):
+            return int(usage[0]), int(usage[1])
+        return None
 
     def _root(self, spec: RunSpec) -> Path:
         if self._evidence_root is not None:
@@ -479,25 +510,45 @@ class AgentRunner:
             coding_calls += 1
             stem = f"coding_round{coding_calls}"
             model = self.gateway.model_id(STAGE)
-            req_ref = self._evidence(root, stem, "req", {
-                "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "stage": STAGE, "model": model,
-                "thread_id": spec.thread_id, "batch_id": spec.batch_id,
-                "coding_round": coding_calls, "gate2_notes_present":
-                    bool(spec.gate2_notes and spec.gate2_notes.strip()),
-                "messages": json.loads(redact(json.dumps(
-                    messages, ensure_ascii=False))),
-            })
-            # 锁内适配（计划 L501）：evidence 必须在 billing_context 进入之后
-            # 挂接——该上下文管理器每次创建新 BillingContext，提前 set 会被重置。
-            with billing_context(task=spec.billing_task, batch_id=spec.batch_id,
-                                 thread_id=spec.thread_id):
-                set_current_evidence(req_ref)
-                raw, _usage = self.gateway.call(
-                    STAGE, messages, max_tokens=MAX_TOKENS,
-                    temperature=TEMPERATURE)
-            self._evidence(root, stem, "resp",
-                           {"ok": True, "text": redact(raw)})
+            # L-1 调用级幂等：kill-9 落在实呼返回后、节点返回前，LangGraph
+            # 0.2.28 会整节点重放。稳定 key + 请求指纹命中即复用上次 raw，
+            # 不发网、不进 billing_context、不写 ledger，req/resp 证据不动；
+            # 补丁仍要重放应用（kill 可能落在补丁落盘前）。
+            cache = self._replay_cache(spec)
+            cache_key = (f"coding_{spec.thread_id}_r{spec.run_idx}"
+                         f"_round{coding_calls}")
+            fp = request_fingerprint(
+                json.dumps(messages, ensure_ascii=False, sort_keys=True),
+                None,
+                {"max_tokens": MAX_TOKENS, "temperature": TEMPERATURE})
+            cached = cache.get(cache_key, fp) if cache is not None else None
+            if cached is not None:
+                raw = cached["raw"]
+            else:
+                req_ref = self._evidence(root, stem, "req", {
+                    "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    "stage": STAGE, "model": model,
+                    "thread_id": spec.thread_id, "batch_id": spec.batch_id,
+                    "coding_round": coding_calls, "gate2_notes_present":
+                        bool(spec.gate2_notes and spec.gate2_notes.strip()),
+                    "messages": json.loads(redact(json.dumps(
+                        messages, ensure_ascii=False))),
+                })
+                # 锁内适配（计划 L501）：evidence 必须在 billing_context 进入之后
+                # 挂接——该上下文管理器每次创建新 BillingContext，提前 set 会被重置。
+                with billing_context(task=spec.billing_task, batch_id=spec.batch_id,
+                                     thread_id=spec.thread_id):
+                    set_current_evidence(req_ref)
+                    raw, _usage = self.gateway.call(
+                        STAGE, messages, max_tokens=MAX_TOKENS,
+                        temperature=TEMPERATURE)
+                self._evidence(root, stem, "resp",
+                               {"ok": True, "text": redact(raw)})
+                # 成功返回后才入缓存（异常路径不 put，按 miss 安全重付）。
+                usage_ints = self._usage_ints(_usage)
+                if cache is not None and usage_ints is not None:
+                    cache.put(cache_key, kind=STAGE, model=model, raw=raw,
+                              usage=usage_ints, fingerprint=fp)
             try:
                 applied = _parse_and_apply(workdir, raw)
             except PatchSafetyError as exc:
@@ -514,6 +565,18 @@ class AgentRunner:
 
     def _fail(self, root: Path, spec: RunSpec, timeline: list[dict],
               result: Optional[_ExecResult], *, reason: str) -> dict:
+        # L-4：失败结案被重放（kill 落在 FAILURE.json 落盘后、节点返回前）时，
+        # 保留首次写入的 ts_iso，时间线以首次失败时刻为准，不滚动成新时间戳。
+        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        existing_p = Path(spec.workdir) / FAILURE_JSON
+        if existing_p.is_file():
+            try:
+                old_ts = json.loads(existing_p.read_text(
+                    encoding="utf-8")).get("ts_iso")
+                if isinstance(old_ts, str) and old_ts.strip():
+                    ts_iso = old_ts
+            except (ValueError, OSError):
+                pass
         payload = {
             "status": "failed",
             "thread_id": spec.thread_id,
@@ -523,7 +586,7 @@ class AgentRunner:
             "last_rc": result.rc if result else None,
             "last_stderr_tail": _tb_tail(result)[-2000:] if result else "",
             "timeline": timeline,
-            "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "ts_iso": ts_iso,
         }
         p = Path(spec.workdir) / FAILURE_JSON
         p.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
