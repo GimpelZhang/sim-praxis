@@ -500,3 +500,17 @@ def test_h13_snapshot_missing_required_fatal(tmp_path, monkeypatch):
         bep._snapshot_sqlite(tmp_path / "nope.db",
                              tmp_path / "pack" / "nope.db",
                              "E1.5", True, "host", [])
+
+
+def test_h14_registered_in_repo_adaptations_ledger():
+    """H-14 偏差必须登记在仓内规范位置 docs/ADAPTATIONS.md（第一行数据）。"""
+    doc = _REPO / "docs" / "ADAPTATIONS.md"
+    assert doc.is_file(), "docs/ADAPTATIONS.md 缺失：偏差无规范登记位置"
+    text = doc.read_text(encoding="utf-8")
+    lines = [l for l in text.splitlines() if l.startswith("| 20")]
+    assert lines, "登记表无数据行"
+    assert "H-14" in lines[0], "H-14 必须是第一条登记"
+    assert "1_000_000" in lines[0] and "1024" in lines[0], (
+        "H-14 行须写明十进制口径与旧 1024² 口径")
+    # 证据包生成器指向仓内登记位置，两份清单不漂移失控
+    assert "docs/ADAPTATIONS.md" in bep.ADAPTATIONS

@@ -391,6 +391,9 @@ def _ledger_snapshot() -> dict:
 
 ADAPTATIONS = """# §1.8 证据树锁内适配（计划差异总表 #24：证据闭环替代假数据测试）
 
+> 仓内偏差规范登记位置：`docs/ADAPTATIONS.md`（日期/条目/计划原文/实际/理由，
+> 评审 H-11/H-12/H-13/H-14 已登记）；本表只列 §1.8 证据树的落点映射。
+
 | §1.8 名义件 | 实际落点 | 原因 |
 |---|---|---|
 | `task3_graph/graph_diagram.svg` | `task3_graph/topology.txt` + 仓内 `orchestrator/graph/topology.py::export_svg` | 生产拓扑文本导出已固化；SVG 渲染为可选视图，未生成不影响拓扑单测（test_graph 断言节点/边） |
