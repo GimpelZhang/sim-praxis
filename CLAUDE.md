@@ -3,7 +3,8 @@
 面向具身智能仿真工具链复现与面试题实证的自治智能体。本仓是 Product A（智能体系统）；
 Product B 知识库 `~/embodied-ai-sim-knowledge-base` **只读挂载**。Phase 0/1 均已全绿推送：
 Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 commits 至 `966fd00`）、
-评审 P1/P2 修复批次（2026-10-16 晚，47+1 项 0 付费，4 commits `b9ba5f9..d9d4c13`，详见 Complete 附 B）。
+评审 P1/P2 修复批次（2026-10-16 晚，47+1 项 0 付费，三独立评审全 APPROVE，
+7 commits `b9ba5f9..8b83193`，341 测全绿，详见 Complete 附 B，余 LOW 在 Phase 2）。
 规范与执行记录在仓库外（与 Plan 冲突时以 Complete 为准）：
 `~/文档/Phase_0_Plan.md`（v4.2）+ `Phase_0_Plan_Complete.md`；
 `~/文档/Phase_1_Plan_detailed.md`（v1.2）+ `Phase_1_Plan_Complete.md`（偏差 A1–A24、坑 P1–P10）。
