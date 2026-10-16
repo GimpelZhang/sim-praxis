@@ -107,7 +107,7 @@ def test_three_stage_ping_all_green(tmp_path):
     map_path = tmp_path / "stage_models.yaml"
     _write_map(map_path)
     sent: list = []
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_fake_raw(sent), sleep=lambda s: None)
     doc = gw.validate_models()
     assert doc["skipped_null"] == []
@@ -129,7 +129,7 @@ def test_three_stage_ping_all_green(tmp_path):
 def test_echo_model_normalization_recorded(tmp_path):
     map_path = tmp_path / "stage_models.yaml"
     _write_map(map_path)
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_fake_raw([]), sleep=lambda s: None)
     rows = {r["stage"]: r for r in gw.validate_models()["results"]}
     assert rows["macro_ideation"]["requested_id"] == "deepseek-v4.1-flash"
@@ -144,7 +144,7 @@ def test_swap_model_id_routes_to_new_id(tmp_path, monkeypatch):
     map_path = tmp_path / "stage_models.yaml"
     _write_map(map_path, models={**DEFAULT_IDS, "coding_debug": "glm-5-3-flash-260828"})
     sent: list = []
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_fake_raw(sent), sleep=lambda s: None)
     rec = gw.ping_text("coding_debug")
     assert rec["requested_id"] == "glm-5-3-flash-260828"
@@ -160,7 +160,7 @@ def test_swap_model_id_routes_to_new_id(tmp_path, monkeypatch):
             usage=types.SimpleNamespace(input_tokens=3, output_tokens=1))
 
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
-    gw2 = R.ModelGateway(stage_models_path=map_path, transport=fake_completion)
+    gw2 = R.ModelGateway(unguarded=True,stage_models_path=map_path, transport=fake_completion)
     # Task3：call() 返回 (text, (tokens_in, tokens_out))——内容与 usage 同时断言
     text_out, usage = gw2.call("coding_debug", [{"role": "user", "content": "hi"}])
     assert text_out == "ok" and usage == (3, 1)
@@ -181,7 +181,7 @@ def test_404_gives_swap_model_guidance(tmp_path):
         return types.SimpleNamespace(status_code=404,
                                     json=lambda: body, text=json_dumps(body), headers={})
 
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_post, sleep=lambda s: None)
     with pytest.raises(R.NonRetryableError, match="stage_models.yaml") as exc:
         gw.ping_text("coding_debug")
@@ -202,7 +202,7 @@ def test_null_stage_without_anchor_rejected(tmp_path):
                  "base_url_env": "ANTHROPIC_BASE_URL"},
         "stage_models": sm}), encoding="utf-8")
     with pytest.raises(R.GatewayError, match="open_question"):
-        R.ModelGateway(stage_models_path=map_path)
+        R.ModelGateway(unguarded=True,stage_models_path=map_path)
 
 
 def test_null_stage_anchor_mismatch_rejected(tmp_path):
@@ -212,7 +212,7 @@ def test_null_stage_anchor_mismatch_rejected(tmp_path):
         ANCHOR, "这句话在 open-questions.md 里根本不存在")
     map_path.write_text(text, encoding="utf-8")
     with pytest.raises(R.GatewayError, match="逐字出现"):
-        R.ModelGateway(stage_models_path=map_path)
+        R.ModelGateway(unguarded=True,stage_models_path=map_path)
 
 
 # ---------- 7. 合规 null：可构造/不触网/validate 报告 SKIP ----------
@@ -221,7 +221,7 @@ def test_null_stage_skips_and_unresolved_call(tmp_path, monkeypatch):
     map_path = tmp_path / "stage_models.yaml"
     _write_map(map_path, nulls=("visual_rollout",))
     sent: list = []
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_fake_raw(sent), sleep=lambda s: None)
     assert gw.model_id("visual_rollout") is None
     assert gw.null_stages() == ["visual_rollout"]
@@ -249,7 +249,7 @@ def test_vision_red_image_32px(tmp_path):
     map_path = tmp_path / "stage_models.yaml"
     _write_map(map_path)
     sent: list = []
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_fake_raw(sent), sleep=lambda s: None)
     rec = gw.vision_check()
     assert rec["red_assert"] is True and rec["http_status"] == 200
@@ -276,12 +276,12 @@ def test_vision_red_image_32px(tmp_path):
                 text=json_dumps(body), headers={})
         return _post
 
-    gw_tired = R.ModelGateway(stage_models_path=map_path,
+    gw_tired = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                               raw_transport=_answer("I am tired today"),
                               sleep=lambda s: None)
     with pytest.raises(R.GatewayError, match="不含 red/红"):
         gw_tired.vision_check()
-    gw_dot = R.ModelGateway(stage_models_path=map_path,
+    gw_dot = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                             raw_transport=_answer("red."),
                             sleep=lambda s: None)
     assert gw_dot.vision_check()["red_assert"] is True
@@ -300,7 +300,7 @@ def test_vision_under_14px_error(tmp_path):
         return types.SimpleNamespace(status_code=400,
                                     json=lambda: body, text=json_dumps(body), headers={})
 
-    gw = R.ModelGateway(stage_models_path=map_path,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                         raw_transport=_post, sleep=lambda s: None)
     with pytest.raises(R.NonRetryableError, match="14"):
         gw.vision_check(size=8)
@@ -332,7 +332,7 @@ def test_429_retry_after_then_success(tmp_path, monkeypatch):
         return resp
 
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
-    gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps.append,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, sleep=sleeps.append,
                         transport=fake_completion)
     text_out, usage = gw.call("coding_debug", [{"role": "user", "content": "hi"}])
     assert text_out == "ok" and usage == (5, 2)
@@ -350,7 +350,7 @@ def test_quota_error_long_circuit_pauses(tmp_path, monkeypatch):
         raise _rl_exc("429 QuotaExceeded: insufficient quota, 欠费")
 
     monkeypatch.setattr(R.litellm, "completion", boom)
-    gw = R.ModelGateway(stage_models_path=map_path, sleep=lambda s: None, transport=boom)
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, sleep=lambda s: None, transport=boom)
     with pytest.raises(R.GatewayPausedError):
         gw.call("coding_debug", [{"role": "user", "content": "hi"}])
     state = json.loads((tmp_path / "state" / "quota_pause.json").read_text())
@@ -361,7 +361,7 @@ def test_quota_error_long_circuit_pauses(tmp_path, monkeypatch):
     def must_not_call(**kwargs):
         raise AssertionError("paused 期间不应调用 completion")
 
-    gw2 = R.ModelGateway(stage_models_path=map_path, transport=must_not_call)
+    gw2 = R.ModelGateway(unguarded=True,stage_models_path=map_path, transport=must_not_call)
     with pytest.raises(R.GatewayPausedError):
         gw2.call("coding_debug", [{"role": "user", "content": "hi"}])
 
@@ -378,7 +378,7 @@ def test_bad_request_is_non_retryable(tmp_path, monkeypatch):
         lambda **kw: (_ for _ in ()).throw(
             BadRequestError("400 bad", model="glm-5.3-flash",
                             llm_provider="anthropic", response=None)))
-    gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps.append)
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, sleep=sleeps.append)
     with pytest.raises(R.NonRetryableError):
         gw.call("coding_debug", [{"role": "user", "content": "hi"}])
     assert sleeps == []
@@ -394,7 +394,7 @@ def test_5xx_exhausts_without_pause_state(tmp_path, monkeypatch):
         raise InternalServerError("500 upstream down", "anthropic", "glm-5.3-flash", None)
 
     monkeypatch.setattr(R.litellm, "completion", boom)
-    gw = R.ModelGateway(stage_models_path=map_path, max_attempts=2,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, max_attempts=2,
                         sleep=lambda s: None, transport=boom)
     with pytest.raises(R.GatewayError):
         gw.call("coding_debug", [{"role": "user", "content": "hi"}])
@@ -416,7 +416,7 @@ def test_401_403_immediate_non_retryable(tmp_path, monkeypatch):
         def boom(*, _c=exc_cls, **kw):
             raise _c("401/403 not permitted", "anthropic", "glm-5.3-flash", fake_4xx)
         monkeypatch.setattr(R.litellm, "completion", boom)
-        gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps.append,
+        gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, sleep=sleeps.append,
                             transport=boom)
         with pytest.raises(R.NonRetryableError):
             gw.call("coding_debug", [{"role": "user", "content": "hi"}])
@@ -468,7 +468,7 @@ def test_structured_rate_limit_type_beats_quota_text(tmp_path, monkeypatch):
         return resp
 
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
-    gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps.append,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, sleep=sleeps.append,
                         transport=fake_completion)
     text_out, usage = gw.call("coding_debug", [{"role": "user", "content": "hi"}])
     assert text_out == "ok" and usage == (5, 2)
@@ -503,7 +503,7 @@ def test_5xx_retry_after_honored_both_transports(tmp_path, monkeypatch):
         return resp
 
     monkeypatch.setattr(R.litellm, "completion", fake_completion)
-    gw = R.ModelGateway(stage_models_path=map_path, sleep=sleeps_a.append,
+    gw = R.ModelGateway(unguarded=True,stage_models_path=map_path, sleep=sleeps_a.append,
                         transport=fake_completion)
     text_out, usage = gw.call("coding_debug", [{"role": "user", "content": "hi"}])
     assert text_out == "ok" and usage == (4, 1)
@@ -524,7 +524,7 @@ def test_5xx_retry_after_honored_both_transports(tmp_path, monkeypatch):
             text=json_dumps(_msg_body(model, "pong")), headers={})
 
     sleeps_b = []
-    gw2 = R.ModelGateway(stage_models_path=map_path, raw_transport=_post,
+    gw2 = R.ModelGateway(unguarded=True,stage_models_path=map_path, raw_transport=_post,
                          sleep=sleeps_b.append)
     rec = gw2.ping_text("macro_ideation")
     assert rec["http_status"] == 200
@@ -551,7 +551,7 @@ def test_validate_failure_writes_failure_json_latest_unmoved(tmp_path, monkeypat
     monkeypatch.setattr(R.time, "strftime", fake_strftime)
 
     # 第一次全绿：latest 指向绿目录
-    gw_ok = R.ModelGateway(stage_models_path=map_path,
+    gw_ok = R.ModelGateway(unguarded=True,stage_models_path=map_path,
                            raw_transport=_fake_raw([]), sleep=lambda s: None)
     gw_ok.validate_models()
     green = (root / "latest").resolve()
@@ -568,7 +568,7 @@ def test_validate_failure_writes_failure_json_latest_unmoved(tmp_path, monkeypat
                                          text=json_dumps(body), headers={})
         return _fake_raw([])(url, headers=headers, json=json, timeout=timeout)
 
-    gw_bad = R.ModelGateway(stage_models_path=map_path, raw_transport=_post,
+    gw_bad = R.ModelGateway(unguarded=True,stage_models_path=map_path, raw_transport=_post,
                             sleep=lambda s: None)
     with pytest.raises(R.NonRetryableError):
         gw_bad.validate_models()
@@ -584,3 +584,204 @@ def test_validate_failure_writes_failure_json_latest_unmoved(tmp_path, monkeypat
     assert [r["stage"] for r in doc["results"]] == ["macro_ideation"]
     # 绿目录里不允许混入失败文件
     assert not (green / "FAILURE.json").exists()
+
+
+# ---------- G-1：嵌套 tool_result 内的 image block 必须递归拦截 ----------
+
+def test_g1_nested_tool_result_image_rejected(tmp_path):
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def must_not_call(**kw):
+        raise AssertionError("含嵌套图像必须死在发网之前")
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        transport=must_not_call)
+    nested = [
+        {"role": "user", "content": [{"type": "text", "text": "排障"}]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "probe", "input": {}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": [
+                {"type": "text", "text": "截图如下"},
+                {"type": "image",
+                 "source": {"type": "base64", "media_type": "image/png",
+                            "data": "QUJD"}},
+            ]}]},
+    ]
+    with pytest.raises(R.NonRetryableError, match="tool_result"):
+        gw.call("macro_ideation", nested)
+    # 再深一层（image 藏在 tool_use.input 里）同样命中
+    nested_deep = [{"role": "user", "content": [
+        {"type": "tool_use", "id": "t2", "name": "probe",
+         "input": {"artifact": {"snapshot": {"type": "image"}}}}]}]
+    with pytest.raises(R.NonRetryableError, match="含嵌套"):
+        gw.call("coding_debug", nested_deep)
+
+
+def test_g1_benign_nested_tool_result_passes_guard(tmp_path):
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+    ok_resp = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content="ok"))],
+        model="glm-5-3-flash",
+        usage=types.SimpleNamespace(input_tokens=3, output_tokens=1))
+
+    def fake_completion(**kw):
+        return ok_resp
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        transport=fake_completion, sleep=lambda s: None)
+    benign = [
+        {"role": "user", "content": [{"type": "text", "text": "q"}]},
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "probe", "input": {}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1",
+             "content": [{"type": "text", "text": "纯文本观测，无图像"}]}]},
+    ]
+    text, usage = gw.call("coding_debug", benign)
+    assert text == "ok" and usage == (3, 1)
+
+
+# ---------- G-3/G-14：main() 的 --ignore-pause 分类拒绝与损坏件 fail-closed ----------
+
+def _write_v2_pause(state_dir):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "schema_version": 2,
+        "status": "PAUSED_WAITING_QUOTA",
+        "stage": "*",
+        "reason": "global_hard_cap",
+        "paused_at_epoch": 1.0,
+        "paused_at_iso": "2026-10-16T00:00:00+0800",
+        "resume_at_epoch": None,
+        "resume_at_iso": None,
+        "scope": "global",
+        "trigger": {"global_used": 36, "global_hard_cap": 36},
+        "resume_ticket": None,
+        "affected_stages": ["*"],
+    }
+    p = state_dir / "quota_pause.json"
+    p.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_g3_main_refuses_ignore_pause_on_v2_budget_state(tmp_path, monkeypatch, capsys):
+    state_p = _write_v2_pause(tmp_path / "state")
+    monkeypatch.setattr("sys.argv",
+                        ["router", "--validate-models", "--ignore-pause"])
+    # main() 返回退出码（SystemExit 只在 __main__ 包装层抛）
+    assert R.main() == 3
+    assert "不允许 --ignore-pause" in capsys.readouterr().err
+    assert state_p.exists()  # 拒绝时绝不删件
+
+
+def test_g3_main_allows_ignore_pause_on_v1_transient_window(tmp_path, monkeypatch, capsys):
+    # 正控：v1 瞬时限流窗口（未来 resume + 非预算 reason）保留旧的人工清除行为
+    R._write_pause_state("macro_ideation", "429 transient backoff", 1800)
+    state_p = tmp_path / "state" / "quota_pause.json"
+    assert state_p.exists()
+
+    class _FakeGw:
+        def __init__(self, *a, **kw):
+            pass
+
+        def validate_models(self, **kw):
+            return {"status": "OK"}
+
+    monkeypatch.setattr(R, "ModelGateway", _FakeGw)
+    monkeypatch.setattr("sys.argv",
+                        ["router", "--validate-models", "--ignore-pause"])
+    assert R.main() == 0
+    assert not state_p.exists()  # 人工确认后清除
+    assert "瞬时限流" in capsys.readouterr().out
+
+
+def test_g14_main_corrupt_pause_file_fail_closed(tmp_path, monkeypatch, capsys):
+    # autouse _env 已建好 state/ 目录
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_p = state_dir / "quota_pause.json"
+    state_p.write_text("{截断的 JSON", encoding="utf-8")
+    # 即使带 --ignore-pause 也不许越损坏件触网/删件
+    monkeypatch.setattr("sys.argv",
+                        ["router", "--validate-models", "--ignore-pause"])
+    assert R.main() == 2
+    err = capsys.readouterr().err
+    assert "VALIDATE BLOCKED" in err and "人工核查" in err
+    assert state_p.read_text(encoding="utf-8") == "{截断的 JSON"
+
+
+# ---------- G-8：日志过滤器对 exc_info 同样脱敏 ----------
+
+def test_g8_redacting_filter_masks_exc_info():
+    import logging
+    token = "redacted-test-token-0001"
+    flt = R._RedactingFilter()
+    try:
+        raise RuntimeError(f"鉴权头回显 Authorization: Bearer {token}")
+    except RuntimeError:
+        import sys as _sys
+        rec = logging.LogRecord(
+            "simpraxis.gateway", logging.ERROR, __file__, 1,
+            "调用失败", (), _sys.exc_info())
+    assert flt.filter(rec)
+    rendered = logging.Formatter("%(message)s\n%(exc_text)s").format(rec)
+    assert token not in rendered and "REDACTED" in rendered
+    assert rec.exc_info is None  # 未脱敏引用必须清掉，防止 Formatter 重渲染
+
+
+# ---------- G-12：200 空回答（空串/纯空白/仅 thinking）不得记成功 ----------
+
+def _empty_litellm(content):
+    return types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=content))],
+        model="deepseek-v4-1-flash",
+        usage=types.SimpleNamespace(input_tokens=2, output_tokens=0))
+
+
+def test_g12_text_empty_and_thinking_only_raise(tmp_path):
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+    def _transport(c):
+        def fake_completion(**kw):
+            return _empty_litellm(c)
+        return fake_completion
+
+    for content in ("", "   ", [{"type": "thinking", "thinking": "……"}]):
+        gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                            transport=_transport(content),
+                            max_attempts=1, sleep=lambda s: None)
+        with pytest.raises(R.EmptyResponseError, match="空回答"):
+            gw.call("macro_ideation", [{"role": "user", "content": "hi"}])
+
+
+def test_g12_raw_thinking_only_200_raises(tmp_path):
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def _post(url, headers=None, json=None, timeout=None):
+        body = {"type": "message", "model": json["model"],
+                "content": [{"type": "thinking", "thinking": "……"}],
+                "usage": {"input_tokens": 2, "output_tokens": 0}}
+        return types.SimpleNamespace(status_code=200, json=lambda: body,
+                                     text=json_dumps(body), headers={})
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        raw_transport=_post, max_attempts=1, sleep=lambda s: None)
+    with pytest.raises(R.EmptyResponseError, match="空回答"):
+        gw.ping_text("macro_ideation")
+
+
+# ---------- G-13：无账本构造 fail-closed，豁免必须显式 unguarded=True ----------
+
+def test_g13_constructor_requires_ledger_or_explicit_unguarded(tmp_path):
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+    with pytest.raises(R.GatewayError, match="QuotaLedger"):
+        R.ModelGateway(stage_models_path=map_path)
+    with pytest.raises(R.GatewayError, match="QuotaLedger"):
+        R.ModelGateway(stage_models_path=map_path, ledger=None)
+    gw = R.ModelGateway(stage_models_path=map_path, unguarded=True)
+    assert gw._billing is None

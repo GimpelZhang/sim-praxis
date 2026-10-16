@@ -140,7 +140,14 @@ def test_03_mp4_from_real_gpu_egl():
 
 # ---------- ④ 方舟三阶段网关实呼校验（文本 ping + 视觉 ping） ----------
 
+@pytest.mark.paid
 def test_04_gateway_real_min_call():
+    # 付费守卫（2026-10-16）：本测真实触网计费一批 4 请求。裸跑/默认收集一律 skip，
+    # 只有书面批准批次且显式 SIMPRAXIS_ALLOW_PAID=1 才执行（先例 test_hitl_drill）。
+    # 背景：本日曾因裸跑本测在 --ignore-pause 下误触 3 次账外实呼（G-3/G-12）。
+    if os.environ.get("SIMPRAXIS_ALLOW_PAID") != "1":
+        pytest.skip("paid：test_04 真实触网计费，需书面批准批次并显式 "
+                    "SIMPRAXIS_ALLOW_PAID=1（误触防护，见 G-3/G-12）")
     import yaml
     cfg_path = ROOT / "orchestrator/gateway/stage_models.yaml"
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -244,7 +251,8 @@ def test_04b_gateway_no_secret_committed_and_null_path_valid():
     mm = yaml.safe_load(text)
     assert mm["meta"]["endpoint"] == "anthropic-messages"
     assert set(mm["stage_models"]) == set(STAGES)
-    gw = ModelGateway(stage_models_path=cfg)  # 无目录成员资格闸；null 必须有逐字锚点
+    # G-13：无账构造必须显式 unguarded=True（本路径只做配置校验，不触网不计费）
+    gw = ModelGateway(stage_models_path=cfg, unguarded=True)  # null 必须有逐字锚点
     nulls = gw.null_stages()
     # 三阶段默认全部非 null（2026-10-12 三模型均实证 200）；null 仅为供应失效时的合规缺口
     assert nulls == [], f"默认配置不得有 null stage：{nulls}"

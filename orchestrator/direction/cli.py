@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.fsutil import atomic_write_text
+from orchestrator.common.validators import assert_within, validate_thread_id
 from orchestrator.direction.inputs import get_input
 from orchestrator.direction.setter import (
     DirectionError, DirectionSchemaError, DirectionSetter, _evidence_dir,
@@ -39,6 +41,14 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--no-gate", action="store_true",
                     help="本地调试：不发 Gate1（需 SIMPRAXIS_ALLOW_NO_GATE=1）")
     args = ap.parse_args(argv)
+
+    # G-5：thread_id 是证据文件名路径段，先过字符集白名单
+    # （^[A-Za-z0-9_-]{1,64}$），拒绝 ../、斜杠、空格等遍历/覆盖形态。
+    try:
+        validate_thread_id(args.thread)
+    except (TypeError, ValueError) as exc:
+        print(f"ERROR: 非法 --thread：{exc}", file=sys.stderr)
+        return 2
 
     payload = get_input(args.track, args.index)
     # Task3（§6.3）：账本挂在网关上；task/batch 归属经 billing_context 透传，
@@ -74,9 +84,9 @@ def main(argv: "list[str] | None" = None) -> int:
 
     stamp = time.strftime("%Y%m%dT%H%M%S")
     out = _evidence_dir() / f"gate1_outcome_{args.thread}_{stamp}.json"
-    out.write_text(json.dumps(outcome, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    os.chmod(out, 0o600)
+    # G-7/G-5：0600 原子写 + 写后 containment 断言（thread 虽已过白名单，双保险）。
+    atomic_write_text(out, json.dumps(outcome, ensure_ascii=False, indent=2))
+    assert_within(out, _evidence_dir())
     print(json.dumps({"status": outcome["status"],
                       "gate1_rejects": outcome["gate1_rejects"],
                       "evidence": str(out)}, ensure_ascii=False, indent=2))

@@ -189,21 +189,25 @@ def test_quota_long_circuit_records_ok_false(env):
     rows = _int_rows(tmp)
     assert len(rows) == 1 and rows[0]["ok"] is False and rows[0]["seq"] == 1
     assert (tmp / "gwstate/quota_pause.json").exists()
-    # 熔断窗口内第二次调用：router 入口 is_paused 在 ledger.preflight 之前拦截，
-    # 不触网、不新增任何账行（含审计行）
+    # 熔断窗口内第二次调用：router 入口早检查在 ledger.preflight 之前拦截，不触网；
+    # G-10：preflight 之前的入口拦截也要补一行 seq=null blocked 审计（paused_preflight）。
     def must_not_call(**kw):
         raise AssertionError("熔断窗口内禁止触网")
 
     gw2 = _gateway(env, transport=must_not_call)
-    with billing_context(task=2, batch_id=BATCH_T2):
+    with billing_context(task=2, batch_id=BATCH_T2, thread_id="t-bill-4"):
         with pytest.raises(R.GatewayPausedError):
             gw2.call("macro_ideation", TEXT_MSG)
-    assert len(_int_rows(tmp)) == 1 and len(_rows(tmp)) == 1
-    # 直接打到账本闸门时，paused 经 preflight 拦并写一行 seq=null 审计
+    assert len(_int_rows(tmp)) == 1
+    early = [r for r in _rows(tmp)
+             if r.get("event") == "preflight_blocked" and "paused_preflight" in (r.get("err") or "")]
+    assert len(early) == 1 and early[0]["seq"] is None
+    assert early[0]["thread_id"] == "t-bill-4"
+    # 直接打到账本闸门时，paused 经 preflight 拦并再写一行 seq=null 审计
     with pytest.raises(R.GatewayPausedError):
         QuotaLedger().preflight("macro_ideation", task=2, batch_id=BATCH_T2)
     blocked = [r for r in _rows(tmp) if r.get("event") == "preflight_blocked"]
-    assert len(blocked) == 1 and blocked[0]["seq"] is None
+    assert len(blocked) == 2 and all(r["seq"] is None for r in blocked)
     assert len(_int_rows(tmp)) == 1
 
 
@@ -388,3 +392,190 @@ def test_per_call_evidence_refresh_and_seq_continuity(env):
 
 def json_dumps(body):
     return json.dumps(body, ensure_ascii=False)
+
+
+# ---------- G-2：凭据缺失 → 两条入口各一行 seq=null blocked，不占整数 seq ----------
+
+def test_g2_missing_gateway_credential_blocked_rows_both_entries(env, monkeypatch):
+    tmp = env["tmp"]
+
+    def must_not_call(**kw):
+        raise AssertionError("缺凭据禁止触网")
+
+    gw = _gateway(env, transport=must_not_call, raw_transport=must_not_call)
+    _approve(2, "macro_ideation", BATCH_T2)
+    _approve(5, "visual_rollout", BATCH_T5, approved=6)
+    monkeypatch.delenv("SIMPRAXIS_LLM_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    with billing_context(task=2, batch_id=BATCH_T2, thread_id="t-g2"):
+        with pytest.raises(R.MissingGatewayCredentialError):
+            gw.call("macro_ideation", TEXT_MSG)
+    with billing_context(task=5, batch_id=BATCH_T5, thread_id="t-g2"):
+        with pytest.raises(R.MissingGatewayCredentialError):
+            gw.call_visual("What color?", "QUJD")
+    assert _int_rows(tmp) == []  # 凭据缺失发生在发网前，绝不占整数 seq
+    blocked = [r for r in _rows(tmp) if r.get("event") == "preflight_blocked"]
+    assert len(blocked) == 2
+    assert {r["stage"] for r in blocked} == {"macro_ideation", "visual_rollout"}
+    assert all("missing_gateway_credential" in r["err"] for r in blocked)
+
+
+# ---------- G-10：preflight 之前入口暂停检查补 seq=null blocked 审计 ----------
+
+def test_g10_paused_preflight_early_gate_writes_blocked_row(env):
+    tmp = env["tmp"]
+
+    def must_not_call(**kw):
+        raise AssertionError("暂停态禁止触网")
+
+    gw = _gateway(env, transport=must_not_call)
+    # v1 瞬时限流窗口（router 写入；早检查在 preflight 之前，无需批次凭据）
+    R._write_pause_state("macro_ideation", "429 transient backoff", 1800)
+    with billing_context(task=2, batch_id=BATCH_T2, thread_id="t-g10"):
+        with pytest.raises(R.GatewayPausedError):
+            gw.call("macro_ideation", TEXT_MSG)
+    assert _int_rows(tmp) == []
+    blocked = [r for r in _rows(tmp) if r.get("event") == "preflight_blocked"]
+    assert len(blocked) == 1 and blocked[0]["seq"] is None
+    assert "paused_preflight" in blocked[0]["err"]
+    assert "429 transient backoff" in blocked[0]["err"]
+    assert blocked[0]["thread_id"] == "t-g10"
+
+
+# ---------- G-14：暂停件损坏 fail-closed（blocked 行 + 原样抛 + 不删件） ----------
+
+def test_g14_corrupt_pause_state_fail_closed_with_blocked_row(env):
+    tmp = env["tmp"]
+
+    def must_not_call(**kw):
+        raise AssertionError("损坏暂停态禁止触网")
+
+    gw = _gateway(env, transport=must_not_call)
+    state_dir = tmp / "gwstate"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_p = state_dir / "quota_pause.json"
+    state_p.write_text("{截断的 JSON", encoding="utf-8")
+    with billing_context(task=2, batch_id=BATCH_T2, thread_id="t-g14"):
+        with pytest.raises(R.PauseStateCorruptError, match="人工核查"):
+            gw.call("macro_ideation", TEXT_MSG)
+    assert _int_rows(tmp) == []
+    blocked = [r for r in _rows(tmp) if r.get("event") == "preflight_blocked"]
+    assert len(blocked) == 1 and "pause_state_corrupt" in blocked[0]["err"]
+    # 损坏件原样保留（禁止自动删除/覆盖）
+    assert state_p.read_text(encoding="utf-8") == "{截断的 JSON"
+
+
+# ---------- G-12：200 空回答内部重试，耗尽一行 ok=false，不双计数 ----------
+
+def test_g12_empty_200_text_retried_then_single_ok_false_row(env):
+    tmp = env["tmp"]
+    attempts = {"n": 0}
+
+    def empty_only(**kw):
+        attempts["n"] += 1
+        return _litellm_resp("   ")  # 纯空白等同空回答
+
+    gw = _gateway(env, transport=empty_only, max_attempts=2)
+    _approve(2, "macro_ideation", BATCH_T2)
+    with billing_context(task=2, batch_id=BATCH_T2, thread_id="t-g12"):
+        with pytest.raises(R.EmptyResponseError):
+            gw.call("macro_ideation", TEXT_MSG)
+    assert attempts["n"] == 2  # 内部重试 2 次
+    rows = _int_rows(tmp)
+    assert len(rows) == 1 and rows[0]["ok"] is False
+    assert "EmptyResponseError" in (rows[0]["err"] or "")
+
+
+def test_g12_empty_200_retry_then_success_still_one_row(env):
+    tmp = env["tmp"]
+    answers = [
+        _litellm_resp("", in_tok=0, out_tok=0),          # 首跳空回答
+        _litellm_resp("ok", in_tok=6, out_tok=2),        # 重试成功
+    ]
+    gw = _gateway(env, transport=lambda **kw: answers.pop(0))
+    _approve(2, "macro_ideation", BATCH_T2)
+    with billing_context(task=2, batch_id=BATCH_T2):
+        text, usage = gw.call("macro_ideation", TEXT_MSG)
+    assert text == "ok" and usage == (6, 2)
+    rows = _int_rows(tmp)
+    assert len(rows) == 1 and rows[0]["ok"] is True      # 空跳不占 seq
+
+
+def test_g12_empty_200_thinking_only_visual_single_ok_false_row(env):
+    tmp = env["tmp"]
+    posts = {"n": 0}
+
+    def raw_post(url, headers=None, json=None, timeout=None):
+        posts["n"] += 1
+        # 200 但 content 只有 thinking block（text 为空）——test_04 空回答事故形态
+        body = {"type": "message", "model": json["model"],
+                "content": [{"type": "thinking", "thinking": "……"}],
+                "usage": {"input_tokens": 5, "output_tokens": 8}}
+        return types.SimpleNamespace(status_code=200, json=lambda: body,
+                                     text=json_dumps(body), headers={})
+
+    gw = _gateway(env, raw_transport=raw_post, max_attempts=2)
+    _approve(5, "visual_rollout", BATCH_T5, approved=6)
+    with billing_context(task=5, batch_id=BATCH_T5):
+        with pytest.raises(R.EmptyResponseError):
+            gw.call_visual("What color?", "QUJD")
+    assert posts["n"] == 2  # 内部重试不新增 ledger seq
+    rows = _int_rows(tmp)
+    assert len(rows) == 1
+    assert rows[0]["stage"] == "visual_rollout" and rows[0]["ok"] is False
+    assert "EmptyResponseError" in (rows[0]["err"] or "")
+
+
+# ---------- G-6：5xx/连接错误累计等待预算 300s，超限按重试耗尽 → ok=false ----------
+
+def test_g6_5xx_cumulative_wait_budget_text_ok_false(env):
+    tmp = env["tmp"]
+    fake_resp = types.SimpleNamespace(headers={"retry-after": "600"},
+                                      text="503 service unavailable")
+
+    def always_503(**kw):
+        raise ServiceUnavailableError(
+            "503 unavailable", "anthropic", "deepseek-v4.1-flash", fake_resp)
+
+    # attempts 给足 50：必须是等待预算先熔断（不是次数耗尽），且不写配额暂停件
+    gw = _gateway(env, transport=always_503, max_attempts=50, max_total_wait=10)
+    _approve(2, "macro_ideation", BATCH_T2)
+    with billing_context(task=2, batch_id=BATCH_T2):
+        with pytest.raises(R.GatewayError, match="等待预算"):
+            gw.call("macro_ideation", TEXT_MSG)
+    rows = _int_rows(tmp)
+    assert len(rows) == 1 and rows[0]["ok"] is False
+    assert not (tmp / "gwstate/quota_pause.json").exists()
+
+
+def test_g6_5xx_and_connection_budget_raw_visual_ok_false(env):
+    tmp = env["tmp"]
+
+    def raw_503(url, headers=None, json=None, timeout=None):
+        body = {"type": "error", "error": {"type": "service_unavailable",
+                                          "code": "unavailable", "message": "retry"}}
+        return types.SimpleNamespace(
+            status_code=503, json=lambda: body, text=json_dumps(body),
+            headers={"retry-after": "600"})
+
+    gw = _gateway(env, raw_transport=raw_503, max_attempts=50, max_total_wait=10)
+    _approve(5, "visual_rollout", BATCH_T5, approved=6)
+    with billing_context(task=5, batch_id=BATCH_T5):
+        with pytest.raises(R.GatewayError, match="等待预算"):
+            gw.call_visual("Q", "QUJD")
+    assert len(_int_rows(tmp)) == 1  # 503 累计预算熔断：一行 ok=false
+
+    # 连接错误（无 Retry-After，指数退避累计）同样受 300s 预算约束
+    posts = {"n": 0}
+
+    def raw_conn_error(url, headers=None, json=None, timeout=None):
+        posts["n"] += 1
+        raise R.requests.ConnectionError("reset by peer")
+
+    gw2 = _gateway(env, raw_transport=raw_conn_error,
+                   max_attempts=50, max_total_wait=10)
+    with billing_context(task=5, batch_id=BATCH_T5):
+        with pytest.raises(R.GatewayError, match="等待预算"):
+            gw2.call_visual("Q", "QUJD")
+    assert posts["n"] >= 2 and len(_int_rows(tmp)) == 2
+    assert all(r["ok"] is False for r in _int_rows(tmp))

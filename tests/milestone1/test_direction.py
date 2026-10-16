@@ -429,7 +429,11 @@ def test_19_task_hard_cap_blocks_at_14(tmp_path, monkeypatch):
     _seed_calls(lp, 1)
     with pytest.raises(GatewayPausedError) as ei:
         led.preflight(STAGE, task=2, batch_id=BATCH)
-    assert ei.value.state["reason"] == "global_hard_cap"
+    # G-11：任务局部硬顶独立 reason（不再混入 global_hard_cap），暂停件只挂本 stage
+    assert ei.value.state["reason"] == "task_hard_cap"
+    assert ei.value.state["stage"] == STAGE
+    assert ei.value.state["scope"] == "task"
+    assert ei.value.state["affected_stages"] == [STAGE]
     assert ei.value.state["trigger"]["task_used"] == 14
 
 
@@ -516,3 +520,32 @@ def test_25_artifacts_list_and_string_normalization(isolated):
     props, errors = validate_proposals(base, hits=hits, catalog=isolated["catalog"])
     assert not errors, errors
     assert props[1]["expected_artifacts"] == ["single.md"]
+
+
+# ---------- G-5：thread_id 字符集白名单（路径遍历/覆盖防护） ----------
+
+@pytest.mark.parametrize("bad_thread", [
+    "../x",          # 路径遍历
+    "a/b",           # 斜杠路径段
+    "a b",           # 空格
+    "x" * 65,        # 超 64 长度
+    "fx$",           # 白名单外字符
+])
+def test_26_run_direction_rejects_bad_thread_id(isolated, bad_thread):
+    # raws=[]：若校验没拦在最前，FakeGateway 会抛 AssertionError（脚本耗尽）
+    s = make_setter(isolated, [])
+    with pytest.raises(ValueError, match="thread_id"):
+        s.run_direction(track="track2", payload=isolated["payload"],
+                        thread_id=bad_thread, batch_id=BATCH)
+    assert s.gateway.calls == []  # 非法 thread 必须死在 KB 查询/实呼之前
+
+
+def test_27_cli_rejects_bad_thread_id_exit_2(tmp_path, monkeypatch, capsys):
+    from orchestrator.direction import cli as dir_cli
+    monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
+    rc = dir_cli.main(["--thread", "../escape", "--track", "track2",
+                       "--index", "1", "--batch-id", "T2-G5"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "非法 --thread" in err

@@ -23,6 +23,8 @@ from typing import Any, Callable
 import yaml
 
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.validators import assert_within, validate_thread_id
 from orchestrator.gateway.quota_ledger import set_current_evidence
 from orchestrator.gateway.router import ModelGateway, redact
 
@@ -335,16 +337,18 @@ def validate_proposals(obj: dict, *, hits: list[dict],
 # ---------- 证据落盘 ----------
 
 def _evidence_dir() -> Path:
+    # G-7：证据目录统一 0700（已存在且被放宽时同样收敛）。
     d = Path(os.environ.get("SIMPRAXIS_PHASE1_ROOT",
                             "/mnt/artifacts/simpraxis/phase1")) / "task2_direction"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return ensure_private_dir(d)
 
 
 def _write_evidence(stem: str, kind: str, payload: dict) -> str:
     p = _evidence_dir() / f"{stem}.{kind}.json"
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(p, 0o600)
+    # G-7：0600 tmp+replace 原子写；G-5：写后 containment 断言（路径段不可信，
+    # thread_id 即便上游漏校验也不允许写出证据目录）。
+    atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
+    assert_within(p, _evidence_dir())
     return f"phase1/task2_direction/{p.name}"
 
 
@@ -367,6 +371,9 @@ class DirectionSetter:
                       human_notes: "str | None" = None,
                       prev_proposals: "list[dict] | None" = None,
                       bypass_stamp: bool = False) -> dict:
+        # G-5：thread_id 直接拼进证据文件名（macro_<thread>_* / proposals_<thread>_*），
+        # 入口先过字符集白名单 ^[A-Za-z0-9_-]{1,64}$，拒绝遍历/分隔符形态。
+        validate_thread_id(thread_id)
         query = payload["question"] if track == "track2" else \
             f"{payload['name']} 架构 物理引擎 特性 闭环仿真"
         hits = self.vector_engine.query_kb(query, namespace="capabilities",
@@ -458,9 +465,9 @@ class DirectionSetter:
             "attempts": round_meta,
         }
         out = _evidence_dir() / f"proposals_{thread_id}_r{gate_round}.json"
-        out.write_text(json.dumps(result, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        os.chmod(out, 0o600)
+        # G-7/G-5：结果件 0600 原子写 + containment 断言。
+        atomic_write_text(out, json.dumps(result, ensure_ascii=False, indent=2))
+        assert_within(out, _evidence_dir())
         return result
 
     # Gate1 循环：打回意见注入下一轮；2 次打回 → human_failure（D10）

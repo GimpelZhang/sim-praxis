@@ -37,6 +37,7 @@ import argparse
 import fcntl
 import json
 import os
+import sys
 import time
 import uuid
 from contextlib import contextmanager
@@ -45,8 +46,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
     GatewayPausedError,
+    PauseStateCorruptError,
     _state_dir as router_state_dir,  # 锁内适配：复用同一暂停文件目录
     _state_path as router_state_path,
     is_paused,
@@ -69,15 +73,22 @@ class QuotaError(RuntimeError):
     """账本/凭据自身错误（区别于 GatewayPausedError 的预算熔断）。"""
 
 
+class LedgerDegradedError(QuotaError):
+    """G-4：ledger 行追加失败（磁盘满/IO 错误等）——禁止假装记账成功。
+
+    伴随一个独立 .degraded JSON 告警件（原子 0600）落 quota 目录，供人工核查；
+    调用方必须把本次调用当失败处理，绝不允许账外放行付费调用。
+    """
+
+
 def phase1_root() -> Path:
     return Path(os.environ.get("SIMPRAXIS_PHASE1_ROOT",
                                "/mnt/artifacts/simpraxis/phase1"))
 
 
 def quota_dir() -> Path:
-    d = phase1_root() / "quota"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    # G-7：配额目录统一 0700（已存在且被放宽时同样收敛）。
+    return ensure_private_dir(phase1_root() / "quota")
 
 
 def ledger_path() -> Path:
@@ -89,9 +100,8 @@ def counters_path() -> Path:
 
 
 def approvals_dir() -> Path:
-    d = quota_dir() / "approvals"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    # G-7：批次凭据目录 0700。
+    return ensure_private_dir(quota_dir() / "approvals")
 
 
 def _now_iso() -> str:
@@ -137,6 +147,11 @@ def call_lines(rows: "list[dict[str, Any]] | None" = None) -> list[dict[str, Any
 
 
 def load_approval(batch_id: str) -> dict[str, Any]:
+    # G-9：batch_id 是路径段，读法先过字符集白名单（拒绝 ../、斜杠等遍历形态）。
+    try:
+        validate_batch_id(batch_id)
+    except (TypeError, ValueError) as exc:
+        raise QuotaError(f"batch_id 非法：{exc}") from exc
     p = approvals_dir() / f"{batch_id}.json"
     if not p.exists():
         raise QuotaError(f"批次批准凭据不存在：{p}（实呼前必须有书面批次批准）")
@@ -152,35 +167,46 @@ def load_approval(batch_id: str) -> dict[str, Any]:
             raise QuotaError(f"批次凭据 {batch_id} 缺字段 {k}")
     if data["batch_id"] != batch_id:
         raise QuotaError(f"批次凭据 batch_id 不一致：{data['batch_id']} != {batch_id}")
-    if not isinstance(data["approved"], int) or data["approved"] <= 0:
-        raise QuotaError(f"批次凭据 {batch_id} approved 必须为正整数")
+    # G-9：bool 是 int 子类（True==1），必须显式拒绝，防止 {"approved": true}
+    # 被当成 1 次书面批准。
+    approved = data["approved"]
+    if not isinstance(approved, int) or isinstance(approved, bool) or approved <= 0:
+        raise QuotaError(f"批次凭据 {batch_id} approved 必须为正整数（不接受 bool）")
     return data
 
 
-def _write_budget_pause(reason: str, trigger: dict[str, Any]) -> dict[str, Any]:
+def _write_budget_pause(reason: str, trigger: dict[str, Any], *,
+                        stage: str = "*", scope: str = "global",
+                        affected_stages: "list[str] | None" = None
+                        ) -> dict[str, Any]:
     """写 v2 超集暂停态：前 7 键名/原义与 router._write_pause_state 完全一致，
-    resume_at_epoch=null 表示不自动恢复（§6.1）。"""
+    resume_at_epoch=null 表示不自动恢复（§6.1）。
+
+    G-11：任务局部硬顶用独立 reason=task_hard_cap，stage 写实际 stage（非 "*"）、
+    scope="task"、affected_stages=[stage]——任务硬顶是该任务绝对上限，resume()
+    据此拒绝以批次扩展恢复。
+    G-7：fsutil 原子写（唯一 tmp 名，fchmod 0600 在 replace 之前）。
+    """
     now = time.time()
+    if affected_stages is None:
+        affected_stages = ["*"] if stage == "*" else [stage]
     state = {
         "schema_version": 2,
         "status": "PAUSED_WAITING_QUOTA",
-        "stage": "*",
+        "stage": stage,
         "reason": reason,
         "paused_at_epoch": now,
         "paused_at_iso": _now_iso(),
         "resume_at_epoch": None,
         "resume_at_iso": None,
-        "scope": "global",
+        "scope": scope,
         "trigger": trigger,
         "resume_ticket": None,
-        "affected_stages": ["*"],
+        "affected_stages": affected_stages,
     }
-    d = router_state_dir()
-    d.mkdir(parents=True, exist_ok=True)
-    tmp = router_state_path().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(router_state_path())
-    os.chmod(router_state_path(), 0o600)
+    ensure_private_dir(router_state_dir())
+    atomic_write_text(router_state_path(),
+                      json.dumps(state, ensure_ascii=False, indent=2))
     return state
 
 
@@ -191,6 +217,25 @@ def _append_line(row: dict[str, Any]) -> None:
     os.chmod(p, 0o600)
 
 
+def _write_degraded_alert(exc: BaseException, meta: dict[str, Any]) -> "Path | None":
+    """G-4：ledger 追加失败时落独立 .degraded 告警件（原子 0600），绝不假装成功。
+
+    告警件本身写入失败不得顶掉原始异常（告警是辅助证据，调用失败语义不变）。
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    p = quota_dir() / (f"ledger.degraded.{stamp}.{os.getpid()}."
+                       f"{uuid.uuid4().hex[:8]}.json")
+    doc = {"ts_iso": _now_iso(),
+           "exception_type": type(exc).__name__,
+           "exception": redact(str(exc))[:500],
+           "call_meta": meta}
+    try:
+        atomic_write_text(p, json.dumps(doc, ensure_ascii=False, indent=2))
+    except Exception:  # noqa: BLE001 —— 告警失败只吞告警，原始异常照抛
+        return None
+    return p
+
+
 def _read_counters() -> dict[str, Any]:
     p = counters_path()
     if not p.exists():
@@ -198,12 +243,27 @@ def _read_counters() -> dict[str, Any]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def _quarantine_counters() -> dict[str, Any]:
+    """G-4：counters.json 损坏（不可解析/非对象/IO 错误）时把原件改名隔离，
+    回退零值——成功追加的账行绝不允许被计数件读失败反向抹掉。"""
+    cp = counters_path()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup = cp.with_name(f"counters.corrupt.{stamp}.{os.getpid()}."
+                          f"{uuid.uuid4().hex[:8]}.json")
+    try:
+        if cp.exists():
+            os.replace(cp, backup)
+    except OSError:
+        # 隔离失败也不阻塞记账：零值回退语义不变（损坏件下次仍会被读到并再试）。
+        return {"consecutive_quota_errors": 0}
+    return {"consecutive_quota_errors": 0}
+
+
 def _write_counters(c: dict[str, Any]) -> None:
+    # G-7：原子 0600 tmp+replace（唯一 tmp 名，杜绝固定 .json.tmp 互踩与权限窗口）。
     c["updated_at_iso"] = _now_iso()
-    tmp = counters_path().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(counters_path())
-    os.chmod(counters_path(), 0o600)
+    atomic_write_text(counters_path(),
+                      json.dumps(c, ensure_ascii=False, indent=2))
 
 
 def _is_quota_err(err: "str | None") -> bool:
@@ -225,7 +285,15 @@ class QuotaLedger:
     def preflight(self, stage: str, *, task: int, batch_id: str) -> dict[str, Any]:
         with _FileLock():
             # 1) router 既有暂停态（m9 长熔断/人工暂停）——复用 is_paused，不复制逻辑
-            paused = is_paused(stage)
+            try:
+                paused = is_paused(stage)
+            except PauseStateCorruptError:
+                # G-14：暂停件损坏 fail-closed——不触网、不覆盖/删除损坏件，
+                # 留 seq=null blocked 审计行后原样抛，交人工核查。
+                self._record_blocked(
+                    stage, task, batch_id,
+                    "preflight_blocked: pause_state_corrupt：熔断状态文件损坏，人工核查")
+                raise
             if paused:
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: paused:{paused.get('reason')}")
@@ -273,12 +341,15 @@ class QuotaLedger:
                                      f"preflight_blocked: global_hard_cap {global_used}")
                 raise GatewayPausedError(state)
 
-            # 4) 单任务局部硬上限
+            # 4) 单任务局部硬上限。G-11：独立 reason=task_hard_cap + scope=task +
+            # 实际 stage（历史误写 global_hard_cap 导致 resume 把任务顶当全局顶处理；
+            # 任务顶是该任务绝对上限，批次扩展不能恢复——resume() 见 reason 直接拒绝）。
             cap = TASK_HARD_CAPS.get(task)
             if cap is not None and task_used >= cap:
-                state = _write_budget_pause("global_hard_cap",
-                                            {**trigger, "task_used": task_used,
-                                             "task_hard_cap": cap})
+                state = _write_budget_pause(
+                    "task_hard_cap",
+                    {**trigger, "task_used": task_used, "task_hard_cap": cap},
+                    stage=stage, scope="task", affected_stages=[stage])
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: task{task}_hard_cap {task_used}>={cap}")
                 raise GatewayPausedError(state)
@@ -331,33 +402,60 @@ class QuotaLedger:
                 "ok": bool(ok), "err": redact(err)[:500] if err else None,
                 "approval_ref": approval_ref, "evidence": evidence,
             }
-            _append_line(row)
+            # G-4：账行追加失败（磁盘满/IO 错误）禁止假装成功——落独立 .degraded
+            # 告警件后抛 LedgerDegradedError；调用方必须按失败处理，不得账外放行。
+            try:
+                _append_line(row)
+            except Exception as exc:  # noqa: BLE001
+                alert = _write_degraded_alert(exc, {
+                    "time": _now_iso(), "stage": stage, "task": task,
+                    "batch_id": batch_id, "seq": seq, "model": model,
+                    "ok": bool(ok), "thread_id": thread_id,
+                    "tokens_in": tokens_in, "tokens_out": tokens_out,
+                    "err": redact(err)[:300] if err else None,
+                })
+                where = f"，告警件 {alert}" if alert is not None else "（告警件同样写入失败）"
+                raise LedgerDegradedError(
+                    f"ledger 账行追加失败（seq={seq}，{type(exc).__name__}）{where}："
+                    "本次调用未入账，禁止按记账成功处理") from exc
 
             # 连续配额错误计数（成功归零；连续 3 次 → 长熔断，§6 阈值）
-            counters = _read_counters()
+            # G-4：counters.json 损坏时改名隔离 + 零值回退——已成功追加的账行
+            # 绝不允许被计数件读失败反向抹掉（调用方已付费，账必须算成功）。
+            try:
+                counters = _read_counters()
+                if not isinstance(counters, dict):
+                    raise TypeError("counters.json 顶层不是 JSON 对象")
+            except (json.JSONDecodeError, TypeError, OSError):
+                counters = _quarantine_counters()
             if ok:
                 counters["consecutive_quota_errors"] = 0
             elif _is_quota_err(err):
                 counters["consecutive_quota_errors"] = \
                     int(counters.get("consecutive_quota_errors", 0)) + 1
             _write_counters(counters)
-            if counters.get("consecutive_quota_errors", 0) >= CONSECUTIVE_QUOTA_LIMIT \
-                    and is_paused(stage) is None:
-                _write_budget_pause("consecutive_quota_errors",
-                                    {"consecutive_errors":
-                                     counters["consecutive_quota_errors"],
-                                     "stage": stage})
+            if counters.get("consecutive_quota_errors", 0) >= CONSECUTIVE_QUOTA_LIMIT:
+                # G-14：暂停件已损坏时不覆盖（损坏件优先交人工核查）。
+                try:
+                    already_paused = is_paused(stage)
+                except PauseStateCorruptError:
+                    already_paused = True
+                if already_paused is None:
+                    _write_budget_pause("consecutive_quota_errors",
+                                        {"consecutive_errors":
+                                         counters["consecutive_quota_errors"],
+                                         "stage": stage})
             return row
 
     def _record_blocked(self, stage: str, task: int, batch_id: str,
-                        err: str) -> None:
+                        err: str, thread_id: str = "") -> None:
         """preflight 拦截审计行：不触网、不递增 seq/全局计数（§6.3）。"""
         rows = call_lines()
         global_used = max((r["global_used_after"] for r in rows), default=0)
         batch_used = sum(1 for r in rows if r.get("batch_id") == batch_id)
         _append_line({
             "ts_iso": _now_iso(), "event": "preflight_blocked",
-            "stage": stage, "model": None, "thread_id": "",
+            "stage": stage, "model": None, "thread_id": thread_id,
             "task": task, "batch_id": batch_id, "seq": None,
             "global_used_after": global_used,
             "batch_approved": None, "batch_used_after": batch_used,
@@ -446,15 +544,32 @@ class BillingGate:
             thread_id=ctx.thread_id, tokens_in=tokens_in, tokens_out=tokens_out,
             err=err, evidence=ctx.evidence)
 
+    def record_blocked(self, stage: str, reason: str) -> None:
+        """G-2/G-10/G-14：preflight 之前的不发网拦截（凭据缺失/入口暂停态/暂停件
+        损坏）也要留 seq=null blocked 审计行。无 billing_context（账外 validate /
+        monkeypatch 单测）时无账可写，静默 no-op——与 record() 的 fail-closed 不同，
+        这些路径本就不挂账本（G-13 显式 unguarded=True）。
+        """
+        ctx = _BILLING_CTX.get()
+        if ctx is None:
+            return
+        self.ledger._record_blocked(
+            stage, ctx.task, ctx.batch_id,
+            f"preflight_blocked: {reason}", thread_id=ctx.thread_id)
+
 
 # ---------- 批次批准凭据 / 恢复（只接受显式参数的 CLI） ----------
 
 def write_approval(*, batch_id: str, task: int, stage: str, approved: int,
                    beyond_normal: bool, note: str) -> Path:
-    if not batch_id or "/" in batch_id or ".." in batch_id:
-        raise QuotaError("batch_id 非法")
-    if approved <= 0:
-        raise QuotaError("approved 必须为正整数")
+    # G-9：写侧与读侧同一字符集白名单（路径段不可信）。
+    try:
+        validate_batch_id(batch_id)
+    except (TypeError, ValueError) as exc:
+        raise QuotaError(f"batch_id 非法：{exc}") from exc
+    # G-9：bool 是 int 子类，显式拒绝 approved=True/False。
+    if isinstance(approved, bool) or not isinstance(approved, int) or approved <= 0:
+        raise QuotaError("approved 必须为正整数（不接受 bool）")
     if beyond_normal:
         rows = call_lines()
         used = max((r["global_used_after"] for r in rows), default=0)
@@ -471,8 +586,8 @@ def write_approval(*, batch_id: str, task: int, stage: str, approved: int,
     doc = {"batch_id": batch_id, "task": task, "stage": stage,
            "approved": int(approved), "beyond_normal": bool(beyond_normal),
            "created_at_iso": _now_iso(), "note": redact(note)[:1000]}
-    p.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(p, 0o600)
+    # G-7：0600 tmp+replace 原子写（approvals 目录已由 approvals_dir() 收敛 0700）。
+    atomic_write_text(p, json.dumps(doc, ensure_ascii=False, indent=2))
     return p
 
 
@@ -483,8 +598,26 @@ def resume(*, ticket: str, batch_id: "str | None" = None) -> Path:
     pause = router_state_path()
     if not pause.exists():
         raise QuotaError("无暂停态文件，无需 resume")
-    state = json.loads(pause.read_text(encoding="utf-8"))
+    # G-14：暂停件损坏 fail-closed——resume 绝不删除损坏件，交人工核查。
+    try:
+        state = json.loads(pause.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise QuotaError(
+            "熔断状态文件损坏，人工核查（resume 不删除损坏件）："
+            f"{pause}：{type(exc).__name__}") from exc
+    if not isinstance(state, dict):
+        raise QuotaError(f"熔断状态文件损坏（顶层不是 JSON 对象），人工核查：{pause}")
     reason = state.get("reason", "")
+    # G-11：任务局部硬顶是该任务的绝对上限，新批次凭据（批次扩展）不能恢复；
+    # 只能在调高 TASK_HARD_CAPS 后人工处置或换任务。必须在预算/批次逻辑之前拒绝。
+    if reason == "task_hard_cap":
+        trig = state.get("trigger") if isinstance(state.get("trigger"), dict) else {}
+        raise QuotaError(
+            f"任务硬顶不可恢复（reason=task_hard_cap，scope=task，stage={state.get('stage')}，"
+            f"task={trig.get('task')}，已用 {trig.get('task_used')}/"
+            f"上限 {trig.get('task_hard_cap')}）：任务局部硬顶是绝对上限，"
+            "不能用 --batch-id 批次扩展恢复；请人工核查（必要时调整 TASK_HARD_CAPS"
+            "并重开审批），暂停件保留不删。")
     rows = call_lines()
     used = max((r["global_used_after"] for r in rows), default=0)
     if reason in ("batch_budget_reached", "global_hard_cap") or used >= NORMAL_BUDGET:
@@ -524,23 +657,34 @@ def main(argv: "list[str] | None" = None) -> int:
     st = sub.add_parser("status", help="打印当前计数与暂停态，不触网不写账")
 
     args = p.parse_args(argv)
-    if args.cmd == "approve":
-        path = write_approval(batch_id=args.batch_id, task=args.task,
-                              stage=args.stage, approved=args.approved,
-                              beyond_normal=args.beyond_normal, note=args.note)
-        print(f"[quota] 批次凭据已写（0600）：{path}")
-        return 0
-    if args.cmd == "resume":
-        path = resume(ticket=args.ticket, batch_id=args.batch_id)
-        print(f"[quota] 暂停已解除，恢复流水：{path}")
-        return 0
+    try:
+        if args.cmd == "approve":
+            path = write_approval(batch_id=args.batch_id, task=args.task,
+                                  stage=args.stage, approved=args.approved,
+                                  beyond_normal=args.beyond_normal, note=args.note)
+            print(f"[quota] 批次凭据已写（0600）：{path}")
+            return 0
+        if args.cmd == "resume":
+            path = resume(ticket=args.ticket, batch_id=args.batch_id)
+            print(f"[quota] 暂停已解除，恢复流水：{path}")
+            return 0
+    except QuotaError as exc:
+        # G-11/G-14：任务硬顶/损坏件/凭据问题给明确文案 + 退出码 2（不打 traceback）。
+        print(f"[quota ERROR] {exc}", file=sys.stderr)
+        return 2
     rows = read_lines()
     calls = call_lines(rows)
     used = max((r["global_used_after"] for r in calls), default=0)
     blocked = sum(1 for r in rows if r.get("event") == "preflight_blocked")
+    # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
+    pause_view: Any
+    try:
+        pause_view = is_paused()
+    except PauseStateCorruptError as exc:
+        pause_view = {"corrupt": str(exc)}
     print(json.dumps({"global_used": used, "normal_budget": NORMAL_BUDGET,
                       "hard_cap": HARD_CAP, "blocked_lines": blocked,
-                      "paused": is_paused()}, ensure_ascii=False, indent=2))
+                      "paused": pause_view}, ensure_ascii=False, indent=2))
     return 0
 
 

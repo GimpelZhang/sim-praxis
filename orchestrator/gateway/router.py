@@ -82,6 +82,9 @@ import litellm
 import requests
 import yaml
 
+from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.secrets import redact_text
+
 # 锁内适配（Task2 首次实呼取证 2026-10-14，litellm==1.99.4 / pydantic==2.11.10）：
 # types.utils 的 Message/Delta.reasoning_items 引用 ChatCompletionReasoningItem
 # （TypedDict），其 summary 字段是字符串前向引用 "ChatCompletionReasoningSummaryTextBlock"；
@@ -133,26 +136,28 @@ SWAP_HINT = (
     "换供重验批次在计划 8 次付费预算之外，另计并逐次记入 Milestone 记录。"
 )
 
-# v4.1 n1：IGNORECASE——BEARER/X-API-KEY/ARK- 等大写形态同样必须脱敏（脱敏方向宁可过杀）
-_SECRET_RE = re.compile(
-    r"(Bearer\s+)[A-Za-z0-9._\-]{12,}|"
-    r"(x-api-key:\s*)[A-Za-z0-9._\-]{12,}|"
-    r"(ark-|hf_|gh[pousr]_|nvapi-|sk-)[A-Za-z0-9._\-]{10,}",
-    re.IGNORECASE,
-)
-
-
 def redact(text: str) -> str:
-    def _sub(m: re.Match) -> str:
-        prefix = next((g for g in m.groups() if g), "")
-        return f"{prefix}***REDACTED***"
-    return _SECRET_RE.sub(_sub, str(text))
+    # G-8：正则单一事实源在 orchestrator/common/secrets.py（与证据包扫描同源，
+    # 含 AKIA/xox/PEM/kv 赋值等完整形态）；历史 ***REDACTED*** 口径与「前缀保留」
+    # 行为由该模块保持，此处只做委托，禁止在 router 另持一份易漂移的正则。
+    return redact_text(text)
+
+
+# G-8：formatException 是 logging.Formatter 的方法（Filter 上不存在），
+# 只依赖传入的 exc_info、无内部状态，模块级共享一个实例即可。
+_EXC_FORMATTER = logging.Formatter()
 
 
 class _RedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = redact(record.getMessage())
         record.args = ()
+        # G-8：异常 traceback 同样可能携带凭据（如鉴权头回显进异常 message）。
+        # 先把 formatException 的结果脱敏写入 exc_text，再清 exc_info 引用——
+        # logging.Formatter 见到 exc_text 已存在就不会用未脱敏的 exc_info 重渲染。
+        if record.exc_info:
+            record.exc_text = redact(_EXC_FORMATTER.formatException(record.exc_info))
+            record.exc_info = None
         return True
 
 
@@ -188,6 +193,20 @@ class GatewayPausedError(GatewayError):
                          f"until {state.get('resume_at_iso')} reason={state.get('reason')}")
 
 
+class PauseStateCorruptError(GatewayError):
+    """熔断状态文件存在但损坏（G-14）：区别于「不存在」，fail-closed 拒绝触网。"""
+
+
+class MissingGatewayCredentialError(GatewayError):
+    """凭据环境变量缺失（G-2）：不发网、不占整数 seq，只留 seq=null blocked 审计行。"""
+
+
+class EmptyResponseError(GatewayError):
+    """HTTP 200 但正文为空（content 缺失/仅 thinking，G-12）：重试耗尽后显式失败，
+    禁止按 ok=true 记账。关联 2026-10-16 test_04 空答事故（空答诱发额外实呼而
+    上一轮账行显示成功，事后无法识别）。"""
+
+
 # ---- 配额长熔断状态（与 v3 同契约，alias 字段改名 stage） ----
 
 def _state_dir() -> Path:
@@ -200,13 +219,25 @@ def _state_path() -> Path:
 
 
 def load_pause_state() -> dict | None:
+    """读熔断态：文件不存在返回 None；文件损坏（G-14）抛 PauseStateCorruptError。
+
+    历史上损坏被等同「不存在」处理，熔断态文件一旦被截断就 fail-open 触网
+    （m9 30 分钟窗口内尤甚），与 ledger 坏行 fail-closed 口径不对称。损坏与
+    缺失必须区分：调用方一律拒绝触网并提示人工核查，--ignore-pause 也不删损坏件。
+    """
     p = _state_path()
     if not p.exists():
         return None
     try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+        state = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise PauseStateCorruptError(
+            f"熔断状态文件损坏，人工核查（禁止触网、禁止 --ignore-pause 删除）：{p}："
+            f"{type(exc).__name__}") from exc
+    if not isinstance(state, dict):
+        raise PauseStateCorruptError(
+            f"熔断状态文件损坏（顶层不是 JSON 对象），人工核查：{p}")
+    return state
 
 
 def is_paused(stage: str | None = None, now: float | None = None) -> dict | None:
@@ -217,9 +248,43 @@ def is_paused(stage: str | None = None, now: float | None = None) -> dict | None
         return None
     now = time.time() if now is None else now
     resume = state.get("resume_at_epoch")
-    if resume and now >= float(resume):
+    if resume is not None and now >= float(resume):
         return None
     return state
+
+
+# G-3：不允许 --ignore-pause 的 reason（预算/硬顶类；恢复唯一合法路径是
+# quota_ledger resume --ticket ... --batch-id ...）。v2 态与 resume_at_epoch=null
+# 本身已被结构条件拦截，本集合再兜底 reason 维度。
+BUDGET_PAUSE_REASONS = frozenset({
+    "global_hard_cap", "batch_budget_reached", "task_hard_cap",
+    "consecutive_quota_errors",
+})
+
+
+def pause_ignore_allowed(state: dict) -> "tuple[bool, str]":
+    """G-3：判定 --ignore-pause 是否可忽略当前熔断态。
+
+    仅 v1 瞬时限流窗口（无 schema_version=2、resume_at_epoch 非空、reason
+    非预算/硬顶类）允许旧的「人工确认后清除」行为。返回 (允许, 拒绝文案)。
+    关联 2026-10-16 三次 test_04 误触实呼：validate --ignore-pause 曾无票越过
+    预算硬顶，账外实付 4 次。
+    """
+    reason = str(state.get("reason") or "")
+    if state.get("schema_version") == 2:
+        return False, (
+            f"v2 预算/硬顶熔断（schema_version=2，reason={reason}）不允许 --ignore-pause；"
+            "唯一恢复路径：python -m orchestrator.gateway.quota_ledger resume "
+            "--ticket <票> --batch-id <新批次凭据>")
+    if state.get("resume_at_epoch") is None:
+        return False, (
+            f"熔断态 resume_at_epoch=null（人工/预算硬停，reason={reason}），"
+            "不允许 --ignore-pause；须走 quota_ledger resume --ticket ... --batch-id ...")
+    if reason in BUDGET_PAUSE_REASONS:
+        return False, (
+            f"预算/硬顶类 reason={reason} 不允许 --ignore-pause；"
+            "须走 quota_ledger resume --ticket ... --batch-id ...")
+    return True, ""
 
 
 def _write_pause_state(stage: str, reason: str, wait_sec: int) -> dict:
@@ -234,16 +299,21 @@ def _write_pause_state(stage: str, reason: str, wait_sec: int) -> dict:
         "resume_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z",
                                        time.localtime(now + wait_sec)),
     }
-    _state_dir().mkdir(parents=True, exist_ok=True)
-    tmp = _state_path().with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(_state_path())
-    os.chmod(_state_path(), 0o600)
+    # G-7：0600 tmp+replace（先 fchmod 后 replace，杜绝 umask 权限窗口），
+    # tmp 名带 pid+随机串，并发写者不互踩固定 .json.tmp。
+    ensure_private_dir(_state_dir())
+    atomic_write_text(_state_path(),
+                      json.dumps(state, ensure_ascii=False, indent=2))
     return state
 
 
 def _clear_stale_pause_state() -> None:
-    if is_paused() is None and _state_path().exists():
+    # G-14：损坏件不许借「过期清理」之名被自动删除；只有确实过期的正常态才清除。
+    try:
+        paused = is_paused()
+    except PauseStateCorruptError:
+        return
+    if paused is None and _state_path().exists():
         _state_path().unlink(missing_ok=True)
 
 
@@ -380,18 +450,30 @@ def _litellm_usage(resp: Any) -> "tuple[int | None, int | None]":
             _num("output_tokens", "completion_tokens"))
 
 
-def _messages_contain_image(messages: list[dict[str, Any]]) -> bool:
-    """硬规则1 守卫：macro/coding 的 Anthropic Messages 体里出现 image block 即拒。
+def _node_contains_image(node: Any) -> bool:
+    """递归扫任意嵌套 list/dict（G-1）。
 
-    content 可以是字符串或 content block 列表（dict 含 type）；两种形态都扫。
+    Anthropic Messages 合法形态中 tool_result 的 content 本身可以是 block 列表：
+    ``{"type":"tool_result","content":[{"type":"image",...}]}``；只扫顶层会让
+    嵌套图像静默直达视觉未测的 macro/coding（coding 多轮工具把失败截图作为 tool
+    观测回灌是仿真排障最自然形态）。任一层级出现 type=="image" 即命中。
     """
-    for msg in messages or []:
-        content = msg.get("content") if isinstance(msg, dict) else None
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "image":
-                    return True
+    if isinstance(node, dict):
+        if node.get("type") == "image":
+            return True
+        return any(_node_contains_image(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_node_contains_image(v) for v in node)
     return False
+
+
+def _messages_contain_image(messages: list[dict[str, Any]]) -> bool:
+    """硬规则1 守卫：macro/coding 的 Messages 体任意层级出现 image block 即拒。
+
+    content 可以是字符串或 content block 列表（dict 含 type）；block 内允许
+    嵌套（tool_result.content 等），递归覆盖。
+    """
+    return any(_node_contains_image(msg) for msg in (messages or []))
 
 
 def _solid_png_b64(rgb: tuple[int, int, int] = (255, 0, 0), size: int = 32) -> str:
@@ -415,8 +497,11 @@ def _open_questions_path() -> Path:
 def _creds() -> tuple[str, str]:
     token = os.environ.get("SIMPRAXIS_LLM_TOKEN") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
     if not token:
-        raise GatewayError("SIMPRAXIS_LLM_TOKEN/ANTHROPIC_AUTH_TOKEN 未注入："
-                           "先 source scripts/00_env.sh")
+        # G-2：专用类型——调用入口据此写 seq=null blocked 审计行
+        # （missing_gateway_credential，未发网不占整数 seq），与 call_visual 对称。
+        raise MissingGatewayCredentialError(
+            "SIMPRAXIS_LLM_TOKEN/ANTHROPIC_AUTH_TOKEN 未注入："
+            "先 source scripts/00_env.sh")
     base_url = (os.environ.get("SIMPRAXIS_LLM_BASE_URL")
                 or os.environ.get("ANTHROPIC_BASE_URL") or DEFAULT_BASE_URL)
     return token, base_url
@@ -433,7 +518,7 @@ class ModelGateway:
                  sleep: Callable[[float], None] = time.sleep,
                  transport: Callable[..., Any] | None = None,
                  raw_transport: Callable[..., Any] | None = None,
-                 ledger: Any = None):
+                 ledger: Any = None, *, unguarded: bool = False):
         self.stage_models_path = Path(stage_models_path)
         self.max_attempts = max_attempts
         self.base_backoff = base_backoff
@@ -444,8 +529,17 @@ class ModelGateway:
         # 测试注入点：transport=litellm.completion 替身；raw_transport=requests.post 替身
         self._transport = transport
         self._raw_transport = raw_transport
+        # G-13：账本不再是构造时静默旁路项。无账本默认 fail-closed 拒绝构造，
+        # 防止生产新入口忘记挂 QuotaLedger 而账外烧预算；仅 --validate-models
+        # （router main，授权账外 4 ping）与全部 monkeypatch 单测可显式
+        # unguarded=True。允许位置由 tests/milestone1/test_quota_ledger_hardening.py
+        # 的源码红线扫描锁定白名单。
+        if ledger is None and not unguarded:
+            raise GatewayError(
+                "ModelGateway 必须挂 QuotaLedger（ledger=QuotaLedger()）；"
+                "仅 --validate-models 与 monkeypatch 单测允许显式 unguarded=True")
         # Task3（§1.5/§6.3）：ledger 非 None 时，call/call_visual 入口统一
-        # preflight、出口统一记账；None = --validate-models / monkeypatch 单测路径。
+        # preflight、出口统一记账；None + unguarded = validate / 单测路径。
         # 惰性导入避免 router ↔ quota_ledger 循环依赖（ledger 单向依赖 router）。
         if ledger is not None:
             from orchestrator.gateway.quota_ledger import BillingGate
@@ -524,6 +618,52 @@ class ModelGateway:
 
     # ---- 运行期：litellm anthropic/ provider + v3 同款退避/熔断 ----
 
+    def _record_early_blocked(self, stage: str, reason: str) -> None:
+        """G-2/G-10：preflight 之前的不发网拦截（凭据缺失/入口熔断/熔断件损坏）
+        也要留 seq=null blocked 审计行；ledger 缺失（validate/单测）时无账可写。
+        审计写入自身失败绝不允许顶掉本应抛出的拦截异常（fail-closed 优先）。"""
+        if self._billing is None:
+            return
+        try:
+            self._billing.record_blocked(stage, reason)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("早检查 blocked 审计行写入失败（不影响拦截语义）：%s",
+                           redact(f"{type(exc).__name__}: {exc}")[:200])
+
+    def _early_pause_gate(self, stage: str) -> None:
+        """preflight 之前的暂停态早检查（两条入口共用）：命中/损坏均先补 seq=null
+        blocked 审计行（G-10/G-14），GatewayPausedError/PauseStateCorruptError 照抛。"""
+        try:
+            paused = is_paused(stage)
+        except PauseStateCorruptError:
+            self._record_early_blocked(stage, "pause_state_corrupt：熔断状态文件损坏，人工核查")
+            raise
+        if paused:
+            self._record_early_blocked(
+                stage,
+                f"paused_preflight：preflight 前命中暂停态 reason={paused.get('reason')}")
+            raise GatewayPausedError(paused)
+
+    def _retry_wait(self, attempt: int, *, exc: "Exception | None" = None,
+                    headers: Any = None) -> float:
+        """m3：先尊重 Retry-After（异常响应头/错误体秒数，两传输层一致），
+        无头再指数退避 + jitter。"""
+        wait = (_retry_after_sec(exc) if exc is not None
+                else _retry_after_from_headers(headers))
+        if wait is None:
+            wait = min(self.max_backoff,
+                       self.base_backoff * (2 ** attempt)) + random.uniform(0, 0.5)
+        return wait
+
+    def _check_wait_budget(self, wait_total: float, wait: float, detail: str) -> None:
+        """G-6：5xx/超时/连接错误与 429 共用同一累计 max_total_wait=300s 熔断；
+        超限按重试耗尽处理（抛 GatewayError，不写配额暂停件——上游故障非配额信号，
+        由出口记 ok=false）。"""
+        if wait_total + wait > self.max_total_wait:
+            raise GatewayError(
+                f"{detail}：累计退避 {wait_total + wait:.0f}s 超过等待预算 "
+                f"{self.max_total_wait:.0f}s，按重试耗尽处理（ok=false）")
+
     def call(self, stage: str, messages: list[dict[str, Any]], *,
              max_tokens: int = 512, temperature: float = 0.2,
              timeout: int = 120) -> tuple[str, "tuple[int | None, int | None]"]:
@@ -540,22 +680,30 @@ class ModelGateway:
         if model_id is None:
             anchor = str(self.entry(stage).get("open_question", ""))
             raise StageUnresolvedError(stage, anchor)
-        paused = is_paused(stage)
-        if paused:
-            raise GatewayPausedError(paused)
+        # G-10/G-14：入口早检查（preflight 之前）命中暂停态/损坏件也写 seq=null
+        # blocked 审计行，异常照抛；账外 validate/单测（无 billing）不写。
+        self._early_pause_gate(stage)
         # 硬规则1两道守卫（均在 preflight 之前——编程错误不发网、不占 seq、不记账）：
         # (a) visual_rollout 是视觉专用阶段，禁止走文本入口，视觉唯一入口 call_visual；
         if stage == VISION_STAGE:
             raise NonRetryableError(
                 "visual_rollout 禁止走文本 call()（硬规则1）；视觉请求只能走 call_visual()")
-        # (b) macro/coding 消息体永不允许 image block。
+        # (b) macro/coding 消息体任意层级永不允许 image block（G-1：递归守卫）。
         if _messages_contain_image(messages):
             raise NonRetryableError(
-                f"{stage} 阶段禁止图像 block（硬规则1）；视觉请求只能走 call_visual()")
+                f"{stage} 阶段禁止图像 block（硬规则1，含嵌套 tool_result）；"
+                "视觉请求只能走 call_visual()")
         if self._billing is not None:
             self._billing.preflight(stage)
-        token, base_url = _creds()
         completion = self._transport or litellm.completion
+        # G-2：_creds() 移入 try 与 call_visual 对称；凭据缺失不发网，写 seq=null
+        # blocked 审计行（missing_gateway_credential）后原样抛，不占整数 seq。
+        try:
+            token, base_url = _creds()
+        except MissingGatewayCredentialError as exc:
+            self._record_early_blocked(
+                stage, f"missing_gateway_credential: {str(exc)[:200]}")
+            raise
         try:
             content, usage = self._chat_loop(
                 stage=stage, model_id=model_id, token=token, base_url=base_url,
@@ -591,6 +739,23 @@ class ModelGateway:
                     timeout=timeout,
                 )
                 content = _litellm_text(resp)
+                # G-12：HTTP 200 但 content 为空（空串/仅 thinking block）不得记成功。
+                # 关联 2026-10-16 test_04 空回答事故：max_tokens=8 实呼返回空 content
+                # 却被记 ok=true，账上"成功"但无答案可验收。按可重试错误处理——内部
+                # 退避重试不新增 ledger seq；耗尽抛 EmptyResponseError 由出口记一行 ok=false。
+                if not content or not content.strip():
+                    if attempt + 1 >= self.max_attempts:
+                        raise EmptyResponseError(
+                            f"stage={stage} 连续 {self.max_attempts} 次 HTTP 200 空回答"
+                            "（empty/thinking-only content），按失败处理（ok=false）")
+                    wait = self._retry_wait(attempt)
+                    self._check_wait_budget(wait_total, wait, "200 空回答退避")
+                    logger.warning("200 空回答 stage=%s 第 %d 次（内部重试不占 seq），"
+                                   "%.1fs 后重试", stage, attempt + 1, wait)
+                    self._sleep(wait)
+                    wait_total += wait
+                    attempt += 1
+                    continue
                 in_tok, out_tok = _litellm_usage(resp)
                 logger.info("chat ok stage=%s requested=%s echo=%s tokens in=%s out=%s",
                             stage, model_id, getattr(resp, "model", "?"), in_tok, out_tok)
@@ -622,10 +787,11 @@ class ModelGateway:
                     raise GatewayError(f"{type(exc).__name__} 重试 {self.max_attempts} 次仍失败："
                                        f"{_error_text(exc)}") from exc
                 # m3：5xx/超时同样先尊重 Retry-After（响应头或错误体秒数），无头才指数退避
-                wait = _retry_after_sec(exc)
-                if wait is None:
-                    wait = min(self.max_backoff, self.base_backoff * (2 ** attempt)) \
-                        + random.uniform(0, 0.5)
+                wait = self._retry_wait(attempt, exc=exc)
+                # G-6：与 429 共用同一累计 max_total_wait=300s 熔断，超限按重试耗尽
+                # 处理（GatewayError → 出口 ok=false；上游故障不是配额信号，不写暂停件）。
+                self._check_wait_budget(wait_total, wait,
+                                        f"{type(exc).__name__} 可重试错误退避")
                 logger.warning("可重试错误 %s，%.1fs 后重试（%s）",
                                type(exc).__name__, wait, _error_text(exc)[:160])
                 self._sleep(wait)
@@ -668,9 +834,8 @@ class ModelGateway:
         if model_id is None:
             anchor = str(self.entry(stage).get("open_question", ""))
             raise StageUnresolvedError(stage, anchor)
-        paused = is_paused(stage)
-        if paused:
-            raise GatewayPausedError(paused)
+        # G-10/G-14：与 call() 同一入口早检查（seq=null blocked 审计行 + 异常照抛）。
+        self._early_pause_gate(stage)
         if self._billing is not None:
             self._billing.preflight(stage)
         blocks = [
@@ -684,6 +849,12 @@ class ModelGateway:
             usage_body = body.get("usage") or {}
             usage = (usage_body.get("input_tokens"), usage_body.get("output_tokens"))
             text = _message_text(body)
+        except MissingGatewayCredentialError as exc:
+            # G-2：凭据缺失发生在发网前，只写 seq=null blocked 审计行
+            # （missing_gateway_credential），绝不占整数 seq/写 ok=false。
+            self._record_early_blocked(
+                stage, f"missing_gateway_credential: {str(exc)[:200]}")
+            raise
         except Exception as exc:  # noqa: BLE001 —— 与 call() 同契约：恰好一行 ok=false
             if self._billing is not None:
                 self._billing.record(
@@ -723,8 +894,10 @@ class ModelGateway:
             except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt + 1 >= self.max_attempts:
                     raise GatewayError(f"连接错误重试 {self.max_attempts} 次仍失败：{exc}") from exc
-                wait = min(self.max_backoff, self.base_backoff * (2 ** attempt)) \
-                    + random.uniform(0, 0.5)
+                wait = self._retry_wait(attempt, exc=exc)
+                # G-6：连接/超时分支与 429 共用累计 max_total_wait=300s 熔断。
+                self._check_wait_budget(wait_total, wait,
+                                        f"{type(exc).__name__} 连接错误退避")
                 self._sleep(wait)
                 wait_total += wait
                 attempt += 1
@@ -735,6 +908,25 @@ class ModelGateway:
             except Exception:  # noqa: BLE001
                 body = {}
             if status == 200:
+                # G-12：200 空体（content 缺失/空串/仅 thinking block/JSON 不可解析）
+                # 不得当成功记 ok=true。关联 2026-10-16 test_04 空回答事故：实呼
+                # HTTP 200 返回空 content，账上却是成功，无答案可验收。按可重试错误
+                # 在调用循环内退避（不新增 ledger seq），耗尽抛 EmptyResponseError，
+                # 由 call_visual 出口记一行 ok=false。
+                if not _message_text(body).strip():
+                    if attempt + 1 >= self.max_attempts:
+                        raise EmptyResponseError(
+                            f"HTTP 200 stage={stage} 连续 {self.max_attempts} 次空回答"
+                            "（empty/thinking-only content），按失败处理（ok=false）")
+                    wait = self._retry_wait(
+                        attempt, headers=getattr(resp, "headers", None))
+                    self._check_wait_budget(wait_total, wait, "200 空回答退避")
+                    logger.warning("200 空回答(HTTP) stage=%s 第 %d 次（内部重试不占 seq），"
+                                   "%.1fs 后重试", stage, attempt + 1, wait)
+                    self._sleep(wait)
+                    wait_total += wait
+                    attempt += 1
+                    continue
                 return resp, body
             text = " | ".join(p for p in (
                 str(body.get("message", "")) if isinstance(body, dict) else "",
@@ -777,10 +969,10 @@ class ModelGateway:
                 if attempt + 1 >= self.max_attempts:
                     raise GatewayError(f"HTTP {status} 重试 {self.max_attempts} 次仍失败：{text}")
                 # m3：5xx 先尊重 Retry-After 响应头，无头再指数退避 + jitter
-                wait = _retry_after_from_headers(getattr(resp, "headers", None))
-                if wait is None:
-                    wait = min(self.max_backoff, self.base_backoff * (2 ** attempt)) \
-                        + random.uniform(0, 0.5)
+                wait = self._retry_wait(attempt, headers=getattr(resp, "headers", None))
+                # G-6：5xx 与 429 共用累计 max_total_wait=300s 熔断，超限即重试耗尽。
+                self._check_wait_budget(wait_total, wait,
+                                        f"HTTP {status} 服务端错误退避")
                 self._sleep(wait)
                 wait_total += wait
                 attempt += 1
@@ -913,29 +1105,51 @@ def main() -> int:
                              "visual_rollout 额外 32x32 视觉 ping；结果落 runs/model_validate/")
     parser.add_argument("--max-tokens", type=int, default=8)
     parser.add_argument("--ignore-pause", action="store_true",
-                        help="忽略仍在窗口内的 quota_pause.json（人工确认配额已恢复时使用）")
+                        help="仅对 v1 瞬时限流窗口（resume_at_epoch 为未来时刻且 reason "
+                             "非预算/硬顶类）人工清除 quota_pause.json；v2 预算/硬顶熔断、"
+                             "resume_at_epoch=null、损坏件一律拒绝且不删除，须走 "
+                             "quota_ledger resume --ticket ... --batch-id ...")
     args = parser.parse_args()
     if not args.validate_models:
         parser.error("当前仅支持 --validate-models")
 
-    # pause 生命周期与 v3 相同：过期即清除；窗口内默认拒绝（exit 3）；--ignore-pause 人工恢复
-    state = load_pause_state()
+    # pause 生命周期：过期正常态即清除；窗口内默认拒绝（exit 3）；
+    # --ignore-pause 仅 v1 瞬时限流窗口可人工清除（G-3）；损坏件 fail-closed（G-14）。
+    try:
+        state = load_pause_state()
+    except PauseStateCorruptError as exc:
+        # G-14：损坏既不触网也不许借 --ignore-pause 删除，exit 2 交人工核查。
+        print(f"[gateway VALIDATE BLOCKED] {exc}", file=sys.stderr)
+        return 2
     if state is not None:
-        if is_paused() is None:
+        try:
+            expired = is_paused() is None
+        except PauseStateCorruptError as exc:
+            print(f"[gateway VALIDATE BLOCKED] {exc}", file=sys.stderr)
+            return 2
+        if expired:
             _state_path().unlink(missing_ok=True)
             print("[gateway] 检测到已过期的 quota_pause.json，已清除")
         elif args.ignore_pause:
+            # G-3：v2/预算硬顶/resume=null 一律拒绝且不删件（关联 2026-10-16 三次
+            # test_04 误触实呼：validate --ignore-pause 曾无票越过预算硬顶账外实付）。
+            allowed, msg = pause_ignore_allowed(state)
+            if not allowed:
+                print(f"[gateway VALIDATE BLOCKED] {msg}", file=sys.stderr)
+                return 3
             _state_path().unlink(missing_ok=True)
-            print("[gateway] --ignore-pause：人工确认配额恢复，清除熔断状态后继续")
+            print("[gateway] --ignore-pause：人工确认瞬时限流已恢复，清除熔断状态后继续")
         else:
             print(f"[gateway VALIDATE BLOCKED] 仍在配额熔断窗口内：{state.get('resume_at_iso')}；"
-                  f"确认恢复后加 --ignore-pause", file=sys.stderr)
+                  f"确认恢复后加 --ignore-pause（仅限 v1 瞬时限流窗口）", file=sys.stderr)
             return 3
 
     # m2：构造器（读 stage_models.yaml/open-questions 锚点）同样包在 try 内——
     # 配置错误过去会裸 traceback 且退出码不确定；现在统一走退出码契约。
+    # G-13：validate 是账外实呼路径（设计上不挂 QuotaLedger），显式 unguarded=True，
+    # 由红线扫描测试锁定该豁免白名单。
     try:
-        gw = ModelGateway()
+        gw = ModelGateway(unguarded=True)
         gw.validate_models(max_tokens=args.max_tokens)
     except GatewayPausedError as exc:
         print(f"[gateway VALIDATE BLOCKED] {exc}", file=sys.stderr)
