@@ -8,8 +8,11 @@
   仓库根），禁止再配 kb_relpath（不允许把一手探针伪装成 KB 引用）；
 - 其余 level（[CODE]/[PAPER]/…）：规则不变，kb_relpath 必须落只读 KB 内，
   禁止配 repo_relpath（二手知识不允许用仓内文件冒充出处）。
-KB 只读钉死（meta.kb_commit == KB HEAD）与 absent 词边界零命中规则不变。
+KB 锚定语义（Task0b 回填）：meta.kb_commit 是 fact 回指的 knowledge 状态，
+必须为 HEAD 祖先且 knowledge/ 自此只增不改（真仓另过 kb_pins 分层钉点）；
+absent 词边界零命中规则不变。
 """
+import hashlib
 import os
 import re
 import subprocess
@@ -17,6 +20,8 @@ import sys
 from pathlib import Path
 
 import yaml
+
+from memory_flywheel import kb_pins  # Task0b 回填：分层钉点单一源
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MATRIX = ROOT / "memory_flywheel" / "capability_matrix.yaml"
@@ -89,10 +94,41 @@ def validate(matrix_path: "str | Path" = DEFAULT_MATRIX,
     if kb_commit in ("", "__FILL__"):
         errors.append("meta.kb_commit 未填写")
     else:
-        real = subprocess.run(["git", "-C", str(kb_root), "rev-parse", "HEAD"],
-                              capture_output=True, text=True)
-        if real.returncode != 0 or kb_commit.strip() != real.stdout.strip():
-            errors.append(f"meta.kb_commit {kb_commit} 与 KB HEAD 不一致")
+        # Task0b 回填：旧断言「meta.kb_commit == KB HEAD」在三层分离后改为
+        # fact 锚定语义——cited commit 必须是 HEAD 祖先，且 knowledge/ 自该
+        # 提交起只增不改（M/D=错误；A=新增 md 必须在 kb_pins 登记且 sha 相符）。
+        # 这样矩阵事实锚定的 knowledge 状态在当前树中逐字节仍可核验；真仓另过
+        # kb_pins 分层钉点（HEAD≥迁移提交 + 32-md 基线哈希集）。
+        kb_commit = kb_commit.strip()
+        anc = subprocess.run(
+            ["git", "-C", str(kb_root), "merge-base", "--is-ancestor",
+             kb_commit, "HEAD"], capture_output=True, text=True)
+        if anc.returncode != 0:
+            errors.append(
+                f"meta.kb_commit {kb_commit[:12]} 不是 KB HEAD 祖先（分叉/移动？）")
+        else:
+            ns = subprocess.run(
+                ["git", "-C", str(kb_root), "diff", "--name-status",
+                 kb_commit, "HEAD", "--", "knowledge"],
+                capture_output=True, text=True)
+            for line in ns.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) < 2 or not parts[-1].endswith(".md"):
+                    continue
+                status, rel = parts[0], parts[-1]
+                if status.startswith(("M", "D", "R")):
+                    errors.append(
+                        f"knowledge/ 自 meta.kb_commit 后被{status}（只增不改）：{rel}")
+                elif status.startswith("A"):
+                    want = kb_pins.KNOWLEDGE_ADDITIONS.get(rel)
+                    got = hashlib.sha256(
+                        (kb_root / rel).read_bytes()).hexdigest() if (kb_root / rel).is_file() else None
+                    if want != got:
+                        errors.append(
+                            f"knowledge 新增文件未在 kb_pins.KNOWLEDGE_ADDITIONS "
+                            f"登记或 sha 不符：{rel}")
+        if kb_root.resolve() == KB.resolve():
+            errors.extend(kb_pins.check_layered_pins(kb_root))
     slugs = set()
     for eng in m.get("engines", []):
         slug = eng.get("slug")

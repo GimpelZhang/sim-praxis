@@ -1,0 +1,69 @@
+# SimPraxis 解题方案清单契约（schema: simpraxis.solution_manifest.v1）
+#
+# 每个 solutions/<solution_id>/ 目录必须恰好包含一个 manifest.yaml，
+# 由引擎仓 orchestrator/solutions/resolver.py 唯二解析（另一合法读者是
+# scripts/kb/check_solutions.py）。字段缺失/sha256 不符/路径 C4 违规一律
+# SolutionError fail-closed：不网络兜底、不就地生成、不静默跳过。
+#
+# solution_id 形态（C4，解析器正则强制）：
+#   track1_tools/NN_<slug>       Track1 工具链实跑方案
+#   track2_questions/NN_<slug>   Track2 工程题方案
+# NN 为两位序号，slug 用 [a-z0-9_]+；目录名必须等于 solution_id。
+schema: simpraxis.solution_manifest.v1
+solution_id: track1_tools/02_mujoco_contact_push
+title: "MuJoCo 3.15.0 接触推动 Cube（EGL 无头，Task7 Rung1-4 载体）"
+
+# 入口可执行文件：必须是 files[] 之一；stage 后权限 0700，其余落件 0600。
+entrypoint: mujoco_contact_push.py
+
+# 图运行时实际下发的参数（值由编排器注入，如 --out-dir/--run-id）。
+# 这里声明「受支持的参数面」，解析器只校验形状（字符串列表），不代执行。
+args:
+  - "--out-dir <workdir>（必填，编排器注入）"
+  - "--run-id <run_id>（必填，编排器注入）"
+  - "--width 640"
+  - "--height 480"
+
+# 仿真引擎 slug（必须与 memory_flywheel/capability_matrix.yaml 的 slug 同名）
+# 与该方案验证过的最低版本；解析器只做非空/字符集校验，真实版本门在容器探针。
+sim_engine:
+  slug: mujoco
+  min_version: "3.15.0"
+
+# 依赖覆盖：空 pip 列表 = 使用引擎仓 pins（CLAUDE.md 硬规则 8 的钉死版本）。
+# 任何非空覆盖都需在方案评审时显式登记；解析器拒绝未知键但允许 notes 说明。
+dependencies:
+  python: ">=3.10"
+  pip: []
+  notes: ""
+
+# Rung 阈值引用：阈值真值只在引擎仓（orchestrator/judge/），公开 KB 不复制数字，
+# 只登记引用位置；迁移后阈值文件改名需同步本字段（kb_integration 套校验）。
+rung_thresholds:
+  ref: orchestrator/judge/thresholds.py
+  constants: [CONTACT_DURATION_S, CONTACT_FORCE_CV_MAX, GOAL_WINDOW_S, MAX_PENETRATION_M]
+
+# 冻结输入编号：对应 inputs/tracks/track_{1,2}_samples.txt 的序号（Task0 扩编固化）。
+frozen_inputs:
+  - track: track1
+    index: 2
+
+# 方案全部落件清单（manifest.yaml 自身除外）：relpath 为方案目录内 POSIX 相对路径，
+# 每段只允许 [A-Za-z0-9_.-]，禁绝对路径/..\\ 逃逸；sha256 为逐字文件十六进制摘要。
+# stage 时逐件复算，差 1 字节即 SolutionError。
+files:
+  - relpath: mujoco_contact_push.py
+    sha256: "<sha256-hex-64>"
+  - relpath: README.md
+    sha256: "<sha256-hex-64>"
+
+# Phase 1 v1 执行副本相对 $SIMPRAXIS_RUN_DIR 的 POSIX 路径（正本溯源锁）。
+# 仓内版即执行版的方案填 null；只有「正本取 run 副本」的方案填非空值，
+# 并在 provenance 同时记录仓内版 sha256 与差异说明（见
+# track2_questions/01_ice_floor_humanoid_dr/manifest.yaml 范例）。
+v1_run_relpath: null
+
+# 可选溯源块（仅正本取自 run 副本或存在多版本时需要）。
+# provenance:
+#   repo_version_sha256: "<仓内版 sha256>"
+#   note: "正本=run 执行副本（29dc536c…）；仓内版 7f42d64f… 后续含引擎契约修复"

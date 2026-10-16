@@ -15,7 +15,7 @@ Phase 0 不包含 LangGraph 状态机、HITL 飞书 Gate、RL/VLA 执行（Phase
 ## 本机布局（大文件全部在 /mnt，仓库保持轻量）
 
 - venv：`/mnt/venvs/simpraxis`（系统 Python 3.10 创建，勿用 conda 环境）
-- 向量库：`/mnt/artifacts/simpraxis/lancedb`（`SIMPRAXIS_LANCEDB_URI` 可覆盖）
+- 向量库：Task0b 三层分离后实体迁到 KB 数据层 `/mnt/artifacts/embodied-kb/data/lancedb`（`$KB_ROOT/data` 软链；`SIMPRAXIS_LANCEDB_URI` 可覆盖；旧位置 `/mnt/artifacts/simpraxis/lancedb` 已废弃）
 - 视频产物：`/mnt/artifacts/simpraxis/runs/`（`SIMPRAXIS_RUN_DIR`）
 - Tour 克隆：`/mnt/assets/simpraxis/tours/`（`SIMPRAXIS_TOURS_DIR`）
 - 缓存：`/mnt/caches/{hf,fastembed,modelscope}`，pip 缓存 `/mnt/caches/pip`

@@ -38,6 +38,7 @@ from orchestrator.judge.collage import (
 )
 from orchestrator.judge.rung4 import Rung4Judge, Rung4Result, combine_vector
 from orchestrator.judge.rungs import evaluate_rollout
+from orchestrator.solutions import SolutionError, resolve_solution
 from orchestrator.judge.seam import assemble_file_metrics
 from orchestrator.judge.thresholds import (
     CONTACT_DURATION_S,
@@ -46,21 +47,20 @@ from orchestrator.judge.thresholds import (
     MAX_PENETRATION_M,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK = 7
 
-# Gate1 批准的 sim_engine slug（能力矩阵 slug）→ Track1 场景模板 + 额外环境。
-# 只接 Track1 两引擎；genesis/physx_isaac/newton/bullet 在 Task7 是协议外选择
-# （Track2/后续任务），命中即 GraphStateError，不静默跑错脚本。
+# Gate1 批准的 sim_engine slug（能力矩阵 slug）→ Track1 解题方案 id + 额外环境。
+# Task0b 三层分离：题目脚本已迁 KB 公开仓 solutions/（内容层），引擎仓只经
+# orchestrator.solutions.resolver 按 manifest 校验后 stage；genesis/
+# physx_isaac/newton/bullet 在 Task7 是协议外选择（Track2/后续任务），命中即
+# GraphStateError，不静默跑错脚本。
 ENGINE_SCENARIOS: dict[str, dict] = {
     "mujoco": {
-        "template": REPO_ROOT / "sandbox" / "track1" / "mujoco_contact_push.py",
-        "script": "mujoco_contact_push.py",
+        "solution_id": "track1_tools/02_mujoco_contact_push",
         "env": {"MUJOCO_GL": "egl", "PYOPENGL_PLATFORM": "egl"},
     },
     "sapien": {
-        "template": REPO_ROOT / "sandbox" / "track1" / "maniskill_pushcube.py",
-        "script": "maniskill_pushcube.py",
+        "solution_id": "track1_tools/01_maniskill_pushcube",
         "env": {"PYOPENGL_PLATFORM": "egl"},
     },
 }
@@ -117,11 +117,6 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             raise GraphStateError(
                 f"Task7 Track1 场景映射缺 sim_engine={engine!r}；"
                 f"支持 {sorted(ENGINE_SCENARIOS)}，其余引擎属 Track2/后续任务")
-        template: Path = scenario["template"]
-        if not template.is_file():
-            raise GraphStateError(
-                f"Task7 场景模板不存在：{template}（引擎 {engine} 探针/脚本未就位）")
-
         # L-12 编号钉死（两阶段索引关系，禁止改号）：工厂在 agent_runs 追加
         # 之前预占序号 len(agent_runs)+1；evaluate 接缝在追加之后用
         # len(agent_runs) 复核（见 make_evaluate_seam 注释）——同一 run 两处
@@ -129,12 +124,18 @@ def make_spec_factory(thread_id: str, coding_batch: str,
         run_idx = len(state.get("agent_runs", [])) + 1
         workdir = task7_run_dir(thread_id, run_idx)
 
-        # 仅在新目录首见时 stage：coding 补丁只改 workdir 内文件，重跑保留。
-        target = workdir / scenario["script"]
-        if not target.exists():
-            # S-6：可执行模板经 fsutil 原子落盘并锁 0700（原 copyfile+chmod
-            # 收口；脚本须可执行，模式显式传 0700，不用默认 0600）。
-            atomic_write_bytes(target, template.read_bytes(), mode=0o700)
+        # Task0b：方案脚本在内容层（$KB_ROOT/solutions），resolver 做 manifest
+        # 字段/sha256/C4 全量校验后 stage 进 workdir（已存在的落件不覆盖，
+        # coding 补丁只改 workdir 内文件，跨 spec 重建保留）；任何违规
+        # fail-closed 成 GraphStateError，不网络兜底、不就地生成。
+        try:
+            staged = resolve_solution(
+                scenario["solution_id"]).stage(workdir)
+        except SolutionError as exc:
+            raise GraphStateError(
+                f"Task7 方案 stage 失败（引擎 {engine}，"
+                f"{scenario['solution_id']}）：{exc}") from exc
+        target = staged.entrypoint
         versions = workdir / "versions.txt"
         if not versions.exists():
             # S-6：原子写 0600 收口 fsutil（可执行模板仍 copyfile+chmod 0700）。

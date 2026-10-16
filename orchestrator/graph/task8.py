@@ -56,16 +56,17 @@ from orchestrator.judge.gait_thresholds import (
     MIN_SEEDS,
 )
 from orchestrator.judge.rung4 import Rung4Judge
+from orchestrator.solutions import SolutionError, resolve_solution
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 TASK = 8
 
-# Gate1 批准的 sim_engine slug（能力矩阵 slug）→ Track2 DR 场景模板。
+# Gate1 批准的 sim_engine slug（能力矩阵 slug）→ Track2 DR 解题方案 id。
+# Task0b 三层分离：题目脚本正本（v1 run 执行副本）已迁 KB 公开仓 solutions/，
+# 引擎仓只经 orchestrator.solutions.resolver 按 manifest 校验后 stage。
 # Track2 Q1 只接 genesis；Q2 Carla 是条件闸门（D9），不经本图运行。
 ENGINE_SCENARIOS: dict[str, dict] = {
     "genesis": {
-        "template": REPO_ROOT / "sandbox" / "track2" / "genesis_humanoid_dr.py",
-        "script": "genesis_humanoid_dr.py",
+        "solution_id": "track2_questions/01_ice_floor_humanoid_dr",
         "env": {"GS_ENABLE_ZEROCOPY": "0", "PYOPENGL_PLATFORM": "egl"},
     },
 }
@@ -159,20 +160,23 @@ def make_spec_factory(thread_id: str, coding_batch: str,
                 f"Task8 Track2 Q1 场景映射缺 sim_engine={engine!r}；"
                 f"Q1 只支持 {sorted(ENGINE_SCENARIOS)}（genesis），"
                 "Carla 属 Q2 条件闸门（D9），不经本图")
-        template: Path = scenario["template"]
-        if not template.is_file():
-            raise GraphStateError(f"Task8 场景模板不存在：{template}")
-
         # L-12 编号钉死（两阶段索引关系，禁止改号）：工厂在 agent_runs 追加
         # 之前预占 len(agent_runs)+1；evaluate 接缝在追加之后用 len(agent_runs)
         # 复核（见 make_evaluate_seam 注释）——同一 run 两处同号（首 run=r1）。
         run_idx = len(state.get("agent_runs", [])) + 1
         workdir = task8_run_dir(thread_id, run_idx)
 
-        target = workdir / scenario["script"]
-        if not target.exists():
-            # S-6：可执行模板经 fsutil 原子落盘并锁 0700（回退语义不变）。
-            atomic_write_bytes(target, template.read_bytes(), mode=0o700)
+        # Task0b：方案脚本在内容层（$KB_ROOT/solutions，正本=v1 run 副本），
+        # resolver 做 manifest/sha256/C4 全量校验后 stage（已存在落件不覆盖，
+        # coding 补丁跨 spec 重建保留）；违规 fail-closed 成 GraphStateError。
+        try:
+            staged = resolve_solution(
+                scenario["solution_id"]).stage(workdir)
+        except SolutionError as exc:
+            raise GraphStateError(
+                f"Task8 方案 stage 失败（{scenario['solution_id']}）：{exc}"
+            ) from exc
+        target = staged.entrypoint
         versions = workdir / "versions.txt"
         if not versions.exists():
             atomic_write_text(versions, _installed_versions())

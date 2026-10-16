@@ -5,8 +5,9 @@
 视觉网关全 fake（call() 文本入口被触即失败，硬规则 1）。覆盖计划 L561-572：
 
 - spec_factory：仅 genesis 合法 → batch 子命令/三臂聚合产物名/billing_task=8/
-  GS_ENABLE_ZEROCOPY=0/2400s 超时/v2 标定件 stage；carla/mujoco 与缺模板/坏标定
-  一律 GraphStateError；Gate2 打回递增 run_idx 且不继承旧补丁；
+  GS_ENABLE_ZEROCOPY=0/2400s 超时/v2 标定件 stage；carla/mujoco 与内容层缺方案/
+  坏标定一律 GraphStateError；Gate2 打回递增 run_idx 且不继承旧补丁
+  （Task0b 起 genesis 方案在 tests 合成 fixture 内容层，正本在 KB solutions/）；
 - evaluate：gait_rungs 三级文件判定（不信 outcomes，series 重算）+ 两张对照
   分屏各一次 Rung4；uncalibrated 零实呼，record_only 恰好 2 次实呼、12 题、
   证据 0600；缺 summary/分屏硬失败；tilt 两级舍入容差 0.01°；
@@ -40,14 +41,32 @@ from orchestrator.judge.gait_rungs import (
 )
 from orchestrator.judge.gait_thresholds import POSTPUSH_WINDOW_S
 from orchestrator.judge.rung4 import Rung4Result
+from orchestrator.solutions import resolve_solution
 
-# CSV_FIELDS 直接从生产脚本 AST 提取（不 import genesis：宿主未必装引擎本体）。
-_TEMPLATE_SRC = task8.ENGINE_SCENARIOS["genesis"]["template"].read_text()
+# Task0b：单测不依赖活 KB 仓，ENGINE_SCENARIOS 挂的 genesis 方案 id 解析到
+# tests/fixtures/solutions 合成方案（manifest 走 resolver 全量校验）。
+FIXTURE_SOLUTIONS_ROOT = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "solutions")
+
+
+@pytest.fixture(autouse=True)
+def _fixture_solutions_root(monkeypatch):
+    monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT",
+                       str(FIXTURE_SOLUTIONS_ROOT))
+
+
+# CSV_FIELDS 直接从 fixture genesis 脚本 AST 提取（不 import genesis：宿主未必
+# 装引擎本体）；fixture 的 35 列逐字复制 KB 正本，漂移即本文件多处断言失败。
+_GENESIS_FIXTURE = (
+    FIXTURE_SOLUTIONS_ROOT / "track2_questions"
+    / "01_ice_floor_humanoid_dr" / "genesis_humanoid_dr.py")
+_TEMPLATE_SRC = _GENESIS_FIXTURE.read_text(encoding="utf-8")
 CSV_FIELDS = ast.literal_eval(next(
     n.value for n in ast.walk(ast.parse(_TEMPLATE_SRC))
     if isinstance(n, ast.Assign)
     and any(isinstance(t, ast.Name) and t.id == "CSV_FIELDS"
             for t in n.targets)))
+assert len(CSV_FIELDS) == 35
 
 PUSH_T_BY_SEED = [3.0, 2.7, 3.3]
 MU_BY_ARM = {"normal": 0.7, "ice_nominal": 0.05,
@@ -297,8 +316,10 @@ def test_01_spec_factory_genesis_mapping(roots, monkeypatch):
     assert spec.workdir == (roots["runs"] / "phase1" / "task8_track2"
                             / "q1_genesis" / "run_tt_1")
     assert target.is_file() and _mode(target) == 0o700
-    assert target.read_bytes() == task8.ENGINE_SCENARIOS["genesis"][
-        "template"].read_bytes()
+    manifest = resolve_solution(
+        task8.ENGINE_SCENARIOS["genesis"]["solution_id"])
+    source = manifest.solution_dir / "genesis_humanoid_dr.py"
+    assert target.read_bytes() == source.read_bytes()
     cal = spec.workdir / "push_window_calibration.json"
     assert cal.is_file() and _mode(cal) == 0o600
     assert json.loads(cal.read_text())["selected_window"]["push_n_N"] == 35
@@ -326,7 +347,7 @@ def test_02_spec_factory_run_idx_and_gate2_notes(roots, monkeypatch):
     assert Path(s2.cmd[1]).is_file()
 
 
-def test_03_spec_factory_rejects_non_genesis_and_missing_template(
+def test_03_spec_factory_rejects_non_genesis_and_missing_solution(
         roots, monkeypatch, tmp_path):
     factory = task8.make_spec_factory("tt", "T8-B1-coding")
     for engine in ("mujoco", "sapien", "carla"):
@@ -334,10 +355,11 @@ def test_03_spec_factory_rejects_non_genesis_and_missing_template(
             factory({"chosen": {"sim_engine": engine},
                      "agent_runs": [], "events": []})
 
+    # Task0b：方案 id 合 C4 语法但内容层缺目录 → resolver fail-closed。
     monkeypatch.setitem(
         task8.ENGINE_SCENARIOS, "genesis",
-        {"template": tmp_path / "no_such.py", "script": "x.py", "env": {}})
-    with pytest.raises(GraphStateError, match="场景模板不存在"):
+        {"solution_id": "track2_questions/99_missing_fixture", "env": {}})
+    with pytest.raises(GraphStateError, match="方案 stage 失败"):
         factory({"chosen": {"sim_engine": "genesis"},
                  "agent_runs": [], "events": []})
 
@@ -867,7 +889,10 @@ def test_45_l6_schema_error_raises_before_any_visual_call(roots, batch_dir):
 # ---------------------------------------------------------------------------
 
 def test_46_postpush_window_literal_matches_threshold_constant():
-    script = (task8.ENGINE_SCENARIOS["genesis"]["template"].read_text())
+    # Task0b：经 resolver 从内容层取 fixture genesis 脚本（引擎仓不再留副本）。
+    manifest = resolve_solution(
+        task8.ENGINE_SCENARIOS["genesis"]["solution_id"])
+    script = (manifest.solution_dir / manifest.entrypoint).read_text()
     tree = ast.parse(script)
 
     class _WindowVisitor(ast.NodeVisitor):

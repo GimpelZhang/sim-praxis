@@ -43,6 +43,7 @@ from memory_flywheel.phase1.offgraph_learning import (
     write_offgraph_learning,
 )
 from orchestrator.common.clock import parse_ts_iso_strict
+from tests.kb_support import require_kb_integration  # Task0b：活库读取守门
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = Path(os.environ.get("SIMPRAXIS_RUN_DIR",
@@ -151,7 +152,12 @@ def _vector_bytes(vec) -> bytes:
 @pytest.fixture
 def seeded_site(site):
     """临时库预置真实老 4 行（id/text/vector/relpath 逐列照搬），模拟补写前
-    状态；老 4 行按 run_id 钉死，不随活库行数（4 或补写后 5）漂移。"""
+    状态；老 4 行按 run_id 钉死，不随活库行数（4 或补写后 5）漂移。
+
+    Task0b：活 lancedb 已划属 KB 数据层（$KB_ROOT/data/lancedb），读活库的
+    预置步骤改由 kb_integration 开关守门（与 paid marker 同构，默认 skip
+    非放水）；SIMPRAXIS_KB_INTEGRATION=1 且数据层迁移完成后执行。"""
+    require_kb_integration(data=True)
     rows = _live_four_rows()
     assert len(rows) == 4
     site["store"].table(create=True).add(rows)
@@ -244,6 +250,7 @@ def test_gate_source_whitelist_extension(site, bad_source):
 
 # ---------------- 2. CLI 补沉淀恰好 5 行（附录 A 第 2 条） ----------------
 
+@pytest.mark.kb_integration
 def test_q2_backfill_exactly_one_row_five_total(seeded_site):
     proc = _run_cli(seeded_site)
     out = _cli_json(proc)
@@ -267,6 +274,7 @@ def test_q2_backfill_exactly_one_row_five_total(seeded_site):
 
 # ---------------- 3. 老 4 行逐字节不变（附录 A 第 3 条） ----------------
 
+@pytest.mark.kb_integration
 def test_old_four_rows_byte_unchanged(seeded_site):
     store = seeded_site["store"]
     before = {r["id"]: (r["text"], r["evidence_relpath"],
@@ -344,6 +352,7 @@ def test_old_four_selection_survives_five_row_state():
     "missing", "schema_bad", "not_approve",
     "relpath_empty", "relpath_traversal", "relpath_missing",
 ])
+@pytest.mark.kb_integration
 def test_requires_real_approve_decision_json(seeded_site, case, tmp_path):
     site = seeded_site
     decision = site["decision_path"]
@@ -389,6 +398,7 @@ def test_requires_real_approve_decision_json(seeded_site, case, tmp_path):
 
 # ---------------- 5. CLI 幂等 + 0600 日志 + q2 脚本二次运行（附录 A 第 5 条） ----
 
+@pytest.mark.kb_integration
 def test_offgraph_cli_idempotent_same_id(seeded_site):
     site = seeded_site
     p1 = _run_cli(site)
@@ -461,6 +471,7 @@ def test_offgraph_cli_idempotent_same_id(seeded_site):
 
 # ---------------- 6. 四段文案事实同源 + 空意见不代笔（附录 A 第 6 条） ----
 
+@pytest.mark.kb_integration
 def test_compose_text_facts_traced_and_empty_notes(seeded_site):
     site = seeded_site
     assert site["decision"]["human_decision"]["human_notes"] == ""
@@ -505,6 +516,7 @@ def test_compose_text_facts_traced_and_empty_notes(seeded_site):
 
 # ---------------- 7. 断网语义召回命中新行（附录 A 第 7 条） ----------------
 
+@pytest.mark.kb_integration
 def test_q2_semantic_recall_offline(seeded_site):
     site = seeded_site
     # mpnet 必须命中共机缓存（0 下载的物证）

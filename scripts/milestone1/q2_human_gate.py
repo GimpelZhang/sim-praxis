@@ -62,8 +62,11 @@ Q2_DIR = RUNS_ROOT / "task8_track2" / "q2_carla"
 ANALYSIS = Q2_DIR / "analysis"
 CONTROL_INV = Q2_DIR / "control" / "analysis" / "invariance_checks.json"
 GATES_DB = PHASE1_ROOT / "state" / "pending_gates.db"
-OPTICS_MODEL = (_REPO_ROOT / "sandbox" / "track2" / "carla_lidar_weather"
-                / "optics_model.py")
+# Task0b：Q2 三件脚本已迁 KB 内容层（solutions/track2_questions/02_lidar_weather）。
+# 经 resolver 校验 manifest+sha256 后 stage 到 state 工作目录读源码常量；
+# stage 目录不进证据包（state/ 非证据树），重跑幂等（已存在落件 sha 复验）。
+Q2_SOLUTION_ID = "track2_questions/02_lidar_weather"
+Q2_SOLUTION_DIR = PHASE1_ROOT / "state" / "q2_solution"
 
 THREAD_ID = "t8-q2carla-hitl-20261016"
 TITLE = ("[Q2 补真人点验] Track2 工程题：固态 LiDAR 雨雪雾"
@@ -115,6 +118,20 @@ class Q2Facts:
     engine_has_snow: bool
 
 
+def stage_optics_model() -> Path:
+    """从内容层 stage Q2 方案，返回 staged optics_model.py（读源码，不 import）。
+
+    main() 已把引擎仓放上 sys.path；manifest 字段/sha256/C4 任一不符即
+    SolutionError fail-closed，转成 Q2FactError（H-10 事实来源缺失语义）。
+    """
+    from orchestrator.solutions import SolutionError, resolve_solution
+    try:
+        staged = resolve_solution(Q2_SOLUTION_ID).stage(Q2_SOLUTION_DIR)
+    except SolutionError as exc:
+        raise Q2FactError(f"Q2 方案 stage 失败（{Q2_SOLUTION_ID}）：{exc}") from exc
+    return staged.files["optics_model.py"]
+
+
 def default_paths() -> Q2Paths:
     return Q2Paths(
         q2_dir=Q2_DIR,
@@ -123,7 +140,7 @@ def default_paths() -> Q2Paths:
         gates_db=GATES_DB,
         meta_rep1=Q2_DIR / "collect_rep1" / "meta_rep1.json",
         summary_md=ANALYSIS / "SUMMARY.md",
-        optics_model=OPTICS_MODEL,
+        optics_model=stage_optics_model(),
         video=ANALYSIS / "q2_overlay.mp4",
     )
 

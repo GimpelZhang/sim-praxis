@@ -1,14 +1,17 @@
 # Phase 0 Task4-1.C 仿真引擎能力矩阵
-# 铁律：每条 fact 必须回指 KB（commit aac53313）原文；全局层不新增事实；
+# 铁律：每条 fact 必须回指 KB（knowledge 基线提交 aac53313）原文；全局层不新增事实；
 # 查不到证据的能力写 coverage: absent + gaps 含“未提及”。
 # 取证范围：仅 $KB/knowledge/ 下 32 个 md；引擎自身能力与 tour 项目用法已在 claim 中区分。
 # 锁内适配（Task7，2026-10-15 用户书面批准「[实践]证据扩展」）：coverage 新增
 # phase1_probed 值——KB 零提及但 Phase1 已有 0 付费一手探针证据的引擎（sapien），
 # 其 fact 只能用 level [实践] + repo_relpath 指仓内证据索引（校验器强制：禁配
-# kb_relpath、文件必须在本仓内）；KB 只读/HEAD 钉死与 absent 零命中规则均不变。
+# kb_relpath、文件必须在本仓内）；absent 零命中规则不变。
+# Task0b 回填（2026-10-17 三层分离）：KB HEAD 已前进到迁移提交 c5712e9f（新增
+# solutions/），kb_commit 保持 aac53313——它锚定的是 fact 回指的 knowledge 树状态；
+# 校验器断言该提交为 HEAD 祖先且 knowledge/ 自此只增不改，真仓另过 kb_pins 分层钉点。
 meta:
   schema_version: "1.0"
-  kb_commit: "aac53313c620efa6217fd51a55834b006d78e689"
+  kb_commit: "aac53313c620efa6217fd51a55834b006d78e689"  # knowledge 锚点（Task0b：非 HEAD 单点）
   generated_by: "Phase0 Task4（Phase1 Task7 追加 sapien [实践] facts）"
   discipline: "每条 fact 必须回指 KB；全局层不新增事实；无证据标 absent；例外仅 phase1_probed 引擎的 [实践] 一手证据（repo_relpath，校验器与 KB 引用互斥）"
 

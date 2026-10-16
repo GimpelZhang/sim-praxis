@@ -497,9 +497,18 @@ def main() -> int:
     lp = PACK / "task6_learnings" / "learnings_export.jsonl"
     lp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in learn)
                   + "\n", encoding="utf-8")
+    # Task0b：origin_rel 跟随 SIMPRAXIS_LANCEDB_URI 实体位置（迁移后为
+    # data/lancedb/phase1_learnings.lance），不再写死 simpraxis 数据根。
+    _lance_uri = Path(os.environ.get(
+        "SIMPRAXIS_LANCEDB_URI",
+        str(Path(os.environ.get(
+            "KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
+            / "data" / "lancedb")))
+    _lance_origin_rel = str(Path(
+        _lance_uri.parent.name, _lance_uri.name, "phase1_learnings.lance"))
     manifest_files.append({"path": str(lp.relative_to(PACK)),
                            "origin": "derived",
-                           "origin_rel": "lancedb/phase1_learnings.lance",
+                           "origin_rel": _lance_origin_rel,
                            "size": lp.stat().st_size, "sha256": _sha256(lp),
                            "logical_ids": ["E6.1"], "required": True})
 

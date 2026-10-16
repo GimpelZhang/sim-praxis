@@ -8,7 +8,7 @@
 阈值溯源
 --------
 跌倒判据 FALL_Z_M=0.85 / FALL_TILT_DEG=50：直接取自生产脚本
-sandbox/track2/genesis_humanoid_dr.py 的跌倒检测（控制器冻结载体口径，
+KB solutions/track2_questions/01_ice_floor_humanoid_dr/genesis_humanoid_dr.py（Task0b 迁入；正本=v1 run 副本） 的跌倒检测（控制器冻结载体口径，
 站立躯干高 ≈1.27 m）；判定器从 series 重算并与 outcomes 逐 run 对质，
 不允许脚本自报成败而不验。
 
@@ -17,7 +17,7 @@ sandbox/track2/genesis_humanoid_dr.py 的跌倒检测（控制器冻结载体口
 
 推力后峰速窗 POSTPUSH_WINDOW_S=2.5：取自推力窗口标定件 v2 选定窗口
 （/mnt/caches/simpraxis/genesis_probe/push_window_calibration.json，
-selected_window）与生产脚本 sandbox/track2/genesis_humanoid_dr.py 推后方窗
+selected_window）与生产脚本 KB solutions/track2_questions/01_ice_floor_humanoid_dr/genesis_humanoid_dr.py（Task0b 迁入；正本=v1 run 副本） 推后方窗
 字面量（in_window = push_t <= t < push_t + 2.5）。容器脚本不能 import
 仓库包，那边保留字面量并加注释钉死本常量；改值必须两处同改，
 test_task8_seam 的 AST 常量一致性测试会拦截单边改动。

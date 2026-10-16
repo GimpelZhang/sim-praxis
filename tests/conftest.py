@@ -43,3 +43,6 @@ def pytest_configure(config):
     # Phase 1：真实付费/真实飞书事件测试打 paid 标记，裸跑 pytest 时函数体内自行 skip
     # （需显式 SIMPRAXIS_ALLOW_PAID=1 才触网）；不新增 pytest.ini/setup.cfg/pyproject.toml。
     config.addinivalue_line("markers", "paid: 真实付费/真实飞书，需显式批准（SIMPRAXIS_ALLOW_PAID=1）")
+    # Task0b：读活 KB 仓/活数据层的测试打 kb_integration 标记，与 paid 同构——
+    # 裸跑自行 skip，需显式 SIMPRAXIS_KB_INTEGRATION=1 且活 KB 在场才执行（非放水）。
+    config.addinivalue_line("markers", "kb_integration: 活 KB 仓/活数据层测试，需显式开关（SIMPRAXIS_KB_INTEGRATION=1）")

@@ -1,0 +1,30 @@
+schema: simpraxis.solution_manifest.v1
+solution_id: track1_tools/02_mujoco_contact_push
+title: Fixture：MuJoCo 接触推动 Cube（合成，非真实脚本）
+entrypoint: mujoco_contact_push.py
+args:
+- --out-dir <workdir>（必填，编排器注入）
+- --run-id <run_id>（必填，编排器注入）
+sim_engine:
+  slug: mujoco
+  min_version: 3.15.0
+dependencies:
+  python: '>=3.10'
+  pip: []
+  notes: 合成 fixture：无真实引擎依赖，空 pip 列表语义同正式 manifest。
+rung_thresholds:
+  ref: orchestrator/judge/thresholds.py
+  constants:
+  - CONTACT_DURATION_S
+  - CONTACT_FORCE_CV_MAX
+  - GOAL_WINDOW_S
+  - MAX_PENETRATION_M
+frozen_inputs:
+- track: track1
+  index: 2
+files:
+- relpath: mujoco_contact_push.py
+  sha256: f76e9a3c1ca833756570f3da7fe6b5703da8310078f6f12bdf823fe3ce959c03
+- relpath: README.md
+  sha256: cead3792ef5b5c4289da98bb971c4d3236bbc765697a7f37391b3db2b5fb7389
+v1_run_relpath: null

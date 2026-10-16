@@ -3,7 +3,7 @@
 共 7 个测试函数（六组验收口径 + 04b 卫生/置空校验）：
   test_01 blueprint：tour blueprint 4 阶段且证据对照真实克隆全部存在
   test_02 KB：全量中文真实召回（YAML 静默覆盖 -> lw_benchhub；EGL 黑屏 -> troubleshooting），
-              provenance 非空且 source_commit==KB HEAD
+              provenance 非空且 source_commit==knowledge 基线提交（Task0b：kb_integration 门）
   test_03 渲染：MP4 来自真实 GPU EGL（tier=gpu、NVIDIA A800、1920x1080x60、质心运动）；
               退出码 2 的 OSMesa 软渲不允许冒充成功
   test_04 网关：三阶段 --validate-models 实呼一批 4 请求（3 文本 ping max_tokens=8
@@ -17,7 +17,8 @@
               null stage 带合规 open_question 锚点（锚点文件经 Task0 §8.10 播种，
               v4.1 M1：文件读取只在存在 null stage 时发生）
   test_05 仓库：两个仓库 git-clean、密钥扫描通过、全部提交 author 为 Junchuan Zhang；
-              KB 零提交且 HEAD==基线全 SHA aac53313c620efa6217fd51a55834b006d78e689（M3）
+              KB 工作区干净且满足 Task0b 分层不变量（HEAD 是迁移提交 c5712e9f 的后代、
+              knowledge/ 32-md sha256 集 == aac53313 基线；M3 单点 HEAD 断言已回填）
   test_06 资源：沙箱容器全部停止，GPU 显存回到基线附近（<=200 MiB）
 """
 from __future__ import annotations
@@ -29,6 +30,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
+from memory_flywheel.kb_pins import KNOWLEDGE_BASELINE_SHA
+from tests.kb_support import require_kb_integration
 
 ROOT = Path(__file__).resolve().parents[2]
 KB_ROOT = Path(os.environ.get("KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
@@ -61,7 +65,11 @@ def test_01_blueprint_four_stages_with_real_evidence():
 
 # ---------- ② 真实 KB 召回 + provenance ----------
 
+@pytest.mark.kb_integration
 def test_02_kb_real_chinese_recall():
+    # Task0b：真实召回读活数据层（$KB_ROOT/data/lancedb，迁移前为旧位置），
+    # 与 paid marker 同构——须显式 SIMPRAXIS_KB_INTEGRATION=1 才执行。
+    require_kb_integration(data=True)
     script = r'''
 from memory_flywheel.vector_engine import VectorEngine
 import json, sys
@@ -99,9 +107,12 @@ sys.exit(0 if (ok1 and ok2 and prov) else 1)
     # 默认检索不得返回索引页（索引是导航，不是知识）
     for h in data["q1"] + data["q2"]:
         assert not h["kb_relpath"].endswith("00-index.md")
-    # KB commit 必须与真实仓库 HEAD 一致
-    kb_head = run(["git", "-C", str(KB_ROOT), "rev-parse", "HEAD"]).stdout.strip()
-    assert data["q1"][0]["source_commit"] == kb_head
+    # 锁内适配（Task0b）：kb_chunks 行是 Phase0 按 aac53313 入库的，行内
+    # source_commit 永久记录入库时 knowledge 树状态；Task0b 后 KB HEAD 已前进
+    # 到迁移提交 c5712e9f（只新增 solutions/），knowledge/ 32-md 哈希集仍逐字
+    # 等于 aac53313（kb_pins 分层不变量在 test_05 机判）。故这里断言行内
+    # 戳记 == knowledge 基线提交，而非当前 HEAD（旧断言 HEAD==aac 已回填）。
+    assert data["q1"][0]["source_commit"] == KNOWLEDGE_BASELINE_SHA
 
 
 # ---------- ③ 真实 GPU EGL MP4 ----------
@@ -296,13 +307,14 @@ def test_05_repos_clean_and_author():
     # e2e 内只跑快速密钥卫生；完整静态门禁（bash -n/py_compile/YAML/探针数学）
     # 由各 Task 收尾的 gate_static.sh 负责，此处不重复跑。
     run(["bash", str(ROOT / "scripts/verification/scan_secrets.sh")])
-    # KB 仓：只读——工作区干净，且 HEAD 必须钉在基线全 SHA（v4.1 M3：
-    # 仅查工作区干净可被"先向 KB 提交再清工作区"绕过）。
+    # KB 仓（Task0b 回填）：工作区必须干净；HEAD 不再钉死单点，改为分层
+    # 不变量——HEAD 是迁移提交（solutions/ 首次写入 c5712e9f）的后代，且
+    # knowledge/ 32-md sha256 集逐字等于 aac53313 基线（只增不改）。
     kb_status = run(["git", "-C", str(KB_ROOT), "status", "--porcelain"]).stdout.strip()
-    assert kb_status == "", f"KB 仓库被改动（Phase 0 禁止）：\n{kb_status}"
-    kb_head = run(["git", "-C", str(KB_ROOT), "rev-parse", "HEAD"]).stdout.strip()
-    assert kb_head == "aac53313c620efa6217fd51a55834b006d78e689", (
-        f"KB HEAD 已移动（只读违规）：{kb_head}")
+    assert kb_status == "", f"KB 工作区有改动（拒绝带脏工作区验收）：\n{kb_status}"
+    from memory_flywheel import kb_pins
+    pin_errors = kb_pins.check_layered_pins(KB_ROOT)
+    assert not pin_errors, "KB 分层不变量失败：\n" + "\n".join(pin_errors)
 
 
 # ---------- ⑥ 容器停止 + 显存归零 ----------

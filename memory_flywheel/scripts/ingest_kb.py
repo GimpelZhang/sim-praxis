@@ -18,13 +18,14 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from memory_flywheel.kb_pins import KNOWLEDGE_BASELINE_SHA
 from memory_flywheel.vector_engine import VectorEngine, make_record
 
 KB_ROOT = Path(os.environ.get("KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
-# 锁内适配（Phase 1 Task0，计划 v1.2 §2 Task0）：原为 main() 内局部字面量，提升为模块
-# 常量供 tests/milestone1/test_kb_invariants.py 导入断言，避免 Phase 1 新测试再抄字面量
-# 形成第四处真值；值与提升前的局部量逐字相同，main() 断言语义不变。
-KB_BASELINE_SHA = "aac53313c620efa6217fd51a55834b006d78e689"
+# Task0b 回填：旧单点字面量已迁为 memory_flywheel.kb_pins 的分层钉点
+# （knowledge/ 32-md 哈希集 + HEAD≥迁移提交）。保留别名供历史调用方导入，
+# 值仍是 knowledge 树基线提交 aac53313；单真值在 kb_pins，禁止再抄字面量。
+KB_BASELINE_SHA = KNOWLEDGE_BASELINE_SHA
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 EVID_RE = re.compile(r"(?<![A-Za-z0-9])([PDLQ])(\d{2})(?!\d)")
@@ -269,11 +270,13 @@ def main() -> int:
     assert not dirty, "KB 仓库不干净，拒绝在只读阶段继续"
     commit = subprocess.run(["git", "-C", str(kb_root), "rev-parse", "HEAD"],
                             capture_output=True, text=True, check=True).stdout.strip()
-    # v4.1 M3：只查工作区干净可被"先向 KB 提交再清工作区"绕过；钉死 HEAD 全 SHA。
-    # （Phase 1 Task0：字面量已提升为模块常量 KB_BASELINE_SHA）
-    assert commit == KB_BASELINE_SHA, (
-        f"KB HEAD 已移动（只读违规）：{commit} != 基线 {KB_BASELINE_SHA}；"
-        "Phase 0 禁止 KB 任何提交，见铁律第 6/9/10 条")
+    # Task0b 回填：v4.1 M3 旧断言「HEAD 全 SHA == aac53313」在三层分离后改为
+    # 分层不变量——HEAD 必须是迁移提交（solutions/ 首次写入）的后代，且
+    # knowledge/ 32 个 md 的 sha256 集仍逐字等于 aac53313 基线（只增不改，
+    # 新增 md 须在 kb_pins.KNOWLEDGE_ADDITIONS 显式登记）。
+    from memory_flywheel import kb_pins
+    pin_errors = kb_pins.check_layered_pins(kb_root)
+    assert not pin_errors, "KB 分层不变量校验失败，拒绝入库：\n" + "\n".join(pin_errors)
 
     files = sorted(str(p.relative_to(kb_root))
                    for p in (kb_root / "knowledge").rglob("*.md"))

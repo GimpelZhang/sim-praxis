@@ -55,6 +55,9 @@ services:
       FEISHU_RECEIVE_ID: ${FEISHU_RECEIVE_ID:-}
       SIMPRAXIS_LANCEDB_URI: ${SIMPRAXIS_LANCEDB_URI:-}
       FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-}
+      # Task0b：容器内方案内容层根（宿主 $KB_ROOT/solutions 只读挂到 /kb）
+      SIMPRAXIS_SOLUTIONS_ROOT: ${SIMPRAXIS_SOLUTIONS_ROOT:-/kb}
+      KB_ROOT: ${KB_ROOT:-/home/vipuser/embodied-ai-sim-knowledge-base}
       # 代理从宿主机 shell 显式继承（source scripts/00_env.sh 后再 compose）
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
@@ -75,6 +78,9 @@ services:
       - /mnt/artifacts:/mnt/artifacts
       - /mnt/caches:/mnt/caches
       - /mnt/assets:/mnt/assets:ro
+      # Task0b 三层分离：解题方案内容层只读挂载（KB 公开仓 solutions/），
+      # 解析器在容器内经 SIMPRAXIS_SOLUTIONS_ROOT=/kb 读取，禁写。
+      - ${KB_ROOT:-/home/vipuser/embodied-ai-sim-knowledge-base}/solutions:/kb:ro
     deploy:
       resources:
         reservations:

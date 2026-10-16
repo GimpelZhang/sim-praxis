@@ -1,7 +1,9 @@
 # CLAUDE.md — SimPraxis（纸浅）Agent 工作规则
 
 面向具身智能仿真工具链复现与面试题实证的自治智能体。本仓是 Product A（智能体系统）；
-Product B 知识库 `~/embodied-ai-sim-knowledge-base` **只读挂载**。Phase 0/1 均已全绿推送：
+Product B 知识库 `~/embodied-ai-sim-knowledge-base` 为公开内容层（Phase 2 Task0b
+起解题脚本随其 `solutions/` 公开；数据产物闭源落 `/mnt`，三层分离纪律见硬规则 3）。
+Phase 0/1 均已全绿推送：
 Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 commits 至 `966fd00`）、
 评审 P1/P2 修复批次（2026-10-16 晚，47+1 项 0 付费，三独立评审全 APPROVE，
 7 commits `b9ba5f9..8b83193`，341 测全绿，详见 Complete 附 B，余 LOW 在 Phase 2）。
@@ -22,8 +24,13 @@ Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 com
 - `orchestrator/common/`：跨域基础——fsutil 原子写 0600/0700、secrets 密钥正则单一源、
   validators charset、callcache 调用级重放缓存（付费点缓存落 phase1_root `.call_cache`，
   0700 dot-dir；命中 0 触网/0 账行，成功才写，不入证据包）
+- `orchestrator/solutions/`：内容层方案闸口——只读解析 `$SIMPRAXIS_SOLUTIONS_ROOT`
+  （默认 `$KB_ROOT/solutions`，容器内 `/kb:ro`）manifest v1，逐件 sha256/C4 fail-closed，
+  `stage()` 0700 目录+入口/0600 其余；引擎仓不携带任何解题脚本（fixture 除外）
 - `memory_flywheel/`：LanceDB 双路向量中枢（namespace=capabilities/troubleshooting）+ 切块/矩阵；
-  学习回写只进独立新表 `phase1_learnings`，`kb_chunks` 永不写
+  Task0b 起库实体迁到 `$KB_ROOT/data/lancedb`（软链到 `/mnt/artifacts/embodied-kb/data`），
+  学习回写只进独立新表 `phase1_learnings`，`kb_chunks` 永不写；方案切块只进
+  `solution_chunks`（独立第三表，mpnet 768 复用，幂等可重跑）
 - `templates/` + `scripts/verification/check_blueprint_evidence.py`：四 tour 范式与证据核验
 
 ## 环境（每个 shell 先来一遍）
@@ -52,8 +59,24 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
    `SIMPRAXIS_ALLOW_PAID=1` 首行守卫（test_04 已加双守卫，裸跑自动 skip 零触网；
    收尾仍按纪律带两排除项），收尾跑 `pytest tests -q -k "not test_04" -m "not paid"`。读 ledger 先看 `ts_iso` 时区后缀
    （历史行 +0000/+0800 混写）。模型 ID 变更仍按规则 1 必须请示，本授权不含模型变更。
-3. **KB 仓永远只读**：不提交、不修改；HEAD 钉死 `aac53313c620efa6217fd51a55834b006d78e689`
-   （preflight/ingest/e2e 三处断言）；kb_chunks 1542 行/104 Q 块基线不变。
+3. **KB 三层分离纪律（Task0b 起；KB 仓公开、Apache-2.0）**：
+   - **引擎层**（本仓）：不含解题脚本；只有 `orchestrator/solutions/` 解析器、
+     `templates/solution_manifest.example.yaml` 契约与 `tests/fixtures/solutions/`
+     合成 fixture。解题内容一律经 manifest（`simpraxis.solution_manifest.v1`，
+     逐件 sha256 + C4 路径）从内容层读，缺件/不符即 `SolutionError` fail-closed。
+   - **内容层**（`~/embodied-ai-sim-knowledge-base`）：`knowledge/` 32 个 md 的
+     sha256 集逐字钉死 `aac53313…` 基线（只增不改；新 md 必须用户签收并显式登记
+     `memory_flywheel/kb_pins.py::KNOWLEDGE_ADDITIONS`）；当前 HEAD 必须是迁移提交
+     `c5712e9f73fc17cd2649cae359aad216e8f3bd07`（solutions/ 首次写入）的后代；
+     `solutions/` 4 方案（6 脚本）随 git 公开，追加走新提交，公开历史不回收。
+     单真值在 kb_pins（preflight/ingest/e2e/matrix 四断言统一调它，禁止抄字面量）。
+   - **数据层**（闭源、永不入库）：lancedb/blobs/bundles 实体在
+     `/mnt/artifacts/embodied-kb/data`（0700），`$KB_ROOT/data` 是软链，
+     `.gitignore` 必须用锚定 `/data`（尾斜杠 `data/` 不匹配软链本身），
+     闸口打 `git check-ignore data`（穿越软链的 data/lancedb pathspec 会 fatal）。
+   - **KB 首次 push 是人工 STOP 门**：push 前向用户呈 diff 清单 + 密钥扫描（公开不可回收）。
+   - 行数口径不变：kb_chunks 1542 行/104 Q 块；phase1_learnings 5 行（Task0a 后）；
+     solution_chunks 独立第三表（首灌 82 块/4 方案），老三表对它恒只读。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
    禁止 `source ~/.bashrc`、禁止回显/入 URL/入日志/提交；git 认证用内存 extraheader 不落盘；
    fixture 不得像真密钥（scan_secrets.sh 10 条 + common.secrets Python 10 条严口径单一源）。
@@ -87,20 +110,30 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
   混维度守卫其他路径恒开）。重建后重跑 Q1/Q2/Q3 召回与 `check_chunk_integrity --expect 104`。
 - 入库：`python -m memory_flywheel.scripts.ingest_kb --rebuild`；切块常量
   TARGET_CHARS=1200/HARD_CHARS=2000，Qxx 原子块，文件级幂等替换。
+  Task0b 起库默认 uri 为 `$KB_ROOT/data/lancedb`（软链 `/mnt/artifacts/embodied-kb/data`）；
+  数据迁移只走 `scripts/kb/migrate_data_layer.py --apply`（同盘 st_dev 守卫 + 行数/召回快照对账）。
 - `phase1_learnings`（12 列含 vector，复用 mpnet 不二次下载）与 kb_chunks 同库独立；
   当前 5 行（Phase 2 Task0a Q2 补点验经用户授权 4→5：gate2_accepted_supplementary/
   rung=1，图外回写走 `memory_flywheel.phase1.offgraph_learning`，纪律 12；老 4 行
   不重写，kb_chunks 恒 1542）。**生产召回尚未接线（production_recall_hits=0），勿声称
   飞轮已闭环**——Phase 2 项。
+- `solution_chunks`（Task0b 第三张表）：4 方案 README/manifest 原子块 + 脚本 code 块，
+  relpath 前缀 `solutions/`，首灌 82 块；`python -m memory_flywheel.scripts.ingest_solutions`
+  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=5 不变。资产包：
+  `scripts/kb/bundle_kb_asset.py --tier both` + `verify_bundle.py`（core=老两表，
+  extended=全部表；sha256/行数/768 维/kb_sha/引擎 SHA 对账）。
 
 ## 常用命令
 
 ```bash
 bash scripts/verification/gate_static.sh                      # 六步静态门禁（提交前必跑）
 /mnt/venvs/simpraxis/bin/python -m pytest tests -q \
-  -k "not test_04" -m "not paid"                              # 0 付费全套（收尾必带两排除项）
+  -k "not test_04" -m "not paid and not kb_integration"      # 0 付费全套（收尾必带排除项）
 # test_04 已有 paid marker + SIMPRAXIS_ALLOW_PAID=1 守卫：裸跑自动 skip 零触网；
 # 真跑 test_04 批次须 SIMPRAXIS_ALLOW_PAID=1 且按规则 2 自批落 quota/approvals/
+# kb_integration（活 KB/活数据层）默认同构 skip；迁移/入库后显式跑：
+SIMPRAXIS_KB_INTEGRATION=1 /mnt/venvs/simpraxis/bin/python -m pytest tests -m kb_integration -q
+python scripts/kb/check_solutions.py                          # 内容层分层校验（4 方案+data 忽略）
 /mnt/venvs/simpraxis/bin/python -m memory_flywheel.scripts.validate_capability_matrix
 python scripts/verification/check_blueprint_evidence.py
 ```

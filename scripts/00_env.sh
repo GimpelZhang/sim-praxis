@@ -126,8 +126,13 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 export FASTEMBED_CACHE_PATH="$SIMPRAXIS_CACHE_ROOT/fastembed"
 export MODELSCOPE_CACHE="$SIMPRAXIS_CACHE_ROOT/modelscope"
 
-# SimPraxis 数据层（全部由数据根派生）
-export SIMPRAXIS_LANCEDB_URI="${SIMPRAXIS_LANCEDB_URI:-$SIMPRAXIS_DATA_ROOT/lancedb}"
+# Task0b 三层分离：解题方案内容层根（KB 公开仓 solutions/；容器内由 compose
+# 覆盖为只读挂载点 /kb），解析器 orchestrator/solutions/resolver.py 读它。
+export SIMPRAXIS_SOLUTIONS_ROOT="${SIMPRAXIS_SOLUTIONS_ROOT:-$KB_ROOT/solutions}"
+
+# SimPraxis 数据层：Task0b 起 lancedb 闭源实体迁到 KB data/（/mnt 物理盘，
+# $KB_ROOT/data 软链 → /mnt/artifacts/embodied-kb/data），不再在 simpraxis 数据根。
+export SIMPRAXIS_LANCEDB_URI="${SIMPRAXIS_LANCEDB_URI:-$KB_ROOT/data/lancedb}"
 export SIMPRAXIS_RUN_DIR="${SIMPRAXIS_RUN_DIR:-$SIMPRAXIS_DATA_ROOT/runs}"
 export SIMPRAXIS_GATEWAY_STATE="${SIMPRAXIS_GATEWAY_STATE:-$SIMPRAXIS_DATA_ROOT/gateway_state}"
 export SIMPRAXIS_TOURS_DIR="${SIMPRAXIS_TOURS_DIR:-/mnt/assets/simpraxis/tours}"

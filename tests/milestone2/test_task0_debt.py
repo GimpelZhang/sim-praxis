@@ -18,7 +18,6 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import numpy as np
 import pytest
 import yaml
 from litellm.exceptions import ServiceUnavailableError
@@ -41,10 +40,10 @@ from orchestrator.gateway.quota_ledger import (
     QuotaLedger,
     billing_context,
 )
-from sandbox.track2.carla_lidar_weather.analyze_q2 import (
-    FrameDataError,
-    load_frame,
-)
+# Task0b：S-7 analyze_q2 load_frame 断言随实现迁入 KB 内容层
+# （solutions/track2_questions/02_lidar_weather/tests/test_analyze_q2_contract.py
+# ::test_s7_load_frame_missing_file_and_key），引擎仓不再 import 已删的
+# sandbox.track2 包。
 from tests.milestone1.test_agent_runner import (
     CONVERGING_SCRIPT,
     FakeVector,
@@ -268,7 +267,9 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
     # Task0a 在 run() 前插入 _offgraph_learning_writer，449 → 467（纯位移，
     # 无新增 claim/upsert；diff 已人工核对）
-    "scripts/milestone1/q2_human_gate.py": {467},
+    # Task0b optics_model 改经 resolver stage（stage_optics_model 插入），
+    # 467 → 484（纯位移，无新增 claim/upsert；diff 已人工核对）
+    "scripts/milestone1/q2_human_gate.py": {484},
 }
 
 
@@ -599,28 +600,10 @@ def test_s2_secret_patterns_positive_negative_samples():
     assert "access[_-]?token" in shell
 
 
-# ---------- S-7：analyze_q2 缺帧/缺键显式错误 ----------
-
-def test_s7_load_frame_missing_file_and_key(tmp_path):
-    root = tmp_path / "collect"
-    # 文件缺失
-    with pytest.raises(FrameDataError) as ei:
-        load_frame(root, 1, "clear", 0)
-    msg = str(ei.value)
-    assert "frames_rep1.npz" in msg and "rep=1" in msg and "frame=0" in msg
-    assert isinstance(ei.value, KeyError)  # 兼容旧 except KeyError 调用面
-
-    # 文件在但键缺失：错误列出槽位现存键与总键数，不再裸抛键名
-    d = root / "collect_rep1"
-    d.mkdir(parents=True)
-    np.savez(d / "frames_rep1.npz",
-             **{"clear__0__geo": np.zeros(2),
-                "clear__0__sem_xyz": np.zeros(2)})  # 缺 sem_tag
-    with pytest.raises(FrameDataError) as ei2:
-        load_frame(root, 1, "clear", 0)
-    m2 = str(ei2.value)
-    assert "clear__0__sem_tag" in m2
-    assert "clear__0__geo" in m2 and "全部键数=2" in m2
+# ---------- S-7：Task0b 起随 analyze_q2.py 迁入 KB 内容层 ----------
+# 同名测试 test_s7_load_frame_missing_file_and_key 现位于
+# solutions/track2_questions/02_lidar_weather/tests/test_analyze_q2_contract.py
+# （在 KB 仓内随内容层 CI/手动 pytest 运行，引擎仓默认套件不再覆盖已删实现）。
 
 
 # ---------- S-10：未分类重试等待预算 / 文本块信任 / .call_cache 落点枚举 ----------
@@ -666,8 +649,10 @@ def test_s10_text_block_trust_only_typed_text_blocks():
 
 CALL_CACHE_ALLOWLIST = {
     ("orchestrator/agent_runner/runner.py", 382),
-    ("orchestrator/graph/task7.py", 330),
-    ("orchestrator/graph/task8.py", 424),
+    # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
+    # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
+    ("orchestrator/graph/task7.py", 331),
+    ("orchestrator/graph/task8.py", 428),
 }
 
 

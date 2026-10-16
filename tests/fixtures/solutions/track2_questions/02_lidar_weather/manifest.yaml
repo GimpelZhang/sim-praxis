@@ -1,0 +1,30 @@
+schema: simpraxis.solution_manifest.v1
+solution_id: track2_questions/02_lidar_weather
+title: Fixture：固态 LiDAR 雨雪雾光学模型（合成，非真实脚本）
+entrypoint: collect_weather_lidar.py
+args:
+- collect_weather_lidar.py --out <目录>（fixture 不连 Carla）
+- optics_model.py 为库模块（无 CLI）；QBACK_DEFAULT=0.4 读源码核对
+sim_engine:
+  slug: carla
+  min_version: 0.10.0
+dependencies:
+  python: '>=3.10'
+  pip: []
+  notes: 合成 fixture：无真实引擎依赖，空 pip 列表语义同正式 manifest。
+rung_thresholds:
+  ref: scripts/milestone1/q2_human_gate.py
+  constants: []
+frozen_inputs:
+- track: track2
+  index: 2
+files:
+- relpath: collect_weather_lidar.py
+  sha256: 45d0e0948f8d01857548bbe2ff020192404f00db83c49e3e9a70427fbb20b8cd
+- relpath: README.md
+  sha256: f6ab833b5b37bd7c753143232b2f28d40f04277f1da4b698b30d6a732b01de83
+- relpath: analyze_q2.py
+  sha256: b96ccc98c45bfdb48a2884e00d769266003b2eb3cbe11394405f98e3a0d6360e
+- relpath: optics_model.py
+  sha256: 6ba8cc6344ca088e10df80b20c224777511703a720f2ee9474ce6b11614b0458
+v1_run_relpath: null

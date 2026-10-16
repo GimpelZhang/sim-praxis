@@ -41,15 +41,16 @@ avail_root=$(df -m --output=avail / | tail -1)
 [ "$avail_root" -gt 40960 ] || fail "/ 可用空间不足 40GB"
 
 # 5. 两个仓库状态
+kb_root="${KB_ROOT:-/home/vipuser/embodied-ai-sim-knowledge-base}"
 git -C /home/vipuser/sim-praxis rev-parse --abbrev-ref HEAD | grep -qx main || fail "sim-praxis 不在 main"
-git -C /home/vipuser/embodied-ai-sim-knowledge-base diff-index --quiet HEAD \
-  || fail "知识库仓库不干净——Phase 0 期间它必须只读"
-# v4.1 M3：光查工作区干净可被"先向 KB 提交、再清工作区"绕过；必须钉死 HEAD 全 SHA。
-# 基线 = 2026-10-12 规划实证所用 KB HEAD（§4.1 v4.1 表、§12.3、§13 test_05 同值）。
-KB_BASELINE_SHA="aac53313c620efa6217fd51a55834b006d78e689"
-kb_head="$(git -C /home/vipuser/embodied-ai-sim-knowledge-base rev-parse HEAD)"
-[ "$kb_head" = "$KB_BASELINE_SHA" ] \
-  || fail "知识库 HEAD=$kb_head 偏离只读基线 $KB_BASELINE_SHA（Phase 0 禁止 KB 提交/移动 HEAD）"
+git -C "$kb_root" diff-index --quiet HEAD \
+  || fail "知识库仓库不干净——Task0b 起内容层允许经提交追加，但工作区必须干净"
+# Task0b 回填：v4.1 M3 旧断言「HEAD 全 SHA == aac53313」改为分层不变量——
+# HEAD 必须是迁移提交（solutions/ 首次写入 c5712e9f）的后代，且 knowledge/
+# 32-md sha256 集逐字等于 aac53313 基线（只增不改）。真值单一源在
+# memory_flywheel/kb_pins.py（scripts/01_preflight.sh、ingest_kb、e2e test_05 共用）。
+KB_ROOT="$kb_root" /mnt/venvs/simpraxis/bin/python -m memory_flywheel.kb_pins --kb-root "$kb_root" \
+  || fail "知识库分层不变量失败（HEAD 非迁移提交后代或 knowledge/ 哈希集偏离 aac53313 基线，见上）"
 
 # 6. Python 与网络镜像
 /usr/bin/python3 --version | grep -q '3.10' || fail "系统 Python 非 3.10"

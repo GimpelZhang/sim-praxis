@@ -44,8 +44,12 @@ DOC_TYPES = (
 
 class VectorEngine:
     def __init__(self, uri: str | None = None):
+        # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
         self.uri = uri or os.environ.get(
-            "SIMPRAXIS_LANCEDB_URI", "/mnt/artifacts/simpraxis/lancedb")
+            "SIMPRAXIS_LANCEDB_URI",
+            str(Path(os.environ.get(
+                "KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
+                / "data" / "lancedb"))
         Path(self.uri).mkdir(parents=True, exist_ok=True)
         self.config = select_embedding()
         self.dim = int(self.config["dim"])
@@ -118,8 +122,12 @@ class VectorEngine:
         --rebuild 不能走「先实例化再 drop」；只连接 lancedb、不加载嵌入配置。
         返回是否真的删过旧表。
         """
+        # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
         uri = uri or os.environ.get(
-            "SIMPRAXIS_LANCEDB_URI", "/mnt/artifacts/simpraxis/lancedb")
+            "SIMPRAXIS_LANCEDB_URI",
+            str(Path(os.environ.get(
+                "KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
+                / "data" / "lancedb"))
         db = lancedb.connect(uri)
         if TABLE_NAME in db.table_names():
             db.drop_table(TABLE_NAME)

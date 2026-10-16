@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Task8 零付费 Genesis 安装/运行探针（容器内执行）。
 
-只验证「装上能不能真跑」，不做 DR 实验（实验在 sandbox/track2 脚本）：
+只验证「装上能不能真跑」，不做 DR 实验（实验在 KB solutions/track2_questions/01_ice_floor_humanoid_dr 方案（Task0b 迁出））：
   1. import genesis + 版本/后端：必须真 CUDA 后端（A800），CPU 回退判失败；
   2. 低摩擦地面（μ=0.1）+ 内置 MJCF humanoid 建场，PD 关节目标驱动若干步；
   3. 接触 API：humanoid.get_contacts(with_entity=ground) 与底层

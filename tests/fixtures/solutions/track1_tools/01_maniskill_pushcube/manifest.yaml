@@ -1,0 +1,30 @@
+schema: simpraxis.solution_manifest.v1
+solution_id: track1_tools/01_maniskill_pushcube
+title: Fixture：ManiSkill3 PushCube（合成，非真实脚本）
+entrypoint: maniskill_pushcube.py
+args:
+- --out-dir <workdir>（必填，编排器注入）
+- --run-id <run_id>（必填，编排器注入）
+sim_engine:
+  slug: sapien
+  min_version: 3.0.3
+dependencies:
+  python: '>=3.10'
+  pip: []
+  notes: 合成 fixture：无真实引擎依赖，空 pip 列表语义同正式 manifest。
+rung_thresholds:
+  ref: orchestrator/judge/thresholds.py
+  constants:
+  - CONTACT_DURATION_S
+  - CONTACT_FORCE_CV_MAX
+  - GOAL_WINDOW_S
+  - MAX_PENETRATION_M
+frozen_inputs:
+- track: track1
+  index: 1
+files:
+- relpath: maniskill_pushcube.py
+  sha256: 79dca4fa3e929973676a0ec07074a56a61371df56c31a371a96074766138cc9b
+- relpath: README.md
+  sha256: 70ede770a7e83730c61755e7971e94c5a7cd7f2f91b6adeeae0b2178678dcb7b
+v1_run_relpath: null

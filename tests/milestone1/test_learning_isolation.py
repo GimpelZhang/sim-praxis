@@ -31,6 +31,8 @@ from memory_flywheel.phase1.learning_store import (
     LearningStore,
 )
 from memory_flywheel.vector_engine import TABLE_NAME as KB_TABLE, VectorEngine
+# Task0b：读活数据层（$KB_ROOT/data/lancedb）的 02/03/04/05 打 kb_integration 门
+from tests.kb_support import require_kb_integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -146,14 +148,18 @@ def test_01b_replay_is_idempotent(store, roots):
 # ②③ 生产基线只读不变：1542 行 / 104 Q 块 / Q1Q2Q3 有序 id
 # ---------------------------------------------------------------------------
 
+@pytest.mark.kb_integration
 def test_02_real_kb_table_still_1542_dim768():
+    require_kb_integration(data=True)
     eng = VectorEngine()
     tbl = eng.table()
     assert tbl.count_rows() == 1542, "kb_chunks 被污染（学习只能写新表）"
     assert tbl.schema.field("vector").type.list_size == 768
 
 
+@pytest.mark.kb_integration
 def test_03_qxx_atomic_chunks_still_104():
+    require_kb_integration(data=True)
     proc = subprocess.run(
         [sys.executable, "-m", "memory_flywheel.scripts.check_chunk_integrity",
          "--expect", "104"],
@@ -161,7 +167,9 @@ def test_03_qxx_atomic_chunks_still_104():
     assert proc.returncode == 0, proc.stdout[-1500:] + proc.stderr[-1500:]
 
 
+@pytest.mark.kb_integration
 def test_04_q1q2q3_ordered_ids_match_phase0_baseline():
+    require_kb_integration(data=True)
     eng = VectorEngine()
     q1 = [h["id"] for h in eng.query_kb(
         Q1_TEXT, namespace="capabilities", project="lw_benchhub", top_k=3)]
@@ -181,8 +189,10 @@ def test_04_q1q2q3_ordered_ids_match_phase0_baseline():
     assert [h["id"] for h in base["Q3"]["hits"]] == Q3_IDS
 
 
+@pytest.mark.kb_integration
 def test_05_real_learning_table_unpolluted(roots):
     """测试全程只写临时库：真实 phase1_learnings 行数快照前后不变。"""
+    require_kb_integration(data=True)
     uri, ev_root = roots
     before = LearningStore().count()
     s = LearningStore(uri=str(uri), evidence_root=ev_root)

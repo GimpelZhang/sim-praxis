@@ -2,9 +2,10 @@
 """Task7 单测：Track1 spec_factory + evaluate 接缝 + CLI 装配（0 付费，全 fake）。
 
 覆盖（计划 L502/L525-529，硬规则 1/2/7）：
-- spec_factory：mujoco/sapien → 场景模板/引擎 env/命令/billing_task=7 映射；
-  首见 staging（脚本 0700、versions.txt 0600）、run_idx 递增、gate2_notes
-  注入；未知引擎与缺模板一律 GraphStateError（不静默跑错脚本）；
+- spec_factory：mujoco/sapien → 方案 id/引擎 env/命令/billing_task=7 映射；
+  resolver stage（入口脚本 0700、versions.txt 0600）、run_idx 递增、
+  gate2_notes 注入；未知引擎与内容层缺方案/sha 不符一律 GraphStateError
+  （不静默跑错脚本；Task0b 起方案在 tests 合成 fixture 内容层）；
 - evaluate 接缝：真实 telemetry.json + 真实 mp4 容器产物走 Rung1–3 文件判定
   与 Rung4 抽帧拼图；record_only 下恰好 1 次 call_visual 且脱敏 req/resp
   证据落盘 0600、raw_text_ref 补戳；uncalibrated 零网络零证据；
@@ -31,10 +32,22 @@ from orchestrator.graph import task7
 from orchestrator.graph.nodes import GraphStateError
 from orchestrator.judge.clips import write_clip_bundle
 from orchestrator.judge.rung4 import expected_answers, load_rubric
+from orchestrator.solutions import resolve_solution
 
 from tests.milestone1.test_judge import make_telemetry  # noqa: E402
 
 RUBRIC = load_rubric()
+
+# Task0b：单测不依赖活 KB 仓，ENGINE_SCENARIOS 挂的方案 id 全部解析到
+# tests/fixtures/solutions 下的合成最小方案（manifest 走 resolver 全量校验）。
+FIXTURE_SOLUTIONS_ROOT = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "solutions")
+
+
+@pytest.fixture(autouse=True)
+def _fixture_solutions_root(monkeypatch):
+    monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT",
+                       str(FIXTURE_SOLUTIONS_ROOT))
 
 
 # ---------------------------------------------------------------------------
@@ -127,11 +140,13 @@ def test_01_spec_factory_mujoco_mapping(roots):
     assert spec.cmd[2:] == ["--out-dir", str(spec.workdir),
                             "--run-id", "tt-r1"]
     assert spec.workdir == roots["runs"] / "phase1" / "task7_track1" / "run_tt_1"
-    # staging：首见复制真实模板并收紧权限
+    # staging：resolver 校验 manifest/sha256 后落件并收紧权限
     assert target.is_file()
     assert _mode(target) == 0o700
-    template = task7.ENGINE_SCENARIOS["mujoco"]["template"]
-    assert target.read_bytes() == template.read_bytes()
+    manifest = resolve_solution(
+        task7.ENGINE_SCENARIOS["mujoco"]["solution_id"])
+    source = manifest.solution_dir / "mujoco_contact_push.py"
+    assert target.read_bytes() == source.read_bytes()
     versions = spec.workdir / "versions.txt"
     assert versions.is_file() and _mode(versions) == 0o600
     assert versions.read_text(encoding="utf-8").strip()
@@ -164,17 +179,18 @@ def test_02_spec_factory_sapien_and_run_idx(roots):
     assert Path(s2.cmd[1]).is_file()
 
 
-def test_03_spec_factory_unknown_engine_and_missing_template(roots, monkeypatch, tmp_path):
+def test_03_spec_factory_unknown_engine_and_missing_solution(roots, monkeypatch, tmp_path):
     factory = task7.make_spec_factory("tt", "T7-B1-coding")
     with pytest.raises(GraphStateError, match="场景映射缺"):
         factory({"chosen": {"sim_engine": "genesis"},
                  "agent_runs": [], "events": []})
 
+    # Task0b：方案 id 合 C4 语法但内容层缺方案目录 → resolver fail-closed，
+    # 不网络兜底、不就地生成。
     monkeypatch.setitem(
         task7.ENGINE_SCENARIOS, "mujoco",
-        {"template": tmp_path / "no_such_template.py",
-         "script": "mujoco_contact_push.py", "env": {}})
-    with pytest.raises(GraphStateError, match="场景模板不存在"):
+        {"solution_id": "track1_tools/99_missing_fixture", "env": {}})
+    with pytest.raises(GraphStateError, match="方案 stage 失败"):
         factory({"chosen": {"sim_engine": "mujoco"},
                  "agent_runs": [], "events": []})
 
