@@ -64,8 +64,8 @@ def run_round(which: str) -> int:
     # PENDING 行 COALESCE 不覆盖 card_message_id（生产重启重挂保护，正确）。
     # 探针三轮重跑若复用固定 thread_id，会粘住首张 1.0 废卡 id 导致新卡点击
     # 全部 no_pending。生产中每个审批请求本来就是新 thread_id，故探针每轮也用
-    # 时间戳唯一 id；并在开跑前直连 SQL 清理历史 probe_c_* 合成行（仅探针
-    # 路径；生产 store 无删除方法是有意设计）。
+    # 时间戳唯一 id；并在开跑前经 store.purge_thread_like 清理历史 probe_c_*
+    # 合成行（仅探针自有字面前缀；生产路径无删除入口）。
     thread_id = f"{ROUND_THREAD[which]}_{int(time.time())}"
     feedback_text = f"探针C-填充意见-{int(time.time())}"
     if which == "empty":
@@ -108,9 +108,10 @@ def run_round(which: str) -> int:
         except FeishuAPIError as exc:
             print(f"[probe-c] 发卡失败：{exc}", file=sys.stderr)
             return 2
-        # 清理历次探针运行遗留的合成行（LIKE 只命中 probe_c_ 前缀，绝不触生产行）
-        gw.store._conn.execute(  # noqa: SLF001
-            "DELETE FROM pending_gates WHERE thread_id LIKE 'probe_c\\_%' ESCAPE '\\'")
+        # 清理历次探针运行遗留的合成行（LIKE 只命中 probe_c_ 前缀，绝不触生产行）。
+        # H-17：禁止裸 DELETE——统一走 store.purge_thread_like，同事务清主表/
+        # history/inbound_messages，避免探针残留污染 UNION 守卫与去重表。
+        gw.store.purge_thread_like(r"probe_c\_%")
         gw.store.upsert_pending(
             thread_id, 1, card_message_id=sent["message_id"],
             open_chat_id=sent["chat_id"])

@@ -24,6 +24,7 @@ from typing import Any, Callable
 import requests
 
 from .cards import (
+    GATE_MISMATCH_TOAST,
     NOT_OWNER_TOAST,
     REJECT_EMPTY_TOAST,
     build_gate1_card,
@@ -43,6 +44,9 @@ from .video import (
     host_to_container_path,
     next_ladder_step,
     select_ladder_step,
+    source_duration_note,
+    trim_interval_note,
+    validate_trim,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -320,7 +324,13 @@ class FeishuGateway:
         不得再嵌套 `docker compose run`，路径也不做 /root/runs 改写。"""
         return os.environ.get("SIMPRAXIS_IN_SANDBOX", "") == "1"
 
-    def _compress_in_container(self, host_video: Path, step: int) -> tuple[Path, Path]:
+    def _compress_in_container(
+        self,
+        host_video: Path,
+        step: int,
+        *,
+        trim: "dict | None" = None,
+    ) -> tuple[Path, Path]:
         """在 sim-sandbox 环境内执行 ffmpeg（宿主机不装 ffmpeg）。
 
         两种执行位置（锁内适配，Task7 图在容器内跑）：
@@ -328,19 +338,26 @@ class FeishuGateway:
             /root/runs（host_to_container_path）；
           - 容器内（SIMPRAXIS_IN_SANDBOX=1）：产物在 /mnt 同路径挂载下，直接
             `bash -lc <ffmpeg>` 调镜像内 ffmpeg，禁止嵌套 docker。
+        H-2/C1：step4 的裁剪区间由调用方（pipeline lane 计算后）经 trim 透传，
+        本方法不自行决定接触时刻；trim 为 None 时用 video.compress_command
+        的默认前 30s；step2/3 压缩参数不含裁剪。
         Task1 单测全部 mock 本方法/subprocess；真实执行发生在 Task7/8。
         """
         out_host, cover_host = expected_outputs(host_video, step)
+        kw: dict[str, float] = {}
+        if trim is not None and step == 4:
+            kw = {"trim_start": float(trim["trim_start"]),
+                  "trim_seconds": float(trim["trim_seconds"])}
         if self._in_sandbox():
             in_c, out_c, cover_c = str(host_video), str(out_host), str(cover_host)
-            cmd = compress_command(in_c, step, out_c, cover_c)
+            cmd = compress_command(in_c, step, out_c, cover_c, **kw)
             argv = ["bash", "-lc", cmd]
             self._log.info("容器内直压 step=%s（同路径 /mnt 挂载，无嵌套 docker）", step)
         else:
             in_c = host_to_container_path(host_video, self.run_dir)
             out_c = host_to_container_path(out_host, self.run_dir)
             cover_c = host_to_container_path(cover_host, self.run_dir)
-            cmd = compress_command(in_c, step, out_c, cover_c)
+            cmd = compress_command(in_c, step, out_c, cover_c, **kw)
             argv = [
                 "docker", "compose",
                 "-f", str(_REPO_ROOT / "sandbox" / "docker-compose.yml"),
@@ -356,13 +373,20 @@ class FeishuGateway:
         video_path: "str | Path",
         duration_ms: "int | None" = None,
         cover_png: "str | Path | None" = None,
+        *,
+        trim: "dict | None" = None,
     ) -> dict:
         """完整五级阶梯：体积判定→容器压缩→files/images/media→失败逐级→step5 降级。
 
         返回 {ok, video_fallback, ladder_step, media_message_id, media_shape,
               detail, attempts:[...]}。任何分支都不抛 FeishuAPIError（失败收敛为
         video_fallback=True），但 docker/本地文件错误不在此吞（属调用方环境故障）。
+
+        H-14：>28MB 一律 step2 起步，之后按压缩后实测体积对照 HARD_LIMIT 逐级
+        2→3→4→5，不再粗分档越级。H-2：trim（C1 四键）为调用方区间，仅在走到
+        step4 时透传给 ffmpeg；None 时 step4 裁默认前 30s。
         """
+        trim = validate_trim(trim)
         video = Path(video_path)
         cover = Path(cover_png) if cover_png else None
         size = self._file_size(video)
@@ -379,7 +403,8 @@ class FeishuGateway:
             if step == 1:
                 cur_video, cur_cover = video, cover
             else:
-                out_video, out_cover = self._compress_in_container(video, step)
+                out_video, out_cover = self._compress_in_container(
+                    video, step, trim=trim)
                 out_size = self._file_size(out_video)
                 attempts_log.append(
                     {"step": step, "action": "compress", "size": out_size})
@@ -524,6 +549,20 @@ class FeishuGateway:
                     self._on_card_action(dict(info))
                 return self._toast(toast)
 
+            # H-8：按钮 value.gate 必须与卡片对应落库行的 gate 一致，防止旧卡/
+            # 伪造回调跨 Gate 落决策（mark_decided 只认按钮 gate，交叉校验失败
+            # 一律拒绝且不落库）。
+            if int(row["gate"]) != gate:
+                self._log.warning(
+                    "按钮 gate=%s 与审批单行 gate=%s 不一致，已拒绝 thread=%s",
+                    gate, row["gate"], row["thread_id"])
+                info.update({"toast": GATE_MISMATCH_TOAST, "decided": False,
+                             "reason": "gate_mismatch",
+                             "thread_id": row["thread_id"], "gate": gate})
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(GATE_MISMATCH_TOAST)
+
             # 3) 打回空意见二次校验（服务端 form 对 textarea 无强制必填）
             if decision == "reject_with_comments" and not (feedback or "").strip():
                 info.update({"toast": REJECT_EMPTY_TOAST, "decided": False,
@@ -583,6 +622,45 @@ class FeishuGateway:
 
     # ---------- 回调②：P2P 文本 ----------
 
+    def _locate_pending_by_reply(
+        self,
+        ev: dict,
+    ) -> "tuple[dict | None, list[dict]]":
+        """H-1：按消息回复上下文把 P2P 文本唯一定位到一张待审批卡。
+
+        共享 P2P 会话里多个审批并存，旧实现「取最近一行」会把意见记错线程。
+        现只在 status='PENDING' 行里，用 parent_id/root_id/thread_id 匹配该行
+        的 card_message_id 或 media_message_id（回复卡片或回复视频均可）。
+        返回 (唯一匹配行|None, 该会话全部 PENDING 候选)；匹配 0 或 >1 时第一
+        元素为 None，由调用方回歧义提示、不落库。
+        """
+        refs = {r for r in (ev.get("parent_id"), ev.get("root_id"),
+                            ev.get("thread_id")) if r}
+        pending = self.store.list_pending(status="PENDING",
+                                          open_chat_id=ev["chat_id"])
+        if not refs:
+            return None, pending
+        matches = [
+            r for r in pending
+            if r["card_message_id"] in refs or r["media_message_id"] in refs
+        ]
+        if len(matches) == 1:
+            return matches[0], pending
+        return None, pending
+
+    @staticmethod
+    def _ambiguity_text(pending: list[dict]) -> str:
+        """0/多匹配时的歧义回执：列出候选并引导用卡片按钮，绝不猜测归属。"""
+        if not pending:
+            return ("未找到进行中的审批单：本消息未记录。请直接点击审批卡片上的"
+                    "按钮，或在对应审批卡片/视频下回复。")
+        lines = ["无法确定这条意见属于哪张审批卡，**未记录**。"
+                 "请直接在对应审批卡片下回复（或点卡片按钮）。当前待审批："]
+        for r in pending:
+            title = r.get("task_title") or "（无任务名）"
+            lines.append(f"- Gate{r['gate']}｜{title}｜线程 `{r['thread_id']}`")
+        return "\n".join(lines)
+
     def _handle_message(self, data: Any) -> None:
         try:
             ev = parse_message_event(data)
@@ -596,16 +674,45 @@ class FeishuGateway:
             text = (ev["text"] or "").strip()
             if not text:
                 return
-            # 关联该会话最近一个 gate 行（含已 DECIDED：仅追加留痕）
-            rows = [r for r in self.store.list_pending(open_chat_id=ev["chat_id"])]
-            if not rows:
-                # 无关联 gate 行：静默不回复，但探针 B 需要观察原始到达事件
-                self._log.info("p2p 文本无关联 gate 行，静默不回复 chat=%s",
-                               ev["chat_id"])
-                self._on_card_safe({**info, "accepted": False,
-                                    "reason": "no_pending"})
+            # H-1：只认 PENDING 行；必须能凭回复上下文唯一定位，否则不落库。
+            row, pending = self._locate_pending_by_reply(ev)
+            refs = {ev.get("parent_id"), ev.get("root_id"), ev.get("thread_id")}
+            refs.discard(None)
+            if not pending:
+                if refs:
+                    # 明确回复了某张卡/视频但对应审批已终态（行已不在 PENDING）：
+                    # 回执告知未记录，避免操作者误以为意见已进入裁决。
+                    self._log.info(
+                        "p2p 回复无 PENDING 审批可定位（审批已结束？），回执不落库 "
+                        "chat=%s refs=%d", ev["chat_id"], len(refs))
+                    try:
+                        self.send_text(ev["chat_id"],
+                                       self._ambiguity_text([]))
+                    except FeishuAPIError:
+                        self._log.warning("p2p 歧义回执发送失败", exc_info=True)
+                    self._on_card_safe({**info, "accepted": False,
+                                        "reason": "ambiguous", "candidates": 0})
+                else:
+                    # 无任何待审批且非回复上下文（闲聊飘消息）：静默不回复，
+                    # 探针 B 仍可经回调观察到达事件。
+                    self._log.info(
+                        "p2p 文本无 PENDING 审批行，静默不回复 chat=%s",
+                        ev["chat_id"])
+                    self._on_card_safe({**info, "accepted": False,
+                                        "reason": "no_pending"})
                 return
-            row = rows[-1]  # created_at ASC，最后一条即最近
+            if row is None:
+                # 0 或 >1 匹配：回歧义提示，明确告知未记录
+                self._log.info("p2p 文本无法唯一定位审批卡（候选 %d），不落库",
+                               len(pending))
+                try:
+                    self.send_text(ev["chat_id"], self._ambiguity_text(pending))
+                except FeishuAPIError:
+                    self._log.warning("p2p 歧义回执发送失败", exc_info=True)
+                self._on_card_safe({**info, "accepted": False,
+                                    "reason": "ambiguous",
+                                    "candidates": len(pending)})
+                return
             age_ms = now_ms() - int(row["created_at"])
             if age_ms > self.SESSION_WINDOW_MS:
                 self._log.info(
@@ -617,19 +724,30 @@ class FeishuGateway:
                 return
             stamp = datetime.now().strftime("%H:%M:%S")
             line = f"[文本 {stamp}] {text}"
-            self.store.append_human_note(
+            # H-1：message_id 同事务去重（飞书重投/SDK 重放不产生重复意见），
+            # 且仅 PENDING 行可追加。
+            ok = self.store.append_human_note(
                 row["thread_id"], int(row["gate"]), line,
-                open_chat_id=ev["chat_id"])
-            self._log.info("p2p 意见已记录 %d 字 thread=%s gate=%s status=%s",
-                           len(text), row["thread_id"], row["gate"], row["status"])
+                message_id=ev["message_id"], open_chat_id=ev["chat_id"])
+            if not ok:
+                self._log.info("p2p 重复投递或行已终态，忽略 message_id=%s",
+                               ev["message_id"])
+                self._on_card_safe({**info, "accepted": False,
+                                    "reason": "duplicate_or_decided"})
+                return
+            task_name = row.get("task_title") or "（无任务名）"
+            receipt = (f"已记录到 Gate{row['gate']} 审批（线程 {row['thread_id']}，"
+                       f"任务：{task_name}）：{len(text)} 字")
+            self._log.info("p2p 意见已记录 %d 字 thread=%s gate=%s",
+                           len(text), row["thread_id"], row["gate"])
             try:
-                self.send_text(ev["chat_id"], f"已记录意见 {len(text)} 字")
+                self.send_text(ev["chat_id"], receipt)
             except FeishuAPIError:
                 # 回执失败不影响意见已落库；静默不报错（通道②主流程不依赖回执）
                 self._log.warning("p2p 回执发送失败（意见已落库）", exc_info=True)
             info.update({"accepted": True, "line": line,
                          "thread_id": row["thread_id"], "gate": row["gate"],
-                         "status": row["status"]})
+                         "status": "PENDING"})
             if self._on_p2p_text:
                 self._on_card_safe(info)
         except Exception:
@@ -675,7 +793,6 @@ class FeishuGateway:
     ) -> dict:
         ev = self._event_for(thread_id, gate)
         start = time.monotonic()
-        reminder_idx = 0
         while True:
             ev.wait(self.WAIT_TICK_S)
             row = self.store.get_pending(thread_id, gate)
@@ -684,27 +801,46 @@ class FeishuGateway:
                         "choice": row["choice"],
                         "human_notes": row["human_notes"],
                         "source": row["source"]}
+            # H-6：提醒节奏落库（reminder_count/last_reminder_at），调度锚点用
+            # 行 created_at 的墙钟时间——进程重启后 8h/16h 节奏不重置、不重复发。
+            count, _last = self.store.get_reminder_state(thread_id, gate)
+            if (row is not None and row["status"] == "PENDING"
+                    and count < len(self.REMIND_AFTER_S)):
+                due_at_ms = int(row["created_at"]) + self.REMIND_AFTER_S[count] * 1000
+                if now_ms() >= due_at_ms:
+                    task_title = row.get("task_title")
+                    if self._send_reminder(gate, count + 1, thread_id, task_title):
+                        # 仅发送成功才计数；失败下一节拍重试，不跳过该档。
+                        self.store.bump_reminder(thread_id, gate)
             elapsed = time.monotonic() - start
-            if (reminder_idx < len(self.REMIND_AFTER_S)
-                    and elapsed >= self.REMIND_AFTER_S[reminder_idx]):
-                self._send_reminder(gate, reminder_idx + 1)
-                reminder_idx += 1
             if max_wait is not None and elapsed >= max_wait:
                 # 绝不代决：超时仅抛出，由上层决定是否继续等待
                 raise TimeoutError(
                     f"Gate{gate} 等待 {elapsed:.0f}s 未决策（禁止自动批准）")
 
-    def _send_reminder(self, gate: int, nth: int) -> None:
+    def _send_reminder(
+        self,
+        gate: int,
+        nth: int,
+        thread_id: "str | None" = None,
+        task_title: "str | None" = None,
+    ) -> bool:
+        """发提醒卡（H-6：卡片自带任务名与线程 ID）。成功返回 True。"""
         try:
             waited_hours = 8 if nth == 1 else 16
             self._send_interactive(
                 self.owner_open_id,
-                build_reminder_card(gate, nth, waited_hours),
-                build_reminder_card_v2(gate, nth, waited_hours))
-            self._log.warning("Gate%s 第 %d 次等待提醒卡片已发送", gate, nth)
+                build_reminder_card(gate, nth, waited_hours,
+                                    task_title=task_title, thread_id=thread_id),
+                build_reminder_card_v2(gate, nth, waited_hours,
+                                       task_title=task_title, thread_id=thread_id))
+            self._log.warning("Gate%s 第 %d 次等待提醒卡片已发送 thread=%s",
+                              gate, nth, thread_id)
+            return True
         except FeishuAPIError:
             self._log.warning("Gate%s 第 %d 次提醒发送失败（下一节拍重试计数不增）",
                               gate, nth, exc_info=True)
+            return False
 
     # ---------- 对外主入口 ----------
 
@@ -735,7 +871,8 @@ class FeishuGateway:
             self.store.upsert_pending(
                 thread_id, gate,
                 card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"])
+                open_chat_id=sent["chat_id"],
+                task_title=task_title)
             # 极端竞态：upsert 前行已存在但无 message_id，attach 再保底回填一次
             self.store.attach_message_ids(
                 thread_id, gate, card_message_id=sent["message_id"],
@@ -744,6 +881,29 @@ class FeishuGateway:
                            thread_id, sent["schema"])
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
+
+    @staticmethod
+    def _build_trim_note(
+        trim: "dict | None",
+        ladder_step: "int | None",
+    ) -> str:
+        """H-2：卡片/video_detail 的原片时长与裁剪区间注记。
+
+        - 原片时长只要调用方给了就始终展示（含 step<4 与未裁剪视频）；
+        - 只有阶梯实际走到 step4（发生裁剪）才追加「裁剪区间 …（接触时刻…/
+          分屏无单一接触）」；调用方未给 trim 时按默认 0–30s、无单一接触呈现。
+        """
+        parts: list[str] = []
+        if ladder_step == 4:
+            if trim is None:
+                trim = {"trim_start": 0.0, "trim_seconds": 30.0,
+                        "contact_moment_s": None, "source_duration_s": None}
+            parts.append(trim_interval_note(trim))
+        if trim is not None:
+            note = source_duration_note(trim.get("source_duration_s"))
+            if note:
+                parts.append(note)
+        return "，".join(parts)
 
     def request_gate2_approval(
         self,
@@ -756,6 +916,7 @@ class FeishuGateway:
         duration_ms: "int | None" = None,
         cover_png: "str | None" = None,
         explanation: "dict[str, str] | None" = None,
+        trim: "dict | None" = None,
         max_wait: "float | None" = None,
     ) -> dict:
         """先发原生视频（五级阶梯，可能降级）再发 Gate2 卡片，阻塞等待验收结论。
@@ -764,8 +925,16 @@ class FeishuGateway:
         见 cards._EXPLAIN_LABELS），由 Task7 真人 Gate2 打回逐字要求引入
         （2026-10-15：「说明这个仿真任务是做什么的，解决什么问题，发来的
         视频是什么意思」）。
+
+        H-2/C1：trim 为 pipeline lane 计算的调用方裁剪区间（严格四键，见
+        video.TRIM_KEYS）；本 lane 只透传到 step4 ffmpeg 与卡片文案，不自行
+        计算接触时刻。H-4：发视频/卡片之前先在库内占位（PENDING 空行），
+        推送失败也保留占位供下次重挂，任何路径不重复推视频；消息 id 在发送
+        成功后只做一次 COALESCE 回填（不再 upsert+attach 双写）。
         """
         gate = 2
+        # 在任何副作用之前校验 trim（非法契约直接抛错，不推视频、不写占位）。
+        trim = validate_trim(trim)
         row = self.store.get_pending(thread_id, gate)
         if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
             self._log.info("Gate2 重启重挂 thread=%s message_id=%s（不重发卡片）",
@@ -774,42 +943,80 @@ class FeishuGateway:
             # 打回后的新一轮：先归档上一轮终态行，否则旧 reject 会被本轮
             # _await_decision 首 tick 读到而秒判第二次打回（见 store._DDL_HISTORY）。
             self._reopen_round(thread_id, gate)
-            media_message_id = None
-            video_fallback = False
-            video_detail = "未提供视频"
-            ladder_step = None
-            if video_path:
-                vr = self.send_video_native(video_path, duration_ms=duration_ms,
-                                            cover_png=cover_png)
-                video_fallback = bool(vr["video_fallback"])
-                media_message_id = vr["media_message_id"]
-                video_detail = vr["detail"]
-                ladder_step = vr["ladder_step"]
-                if intranet_url is None and video_fallback:
-                    video_detail += "（且未提供 intranet_url，仅能查看证据目录原片）"
-            url = intranet_url
-            sent = self._send_interactive(
-                self.owner_open_id,
-                build_gate2_card(task_title, metrics, url,
-                                 video_fallback=video_fallback,
-                                 explanation=explanation),
-                build_gate2_card_v2(task_title, metrics, url,
-                                    video_fallback=video_fallback,
-                                    explanation=explanation),
-                form_required=True,
-            )
-            self.store.upsert_pending(
-                thread_id, gate,
-                card_message_id=sent["message_id"],
-                media_message_id=media_message_id,
-                open_chat_id=sent["chat_id"])
-            self.store.attach_message_ids(
-                thread_id, gate, card_message_id=sent["message_id"],
-                media_message_id=media_message_id,
-                open_chat_id=sent["chat_id"])
-            self._log.info(
-                "Gate2 卡片已发出 thread=%s schema=%s video=%s step=%s",
-                thread_id, sent["schema"], video_detail, ladder_step)
+            # H-4：占位先行。claim 失败说明主表已有行——若已带 card_message_id
+            # 视为他方发卡完成，直接进入等待、绝不重复推视频；无 card id 的
+            # PENDING 占位（他方进程崩溃遗留）由本次接管补发。
+            claimed = self.store.claim_pending(thread_id, gate,
+                                                task_title=task_title)
+            other_card_ready = False
+            if not claimed:
+                existing = self.store.get_pending(thread_id, gate)
+                if existing is not None and existing["status"] == "PENDING" \
+                        and existing["card_message_id"]:
+                    other_card_ready = True
+                    self._log.warning(
+                        "Gate2 占位已被他方持有且卡片已发，本次不重复推视频 "
+                        "thread=%s card=%s", thread_id,
+                        existing["card_message_id"])
+            if not other_card_ready:
+                media_message_id = None
+                video_fallback = False
+                video_detail = "未提供视频"
+                ladder_step = None
+                stale = None if claimed else self.store.get_pending(thread_id, gate)
+                reattach_media = bool(
+                    stale is not None and stale["status"] == "PENDING"
+                    and not stale["card_message_id"] and stale["media_message_id"])
+                if reattach_media:
+                    # H-4 重挂：占位行已带 media_message_id（视频此前已送达，
+                    # 仅卡片发送失败/进程崩溃）——只补发卡片，绝不重复推视频。
+                    media_message_id = stale["media_message_id"]
+                    video_detail = "复用已发送视频（重挂卡片，未重复推送）"
+                    # 实际裁剪档未知：只展示原片时长，不虚构裁剪区间。
+                    trim_note = self._build_trim_note(trim, None)
+                elif video_path:
+                    vr = self.send_video_native(video_path, duration_ms=duration_ms,
+                                                cover_png=cover_png, trim=trim)
+                    video_fallback = bool(vr["video_fallback"])
+                    media_message_id = vr["media_message_id"]
+                    video_detail = vr["detail"]
+                    ladder_step = vr["ladder_step"]
+                    # H-4：视频送达后立刻回填 media_message_id——即便随后发卡失败/
+                    # 进程崩溃，重挂分支也只补卡片、绝不重复推视频。
+                    if media_message_id is not None:
+                        self.store.attach_message_ids(
+                            thread_id, gate, media_message_id=media_message_id)
+                    trim_note = self._build_trim_note(trim, ladder_step)
+                    if trim_note:
+                        video_detail += f"｜{trim_note}"
+                    if intranet_url is None and video_fallback:
+                        video_detail += "（且未提供 intranet_url，仅能查看证据目录原片）"
+                else:
+                    trim_note = self._build_trim_note(trim, None)
+                url = intranet_url
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate2_card(task_title, metrics, url,
+                                     video_fallback=video_fallback,
+                                     explanation=explanation,
+                                     trim_note=trim_note),
+                    build_gate2_card_v2(task_title, metrics, url,
+                                        video_fallback=video_fallback,
+                                        explanation=explanation,
+                                        trim_note=trim_note),
+                    form_required=True,
+                )
+                # H-4：占位行已在推视频前落库；media_message_id 在视频送达后
+                # 已先回填一次，这里回填 card_message_id/open_chat_id（全部
+                # COALESCE，重复调用幂等；若发卡抛异常，占位+视频 id 保留，
+                # 下次走重挂分支只补卡片，绝不重推视频）。
+                self.store.attach_message_ids(
+                    thread_id, gate, card_message_id=sent["message_id"],
+                    media_message_id=media_message_id,
+                    open_chat_id=sent["chat_id"])
+                self._log.info(
+                    "Gate2 卡片已发出 thread=%s schema=%s video=%s step=%s",
+                    thread_id, sent["schema"], video_detail, ladder_step)
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 

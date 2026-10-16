@@ -11,7 +11,9 @@
   task6_learnings/learnings_export.jsonl（去 vector）、
   quota/approvals_index.json（只取批次元数据，文件哈希可对账）、
   symlinks.json；
-- 打包前对所有文本件跑 scan_secrets 同款 9 条正则（Python 移植）。
+- 打包前对所有文本件跑密钥扫描，正则单一事实源
+  orchestrator/common/secrets.py（H-12：10 条严格口径，含飞书 cli_ app_id
+  与 app_secret 赋值形态；与 scan_secrets.sh 同源）。
 
 与 §1.8 树不一致处一律写进 ADAPTATIONS.md（锁内适配留痕，规则 7）。
 用法：
@@ -23,7 +25,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -34,6 +35,9 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 
+# H-12：密钥正则只允许单一事实源（router 日志脱敏也用它），本脚本不再自持副本。
+from orchestrator.common.secrets import scan_text  # noqa: E402
+
 PHASE1_ROOT = Path(os.environ.get(
     "SIMPRAXIS_PHASE1_ROOT", "/mnt/artifacts/simpraxis/phase1"))
 RUNS_PHASE1 = Path(os.environ.get(
@@ -41,20 +45,6 @@ RUNS_PHASE1 = Path(os.environ.get(
 PACK = PHASE1_ROOT / "task9_milestone" / "evidence_pack"
 
 SCHEMA = "simpraxis.evidence_pack.v1"
-
-# scan_secrets.sh 同款 9 条（第 9 条大小写不敏感）
-SECRET_PATTERNS = [
-    (r"hf_[A-Za-z0-9]{20,}", False),
-    (r"gh[pousr]_[A-Za-z0-9]{20,}", False),
-    (r"nvapi-[A-Za-z0-9_-]{20,}", False),
-    (r"ark-[A-Za-z0-9][A-Za-z0-9-]{12,}", False),
-    (r"sk-[A-Za-z0-9_-]{24,}", False),
-    (r"AKIA[0-9A-F]{16}", False),
-    (r"xox[baprs]-[A-Za-z0-9-]{10,}", False),
-    (r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", False),
-    (r"(api[_-]?key|access[_-]?token|auth[_-]?token|authorization)"
-     r"([\s]{0,5})[:=]([\s]{0,5})['\"][A-Za-z0-9_./+-]{24,}['\"]", True),
-]
 
 # ---------------------------------------------------------------------------
 # 复制清单：(pack 内相对路径, 源根, 源相对路径, 逻辑编号, 必需性)
@@ -109,9 +99,8 @@ FILES: list[tuple[str, str, str, str, bool]] = [
      H, "task8_track2_judge/gait_cal_good.incident.json", "E5.4", False),
     # 决策签收
     ("decision_signoff.json", H, "decision_signoff.json", "E0.1", True),
-    # state
-    ("state/pending_gates.db", H, "state/pending_gates.db", "E1.5", True),
-    ("state/langgraph_checkpoints.db", H, "state/langgraph_checkpoints.db", "E3.3", True),
+    # state：两个存活 SQLite 不走 FILES 的 copy2，由 SQLITE_DBS 经 backup
+    # API 取一致性快照（H-13，见 _snapshot_sqlite）。
     # quota（approvals/ 原件排除，只入索引）
     ("quota/ledger.jsonl", H, "quota/ledger.jsonl", "E$.1", True),
     ("quota/counters.json", H, "quota/counters.json", "E$.1", True),
@@ -164,7 +153,18 @@ RUN_SINGLES = [
     ("runs/task8_track2/probe", "task8_track2/probe", "E8.0"),
 ]
 
+# 存活 SQLite：禁止 copy2（有写入者时主库可能落后 WAL）。走 sqlite3 online
+# backup API 导出事务一致快照（WAL 在导出时合并），入包后再跑 integrity_check。
+SQLITE_DBS = [
+    ("state/pending_gates.db", H, "state/pending_gates.db", "E1.5", True),
+    ("state/langgraph_checkpoints.db", H, "state/langgraph_checkpoints.db",
+     "E3.3", True),
+]
+
 SKIP_NAMES = {"__pycache__", ".ledger.lock"}
+
+# SQLite 伴生文件：只允许主库快照入包，-wal/-shm 永不打包（H-13）。
+_WAL_SUFFIXES = ("-wal", "-shm")
 
 
 def _git_head() -> str:
@@ -185,6 +185,8 @@ def _origin(root: str, rel: str) -> Path:
 
 
 def _scan_secrets(root: Path) -> list[str]:
+    # H-12：正则单一事实源在 orchestrator.common.secrets（严格口径，
+    # 含飞书 cli_ app_id 与 app_secret 赋值形态）。
     hits = []
     for f in root.rglob("*"):
         if not f.is_file():
@@ -193,11 +195,8 @@ def _scan_secrets(root: Path) -> list[str]:
             data = f.read_text(encoding="utf-8", errors="ignore")
         except Exception:
             continue
-        for pat, ignore_case in SECRET_PATTERNS:
-            flags = re.IGNORECASE if ignore_case else 0
-            m = re.search(pat, data, flags)
-            if m:
-                hits.append(f"{f.relative_to(root)} :: /{pat}/ :: {m.group(0)[:40]}")
+        for name, matched in scan_text(data):
+            hits.append(f"{f.relative_to(root)} :: {name} :: {matched[:40]}")
     return hits
 
 
@@ -234,6 +233,8 @@ def _learnings_export() -> list[dict]:
 
 
 def _symlinks_index() -> list[dict]:
+    # H-11：全量清点（不论是否在复制树内），标注相对/绝对与文件/目录；
+    # 复制树内的绝对链接/链接文件由 _iter_copy_files/_copy_file 直接 FATAL。
     out = []
     for base in (PHASE1_ROOT, RUNS_PHASE1):
         for link in base.rglob("*"):
@@ -244,6 +245,8 @@ def _symlinks_index() -> list[dict]:
                     "path": str(link.relative_to(base)),
                     "root": "host" if base == PHASE1_ROOT else "runs",
                     "target": tgt,
+                    "relative": not os.path.isabs(tgt),
+                    "kind": "dir" if link.is_dir() else "file",
                     "broken": not resolved.exists(),
                     "points_to_failure": (resolved.name.startswith("FAILURE")
                                           or (resolved / "FAILURE.json").exists()),
@@ -252,18 +255,57 @@ def _symlinks_index() -> list[dict]:
 
 
 def _add_manifest(manifest: list, dst: Path, src: Path, origin: str,
-                  logical: str, required: bool) -> None:
+                  logical: str, required: bool) -> dict:
     """登记 manifest；同包路径（FILES 与 DIR_COPIES 重叠时）合并逻辑编号。"""
     rel = str(dst.relative_to(PACK))
     rec = next((r for r in manifest if r["path"] == rel), None)
     if rec is None:
-        manifest.append({
+        rec = {
             "path": rel, "origin": origin, "origin_rel": str(src),
             "size": dst.stat().st_size, "sha256": _sha256(dst),
-            "logical_ids": [logical], "required": required})
+            "logical_ids": [logical], "required": required}
+        manifest.append(rec)
     elif logical not in rec["logical_ids"]:
         rec["logical_ids"].append(logical)
         rec["required"] = rec["required"] or required
+    return rec
+
+
+def _iter_copy_files(src_base: Path):
+    """展开目录复制清单（H-11 安全 walk）。
+
+    - os.walk(followlinks=False)：符号链接目录永不下降（含相对白名单链接，
+      其目标实体不打包，链接本身登记进 symlinks.json）；
+    - 符号链接目录若为绝对目标 → FATAL（白名单只允许相对链接）；
+    - 符号链接**文件**一律 FATAL（is_file() 会跟随链接把 ~/access 等
+      链接目标实体打进包，破坏清单自证）。
+    """
+    for dirpath, dirnames, filenames in os.walk(src_base, followlinks=False):
+        dpath = Path(dirpath)
+        kept: list[str] = []
+        for d in dirnames:
+            p = dpath / d
+            if d in SKIP_NAMES:
+                continue
+            if p.is_symlink():
+                tgt = os.readlink(p)
+                if os.path.isabs(tgt):
+                    raise SystemExit(
+                        f"证据树含绝对符号链接目录，拒绝打包（H-11）：{p} -> {tgt}")
+                # 相对目录链接：白名单允许但不下降（followlinks=False 已保证，
+                # 从 dirnames 摘除为双保险），由 symlinks.json 登记。
+                continue
+            kept.append(d)
+        dirnames[:] = kept
+        for name in filenames:
+            if name in SKIP_NAMES:
+                continue
+            p = dpath / name
+            if p.is_symlink():
+                raise SystemExit(
+                    f"证据源为符号链接文件，拒绝打包（H-11）：{p} -> "
+                    f"{os.readlink(p)}")
+            yield p
 
 
 def _copy_file(src: Path, dst: Path, logical: str, required: bool,
@@ -272,9 +314,60 @@ def _copy_file(src: Path, dst: Path, logical: str, required: bool,
         if required:
             raise FileNotFoundError(f"必需证据缺失：{src}")
         return
+    # H-11：单文件复制同样拒绝符号链接（FILES/RUN_SINGLES/信封/hitl_evidence
+    # 全部经本函数，无旁路）。
+    if src.is_symlink():
+        raise SystemExit(
+            f"证据源为符号链接文件，拒绝打包（H-11）：{src} -> "
+            f"{os.readlink(src)}")
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dst)
     _add_manifest(manifest, dst, src, origin, logical, required)
+
+
+def _snapshot_sqlite(src: Path, dst: Path, logical: str, required: bool,
+                     origin: str, manifest: list) -> None:
+    """H-13：存活 SQLite 经 online backup API 取一致性快照入包。
+
+    copy2 存活库在有写入者时主库可能落后未 checkpoint 的 WAL；backup API
+    导出时合并 WAL，得到事务一致快照。导出后对包内副本跑 integrity_check，
+    且目标侧不得残留 -wal/-shm。
+    """
+    if not src.exists():
+        if required:
+            raise FileNotFoundError(f"必需证据缺失：{src}")
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():  # 非 --clean 重建：backup 不能覆盖已含表的库
+        dst.unlink()
+    for suf in _WAL_SUFFIXES:
+        side = dst.with_name(dst.name + suf)
+        if side.exists():
+            side.unlink()
+    src_con = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    try:
+        out_con = sqlite3.connect(str(dst))
+        try:
+            src_con.backup(out_con)
+            # backup 会把源库文件头的 journal_mode=WAL 带到目标；关闭前改回
+            # DELETE，使快照关闭即清掉 -wal/-shm（证据包只收主库文件）。
+            out_con.execute("PRAGMA journal_mode=DELETE")
+        finally:
+            out_con.close()
+    finally:
+        src_con.close()
+    chk_con = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+    try:
+        verdict = chk_con.execute("PRAGMA integrity_check").fetchone()[0]
+    finally:
+        chk_con.close()
+    if verdict != "ok":
+        raise SystemExit(f"SQLite 快照完整性失败：{src} -> {verdict}")
+    sidecars = [dst.with_name(dst.name + suf) for suf in _WAL_SUFFIXES]
+    if any(p.exists() for p in sidecars):
+        raise SystemExit(f"SQLite 快照残留 {[p.name for p in sidecars if p.exists()]}")
+    rec = _add_manifest(manifest, dst, src, origin, logical, required)
+    rec["snapshot"] = "sqlite3_backup_api"
 
 
 def _ledger_snapshot() -> dict:
@@ -308,6 +401,9 @@ ADAPTATIONS = """# §1.8 证据树锁内适配（计划差异总表 #24：证据
 | `task0_env/inputs/` | `task0_env/inputs/track_{1,2}_samples.txt`（自仓内 `inputs/tracks/` 复制） | 面试题原件仓内版本化，证据包内固定一份对应 commit |
 | `quota/approvals/` | `quota/approvals_index.json`（元数据+sha256，无凭据） | 凭据/批准原件不打包（计划 L582）；ledger 每行 approval_ref 可凭索引哈希回原文件对账 |
 | 失败线程第二轮 Gate2 意见 | 无落库件（见 rsi_dashboard reject_topic_clusters.evidence_gap） | 重发卡未走 archive_decided，history 表空；不猜测按钮/文字，事件序列与 FAILURE.json 为证 |
+| `state/pending_gates.db`、`state/langgraph_checkpoints.db` 存活库原件复制（H-13） | sqlite3 online backup API 一致性快照（导出时合并 WAL），manifest 标 `snapshot=sqlite3_backup_api`，包内副本过 `PRAGMA integrity_check`；`-wal/-shm` 永不入包 | copy2 存活库在有写入者时主库可能落后 WAL，快照不事务一致；备份 API 取在线一致视图（2026-10-16 评审 H-13） |
+| 目录树 rglob 复制（H-11） | os.walk(followlinks=False) 安全展开：符号链接**文件**/绝对目标符号链接目录命中即 FATAL；相对符号链接目录不下降、仅登记 symlinks.json（新增 relative/kind 字段） | is_file() 跟随链接文件，会把指向 ~/access 或超大件的目标实体打进包，破坏清单自证；现场两个 `latest` 为相对目录链接，白名单保留（2026-10-16 评审 H-11） |
+| Gate2 视频体积分档（H-14，`orchestrator/feishu_gateway/video.py`） | MB=1_000_000 十进制（飞书 files 接口口径）；≤28MB step1 直传，>28MB 一律从 step2 起，按压缩后实测体积逐级 2→3→4→5；旧 64/128/256MB 粗分档常量仅留作文档锚点不再选级 | 旧 1024² 口径下 HARD_LIMIT=30MiB 越过接口十进制硬顶 30,000,000（fail-safe 但白丢一次上传），粗分档会越级直跳截断档，与 H-2 接触时刻未接线叠加放大误裁剪（2026-10-16 评审 H-14） |
 """
 
 REPLAY = [
@@ -339,25 +435,34 @@ def main() -> int:
     for spec in FILES:
         cp(*spec)
 
-    # 目录复制（含 q2 npz 等二进制；跳过 __pycache/锁）
+    # H-13：存活 SQLite 经 backup API 快照（不走 copy2）。
+    for pack_rel, root, src_rel, logical, required in SQLITE_DBS:
+        _snapshot_sqlite(_origin(root, src_rel), PACK / pack_rel, logical,
+                         required, root, manifest_files)
+
+    # 目录复制（含 q2 npz 等二进制；H-11 安全 walk：跳过 __pycache/锁、
+    # 不下降任何符号链接目录、链接文件 FATAL）
     for pack_prefix, root, src_dir, logical in DIR_COPIES:
         src_base = _origin(root, src_dir)
         if not src_base.exists():
             raise FileNotFoundError(f"必需证据目录缺失：{src_base}")
-        for f in sorted(src_base.rglob("*")):
-            if f.is_dir() or f.name in SKIP_NAMES \
-                    or any(p.name in SKIP_NAMES for p in f.parents):
-                continue
+        for f in sorted(_iter_copy_files(src_base)):
             rel = f.relative_to(src_base)
             _copy_file(f, PACK / pack_prefix / rel, logical, True, root,
                        manifest_files)
 
     for pack_rel, src_rel, logical in RUN_SINGLES:
         src = RUNS_PHASE1 / src_rel
+        if src.is_symlink():
+            # 清单根本身是链接：绝对目标 FATAL；相对目录链接不复制实体（H-11，
+            # symlinks.json 全量登记）。
+            tgt = os.readlink(src)
+            if os.path.isabs(tgt):
+                raise SystemExit(
+                    f"证据根为绝对符号链接，拒绝打包（H-11）：{src} -> {tgt}")
+            continue
         if src.is_dir():
-            for f in sorted(src.rglob("*")):
-                if f.is_dir() or f.name in SKIP_NAMES:
-                    continue
+            for f in sorted(_iter_copy_files(src)):
                 _copy_file(f, PACK / pack_rel / f.relative_to(src),
                            logical, True, R, manifest_files)
         else:
@@ -481,11 +586,10 @@ def main() -> int:
                    manifest_files)
     # HITL 演练的脱敏 req/resp 与结构化结果（与日志同编号 E9.2；演练前目录可缺）
     he = PHASE1_ROOT / "task9_milestone" / "hitl_evidence"
-    if he.is_dir():
-        for f in sorted(he.rglob("*")):
-            if f.is_file() and f.name not in SKIP_NAMES:
-                _copy_file(f, PACK / "hitl_evidence" / f.relative_to(he),
-                           "E9.2", True, H, manifest_files)
+    if he.is_dir() and not he.is_symlink():
+        for f in sorted(_iter_copy_files(he)):
+            _copy_file(f, PACK / "hitl_evidence" / f.relative_to(he),
+                       "E9.2", True, H, manifest_files)
 
     # 凭据排除自检：包内不得出现 approvals 原件或任何凭据文件名
     forbidden = [str(p.relative_to(PACK)) for p in PACK.rglob("*")
@@ -493,6 +597,13 @@ def main() -> int:
                                      and p.name != "approvals_index.json")]
     if forbidden:
         raise SystemExit(f"证据包混入凭据原件：{forbidden}")
+
+    # H-13：-wal/-shm 永不入包（存活库只经 backup 快照；DIR_COPIES 内若有
+    # SQLite 伴生件也在此兜底拦截）。
+    wal_packed = [str(p.relative_to(PACK)) for p in PACK.rglob("*")
+                  if p.is_file() and p.name.endswith(_WAL_SUFFIXES)]
+    if wal_packed:
+        raise SystemExit(f"证据包混入 SQLite -wal/-shm 伴生件：{wal_packed}")
 
     hits = _scan_secrets(PACK)
     if hits:

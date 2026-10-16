@@ -76,15 +76,21 @@ def _cmd_send_probe(args: argparse.Namespace) -> int:
          "first_principles": "多方案选择按钮", "expected_artifacts": "-"},
     ]
     try:
+        # H-16：探针必须验证生产同款含表单卡片（form_required=True，2.0 先发，
+        # 退回 1.0），否则探针「成功」不代表真实 Gate 卡可用。
         sent = gw._send_interactive(  # noqa: SLF001 — CLI 复用与生产同一条发卡路径
             gw.owner_open_id,
             build_gate1_card("探针任务（不影响任何真实 run）", proposals),
             build_gate1_card_v2("探针任务（不影响任何真实 run）", proposals),
+            form_required=True,
         )
     except FeishuAPIError as exc:
         print(f"[send-probe] 发卡失败：{exc}", file=sys.stderr)
         return 2
+    # 探针刻意不写 PENDING 行：点击按钮只验证送达/回调链路，回调会回
+    # 「该审批已结束或不存在」。H-16：明确打印这一语义，避免误以为点击会落决策。
     print(json.dumps(sent, ensure_ascii=False))
+    print("[send-probe] 未插入 PENDING 审批行：仅验证送达，点击会提示无审批。")
     gw.close()
     return 0
 

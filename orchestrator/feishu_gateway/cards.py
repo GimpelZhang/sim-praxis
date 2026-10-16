@@ -21,6 +21,40 @@ from typing import Any, Optional
 FEEDBACK_PLACEHOLDER = "打回时必填：具体意见（会原样带回方案重做）"
 REJECT_EMPTY_TOAST = {"type": "error", "content": "打回必须填写意见"}
 NOT_OWNER_TOAST = {"type": "error", "content": "非审批人操作，已拒绝"}
+# H-8：卡片按钮 value.gate 与落库行 gate 不一致时的拒绝 toast。
+GATE_MISMATCH_TOAST = {"type": "error",
+                       "content": "按钮与审批单不匹配（Gate 不一致），已拒绝"}
+
+
+# ---------------- H-7：lark_md 宏模型字段转义 ----------------
+# 信任边界：task_title / 方案 name/focus/artifacts / explanation 文本来自 macro
+# LLM 产出，若原样进 lark_md，可被注入 [批准](https://evil.example) 假链接、
+# **加粗**伪系统行等。仅对这些宏字段转义；人类/常量文本（我们自己的标签、
+# 数值渲染器产出）不转义。
+_MD_ESCAPE_CHARS = ("\\", "`", "*", "_", "~", "[", "]", "(", ")", ">", "#")
+
+
+def md_escape(text: Any) -> str:
+    """把宏模型产出文本转成 lark_md 安全字面量（markdown 结构字符全部反斜杠化）。
+
+    行首的列表/引用标记（-、+、#、>）也转义，防止伪造系统条目；非字符串强转。
+    """
+    s = str(text)
+    out: list[str] = []
+    for i, ch in enumerate(s):
+        if ch in _MD_ESCAPE_CHARS:
+            out.append("\\" + ch)
+        elif ch in ("-", "+") and (i == 0 or s[i - 1] == "\n"):
+            out.append("\\" + ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def inline_code(text: Any) -> str:
+    """安全的行内代码字面量：反斜杠/反引号替换掉，保证 code span 不可被截断。"""
+    s = str(text).replace("\\", "/").replace("`", "'")
+    return f"`{s}`"
 
 
 # ---------------- 卡片 1.0 ----------------
@@ -63,7 +97,7 @@ def build_gate1_card(
     """
     elements: list[dict] = [
         {"tag": "markdown",
-         "content": f"**任务目标**：{task_title}\n请在下方选择批准的方案；"
+         "content": f"**任务目标**：{md_escape(task_title)}\n请在下方选择批准的方案；"
                     f"打回请在意见框填写具体意见（必填，会原样带回重做）。"}
     ]
     for idx, p in enumerate(proposals):
@@ -73,10 +107,11 @@ def build_gate1_card(
                                        or p.get("artifacts"))
         elements.append({
             "tag": "markdown",
-            "content": f"**方案 {idx + 1}：{p.get('name', '-')}**\n"
-                       f"- 物理基座：`{engine}`\n"
-                       f"- 思路/重点：{focus}\n"
-                       f"- 预期产出：{artifacts}",
+            # H-7：name/engine/focus/artifacts 均为宏模型产出，逐个转义。
+            "content": f"**方案 {idx + 1}：{md_escape(p.get('name', '-'))}**\n"
+                       f"- 物理基座：{inline_code(engine)}\n"
+                       f"- 思路/重点：{md_escape(focus)}\n"
+                       f"- 预期产出：{md_escape(artifacts)}",
         })
         elements.append(_gate1_form_1(idx))
     if not feedback_required:
@@ -488,7 +523,8 @@ def _explanation_md(explanation: "dict[str, str] | None") -> "str | None":
     for key, label in _EXPLAIN_LABELS:
         val = explanation.get(key)
         if isinstance(val, str) and val.strip():
-            blocks.append(f"**{label}**\n{val.strip()}")
+            # H-7：explanation 文本来自宏模型产出，标签是我方常量不转义。
+            blocks.append(f"**{label}**\n{md_escape(val.strip())}")
     if not blocks:
         return None
     return ("📋 **审批前请先读：任务背景与视频解读（真人 Gate2 要求补充）**\n\n"
@@ -500,8 +536,13 @@ def _gate2_metrics_md(
     metrics: dict[str, Any],
     intranet_url: "str | None",
     video_fallback: bool = False,
+    trim_note: "str | None" = None,
 ) -> str:
-    lines = [f"**任务目标**：{task_title}"]
+    # H-7：任务名来自宏模型产出，转义；指标正文为我方数值渲染器，不转义。
+    lines = [f"**任务目标**：{md_escape(task_title)}"]
+    # H-2：原片时长始终展示；实际走到 step4 裁剪时再附裁剪区间行。
+    if trim_note:
+        lines.append(trim_note)
     nested = _rungs_metrics_md(metrics)
     if nested is not None:
         lines.append(nested)
@@ -558,9 +599,10 @@ def build_gate2_card(
     *,
     video_fallback: bool = False,
     explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
 ) -> dict:
     """Gate2 1.0 卡：（可选）任务背景说明 + 指标 markdown（含内网链接）
-    + form（验收通过/打回并提出意见）。"""
+    + form（验收通过/打回并提出意见）。trim_note 为 H-2 原片/裁剪区间注记。"""
     elements: list[dict] = []
     explain_md = _explanation_md(explanation)
     if explain_md:
@@ -568,7 +610,7 @@ def build_gate2_card(
         elements.append({"tag": "hr"})
     elements.append({"tag": "markdown",
                      "content": _gate2_metrics_md(task_title, metrics, intranet_url,
-                                                  video_fallback)})
+                                                  video_fallback, trim_note)})
     form = _gate2_form_1()
     if video_fallback:
         for btn in form["elements"][1]["actions"]:
@@ -640,7 +682,7 @@ def build_gate1_card_v2(
 ) -> dict:
     """Gate1 schema 2.0 卡（1.0 内嵌 form 被服务端拒绝时的自动降级形态）。"""
     body: list[dict] = [
-        _div_lark_md(f"**任务目标**：{task_title}\n请在下方选择批准的方案；"
+        _div_lark_md(f"**任务目标**：{md_escape(task_title)}\n请在下方选择批准的方案；"
                      f"打回请在意见框填写具体意见（必填，会原样带回重做）。")
     ]
     if not feedback_required:
@@ -650,10 +692,11 @@ def build_gate1_card_v2(
         focus = p.get("first_principles") or p.get("focus") or "-"
         artifacts = _format_artifacts(p.get("expected_artifacts")
                                        or p.get("artifacts"))
+        # H-7：name/engine/focus/artifacts 为宏模型产出，逐个转义。
         body.append(_div_lark_md(
-            f"**方案 {idx + 1}：{p.get('name', '-')}**\n"
-            f"- 物理基座：`{engine}`\n- 思路/重点：{focus}\n"
-            f"- 预期产出：{artifacts}"))
+            f"**方案 {idx + 1}：{md_escape(p.get('name', '-'))}**\n"
+            f"- 物理基座：{inline_code(engine)}\n- 思路/重点：{md_escape(focus)}\n"
+            f"- 预期产出：{md_escape(artifacts)}"))
         body.append(_gate1_form_2(idx))
     return {
         "schema": "2.0",
@@ -695,6 +738,7 @@ def build_gate2_card_v2(
     *,
     video_fallback: bool = False,
     explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
 ) -> dict:
     body: list[dict] = []
     explain_md = _explanation_md(explanation)
@@ -702,7 +746,7 @@ def build_gate2_card_v2(
         body.append(_div_lark_md(explain_md))
         body.append({"tag": "hr"})
     body.append(_div_lark_md(_gate2_metrics_md(
-        task_title, metrics, intranet_url, video_fallback)))
+        task_title, metrics, intranet_url, video_fallback, trim_note)))
     body.append(_gate2_form_2(video_fallback))
     return {
         "schema": "2.0",
@@ -714,7 +758,27 @@ def build_gate2_card_v2(
 
 # ---------------- 等待提醒卡片（8h/16h，仅提醒绝不代决） ----------------
 
-def build_reminder_card(gate: int, nth: int, waited_hours: int) -> dict:
+def _reminder_body(gate: int, nth: int, waited_hours: int,
+                   task_title: "str | None", thread_id: "str | None") -> str:
+    # H-6：提醒卡必须自带任务名与线程 ID——共享 P2P 会话里多个审批并存时，
+    # 没有身份信息的提醒无法对应到原卡片。任务名为宏产出，转义。
+    head = f"Gate{gate} 已等待约 {waited_hours} 小时，仍在等待**人工**结论。\n"
+    if task_title:
+        head += f"任务：{md_escape(task_title)}\n"
+    if thread_id:
+        head += f"审批线程：`{thread_id}`\n"
+    head += ("系统不会代为决定；请在原审批卡片上操作（批准/打回并提出意见）。")
+    return head
+
+
+def build_reminder_card(
+    gate: int,
+    nth: int,
+    waited_hours: int,
+    *,
+    task_title: "str | None" = None,
+    thread_id: "str | None" = None,
+) -> dict:
     return {
         "config": {"wide_screen_mode": True},
         "header": {"template": "orange",
@@ -722,21 +786,27 @@ def build_reminder_card(gate: int, nth: int, waited_hours: int) -> dict:
                              "content": f"【SimPraxis】Gate{gate} 审批等待提醒 {nth}/2"}},
         "elements": [
             {"tag": "markdown",
-             "content": f"Gate{gate} 已等待约 {waited_hours} 小时，仍在等待**人工**结论。\n"
-                        f"系统不会代为决定；请在原审批卡片上操作（批准/打回并提出意见）。"}
+             "content": _reminder_body(gate, nth, waited_hours,
+                                       task_title, thread_id)}
         ],
     }
 
 
-def build_reminder_card_v2(gate: int, nth: int, waited_hours: int) -> dict:
+def build_reminder_card_v2(
+    gate: int,
+    nth: int,
+    waited_hours: int,
+    *,
+    task_title: "str | None" = None,
+    thread_id: "str | None" = None,
+) -> dict:
     return {
         "schema": "2.0",
         "config": {"update_multi": True, "wide_screen_mode": True},
         "header": _v2_header("orange",
                              f"【SimPraxis】Gate{gate} 审批等待提醒 {nth}/2"),
         "body": {"elements": [_div_lark_md(
-            f"Gate{gate} 已等待约 {waited_hours} 小时，仍在等待**人工**结论。\n"
-            f"系统不会代为决定；请在原审批卡片上操作（批准/打回并提出意见）。")]},
+            _reminder_body(gate, nth, waited_hours, task_title, thread_id))]},
     }
 
 
@@ -782,7 +852,13 @@ def parse_card_event(event: Any) -> "tuple[dict, str, Optional[str], Optional[st
 
 def parse_message_event(event: Any) -> "dict[str, Any]":
     """从 P2ImMessageReceiveV1 提取 {chat_id, chat_type, message_type, content_raw,
-    text, sender_open_id, message_id, create_time_ms}（鸭子类型）。"""
+    text, sender_open_id, message_id, create_time_ms, parent_id, root_id,
+    thread_id}（鸭子类型）。
+
+    H-1：parent_id/root_id/thread_id 为消息的回复上下文（lark 1.7.4
+    EventMessage 实有字段；非回复消息为 None），通道②据此把意见唯一定位到
+    被回复的那张审批卡（卡 message_id / 视频 message_id）。
+    """
     data = event.event
     msg = getattr(data, "message", None)
     sender = getattr(data, "sender", None)
@@ -805,4 +881,8 @@ def parse_message_event(event: Any) -> "dict[str, Any]":
         "sender_open_id": getattr(sender_id, "open_id", None),
         "message_id": getattr(msg, "message_id", None),
         "create_time_ms": getattr(msg, "create_time", None),
+        # H-1：回复关系三字段，用于把 P2P 文本意见定位到具体审批卡线程。
+        "parent_id": getattr(msg, "parent_id", None),
+        "root_id": getattr(msg, "root_id", None),
+        "thread_id": getattr(msg, "thread_id", None),
     }

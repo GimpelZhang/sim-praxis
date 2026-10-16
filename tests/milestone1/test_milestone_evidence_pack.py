@@ -10,7 +10,8 @@
    批次凭据（索引 sha256 回指原件）、used≤approved；
 5. FAILURE.json 冻结：包内/原件/ manifest 三处哈希一致、字段合法、
    任何 latest 软链都不指向 FAILURE 目录；
-6. 包内无凭据原件，过 scan_secrets 同款 9 条正则；
+6. 包内无凭据原件，过密钥扫描（正则单一事实源
+   orchestrator.common.secrets，H-12：10 条严格口径含 cli_/app_secret）；
 7. §4 七项追溯矩阵逐条有证据编号且编号在 manifest 存在；
 8. rsi_dashboard.json schema 合法、付费计数与 ledger 一致。
 
@@ -19,16 +20,35 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
-import re
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
 
+from orchestrator.common.secrets import scan_text
+from orchestrator.gateway.quota_ledger import call_lines
 from orchestrator.judge.gait_rungs import evaluate_batch
 from orchestrator.judge.rungs import evaluate_telemetry_file, validate_telemetry
+
+_REPO = Path(__file__).resolve().parents[2]
+
+
+def _load_bep():
+    """以脚本路径加载 build_evidence_pack.py（scripts/ 非包）。"""
+    name = "build_evidence_pack_under_test"
+    spec = importlib.util.spec_from_file_location(
+        name, str(_REPO / "scripts" / "milestone1" / "build_evidence_pack.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+bep = _load_bep()
 
 PHASE1_ROOT = Path(os.environ.get(
     "SIMPRAXIS_PHASE1_ROOT", "/mnt/artifacts/simpraxis/phase1"))
@@ -55,19 +75,6 @@ REQUIRED_IDS = {
 LEDGER_KEYS = {"seq", "event", "stage", "model", "task", "batch_id",
                "global_used_after", "batch_approved", "batch_used_after",
                "approval_ref", "ok", "ts_iso"}
-
-SECRET_PATTERNS = [
-    (r"hf_[A-Za-z0-9]{20,}", 0),
-    (r"gh[pousr]_[A-Za-z0-9]{20,}", 0),
-    (r"nvapi-[A-Za-z0-9_-]{20,}", 0),
-    (r"ark-[A-Za-z0-9][A-Za-z0-9-]{12,}", 0),
-    (r"sk-[A-Za-z0-9_-]{24,}", 0),
-    (r"AKIA[0-9A-F]{16}", 0),
-    (r"xox[baprs]-[A-Za-z0-9-]{10,}", 0),
-    (r"-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----", 0),
-    (r"(api[_-]?key|access[_-]?token|auth[_-]?token|authorization)"
-     r"([\s]{0,5})[:=]([\s]{0,5})['\"][A-Za-z0-9_./+-]{24,}['\"]", re.I),
-]
 
 
 def _sha(path: Path) -> str:
@@ -136,11 +143,18 @@ def test_03_json_artifacts_parse_and_schemas(manifest):
     assert isinstance(rubric.get("questions"), list) and rubric["questions"]
     cal = json.loads((PACK / "task5_judge/calibration_6q.json").read_text())
     assert {"mode", "results"} <= set(cal) or "mode" in cal
-    # 两个 SQLite 可打开
+    # 两个 SQLite 可打开且自洽（H-13：backup 快照必须过 integrity_check）
     for rel in ("state/pending_gates.db", "state/langgraph_checkpoints.db"):
         con = sqlite3.connect(f"file:{PACK/rel}?mode=ro", uri=True)
         assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         con.close()
+        rec = next(f for f in manifest["files"] if f["path"] == rel)
+        assert rec.get("snapshot") == "sqlite3_backup_api", (
+            f"{rel} 必须标记为 backup API 一致性快照（H-13）")
+    # H-13：-wal/-shm 永不入包（含 DIR_COPIES 树内任何 SQLite 伴生件）
+    sidecars = [str(p.relative_to(PACK)) for p in PACK.rglob("*")
+                if p.is_file() and p.name.endswith(("-wal", "-shm"))]
+    assert not sidecars, f"包内混入 SQLite 伴生件：{sidecars}"
 
 
 def test_04_telemetry_schema_and_rules_pass(manifest):
@@ -253,6 +267,12 @@ def test_07_failure_json_immutable(manifest):
     # latest 软链永不指向 FAILURE 目录（包内清单 + 现场实物双重断言）
     syms = json.loads((PACK / "symlinks.json").read_text(encoding="utf-8"))
     assert not any(s["points_to_failure"] for s in syms)
+    # H-11：清单必须标注相对/绝对与文件/目录；现场两个 latest 为相对目录链接
+    for s in syms:
+        assert isinstance(s["relative"], bool)
+        assert s["kind"] in ("dir", "file")
+    latest = [s for s in syms if Path(s["path"]).name == "latest"]
+    assert latest and all(s["relative"] and s["kind"] == "dir" for s in latest)
     for base in (PHASE1_ROOT, RUNS_PHASE1):
         for link in base.rglob("*"):
             if link.is_symlink() and link.name == "latest":
@@ -271,9 +291,10 @@ def test_08_no_credentials_and_secret_scan_clean(manifest):
         if not p.is_file():
             continue
         text = p.read_text(encoding="utf-8", errors="ignore")
-        for pat, flags in SECRET_PATTERNS:
-            assert not re.search(pat, text, flags), (
-                f"secret 命中 {p.relative_to(PACK)}：/{pat}/")
+        # H-12：测试不再自持正则副本，直接用单一事实源（10 条严格口径）。
+        hits = scan_text(text)
+        assert not hits, (
+            f"secret 命中 {p.relative_to(PACK)}：{hits}")
 
 
 # ---------------------------------------------------------------------------
@@ -317,9 +338,30 @@ def test_10_rsi_dashboard_schema_and_counts(manifest):
         "t7-maniskill-20261015a", "t8-genesis-20261016a"}
     for r in d["runs"]:
         assert isinstance(r.get("proxy_decoupling_alarms"), list)
-    assert d["paid_calls"]["total"] == len(_ledger_rows())
-    assert d["paid_calls"]["hard_cap_ok"] is True
-    assert d["paid_calls"]["normal_cap_used"] is True
+    # H-18：total 只认真实触网行（call_lines：seq 整数），preflight 拦截行
+    # （seq=null）单列 blocked_preflight；今日无拦截行，两数与 ledger 行数相等。
+    rows = _ledger_rows()
+    calls = call_lines(rows)
+    pc = d["paid_calls"]
+    assert pc["total"] == len(calls)
+    assert pc["blocked_preflight"] == len(rows) - len(calls) == 0
+    assert pc["ledger_lines"] == len(rows)
+    assert pc["hard_cap_ok"] is True
+    assert pc["normal_cap_used"] is True
+    # H-18：T8 结案块从 DONE 信封实读（不再硬编码 done/0）
+    t8row = next(r for r in d["runs"]
+                 if r["thread_id"] == "t8-genesis-20261016a")
+    env = json.loads((PHASE1_ROOT / "runs" / "t8-genesis-20261016a"
+                      / "DONE.json").read_text(encoding="utf-8"))
+    assert t8row["closeout"] == env["status"] == "done"
+    assert t8row["closeout_source"] == "DONE.json"
+    assert t8row["n_agent_runs"] == env["n_agent_runs"]
+    assert t8row["gate1_rejects"] == env["gate1_rejects"]
+    assert t8row["gate2"]["rejects"] == env["gate2_rejects"]
+    assert d["loop_distribution"]["per_thread"][
+        "t8-genesis-20261016a"]["agent_runs"] == env["n_agent_runs"]
+    # H-18：pending 演练块的配额键改名（已 passed 时该键不存在）
+    assert "approved" not in d["hitl_drill"]
     assert d["learnings"]["rows_new"] == 4
     assert d["learnings"]["production_recall_hits"] == 0  # 诚实口径
     # L580 HITL 真人点验：代理重验复现 + card_form 真人签字
@@ -349,3 +391,112 @@ def test_11_hitl_drill_log_present():
         "HITL 演练日志缺失：T9-B1 批次经用户书面批准后跑 hitl_drill")
     text = log.read_text(encoding="utf-8")
     assert "T9-B1" in text and "SIMPRAXIS_ALLOW_PAID=1" in text
+
+
+# ---------------------------------------------------------------------------
+# H-11/H-12/H-13：合成树单测（不依赖 /mnt 现场包，全部 tmp_path）
+# ---------------------------------------------------------------------------
+
+def test_h11_symlink_file_is_fatal(tmp_path, monkeypatch):
+    """符号链接文件绝不复制（会把链接目标实体打进包）。"""
+    monkeypatch.setattr(bep, "PACK", tmp_path / "pack")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("real", encoding="utf-8")
+    link = src / "b.txt"
+    link.symlink_to(src / "a.txt")
+    dst = tmp_path / "pack" / "b.txt"
+    with pytest.raises(SystemExit, match="H-11"):
+        bep._copy_file(link, dst, "E9.9", True, "host", [])
+    assert not dst.exists()
+    # 普通文件复制正常，manifest 落账
+    manifest: list = []
+    bep._copy_file(src / "a.txt", tmp_path / "pack" / "a.txt", "E9.9",
+                   True, "host", manifest)
+    assert manifest and manifest[0]["path"].endswith("a.txt")
+
+
+def test_h11_walk_relative_dir_link_not_descended(tmp_path):
+    """相对目录符号链接：白名单允许、实体不下降复制、不 FATAL。"""
+    root = tmp_path / "tree"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (outside / "secret_target.txt").write_text("via link", encoding="utf-8")
+    (root / "real").mkdir()
+    (root / "real" / "f.txt").write_text("real", encoding="utf-8")
+    (root / "link_out").symlink_to(Path("..") / "outside")  # 相对链接
+    got = {p.relative_to(root).as_posix()
+           for p in bep._iter_copy_files(root)}
+    assert "real/f.txt" in got
+    assert "link_out/secret_target.txt" not in got
+    assert not any(p.as_posix().startswith("link_out") for p in
+                   bep._iter_copy_files(root))
+
+
+def test_h11_walk_absolute_dir_link_is_fatal(tmp_path):
+    """绝对目标的符号链接目录命中 FATAL（白名单只放相对链接）。"""
+    root = tmp_path / "tree"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    (root / "abs_link").symlink_to(outside)
+    with pytest.raises(SystemExit, match="H-11"):
+        list(bep._iter_copy_files(root))
+
+
+def test_h12_scanner_uses_shared_patterns(tmp_path):
+    """扫描器走单一事实源：cli_ app_id 与 app_secret 赋值都能命中。"""
+    d = tmp_path / "p"
+    d.mkdir()
+    (d / "evil.txt").write_text(
+        "APP_ID=cli_" + "a" * 20 + "\n"
+        "FEISHU_APP_SECRET=\"" + "j" * 32 + "\"\n", encoding="utf-8")
+    (d / "clean.txt").write_text("nothing here\n", encoding="utf-8")
+    hits = bep._scan_secrets(d)
+    joined = "\n".join(hits)
+    assert "lark_cli_app_id" in joined
+    assert "assigned_secret_kv" in joined
+    assert "evil.txt" in joined
+    # 干净目录零命中
+    clean = tmp_path / "c"
+    clean.mkdir()
+    (clean / "ok.txt").write_text("normal log line\n", encoding="utf-8")
+    assert bep._scan_secrets(clean) == []
+
+
+def test_h13_sqlite_backup_snapshot_merges_live_wal(tmp_path, monkeypatch):
+    """存活 WAL 库经 backup 快照：未 checkpoint 的写入必须进包且自洽。"""
+    monkeypatch.setattr(bep, "PACK", tmp_path / "pack")
+    live = tmp_path / "live.db"
+    writer = sqlite3.connect(str(live))
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE t(x INTEGER)")
+    writer.execute("INSERT INTO t VALUES (1)")
+    writer.commit()  # 不 checkpoint：值只在 WAL 里
+    assert live.with_name("live.db-wal").exists()
+
+    dst = tmp_path / "pack" / "state" / "live.db"
+    manifest: list = []
+    try:
+        bep._snapshot_sqlite(live, dst, "E1.5", True, "host", manifest)
+    finally:
+        writer.close()
+    ro = sqlite3.connect(f"file:{dst}?mode=ro", uri=True)
+    try:
+        assert ro.execute("SELECT x FROM t").fetchall() == [(1,)]
+        assert ro.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    finally:
+        ro.close()
+    assert not dst.with_name("live.db-wal").exists()
+    assert not dst.with_name("live.db-shm").exists()
+    assert manifest[0]["snapshot"] == "sqlite3_backup_api"
+
+
+def test_h13_snapshot_missing_required_fatal(tmp_path, monkeypatch):
+    monkeypatch.setattr(bep, "PACK", tmp_path / "pack")
+    with pytest.raises(FileNotFoundError):
+        bep._snapshot_sqlite(tmp_path / "nope.db",
+                             tmp_path / "pack" / "nope.db",
+                             "E1.5", True, "host", [])

@@ -28,6 +28,7 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO))
 
+from orchestrator.gateway.quota_ledger import call_lines  # noqa: E402
 from orchestrator.judge.gait_rungs import evaluate_batch  # noqa: E402
 from orchestrator.judge.rungs import evaluate_telemetry_file  # noqa: E402
 
@@ -212,6 +213,21 @@ def _t8_row() -> dict:
     gates = {(r["thread_id"], r["gate"]): r for r in _gates_rows()}
     g1 = gates.get((thread, 1), {})
     g2 = gates.get((thread, 2), {})
+    # H-18：结案字段一律从结案信封（DONE/FAILURE）实读；信封缺失即
+    # unavailable，不再硬编码 done/0（T8 重开/补录时旧值会静默冻结）。
+    env = _envelopes().get(thread)
+    if env is None:
+        closeout = "unavailable"
+        gate1_rejects = None
+        gate2_rejects = None
+        n_agent_runs = None
+        closeout_source = None
+    else:
+        closeout = env.get("status")
+        gate1_rejects = env.get("gate1_rejects", 0)
+        gate2_rejects = env.get("gate2_rejects", 0)
+        n_agent_runs = env.get("n_agent_runs")
+        closeout_source = "DONE.json" if closeout == "done" else "FAILURE.json"
     alarms = []
     if proxy_splits[1]["status"] == "unavailable":
         alarms.append({"type": "proxy_unavailable",
@@ -221,11 +237,14 @@ def _t8_row() -> dict:
                                  "Gate2 凭原件人工裁决，代理侧缺口不补造"})
     summary = _load_json(wd / "summary.json")
     return {
-        "thread_id": thread, "track": track, "closeout": "done",
-        "gate1_rejects": 0,
+        "thread_id": thread, "track": track, "closeout": closeout,
+        "closeout_source": closeout_source,
+        "n_agent_runs": n_agent_runs,
+        "gate1_rejects": gate1_rejects,
         "gate1": {"decision": g1.get("decision"), "source": g1.get("source")},
         "gate2": {"decision": g2.get("decision"), "source": g2.get("source"),
-                  "rejects": 0, "human_notes": ""},
+                  "rejects": gate2_rejects,
+                  "human_notes": g2.get("human_notes") or ""},
         "rules_external_truth": truth,
         "groups": {k: {"success_rate": v.get("success_rate"),
                        "n_fell": v.get("n_fell"),
@@ -248,11 +267,21 @@ def _loop_distribution(rows: list[dict], t8: dict, ledger: list[dict]) -> dict:
     per_thread = {}
     for row in rows + [t8]:
         tid = row["thread_id"]
+        # H-18：T8 的 agent_runs 从结案信封实读（n_agent_runs）；信封缺失为
+        # None，退回结构启发式；打回计数缺失（unavailable）按 0 合计并由
+        # closeout=unavailable 在 run 块如实标注。
+        if row.get("n_agent_runs") is not None:
+            agent_runs = row["n_agent_runs"]
+        elif row.get("closeout") == "human_failure":
+            agent_runs = 2
+        elif "agent_runs" in row:
+            agent_runs = len(row["agent_runs"])
+        else:
+            agent_runs = None
         per_thread[tid] = {
-            "agent_runs": 2 if row.get("closeout") == "human_failure"
-            else (len(row["agent_runs"]) if "agent_runs" in row else 1),
+            "agent_runs": agent_runs,
             "coding_rounds_ok": coding.get(tid, 0),
-            "gate1_rejects": row.get("gate1_rejects", 0),
+            "gate1_rejects": row.get("gate1_rejects") or 0,
             "gate2_rejects": row["gate2"].get("rejects") or 0,
             "rung4_calls_ok": rung4_calls.get(tid, 0),
         }
@@ -322,13 +351,27 @@ def _learnings_block() -> dict:
     }
 
 
+def _quota_approved(batch_id: str):
+    """从批次批准件实读批准配额（H-18）；缺失返回 None（不编数字）。"""
+    p = PHASE1_ROOT / "quota" / "approvals" / f"{batch_id}.json"
+    if not p.is_file():
+        return None
+    data = _load_json(p)
+    return data.get("approved")
+
+
 def _hitl_block(ledger: list[dict]) -> dict:
     """L580 HITL 真人点验演练：演练未完成时如实报 pending，不编结果。"""
     rp = PHASE1_ROOT / "task9_milestone" / "hitl_evidence" / "drill_result.json"
-    n_calls = sum(1 for r in ledger if r.get("batch_id") == "T9-B1")
+    # H-18：只数真实触网行（seq 整数），与 _paid_block 同口径。
+    n_calls = sum(1 for r in call_lines(ledger)
+                  if r.get("batch_id") == "T9-B1")
     if not rp.is_file():
+        # H-18：旧键名 "approved" 易被误读为"已批准次数"，改名
+        # quota_approvals 且从批次批准件实读（今日 4）。
         return {"status": "pending", "batch_id": "T9-B1",
-                "approved": 4, "calls_recorded": n_calls,
+                "quota_approvals": _quota_approved("T9-B1"),
+                "calls_recorded": n_calls,
                 "note": "待真人 card_form 点验（test_hitl_drill.py，paid）"}
     r = _load_json(rp)
     agreements = [x["agreement_with_original"] for x in r["revalidations"]]
@@ -374,16 +417,25 @@ def _q2_gate_block() -> dict:
 
 
 def _paid_block(ledger: list[dict]) -> dict:
-    by_stage = Counter(r["stage"] for r in ledger)
-    by_task = Counter(r["task"] for r in ledger)
+    # H-18：与 call_lines 同一口径——只有 seq 为整数的行是真正触网的实呼，
+    # preflight 拦截行（seq=null）单列 blocked_preflight，不进 total/配额占用；
+    # 今日 null-seq=0，两口径数值相等但语义不再混淆。
+    calls = call_lines(ledger)
+    blocked = [r for r in ledger if not isinstance(r.get("seq"), int)]
+    by_stage = Counter(r["stage"] for r in calls)
+    by_task = Counter(r["task"] for r in calls)
     return {
-        "total": len(ledger), "ok": sum(1 for r in ledger if r["ok"]),
-        "failed": sum(1 for r in ledger if not r["ok"]),
+        "total": len(calls), "ok": sum(1 for r in calls if r["ok"]),
+        "failed": sum(1 for r in calls if not r["ok"]),
+        "blocked_preflight": len(blocked),
+        "ledger_lines": len(ledger),
         "cap_normal": CAP_NORMAL, "cap_hard": CAP_HARD,
         "by_stage": dict(by_stage), "by_task": {str(k): v for k, v in by_task.items()},
-        "normal_cap_used": len(ledger) <= CAP_NORMAL,
-        "hard_cap_ok": len(ledger) <= CAP_HARD,
-        "note": "失败行同样记账；36→48 区间每批需单独书面批准（D1 v1.1）",
+        "normal_cap_used": len(calls) <= CAP_NORMAL,
+        "hard_cap_ok": len(calls) <= CAP_HARD,
+        "note": "total 只计真实触网行（seq 为整数，call_lines 口径）；"
+                "blocked_preflight=preflight 拦截行（seq=null，今日 0）；"
+                "失败行同样记账；36→48 区间每批需单独书面批准（D1 v1.1）",
     }
 
 
@@ -431,7 +483,8 @@ def main() -> int:
                       "runs": len(dashboard["runs"]),
                       "alarms": sum(len(r.get("proxy_decoupling_alarms", []))
                                     for r in dashboard["runs"]),
-                      "paid_total": len(ledger)}, ensure_ascii=False))
+                      "paid_total": dashboard["paid_calls"]["total"]},
+                     ensure_ascii=False))
     return 0
 
 

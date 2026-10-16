@@ -48,7 +48,7 @@ if bad:
 print("  ok yaml/json parse")
 PYEOF
 
-echo "== [gate 4/6] 交付文件密钥自扫（9 条正则，期望 0 命中，无 allowlist）=="
+echo "== [gate 4/6] 交付文件密钥自扫（scan_secrets.sh 10 条正则 + Python 单一源 10 条严口径，期望 0 命中，无 allowlist）=="
 bash scripts/verification/scan_secrets.sh
 
 echo "== [gate 5/6] 探针纯函数数学（clearColor 字节/中心裁剪包络/相对软链）=="
