@@ -170,3 +170,39 @@ export SIMPRAXIS_PHASE1_ROOT="${SIMPRAXIS_PHASE1_ROOT:-$SIMPRAXIS_DATA_ROOT/phas
 mkdir -p "$SIMPRAXIS_PHASE1_ROOT"/{task0_env,task1_feishu,task2_direction,task3_graph,task4_runner,task5_judge,task6_learnings,task9_milestone,state,quota} \
          "$SIMPRAXIS_RUN_DIR/phase1"
 chmod 700 "$SIMPRAXIS_PHASE1_ROOT/state" "$SIMPRAXIS_PHASE1_ROOT/quota" 2>/dev/null || true
+
+# ---- Phase 2 Task0：独立新账根（P2/A12）、非 root 容器账号（P4）、v2 签收件、G-4 可写探针 ----
+# Phase 2 台账独立新账：与 Phase 1 封存账同盘不同根，seq 从 0 起，Phase 1 账永不被写打开。
+export SIMPRAXIS_PHASE2_ROOT="${SIMPRAXIS_PHASE2_ROOT:-$SIMPRAXIS_DATA_ROOT/phase2}"
+# 非 root 容器运行身份（compose user: 插值；与宿主 vipuser 1000:1000 对齐）。
+export SIMPRAXIS_UID="${SIMPRAXIS_UID:-1000}"
+export SIMPRAXIS_GID="${SIMPRAXIS_GID:-1000}"
+mkdir -p "$SIMPRAXIS_PHASE2_ROOT"/quota/approvals "$SIMPRAXIS_PHASE2_ROOT"/runs \
+         "$SIMPRAXIS_PHASE2_ROOT"/state "$SIMPRAXIS_RUN_DIR/phase2"
+chmod 700 "$SIMPRAXIS_PHASE2_ROOT/quota" "$SIMPRAXIS_PHASE2_ROOT/state" 2>/dev/null || true
+
+# quota_pause v2 schema 签收操作件：仓内模板 0600 安装到新账 quota/，只装一次，
+# 已存在（尤其已签收件）绝不覆盖；值不入 git。
+_sp_pause_signed="$SIMPRAXIS_PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json"
+if [ ! -e "$_sp_pause_signed" ] && [ -f "$SIMPRAXIS_ROOT/scripts/milestone2/quota_pause_schema_v2.template.json" ]; then
+  cp "$SIMPRAXIS_ROOT/scripts/milestone2/quota_pause_schema_v2.template.json" "$_sp_pause_signed"
+  chmod 600 "$_sp_pause_signed"
+fi
+
+# arch G-4（Task0）：非 root 改造后的可写探针——以当前宿主身份（= 容器 1000:1000
+# 的同一 uid）对非 root 容器的 bind 源做写/删验证；任一项不可写则 00_env 失败，
+# 避免容器跑起来才 EACCES。只碰 simpraxis 自有 /mnt 字面路径。
+_sp_writable_probe() {
+  local dir="$1" probe
+  probe="$dir/.write_probe.$$"
+  if ( umask 077 && : > "$probe" ) 2>/dev/null; then
+    rm -f "$probe"
+  else
+    echo "[00_env] G-4 可写探针失败：$dir 对 uid=$(id -u) 不可写（非 root 容器将 EACCES）" >&2
+    return 1
+  fi
+}
+_sp_writable_probe "$SIMPRAXIS_RUN_DIR" || return 1
+_sp_writable_probe "$HF_HOME" || return 1
+_sp_writable_probe "$SIMPRAXIS_PHASE2_ROOT/quota" || return 1
+echo "[00_env] Phase2：新账根=$SIMPRAXIS_PHASE2_ROOT（quota/state 700）；容器身份=${SIMPRAXIS_UID}:${SIMPRAXIS_GID}；G-4 可写探针通过；v2 签收件=$([ -e "$_sp_pause_signed" ] && echo present || echo missing)"

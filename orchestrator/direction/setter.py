@@ -14,16 +14,16 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.runtime_paths import phase1_root
 from orchestrator.common.validators import assert_within, validate_thread_id
 from orchestrator.gateway.quota_ledger import set_current_evidence
 from orchestrator.gateway.router import ModelGateway, redact
@@ -338,8 +338,8 @@ def validate_proposals(obj: dict, *, hits: list[dict],
 
 def _evidence_dir() -> Path:
     # G-7：证据目录统一 0700（已存在且被放宽时同样收敛）。
-    d = Path(os.environ.get("SIMPRAXIS_PHASE1_ROOT",
-                            "/mnt/artifacts/simpraxis/phase1")) / "task2_direction"
+    # A12（Task0）：根路径收口 runtime_paths 单一入口（env 语义不变）。
+    d = phase1_root() / "task2_direction"
     return ensure_private_dir(d)
 
 
@@ -412,7 +412,8 @@ class DirectionSetter:
             # 本次实呼的 req 证据引用挂到 billing_context，成功/失败账行都能指回它。
             model = self.gateway.model_id(STAGE)
             req_ref = self._write_evidence(stem, "req", {
-                "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                # P2（Task0）：Phase 2 新证据行统一严格 UTC Z。
+                "ts_iso": utc_now_iso_z(),
                 "stage": STAGE, "model": model, "thread_id": thread_id,
                 "batch_id": batch_id, "track": track, "gate_round": gate_round,
                 "attempt": attempt, "max_tokens": MAX_TOKENS,

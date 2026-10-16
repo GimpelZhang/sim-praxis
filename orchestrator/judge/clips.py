@@ -25,8 +25,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
+
+from orchestrator.common.fsutil import atomic_write_text
+
+
 
 W, H = 320, 240
 FPS = 60
@@ -155,6 +160,8 @@ def encode_mp4(frames, out_path: "str | Path", fps: int = FPS) -> Path:
         f.tobytes() for f in frames), capture_output=True)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg 失败：{proc.stderr.decode(errors='replace')[-800:]}")
+    # S-6：ffmpeg 直写路径无法走 tmp+replace，在产出点显式锁 0600。
+    os.chmod(out, 0o600)
     return out
 
 
@@ -163,8 +170,9 @@ def write_clip_bundle(kind: str, dir_path: "str | Path") -> dict:
     d = Path(dir_path)
     frames, meta = render_clip(kind)
     mp4 = encode_mp4(frames, d / f"{kind}.mp4")
-    (d / f"{kind}.ground_truth.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # S-6：ground_truth 原子写 0600 收口 fsutil（原裸 write_text 无 chmod）。
+    atomic_write_text(d / f"{kind}.ground_truth.json",
+                      json.dumps(meta, ensure_ascii=False, indent=2))
     return {"frames": frames, "mp4": str(mp4),
             "ground_truth": meta,
             "contact_frame": CONTACT_FRAME if kind == "good" else CONTACT_FRAME}

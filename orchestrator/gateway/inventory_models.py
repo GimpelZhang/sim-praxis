@@ -16,6 +16,8 @@ import time
 
 import requests
 
+from orchestrator.common.fsutil import atomic_write_text
+
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding"
 INVENTORY_ROOT = os.path.join(
     os.environ.get("SIMPRAXIS_RUN_DIR", "/mnt/artifacts/simpraxis/runs"), "inventory")
@@ -53,9 +55,8 @@ def main() -> int:
     out_dir = os.path.join(INVENTORY_ROOT, ts)
     os.makedirs(out_dir, exist_ok=True)
     raw = os.path.join(out_dir, "ark_models.json")
-    with open(raw, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    os.chmod(raw, 0o600)
+    # S-6：原子写 0600 收口 fsutil（原 open+chmod）。
+    atomic_write_text(raw, json.dumps(payload, ensure_ascii=False, indent=2))
     # 相对软链（B1c 同源修法）：容器/宿主两侧路径前缀不同，绝对链会悬空
     latest = os.path.join(INVENTORY_ROOT, "latest")
     if os.path.islink(latest) or os.path.exists(latest):

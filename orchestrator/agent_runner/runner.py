@@ -18,14 +18,14 @@ import json
 import os
 import re
 import subprocess
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.common.callcache import CallReplay, request_fingerprint
-from orchestrator.common.fsutil import chmod_keep_user_exec
+from orchestrator.common.clock import utc_now_iso_z
+from orchestrator.common.fsutil import atomic_write_text, chmod_keep_user_exec
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -404,9 +404,8 @@ class AgentRunner:
         if self._write_evidence is not None:
             return self._write_evidence(root, stem, kind, payload)
         p = root / f"{stem}.{kind}.json"
-        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                     encoding="utf-8")
-        os.chmod(p, 0o600)
+        # S-6：write→chmod 收口 fsutil 原子写（mkstemp 0600→fsync→replace）。
+        atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
         return f"phase1/task4_runner/{root.name}/{p.name}"
 
     @staticmethod
@@ -517,16 +516,19 @@ class AgentRunner:
             cache = self._replay_cache(spec)
             cache_key = (f"coding_{spec.thread_id}_r{spec.run_idx}"
                          f"_round{coding_calls}")
+            # S-8：指纹并入 stage/model，同 prompt 跨阶段/跨模型不得错配重放。
             fp = request_fingerprint(
                 json.dumps(messages, ensure_ascii=False, sort_keys=True),
                 None,
-                {"max_tokens": MAX_TOKENS, "temperature": TEMPERATURE})
+                {"max_tokens": MAX_TOKENS, "temperature": TEMPERATURE},
+                stage=STAGE, model=model)
             cached = cache.get(cache_key, fp) if cache is not None else None
             if cached is not None:
                 raw = cached["raw"]
             else:
                 req_ref = self._evidence(root, stem, "req", {
-                    "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    # P2（Task0）：Phase 2 新证据行时间戳统一严格 UTC Z。
+                    "ts_iso": utc_now_iso_z(),
                     "stage": STAGE, "model": model,
                     "thread_id": spec.thread_id, "batch_id": spec.batch_id,
                     "coding_round": coding_calls, "gate2_notes_present":
@@ -567,7 +569,8 @@ class AgentRunner:
               result: Optional[_ExecResult], *, reason: str) -> dict:
         # L-4：失败结案被重放（kill 落在 FAILURE.json 落盘后、节点返回前）时，
         # 保留首次写入的 ts_iso，时间线以首次失败时刻为准，不滚动成新时间戳。
-        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        # P2（Task0）：首写时间戳改严格 UTC Z；旧件 +0000/+0800 串原样保留。
+        ts_iso = utc_now_iso_z()
         existing_p = Path(spec.workdir) / FAILURE_JSON
         if existing_p.is_file():
             try:
@@ -589,9 +592,8 @@ class AgentRunner:
             "ts_iso": ts_iso,
         }
         p = Path(spec.workdir) / FAILURE_JSON
-        p.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                     encoding="utf-8")
-        os.chmod(p, 0o600)
+        # S-6：原子写 0600；L-4 首写 ts 保留语义在上方不变。
+        atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
         self._evidence(root, "failure", "json", payload)
         return {"status": "failed", "failure_json": str(p),
                 "coding_round": payload["coding_round"],

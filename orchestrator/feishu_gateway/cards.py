@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 FEEDBACK_PLACEHOLDER = "打回时必填：具体意见（会原样带回方案重做）"
@@ -32,20 +33,27 @@ GATE_MISMATCH_TOAST = {"type": "error",
 # **加粗**伪系统行等。仅对这些宏字段转义；人类/常量文本（我们自己的标签、
 # 数值渲染器产出）不转义。
 _MD_ESCAPE_CHARS = ("\\", "`", "*", "_", "~", "[", "]", "(", ")", ">", "#")
+# S-4：行首有序列表标记（"1. "）的句点位置；行首竖线（表格引用/管道伪行）。
+_OL_RE = re.compile(r"(?m)^(?P<num>\d+)(?P<dot>\. )")
 
 
 def md_escape(text: Any) -> str:
     """把宏模型产出文本转成 lark_md 安全字面量（markdown 结构字符全部反斜杠化）。
 
-    行首的列表/引用标记（-、+、#、>）也转义，防止伪造系统条目；非字符串强转。
+    行首的列表/引用/表格标记（-、+、|、#、>、``1. ``）也转义，防止伪造系统
+    条目或伪表格；非字符串强转。
     """
     s = str(text)
+    # S-4：记录每个行首 "数字. " 的句点位置，逐字符循环时反斜杠化。
+    ol_dots = {m.start("dot") for m in _OL_RE.finditer(s)}
     out: list[str] = []
     for i, ch in enumerate(s):
         if ch in _MD_ESCAPE_CHARS:
             out.append("\\" + ch)
-        elif ch in ("-", "+") and (i == 0 or s[i - 1] == "\n"):
+        elif ch in ("-", "+", "|") and (i == 0 or s[i - 1] == "\n"):
             out.append("\\" + ch)
+        elif i in ol_dots:
+            out.append("\\.")
         else:
             out.append(ch)
     return "".join(out)

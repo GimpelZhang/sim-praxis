@@ -321,7 +321,7 @@ class FeishuGateway:
     def _in_sandbox() -> bool:
         """Task7/8 图整体在 sim-sandbox 容器内运行（compose 注入
         SIMPRAXIS_IN_SANDBOX=1）：此时 /mnt 同路径挂载、ffmpeg 已在镜像内，
-        不得再嵌套 `docker compose run`，路径也不做 /root/runs 改写。"""
+        不得再嵌套 `docker compose run`，路径也不做容器 runs 改写。"""
         return os.environ.get("SIMPRAXIS_IN_SANDBOX", "") == "1"
 
     def _compress_in_container(
@@ -335,7 +335,7 @@ class FeishuGateway:
 
         两种执行位置（锁内适配，Task7 图在容器内跑）：
           - 宿主：经 `docker compose run` 起一次性容器，RUN_DIR 路径映射成
-            /root/runs（host_to_container_path）；
+            /home/agent/runs（host_to_container_path；非 root Task0 起）；
           - 容器内（SIMPRAXIS_IN_SANDBOX=1）：产物在 /mnt 同路径挂载下，直接
             `bash -lc <ffmpeg>` 调镜像内 ffmpeg，禁止嵌套 docker。
         H-2/C1：step4 的裁剪区间由调用方（pipeline lane 计算后）经 trim 透传，

@@ -586,14 +586,16 @@ def test_09_compress_execution_position_branch(gw, tmp_path, monkeypatch):
 
     monkeypatch.setattr(client_mod.subprocess, "run", fake_run)
 
-    # 宿主模式（默认）：docker compose run 起一次性容器；/root/runs 映射
+    # 宿主模式（默认）：docker compose run 起一次性容器；非 root 的
+    # /home/agent/runs 映射（Phase 2 Task0，Phase 1 为 /root/runs）
     monkeypatch.delenv("SIMPRAXIS_IN_SANDBOX", raising=False)
     out2, cov2 = call(2)
     argv = captured["argv"]
     assert argv[:2] == ["docker", "compose"] and "sim-sandbox" in argv
     assert argv[-3:-1] == ["bash", "-lc"]
     cmd_host = argv[-1]
-    assert "/root/runs/v.mp4" in cmd_host
+    assert "/home/agent/runs/v.mp4" in cmd_host
+    assert "/root/runs" not in cmd_host
     assert str(video) not in cmd_host          # 宿主字面路径不得漏进容器命令
     assert out2 == tmp_path / "runs" / "v_s2.mp4"
 

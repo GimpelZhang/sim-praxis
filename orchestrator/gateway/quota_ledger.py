@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Phase 1 批次配额账本 + 双层计数闸门（详细计划 §0.2/§6，D1/D3 签收）。
+"""批次配额账本 + 双层计数闸门（详细计划 §0.2/§6，D1/D3 签收；Phase 2 Task0 起为 Phase 2 账）。
 
 本模块【不含任何网络代码】：只做批次凭据校验、ledger 记账与预算闸门；
 HTTP 分类/退避仍在 router.py，m9/m12 逻辑零改动（§6.3）。
 
+Phase 2（Task0，D-1 独立新账）：台账路径切到 $SIMPRAXIS_PHASE2_ROOT/quota/，
+新账 seq 从 0 起；Phase 1 封存账（29 行）保持只读，新代码不以写方式打开。
 路径（全部 /mnt，仓外）：
-  $SIMPRAXIS_PHASE1_ROOT/quota/ledger.jsonl     # 每行一次实呼或一次 preflight 拦截
-  $SIMPRAXIS_PHASE1_ROOT/quota/counters.json    # 连续配额错误计数
-  $SIMPRAXIS_PHASE1_ROOT/quota/approvals/<batch_id>.json   # 每批书面批准凭据
-  $SIMPRAXIS_PHASE1_ROOT/quota/resume_audit.jsonl          # 人工恢复流水
+  $SIMPRAXIS_PHASE2_ROOT/quota/ledger.jsonl     # 每行一次实呼或一次 preflight 拦截
+  $SIMPRAXIS_PHASE2_ROOT/quota/counters.json    # 连续配额错误计数
+  $SIMPRAXIS_PHASE2_ROOT/quota/approvals/<batch_id>.json   # 每批书面批准凭据
+  $SIMPRAXIS_PHASE2_ROOT/quota/resume_audit.jsonl          # 人工恢复流水
+  $SIMPRAXIS_PHASE1_ROOT/quota/ledger.jsonl     # Phase 1 封存账（只读，见 normalize 脚本）
 暂停态文件不在这里：沿用 router.py 的 $SIMPRAXIS_GATEWAY_STATE/quota_pause.json，
 is_paused() 直接复用 router 实现（不复制其逻辑）。预算类暂停 resume_at_epoch=null
 （无票不自动恢复），在既有 7 键上追加 schema_version=2 的超集键（§6.1）。
+Phase 2 新行 ts_iso 全部严格 UTC Z（orchestrator.common.clock）。
 
 接线状态（Task3 已收口，§6.3「倾向并入 Task3」）：Task2 阶段账本先行，
 direction_setter 显式 preflight/record；Task3 起同一对门只在
@@ -46,27 +50,52 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.runtime_paths import (
+    gateway_state_dir as router_state_dir,  # 统一入口：暂停态目录
+    gateway_state_path as router_state_path,
+    phase1_root as phase1_root,  # 转出：外部只读使用者取 Phase 1 封存账根
+    phase2_approvals_dir,
+    phase2_counters_path,
+    phase2_ledger_path,
+    phase2_quota_dir,
+)
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
     GatewayPausedError,
     PauseStateCorruptError,
-    _state_dir as router_state_dir,  # 锁内适配：复用同一暂停文件目录
-    _state_path as router_state_path,
     is_paused,
     redact,
 )
 
-NORMAL_BUDGET = 36       # 常态批准总量（各任务「批准预算」列之和）
-HARD_CAP = 48            # 全局先到先停硬门
-# 各任务局部硬上限（§0.2；只表示局部可申请边界，全局 48 才是总闸）
-# 锁内适配（计划 §0.2 D1 偏离，用户书面签收 2026-10-14）：Task2 硬上限 10→14。
-# 原因：T2-B1 的 8 次中 6 次耗于首发环境缺陷（litellm/py3.10 shim、thinking 块
-# 吃光输出预算、expected_artifacts 数组形态，均取证修复并回归）；track2 Q1 与
-# Gate1 打回余量在 10 以内无法完成。全局 36/48 双门不变；4/5/7/8/9 各列不动。
-TASK_HARD_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
+# Phase 2 独立新账预算（§6.2：常态 60、全局硬顶 80；2026-10-16 用户自主授权，
+# Agent 可按 §6 SOP 自批提顶；触顶是自批提顶而非停工审批）。Phase 1 封存账
+# 的 36/48 双门随 29 行终值冻结，不再由本常量表达。
+NORMAL_BUDGET = 60       # 常态批准总量
+HARD_CAP = 80            # 全局先到先停硬门
+LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
+# Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
+PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
+# Phase 2 task 集（§6.2/§6.5 估算初始值）：Task4 标定占 task=4 账套，编号沿用
+# Stage 账套避免新增（Phase 2 限 24，覆盖 Phase 1 的 8）。
+PHASE2_TASK_CAPS = {4: 24, 6: 16, 7: 16, 8: 16}
+# 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
+# choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/80 双门不变）。
+TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
 CONSECUTIVE_QUOTA_LIMIT = 3
 LOCK_NAME = ".ledger.lock"
+
+# Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
+# 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
+# 模板 scripts/milestone2/quota_pause_schema_v2.template.json）的书面签收并
+# 升 schema_version。顺序即写件键序（_write_budget_pause 必须与此常量一致）。
+QUOTA_PAUSE_SCHEMA_V2_KEYS: tuple[str, ...] = (
+    "schema_version", "status", "stage", "reason",
+    "paused_at_epoch", "paused_at_iso",
+    "resume_at_epoch", "resume_at_iso",
+    "scope", "trigger", "resume_ticket", "affected_stages",
+)
 
 
 class QuotaError(RuntimeError):
@@ -81,31 +110,29 @@ class LedgerDegradedError(QuotaError):
     """
 
 
-def phase1_root() -> Path:
-    return Path(os.environ.get("SIMPRAXIS_PHASE1_ROOT",
-                               "/mnt/artifacts/simpraxis/phase1"))
-
-
+# 路径统一走 orchestrator.common.runtime_paths（Phase 2 独立新账）。
+# phase1_root 由该模块导入再转出，供 normalize 脚本/外部只读使用者取封存账根。
 def quota_dir() -> Path:
     # G-7：配额目录统一 0700（已存在且被放宽时同样收敛）。
-    return ensure_private_dir(phase1_root() / "quota")
+    return phase2_quota_dir()
 
 
 def ledger_path() -> Path:
-    return quota_dir() / "ledger.jsonl"
+    return phase2_ledger_path()
 
 
 def counters_path() -> Path:
-    return quota_dir() / "counters.json"
+    return phase2_counters_path()
 
 
 def approvals_dir() -> Path:
     # G-7：批次凭据目录 0700。
-    return ensure_private_dir(quota_dir() / "approvals")
+    return phase2_approvals_dir()
 
 
 def _now_iso() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime())
+    # P2：Phase 2 所有新行严格 UTC Z。
+    return utc_now_iso_z()
 
 
 class _FileLock:
@@ -204,6 +231,11 @@ def _write_budget_pause(reason: str, trigger: dict[str, Any], *,
         "resume_ticket": None,
         "affected_stages": affected_stages,
     }
+    # Task0 v2 schema 签收冻结：写件键集必须恰为 12 键常量，多写/漏写即编码错误。
+    if tuple(state) != QUOTA_PAUSE_SCHEMA_V2_KEYS or len(state) != 12:
+        raise AssertionError(
+            f"quota_pause 键集漂移：{tuple(state)} != {QUOTA_PAUSE_SCHEMA_V2_KEYS}"
+        )
     ensure_private_dir(router_state_dir())
     atomic_write_text(router_state_path(),
                       json.dumps(state, ensure_ascii=False, indent=2))
@@ -378,6 +410,8 @@ class QuotaLedger:
     def record(self, stage: str, *, task: int, batch_id: str, ok: bool,
                model: "str | None" = None, thread_id: str = "",
                tokens_in: "int | None" = None, tokens_out: "int | None" = None,
+               tokens_cache_read: "int | None" = None,
+               tokens_cache_create: "int | None" = None,
                err: "str | None" = None, evidence: "str | None" = None) -> dict[str, Any]:
         with _FileLock():
             rows = call_lines()
@@ -399,6 +433,10 @@ class QuotaLedger:
                 "batch_approved": batch_approved,
                 "batch_used_after": batch_after,
                 "tokens_in": tokens_in, "tokens_out": tokens_out,
+                # Task0：prompt cache 两列（Anthropic cache_read/cache_create），
+                # 取不到为 None，不猜不补。
+                "tokens_cache_read": tokens_cache_read,
+                "tokens_cache_create": tokens_cache_create,
                 "ok": bool(ok), "err": redact(err)[:500] if err else None,
                 "approval_ref": approval_ref, "evidence": evidence,
             }
@@ -412,6 +450,8 @@ class QuotaLedger:
                     "batch_id": batch_id, "seq": seq, "model": model,
                     "ok": bool(ok), "thread_id": thread_id,
                     "tokens_in": tokens_in, "tokens_out": tokens_out,
+                    "tokens_cache_read": tokens_cache_read,
+                    "tokens_cache_create": tokens_cache_create,
                     "err": redact(err)[:300] if err else None,
                 })
                 where = f"，告警件 {alert}" if alert is not None else "（告警件同样写入失败）"
@@ -449,19 +489,33 @@ class QuotaLedger:
 
     def _record_blocked(self, stage: str, task: int, batch_id: str,
                         err: str, thread_id: str = "") -> None:
-        """preflight 拦截审计行：不触网、不递增 seq/全局计数（§6.3）。"""
+        """preflight 拦截审计行：不触网、不递增 seq/全局计数（§6.3）。
+
+        LOW-5：审计行自身追加失败不得静默——落独立 .degraded 告警件；但拦截
+        语义不变（调用方紧接着抛 GatewayPausedError，本次本就不发网），故告警
+        后吞掉写入异常，避免顶掉真正的拦截异常。
+        """
         rows = call_lines()
         global_used = max((r["global_used_after"] for r in rows), default=0)
         batch_used = sum(1 for r in rows if r.get("batch_id") == batch_id)
-        _append_line({
+        row = {
             "ts_iso": _now_iso(), "event": "preflight_blocked",
             "stage": stage, "model": None, "thread_id": thread_id,
             "task": task, "batch_id": batch_id, "seq": None,
             "global_used_after": global_used,
             "batch_approved": None, "batch_used_after": batch_used,
             "tokens_in": None, "tokens_out": None,
+            "tokens_cache_read": None, "tokens_cache_create": None,
             "ok": False, "err": err, "approval_ref": None, "evidence": None,
-        })
+        }
+        try:
+            _append_line(row)
+        except Exception as exc:  # noqa: BLE001 —— LOW-5：见 docstring
+            _write_degraded_alert(exc, {"degraded": True,
+                                        "audit_event": "preflight_blocked",
+                                        "time": _now_iso(), "stage": stage,
+                                        "task": task, "batch_id": batch_id,
+                                        "err": redact(err)[:300]})
 
 
 # ---------- Task3：调用方记账上下文 + 网关统一记账门 ----------
@@ -537,11 +591,15 @@ class BillingGate:
     def record(self, stage: str, *, ok: bool,
                model: "str | None" = None,
                tokens_in: "int | None" = None, tokens_out: "int | None" = None,
+               tokens_cache_read: "int | None" = None,
+               tokens_cache_create: "int | None" = None,
                err: "str | None" = None) -> dict[str, Any]:
         ctx = self._ctx()
         return self.ledger.record(
             stage, task=ctx.task, batch_id=ctx.batch_id, ok=ok, model=model,
             thread_id=ctx.thread_id, tokens_in=tokens_in, tokens_out=tokens_out,
+            tokens_cache_read=tokens_cache_read,
+            tokens_cache_create=tokens_cache_create,
             err=err, evidence=ctx.evidence)
 
     def record_blocked(self, stage: str, reason: str) -> None:
@@ -585,6 +643,7 @@ def write_approval(*, batch_id: str, task: int, stage: str, approved: int,
         raise QuotaError(f"批次凭据已存在，禁止覆盖：{p}")
     doc = {"batch_id": batch_id, "task": task, "stage": stage,
            "approved": int(approved), "beyond_normal": bool(beyond_normal),
+           "ledger_phase": LEDGER_PHASE,
            "created_at_iso": _now_iso(), "note": redact(note)[:1000]}
     # G-7：0600 tmp+replace 原子写（approvals 目录已由 approvals_dir() 收敛 0700）。
     atomic_write_text(p, json.dumps(doc, ensure_ascii=False, indent=2))
@@ -625,10 +684,13 @@ def resume(*, ticket: str, batch_id: "str | None" = None) -> Path:
             raise QuotaError("预算类恢复必须同时给 --batch-id 指向新批次批准凭据")
         approval = load_approval(batch_id)
         if used >= NORMAL_BUDGET and not approval.get("beyond_normal"):
-            raise QuotaError("36→48 区间恢复：新批次凭据必须 --beyond-normal 开具")
+            raise QuotaError(
+                f"{NORMAL_BUDGET}→{HARD_CAP} 区间恢复：新批次凭据必须 "
+                "--beyond-normal 开具")
     audit = quota_dir() / "resume_audit.jsonl"
     with open(audit, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"ts_iso": _now_iso(), "ticket": ticket,
+        fh.write(json.dumps({"ts_iso": _now_iso(), "ledger_phase": LEDGER_PHASE,
+                             "ticket": ticket,
                              "reason": reason, "batch_id": batch_id,
                              "global_used": used}, ensure_ascii=False) + "\n")
     os.chmod(audit, 0o600)
@@ -637,12 +699,14 @@ def resume(*, ticket: str, batch_id: "str | None" = None) -> Path:
 
 
 def main(argv: "list[str] | None" = None) -> int:
-    p = argparse.ArgumentParser(description="Phase 1 配额账本（批准凭据/恢复/计数）")
+    p = argparse.ArgumentParser(description="Phase 2 配额账本（批准凭据/恢复/计数；Phase 1 账已封存）")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # Task0：--task choices 取 Phase1/Phase2 caps 并集（编号沿用 Stage 账套）。
+    all_tasks = sorted(set(PHASE1_TASK_CAPS) | set(PHASE2_TASK_CAPS))
     pa = sub.add_parser("approve", help="写入一批书面批准凭据（显式参数，无默认值）")
     pa.add_argument("--batch-id", required=True)
-    pa.add_argument("--task", type=int, required=True, choices=sorted(TASK_HARD_CAPS))
+    pa.add_argument("--task", type=int, required=True, choices=all_tasks)
     pa.add_argument("--stage", required=True,
                     choices=("macro_ideation", "coding_debug", "visual_rollout"))
     pa.add_argument("--approved", type=int, required=True)
@@ -682,7 +746,9 @@ def main(argv: "list[str] | None" = None) -> int:
         pause_view = is_paused()
     except PauseStateCorruptError as exc:
         pause_view = {"corrupt": str(exc)}
-    print(json.dumps({"global_used": used, "normal_budget": NORMAL_BUDGET,
+    print(json.dumps({"ledger_phase": LEDGER_PHASE,
+                      "ledger_path": str(ledger_path()),
+                      "global_used": used, "normal_budget": NORMAL_BUDGET,
                       "hard_cap": HARD_CAP, "blocked_lines": blocked,
                       "paused": pause_view}, ensure_ascii=False, indent=2))
     return 0

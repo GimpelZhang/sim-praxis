@@ -16,9 +16,10 @@ PATTERNS=(
   'xox[baprs]-[A-Za-z0-9-]{10,}'
   '-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----'
   # 第 9 条（v4 扩 auth_token/authorization；H-12 扩 app_secret/feishu_app_secret
-  # 赋值形态）：与 orchestrator/common/secrets.py::assigned_secret_kv 同源；
-  # shell ERE 无反向引用，左右引号各自独立（Python 版用 \4 锁同引号，更严）。
-  '(api[_-]?key|access[_-]?token|auth[_-]?token|authorization|app[_-]?secret|feishu[_-]?app[_-]?secret)([[:space:]]{0,5})[:=]([[:space:]]{0,5})["'"'"'][A-Za-z0-9_./+-]{24,}["'"'"']'
+  # 赋值形态；S-2 补 name 后可选收尾引号，覆盖 "access_token" : "..." JSON 形态）：
+  # 与 orchestrator/common/secrets.py::assigned_secret_kv 同源；
+  # shell ERE 无反向引用，左右引号各自独立（Python 版用 \5 锁同引号，更严）。
+  '(api[_-]?key|access[_-]?token|auth[_-]?token|authorization|app[_-]?secret|feishu[_-]?app[_-]?secret)(["'"'"']?)([[:space:]]{0,5})[:=]([[:space:]]{0,5})["'"'"'][A-Za-z0-9_./+-]{24,}["'"'"']'
   # 第 10 条（H-12）：飞书自建应用 app_id（cli_ 前缀）；与
   # orchestrator/common/secrets.py::lark_cli_app_id 同源。
   'cli_[a-z0-9]{16,}'

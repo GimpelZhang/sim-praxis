@@ -49,10 +49,13 @@ SECRET_PATTERNS: tuple[SecretPattern, ...] = (
                   r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
     SecretPattern(
         "assigned_secret_kv",
+        # S-2：name 后允许一个可选收尾引号（组 2），覆盖 JSON/env dump 形态
+        # ``"access_token" : "..."``——只收紧不放宽；值引号仍由反向引用 \5
+        # 锁同引号，值字符类与长度门槛一字未松。
         r"(api[_-]?key|access[_-]?token|auth[_-]?token|authorization|"
         r"app[_-]?secret|feishu[_-]?app[_-]?secret)"
-        r"([\s]{0,5})[:=]([\s]{0,5})(['\"])([A-Za-z0-9_./+-]{24,})\4",
-        ignorecase=True, prefix_groups=(1, 2, 3, 4)),
+        r"([\"']?)([\s]{0,5})[:=]([\s]{0,5})(['\"])([A-Za-z0-9_./+-]{24,})\5",
+        ignorecase=True, prefix_groups=(1, 2, 3, 4, 5)),
     # --- H-12 补充：飞书 cli_ 系列 app_id（证据扫描也应识别为标识型秘密） ---
     SecretPattern("lark_cli_app_id", r"cli_[a-z0-9]{16,}"),
     # --- 日志宽脱敏 sentinel（router 历史口径：前缀 + 12/10 字符即杀） ---

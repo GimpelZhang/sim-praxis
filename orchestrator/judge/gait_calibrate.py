@@ -23,6 +23,8 @@ import os
 import time
 from pathlib import Path
 
+from orchestrator.common.clock import utc_now_iso_z
+from orchestrator.common.fsutil import atomic_write_bytes, atomic_write_text
 from orchestrator.gateway.quota_ledger import (
     QuotaLedger,
     billing_context,
@@ -63,10 +65,6 @@ def runs_root() -> Path:
         "SIMPRAXIS_RUN_DIR", "/mnt/artifacts/simpraxis/runs"))
 
 
-def _chmod600(p: Path) -> None:
-    os.chmod(p, 0o600)
-
-
 def prepare(out_dir: "str | Path | None" = None) -> dict:
     """生成好/坏片 + 拼图 + ground truth（纯本地，0 付费）。"""
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -81,22 +79,21 @@ def prepare(out_dir: "str | Path | None" = None) -> dict:
         # 中性标签：不向 VLM 泄漏好/坏身份（真值只在 ground_truth.json）
         labels = [f"frame {i:02d}" for i in idx]
         png = d / f"{kind}_collage.png"
-        png.write_bytes(build_collage_png([frames[i] for i in idx], labels))
-        _chmod600(png)
-        _chmod600(d / f"{kind}.mp4")
-        _chmod600(d / f"{kind}.ground_truth.json")
+        # S-6：拼图原子写 0600；mp4/ground_truth 在 gait_clips 产出点已锁 0600。
+        atomic_write_bytes(
+            png, build_collage_png([frames[i] for i in idx], labels))
         b["collage_png"] = str(png)
         b["frame_indices"] = idx
         bundles[kind] = b
     manifest = d / "manifest.json"
-    manifest.write_text(json.dumps(
+    # S-6：manifest 原子写 0600 收口 fsutil。
+    atomic_write_text(manifest, json.dumps(
         {"ts": ts, "dir": str(d), "rubric": str(RUBRIC_PATH),
          "clips": {k: {"mp4": v["mp4"], "ground_truth": v["ground_truth"],
                        "collage": v["collage_png"],
                        "frame_indices": v["frame_indices"]}
                    for k, v in bundles.items()}},
-        ensure_ascii=False, indent=2), encoding="utf-8")
-    _chmod600(manifest)
+        ensure_ascii=False, indent=2))
     if not out_dir:
         latest = base / "latest"
         if latest.is_symlink() or latest.exists():
@@ -113,9 +110,8 @@ def _evidence_dir() -> Path:
 
 def _write_evidence(stem: str, kind: str, payload: dict) -> str:
     p = _evidence_dir() / f"{stem}.{kind}.json"
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _chmod600(p)
+    # S-6：原子写 0600 收口 fsutil。
+    atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
     return f"phase1/task8_track2_judge/{p.name}"
 
 
@@ -152,7 +148,8 @@ def run_calibration(batch_id: str, clips_dir: str, *,
         png_b64 = base64.b64encode(png_path.read_bytes()).decode("ascii")
         stem = f"gait_cal_{kind}{suffix}"
         req_ref = _write_evidence(stem, "req", {
-            "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            # P2（Task0）：Phase 2 新证据行统一严格 UTC Z。
+            "ts_iso": utc_now_iso_z(),
             "stage": CAL_STAGE,
             "model": judge.gateway.model_id(CAL_STAGE),
             "thread_id": thread, "batch_id": batch_id,
@@ -210,7 +207,8 @@ def run_calibration(batch_id: str, clips_dir: str, *,
                     if not q["correct"]]
     mode = MODE_ACTIVE if not misses else MODE_RECORD_ONLY
     out = {
-        "version": 1, "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        # P2（Task0）：结论件时间戳严格 UTC Z。
+        "version": 1, "ts_iso": utc_now_iso_z(),
         "batch_id": batch_id, "thread_id": thread,
         "stage": CAL_STAGE,
         "model": judge.gateway.model_id(CAL_STAGE),
@@ -229,9 +227,8 @@ def run_calibration(batch_id: str, clips_dir: str, *,
                           "Task9 HITL 抽验或后续 run 可用真实片复标。"),
     }
     p = gait_calibration_file()
-    p.write_text(json.dumps(out, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    _chmod600(p)
+    # S-6：结论件原子写 0600 收口 fsutil。
+    atomic_write_text(p, json.dumps(out, ensure_ascii=False, indent=2))
     return out
 
 

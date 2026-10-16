@@ -9,3 +9,27 @@ https://github.com/google-deepmind/mujoco
 https://mujoco.org/
 https://mujoco.readthedocs.io/en/stable/overview.html
 
+3. Gazebo:
+https://github.com/gazebosim/gz-sim
+https://gazebosim.org/home
+https://gazebosim.org/docs/latest/getstarted/
+
+4. LIBERO:
+https://github.com/Lifelong-Robot-Learning/LIBERO
+https://libero-project.github.io/intro.html
+https://arxiv.org/pdf/2306.03310
+https://lifelong-robot-learning.github.io/LIBERO/html/index.html
+
+5. RoboCasa:
+https://github.com/robocasa/robocasa
+https://robocasa.ai/docs/build/html/introduction/overview.html
+https://arxiv.org/pdf/2603.04356
+
+6. IsaacLab-Arena:
+https://github.com/isaac-sim/IsaacLab-Arena
+https://docs.isaacsim.omniverse.nvidia.com/latest/index.html
+https://github.com/isaac-sim/IsaacLab
+https://isaac-sim.github.io/IsaacLab-Arena/release/0.3.1/index.html
+
+
+

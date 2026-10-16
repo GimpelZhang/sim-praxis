@@ -20,19 +20,29 @@ services:
     init: true
     ipc: host              # 多进程仿真共享内存
     network_mode: host
+    # Phase 2 Task0（P4）：非 root 运行（agent 1000:1000，Dockerfile 内建号但
+    # 不切默认 USER——删本行即整体回退 Phase 1 root 行为）。宿主 bind 源全部
+    # 1000:1000（00_env G-4 探针守门）；/dev/nvidia* 世界可读写，renderD 节点
+    # 宿主 ACL 已授 uid 1000，故暂不需要 group_add（EGL smoke 实测，2026-10-17）。
+    user: "${SIMPRAXIS_UID:-1000}:${SIMPRAXIS_GID:-1000}"
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: "graphics,utility,compute,display"
       PYOPENGL_PLATFORM: egl
       DISPLAY: ":99"
-      HF_HOME: /root/.cache/huggingface
+      HF_HOME: /home/agent/.cache/huggingface
+      MODELSCOPE_CACHE: /home/agent/.cache/modelscope
       HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
       # HF_TOKEN 仅运行期注入（m11）：不进 Dockerfile、不进镜像层、不进 build-arg
       HF_TOKEN: ${HF_TOKEN:-}
-      SIMPRAXIS_RUN_DIR: /root/runs
+      SIMPRAXIS_RUN_DIR: /home/agent/runs
       # 锁内适配（Task7 图整体在容器内运行）：Gate2 视频阶梯据此跳过
       # `docker compose run` 嵌套，/mnt 同路径挂载下直接调镜像内 ffmpeg
       SIMPRAXIS_IN_SANDBOX: "1"
+      # Phase 2 Task0：独立新账根（默认即 /mnt/artifacts/simpraxis/phase{1,2}，
+      # 经下方 /mnt/artifacts 同路径挂载容器内也可见；显式透传防宿主自定义根时漂移）
+      SIMPRAXIS_PHASE1_ROOT: ${SIMPRAXIS_PHASE1_ROOT:-}
+      SIMPRAXIS_PHASE2_ROOT: ${SIMPRAXIS_PHASE2_ROOT:-}
       # 锁内适配（Task7 图整体容器内运行）：LLM 网关凭据与飞书长连接三变量、
       # LanceDB/fastembed 路径按「名」从宿主 shell（source scripts/00_env.sh）
       # 插值透传；值绝不写入本文件/镜像层/日志（硬规则4）。
@@ -51,10 +61,12 @@ services:
       no_proxy: ${no_proxy:-}
     volumes:
       - ..:/workspace
-      - /mnt/caches/hf:/root/.cache/huggingface
-      - /mnt/caches/modelscope:/root/.cache/modelscope
-      - /mnt/weights:/root/weights
-      - ${SIMPRAXIS_RUN_DIR:-/mnt/artifacts/simpraxis/runs}:/root/runs
+      # Phase 2 Task0（P4）：非 root 缓存/权重/产物挂载点全部迁到 agent 家目录；
+      # 宿主源保持 /mnt 字面路径不变（已全部 1000:1000，G-4 探针守门）。
+      - /mnt/caches/hf:/home/agent/.cache/huggingface
+      - /mnt/caches/modelscope:/home/agent/.cache/modelscope
+      - /mnt/weights:/home/agent/weights
+      - ${SIMPRAXIS_RUN_DIR:-/mnt/artifacts/simpraxis/runs}:/home/agent/runs
       # 锁内适配（计划 Task7 L545-548「容器调用方式锁内适配」）：图整体在容器内
       # 运行，ledger/批次凭据/检查点/lancedb/fastembed 缓存/venv/tours 必须与宿主
       # 同路径单份可见，否则 quota 账本与证据根会在容器内外分裂。以下挂载只暴露

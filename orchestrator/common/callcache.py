@@ -16,12 +16,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
-import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .clock import utc_now_iso_z
 from .fsutil import atomic_write_text, ensure_private_dir
 
 SCHEMA = "simpraxis.call_replay.v1"
@@ -29,14 +28,19 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,160}$")
 
 
 def request_fingerprint(prompt: str, image_b64: "str | None" = None,
-                        extra: "dict[str, Any] | None" = None) -> str:
-    """逻辑请求指纹：prompt + 图像 + 影响计费/结果的参数。
+                        extra: "dict[str, Any] | None" = None, *,
+                        stage: "str | None" = None,
+                        model: "str | None" = None) -> str:
+    """逻辑请求指纹：stage + model + prompt + 图像 + 影响计费/结果的参数。
 
-    代码改了 prompt 或 max_tokens 后旧缓存自然失配（按 miss 处理），不会把
-    旧响应错配给新请求。
+    S-8：stage/model 必须并入指纹——同一 prompt 在 macro/coding/visual 三阶段
+    或不同模型下不是同一个逻辑请求，旧实现仅 hash prompt+image+extra，存在跨
+    阶段/跨模型错配重放的风险。并入后旧缓存全部自然失配重付一次（安全方向）。
+    代码改了 prompt 或 max_tokens 后旧缓存同样自然失配（按 miss 处理）。
     """
     h = hashlib.sha256()
-    h.update(json.dumps({"prompt": prompt, "image_b64": image_b64,
+    h.update(json.dumps({"stage": stage, "model": model,
+                         "prompt": prompt, "image_b64": image_b64,
                          "extra": extra or {}},
                         ensure_ascii=False, sort_keys=True,
                         default=str).encode("utf-8"))
@@ -94,7 +98,7 @@ class CallReplay:
             "raw": raw,
             "usage": [int(usage[0]), int(usage[1])],
             "req_sha256": fingerprint,
-            "ts_iso": ts_iso or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "ts_iso": ts_iso or utc_now_iso_z(),
         }
         atomic_write_text(self._path(key),
                           json.dumps(rec, ensure_ascii=False, indent=2))

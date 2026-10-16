@@ -33,6 +33,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 
 from memory_flywheel.phase1.learning_store import LearningStore
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.common.validators import validate_batch_id, validate_thread_id
 from orchestrator.direction.inputs import get_input
 from orchestrator.direction.setter import DirectionSetter
@@ -392,7 +393,8 @@ def _topology(args: argparse.Namespace) -> int:
     compiled = build_graph(None).compile()
     txt = export_text(compiled)
     txt_path = out_dir / "topology.txt"
-    txt_path.write_text(txt, encoding="utf-8")
+    # S-6：拓扑导出原子写 0600 收口 fsutil（svg 由 graphviz 直写，不在此列）。
+    atomic_write_text(txt_path, txt)
     svg_path = export_svg(compiled, out_dir / "topology.svg")
     result = {"topology_txt": str(txt_path), "topology_svg": str(svg_path)
               if svg_path else None,

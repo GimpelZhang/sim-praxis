@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Track 输入解析：Task0 固化的 inputs/tracks/track_{1,2}_samples.txt。
+"""Track 输入解析：Task0 扩编固化的 inputs/tracks/track_{1,2}_samples.txt。
 
-文件是评审输入的冻结原件（原样复制自 ~/文档），解析器只做结构化，不改写一字：
+文件是评审输入的冻结原件（Phase 2 Task0 起逐字复制自 ~/文档，各 6 条，
+sha256 见 Task0 commit body），解析器只做结构化，不改写一字：
   track_1: 序号 + 工具名 + 若干 URL（repo/主页/论文，按出现顺序保留）
   track_2: 序号 + 题目原文（可能跨多行，直到下一个序号/文件结束）
+
+# 锁内适配（Task0）：计划 v1.2 写「7/6 条」，实测 ~/文档 原件两份均为 6 条
+# （track_1 sha256 8eb02971…、track_2 0f25cf69…）；冻结原则是逐字保真，
+# 不自造第 7 条，按 6/6 固化并在 Task0 报告登记偏差。解析逻辑本就支持 N 条，
+# 序号 1..N 连续自检自动覆盖扩编。
 """
 from __future__ import annotations
 

@@ -21,6 +21,7 @@ HARD_LIMIT 逐级 2→3→4→5，不再按 64/128/256MB 粗分档越级跳（�
 """
 from __future__ import annotations
 
+import math
 import shlex
 from pathlib import Path
 
@@ -80,7 +81,12 @@ def validate_trim(trim: "dict | None") -> "dict | None":
         # bool 是 int 子类，显式挡掉（True 被当 1.0 会静默错裁）。
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             raise ValueError(f"trim[{key!r}] 必须是数值，收到 {v!r}")
-        return float(v)
+        f = float(v)
+        # S-3：NaN/Infinity 会以 nan/inf 字面量流进 ffmpeg -ss/-t，行为未定义；
+        # 与 Task5 同口径 math.isfinite 显式拒绝。
+        if not math.isfinite(f):
+            raise ValueError(f"trim[{key!r}] 必须是有限数值，收到 {v!r}")
+        return f
 
     start = _num("trim_start", False)
     seconds = _num("trim_seconds", False)
@@ -167,9 +173,15 @@ def compress_command(
     由 Task7/8 调用方传入。H-15：src/out/cover 一律 shlex.quote，路径含空格或
     中文/引号不再被 shell 拆词。
     """
-    src = shlex.quote(str(path))
-    out = shlex.quote(str(output_path))
-    cover = shlex.quote(str(cover_path))
+    # S-9：前导横线文件名经 shlex.quote 后仍是 "-x.mp4"，会被 ffmpeg 当选项。
+    # 统一加 ./ 前缀（路径串以 - 开头时），在 shlex.quote 之前处理。
+    def _q(p: "str | Path") -> str:
+        s = str(p)
+        return shlex.quote("./" + s if s.startswith("-") else s)
+
+    src = _q(path)
+    out = _q(output_path)
+    cover = _q(cover_path)
     if step == 2:
         vf = _short_edge_scale(720)
         extra = ""
@@ -181,7 +193,9 @@ def compress_command(
         # -ss 放 -i 前快速 seek；区间支持小数秒（C1 由调用方按接触时刻给定）
         start = float(trim_start)
         seconds = float(trim_seconds)
-        if start < 0 or seconds <= 0:
+        # S-3：NaN/Infinity 不得流进 ffmpeg -ss/-t（nan/inf 字面量行为未定义）。
+        if (not math.isfinite(start) or not math.isfinite(seconds)
+                or start < 0 or seconds <= 0):
             raise ValueError(
                 f"非法截断区间：trim_start={start}, trim_seconds={seconds}"
             )
@@ -196,11 +210,17 @@ def compress_command(
     )
 
 
-def host_to_container_path(host_path: "str | Path", run_dir: "str | Path") -> str:
-    """宿主 $SIMPRAXIS_RUN_DIR 路径 -> 容器内 /root/runs 挂载路径。
+# 非 root 容器（Phase 2 Task0）：agent(1000:1000) 的 runs 挂载点。
+CONTAINER_RUNS_DIR = "/home/agent/runs"
 
-    非 RUN_DIR 下的产物无法被容器看到（compose 仅挂载该目录），直接报错而非隐式传错。
-    shlex.quote 在命令生成处统一做；本函数只负责路径映射与越界守卫（H-15）。
+
+def host_to_container_path(host_path: "str | Path", run_dir: "str | Path") -> str:
+    """宿主 $SIMPRAXIS_RUN_DIR 路径 -> 容器内 runs 挂载路径。
+
+    Phase 2 起容器以非 root agent(1000) 运行，挂载目标侧为 /home/agent/runs
+    （Phase 1 为 /root/runs）。非 RUN_DIR 下的产物无法被容器看到（compose 仅
+    挂载该目录），直接报错而非隐式传错。shlex.quote 在命令生成处统一做；
+    本函数只负责路径映射与越界守卫（H-15）。
     """
     p = Path(host_path).resolve()
     root = Path(run_dir).resolve()
@@ -210,7 +230,7 @@ def host_to_container_path(host_path: "str | Path", run_dir: "str | Path") -> st
         raise ValueError(
             f"视频产物 {p} 不在 {root} 下，容器内不可见（compose 仅挂载 RUN_DIR）"
         ) from exc
-    return str(Path("/root/runs") / rel)
+    return str(Path(CONTAINER_RUNS_DIR) / rel)
 
 
 def expected_outputs(path: "str | Path", step: int,

@@ -12,7 +12,7 @@
 运行：
   python -m orchestrator.feishu_gateway.probes.probe_d_video --build-container
   cd sandbox && docker compose build sim-sandbox   # 按生成 commands.txt 执行
-  docker compose run --rm sim-sandbox bash /root/runs/phase1/task1_feishu/probe_d/make_probe_video.sh
+  docker compose run --rm sim-sandbox bash /home/agent/runs/phase1/task1_feishu/probe_d/make_probe_video.sh
   python -m orchestrator.feishu_gateway.probes.probe_d_video
 """
 from __future__ import annotations
@@ -23,7 +23,10 @@ import sys
 import uuid
 from pathlib import Path
 
+from orchestrator.common.fsutil import atomic_write_text
+
 from ..client import FeishuAPIError, gateway_from_env
+from ..video import CONTAINER_RUNS_DIR
 from ._evidence import (
     confirm,
     now_iso,
@@ -35,14 +38,17 @@ OVERSIZE_BYTES = 31 * 1024 * 1024   # 31MB > 30MB files 接口硬上限
 
 # 容器内合成脚本（imageio 2.36.1 写帧 + 镜像内 ffmpeg x264 crf23 yuv420p + 首帧封面）。
 # 黑底 + 随机噪点带（保证 ≥1MB 熵）+ 白字帧号/时间戳，4s @24fps，1280x720。
-_CONTAINER_SCRIPT = r'''#!/usr/bin/env bash
+# 容器 runs 挂载点与 video.host_to_container_path 同源（CONTAINER_RUNS_DIR）：
+# Phase 2 Task0 非 root 容器为 /home/agent/runs（Phase 1 为 /root/runs）。
+# 模板内 Python 花括号不可用 str.format，故用 @CONTAINER_RUNS_DIR@ 占位替换。
+_CONTAINER_SCRIPT_TEMPLATE = r'''#!/usr/bin/env bash
 set -euo pipefail
-mkdir -p /root/runs/phase1/task1_feishu/probe_d
+mkdir -p @CONTAINER_RUNS_DIR@/phase1/task1_feishu/probe_d
 python3 - <<'PY'
 import numpy as np
 import imageio.v2 as imageio
 
-out = "/root/runs/phase1/task1_feishu/probe_d/probe_d_synthetic.mp4"
+out = "@CONTAINER_RUNS_DIR@/phase1/task1_feishu/probe_d/probe_d_synthetic.mp4"
 fps, seconds, w, h = 24, 4, 1280, 720
 rng = np.random.default_rng(20261013)
 writer = imageio.get_writer(
@@ -61,10 +67,12 @@ for i in range(fps * seconds):
 writer.close()
 print("VIDEO_WRITTEN", out)
 PY
-ffmpeg -y -i /root/runs/phase1/task1_feishu/probe_d/probe_d_synthetic.mp4 \
-  -frames:v 1 -an /root/runs/phase1/task1_feishu/probe_d/probe_d_cover.png
-ls -l /root/runs/phase1/task1_feishu/probe_d/
+ffmpeg -y -i @CONTAINER_RUNS_DIR@/phase1/task1_feishu/probe_d/probe_d_synthetic.mp4 \
+  -frames:v 1 -an @CONTAINER_RUNS_DIR@/phase1/task1_feishu/probe_d/probe_d_cover.png
+ls -l @CONTAINER_RUNS_DIR@/phase1/task1_feishu/probe_d/
 '''
+_CONTAINER_SCRIPT = _CONTAINER_SCRIPT_TEMPLATE.replace(
+    "@CONTAINER_RUNS_DIR@", CONTAINER_RUNS_DIR)
 
 
 def _run_dir() -> Path:
@@ -78,19 +86,20 @@ def _run_dir() -> Path:
 def build_container_artifacts() -> int:
     d = _run_dir()
     script = d / "make_probe_video.sh"
-    script.write_text(_CONTAINER_SCRIPT, encoding="utf-8")
-    os.chmod(script, 0o755)
+    # S-6：原子写，容器内 bash 调起的脚本保持 0755。
+    atomic_write_text(script, _CONTAINER_SCRIPT, mode=0o755)
     commands = d / "commands.txt"
-    commands.write_text(
+    # S-6：操作件原子写 0600（原裸 write_text 无 chmod）。
+    atomic_write_text(
+        commands,
         "# 探针 D 容器合成步骤（凭据不进容器；在仓库根执行）\n"
         "cd /home/vipuser/sim-praxis/sandbox\n"
         "SIMPRAXIS_USE_PROXY=0 docker compose build sim-sandbox 2>&1 | "
         "tee \"$SIMPRAXIS_RUN_DIR/build-phase1-probe-$(date +%Y%m%d-%H%M%S).log\"\n"
         "docker compose run --rm sim-sandbox bash "
-        "/root/runs/phase1/task1_feishu/probe_d/make_probe_video.sh\n"
+        f"{CONTAINER_RUNS_DIR}/phase1/task1_feishu/probe_d/make_probe_video.sh\n"
         "docker compose down\n"
-        "# 产物：probe_d_synthetic.mp4（≥1MB/4s）与 probe_d_cover.png\n",
-        encoding="utf-8")
+        "# 产物：probe_d_synthetic.mp4（≥1MB/4s）与 probe_d_cover.png\n")
     print_checklist("探针 D / 阶段 1：容器合成脚本已生成（本机未执行 docker）", [
         f"检查脚本：{script}",
         f"按命令文本执行：{commands}",

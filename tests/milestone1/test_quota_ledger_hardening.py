@@ -26,8 +26,11 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.fixture()
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    # Task0：台账类路径已切 Phase 2 独立新账（runtime_paths 单一入口）；
+    # fixture 账目录随之指向 phase2，G-4/G-9/G-11 断言语义不变。
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
-    qdir = tmp_path / "phase1" / "quota"
+    qdir = tmp_path / "phase2" / "quota"
     qdir.mkdir(parents=True)
     return {"tmp": tmp_path, "qdir": qdir,
             "ledger": qdir / "ledger.jsonl",

@@ -58,11 +58,33 @@ SNOW_RATES = (2.5, 10.0, 25.0, 50.0, 100.0)
 FOG_VIS = (200.0, 100.0, 50.0, 20.0, 10.0, 6.0)
 
 
+class FrameDataError(KeyError):
+    """采集帧数据缺失（npz 文件或键缺失）：显式错误，S-7 替代裸 KeyError。
+
+    消息必须带 npz 路径、rep/preset/frame 与缺失键名，便于定位是哪一重复/
+    预设的采集产物不完整，而不是让裸键名在深层聚合处才爆出来。
+    """
+
+
 def load_frame(root: Path, rep: int, preset: str, i: int):
-    d = np.load(root / f"collect_rep{rep}" / f"frames_rep{rep}.npz")
-    return (d[f"{preset}__{i}__geo"],
-            d[f"{preset}__{i}__sem_xyz"],
-            d[f"{preset}__{i}__sem_tag"])
+    npz_path = root / f"collect_rep{rep}" / f"frames_rep{rep}.npz"
+    if not npz_path.is_file():
+        raise FrameDataError(
+            f"Q2 帧数据文件缺失：{npz_path}（rep={rep} preset={preset} frame={i}）；"
+            "采集目录须为 collect_weather_lidar.py 的 collect_rep{1,2,3} 产物")
+    d = np.load(npz_path)
+    arrays = []
+    for suffix in ("geo", "sem_xyz", "sem_tag"):
+        key = f"{preset}__{i}__{suffix}"
+        try:
+            arrays.append(d[key])
+        except KeyError:
+            same_slot = [k for k in d.files if k.startswith(f"{preset}__{i}__")]
+            raise FrameDataError(
+                f"Q2 npz 缺键：{npz_path} 无 {key!r}"
+                f"（rep={rep} preset={preset} frame={i}）；"
+                f"该槽位现存键={same_slot}，全部键数={len(d.files)}") from None
+    return tuple(arrays)
 
 
 def key_array(xyz: np.ndarray, scale: int = 100) -> list:

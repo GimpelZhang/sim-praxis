@@ -22,7 +22,6 @@ persist_learning / human_failure / done。
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +29,7 @@ from typing import Any, Callable, Optional
 
 from langgraph.graph import END, StateGraph
 
+from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.judge.seam import assemble_file_metrics
 
 from .state import SimPraxisState, run_dir_for
@@ -285,11 +285,8 @@ def _patch_workdir_failure_ref(workdir_failure: str, graph_failure: Path) -> Non
     if data.get("graph_failure_json") == str(graph_failure):
         return
     data["graph_failure_json"] = str(graph_failure)
-    tmp = wpath.with_suffix(wpath.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, wpath)
-    os.chmod(wpath, 0o600)
+    # LOW-2/S-6：手工 tmp/replace/chmod 收口到 fsutil 唯一实现。
+    atomic_write_text(wpath, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def write_graph_failure(state: dict, deps: GraphDeps, *, stage: str,
@@ -323,9 +320,8 @@ def write_graph_failure(state: dict, deps: GraphDeps, *, stage: str,
         workdir_failure = failed_ev.get("failure_json")
     if workdir_failure:
         payload["agent_failure_json"] = workdir_failure
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
-    os.chmod(out, 0o600)
+    # LOW-2/S-6：fsutil 原子 0600 写。
+    atomic_write_text(out, json.dumps(payload, ensure_ascii=False, indent=2))
     if workdir_failure:
         _patch_workdir_failure_ref(workdir_failure, out)
     return out
@@ -374,9 +370,8 @@ def node_done(state: SimPraxisState, deps: GraphDeps) -> dict:
     }
     d = _run_dir(state, deps)
     out = d / DONE_JSON
-    with open(out, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
-    os.chmod(out, 0o600)
+    # LOW-2/S-6：fsutil 原子 0600 写。
+    atomic_write_text(out, json.dumps(payload, ensure_ascii=False, indent=2))
     return {"events": [_ev("done", done_json=str(out))]}
 
 

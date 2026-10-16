@@ -39,7 +39,11 @@ from orchestrator.direction.setter import (
     validate_proposals,
 )
 from orchestrator.gateway import quota_ledger as ql_mod
-from orchestrator.gateway.quota_ledger import QuotaLedger
+from orchestrator.gateway.quota_ledger import (
+    HARD_CAP,
+    NORMAL_BUDGET,
+    QuotaLedger,
+)
 from orchestrator.gateway.router import GatewayPausedError
 
 BATCH = "T2-FIXTURE"
@@ -368,11 +372,13 @@ def test_15_credential_mismatch_blocks_without_persist(tmp_path, monkeypatch):
 
 def test_16_batch_exhausted_writes_v2_superset_pause(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    # Task0：台账切 Phase 2 独立新账根（语义不变）。
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     ql_mod.write_approval(batch_id=BATCH, task=2, stage=STAGE, approved=2,
                           beyond_normal=False, note="fixture 小批")
     led = QuotaLedger()
-    lp = tmp_path / "phase1/quota/ledger.jsonl"
+    lp = tmp_path / "phase2/quota/ledger.jsonl"
     _seed_calls(lp, 2)
     with pytest.raises(GatewayPausedError) as ei:
         led.preflight(STAGE, task=2, batch_id=BATCH)
@@ -386,31 +392,38 @@ def test_16_batch_exhausted_writes_v2_superset_pause(tmp_path, monkeypatch):
 
 
 def test_17_normal36_without_beyond_blocks(tmp_path, monkeypatch):
+    # Task0：常态阈值由 Phase 1 的 36 随代码常量迁到 NORMAL_BUDGET（Phase 2=60），
+    # 门语义不变：常态触顶且凭据非 beyond-normal → batch_budget_reached。
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     ql_mod.write_approval(batch_id="T2-N", task=2, stage=STAGE, approved=12,
-                          beyond_normal=False, note="fixture 常态批 36 起点")
+                          beyond_normal=False, note="fixture 常态批起点")
     led = QuotaLedger()
-    _seed_calls(tmp_path / "phase1/quota/ledger.jsonl", 36, task=1,
-                batch_id="T2-OLD")  # 无 cap 的任务行，专测 36 常态门
+    _seed_calls(tmp_path / "phase2/quota/ledger.jsonl", NORMAL_BUDGET, task=1,
+                batch_id="T2-OLD")  # 无 cap 的任务行，专测常态门
     with pytest.raises(GatewayPausedError) as ei:
         led.preflight(STAGE, task=2, batch_id="T2-N")
     assert ei.value.state["reason"] == "batch_budget_reached"
 
 
 def test_18_beyond_normal_unlocks_36_to_48(tmp_path, monkeypatch):
+    # Task0：36/48 随代码常量迁到 NORMAL_BUDGET/HARD_CAP（Phase 2=60/80），
+    # beyond-normal 区间解锁语义不变（函数名为 Phase 1 历史编号，保留）。
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
-    _seed_calls(tmp_path / "phase1/quota/ledger.jsonl", 36, task=1,
-                batch_id="T2-OLD")
-    # 36 起点可开 beyond 批；开到 48 硬门
-    ql_mod.write_approval(batch_id="T2-BN", task=2, stage=STAGE, approved=12,
-                          beyond_normal=True, note="fixture 36-48 书面批")
+    lp = tmp_path / "phase2/quota/ledger.jsonl"
+    _seed_calls(lp, NORMAL_BUDGET, task=1, batch_id="T2-OLD")
+    # 常态起点可开 beyond 批；开到 HARD_CAP 硬门
+    ql_mod.write_approval(batch_id="T2-BN", task=2, stage=STAGE,
+                          approved=HARD_CAP - NORMAL_BUDGET,
+                          beyond_normal=True, note="fixture 常态-硬顶书面批")
     led = QuotaLedger()
     info = led.preflight(STAGE, task=2, batch_id="T2-BN")
-    assert info["global_used"] == 36
-    _seed_calls(tmp_path / "phase1/quota/ledger.jsonl", 12, task=1,
-                batch_id="T2-BN", offset=36)
+    assert info["global_used"] == NORMAL_BUDGET
+    _seed_calls(lp, HARD_CAP - NORMAL_BUDGET, task=1,
+                batch_id="T2-BN", offset=NORMAL_BUDGET)
     with pytest.raises(GatewayPausedError) as ei:
         led.preflight(STAGE, task=2, batch_id="T2-BN")
     assert ei.value.state["reason"] == "global_hard_cap"
@@ -418,12 +431,15 @@ def test_18_beyond_normal_unlocks_36_to_48(tmp_path, monkeypatch):
 
 def test_19_task_hard_cap_blocks_at_14(tmp_path, monkeypatch):
     # 锁内适配（2026-10-14 用户书面签收）：Task2 cap 10→14
+    # Task0：task=2 不在 Phase 2 caps，cap 并集仍取 Phase 1 的 14，断言不变；
+    # 台账路径随 runtime_paths 切 phase2 根。
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     ql_mod.write_approval(batch_id=BATCH, task=2, stage=STAGE, approved=20,
                           beyond_normal=False, note="fixture 大批")
     led = QuotaLedger()
-    lp = tmp_path / "phase1/quota/ledger.jsonl"
+    lp = tmp_path / "phase2/quota/ledger.jsonl"
     _seed_calls(lp, 13)
     assert led.preflight(STAGE, task=2, batch_id=BATCH)["task_used"] == 13
     _seed_calls(lp, 1)
@@ -439,11 +455,12 @@ def test_19_task_hard_cap_blocks_at_14(tmp_path, monkeypatch):
 
 def test_20_blocked_rows_do_not_consume_seq(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     ql_mod.write_approval(batch_id=BATCH, task=2, stage=STAGE, approved=8,
                           beyond_normal=False, note="fixture")
     led = QuotaLedger()
-    lp = tmp_path / "phase1/quota/ledger.jsonl"
+    lp = tmp_path / "phase2/quota/ledger.jsonl"
     _seed_calls(lp, 1)
     _seed_blocked(lp, 3)
     led.record(STAGE, task=2, batch_id=BATCH, ok=True, model="fixture",
@@ -455,15 +472,16 @@ def test_20_blocked_rows_do_not_consume_seq(tmp_path, monkeypatch):
 
 def test_21_corrupt_credential_is_quota_error(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
-    d = tmp_path / "phase1/quota/approvals"
+    d = tmp_path / "phase2/quota/approvals"
     d.mkdir(parents=True)
     (d / "T2-BAD.json").write_text("{不是合法JSON", encoding="utf-8")
     led = QuotaLedger()
     with pytest.raises(GatewayPausedError):
         led.preflight(STAGE, task=2, batch_id="T2-BAD")
     rows = [json.loads(l) for l in
-            (tmp_path / "phase1/quota/ledger.jsonl").read_text().splitlines()]
+            (tmp_path / "phase2/quota/ledger.jsonl").read_text().splitlines()]
     assert rows and rows[0]["event"] == "preflight_blocked"
 
 

@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from orchestrator.common.clock import parse_ts_iso_lenient, parse_ts_iso_strict
 from orchestrator.common.secrets import scan_text
 from orchestrator.gateway.quota_ledger import call_lines
 from orchestrator.judge.gait_rungs import evaluate_batch
@@ -228,9 +229,33 @@ def test_06_ledger_caps_sequence_and_reconciliation(manifest):
     for r in rows:
         assert r["batch_used_after"] <= r["batch_approved"]
         assert r["global_used_after"] == r["seq"]
-    # 包内账实一致：包内 ledger == 宿主原件（禁止打包后单边改动）
-    assert _sha(PACK / "quota/ledger.jsonl") == _sha(
-        PHASE1_ROOT / "quota/ledger.jsonl")
+    # 锁内适配（Task0）：计划 v1.2 §Task0 L230 授权一次性 tz 迁移
+    # （scripts/milestone2/normalize_ledger_tz.py），宿主封存账已同瞬时 Z 化；
+    # 冻结证据包是 Phase 1 历史产物（manifest 钉 git_commit，不得 --clean 重建、
+    # 不得改包内字节），保持迁移前字节。故旧「包内字节==宿主字节」断言升级为
+    # 双钉，强度不减：
+    # (a) 包内账本与 quota/ 下唯一的 ledger.jsonl.bak-tz-* 封存备份逐字节相等
+    #     （备份恰好 1 个：多了/没了都 fail），备份即迁移前宿主原件；
+    # (b) 宿主现账只能是包内账本的同瞬时 Z 化：行数/seq 序列/逐行除 ts_iso 外
+    #     字段全等；每行 ts_iso 经 lenient 解析后与包内对应行为同一 UTC 瞬时，
+    #     且宿主每行必须过 strict（全部严格 Z）。
+    backups = sorted((PHASE1_ROOT / "quota").glob("ledger.jsonl.bak-tz-*"))
+    assert len(backups) == 1, f"tz 封存备份必须恰好 1 个：{backups}"
+    assert _sha(PACK / "quota/ledger.jsonl") == _sha(backups[0]), (
+        "包内账本必须与 tz 迁移封存备份逐字节相等（冻结包=迁移前宿主原件）")
+    host_ledger = PHASE1_ROOT / "quota/ledger.jsonl"
+    host_rows = [json.loads(line) for line in
+                 host_ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(host_rows) == n == 29
+    assert [r["seq"] for r in host_rows] == [r["seq"] for r in rows]
+    for packed_row, host_row in zip(rows, host_rows):
+        assert {k: v for k, v in host_row.items() if k != "ts_iso"} == \
+               {k: v for k, v in packed_row.items() if k != "ts_iso"}, (
+            f"seq={packed_row['seq']} 行除 ts_iso 外字段在迁移后发生变化")
+        host_ts = parse_ts_iso_strict(host_row["ts_iso"])  # 宿主必须全严格 Z
+        assert host_ts == parse_ts_iso_lenient(packed_row["ts_iso"]), (
+            f"seq={packed_row['seq']} tz 迁移前后不是同一 UTC 瞬时："
+            f"{packed_row['ts_iso']} -> {host_row['ts_iso']}")
     index = json.loads(
         (PACK / "quota/approvals_index.json").read_text(encoding="utf-8"))
     batches = {r["batch_id"] for r in rows}

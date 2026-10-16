@@ -52,6 +52,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_LLM_BASE_URL",
                        "https://ark.cn-beijing.volces.com/api/coding")
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+    # Task0：台账类路径已切 Phase 2 独立新账（runtime_paths）；fixture 显式指
+    # 临时 phase2 根，断言口径（seq/计数/blocked 语义）不变。
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     oq = tmp_path / "open-questions.md"
     oq.write_text(f"# Open Questions\n\n- {ANCHOR}\n", encoding="utf-8")
@@ -82,7 +85,8 @@ def _litellm_resp(content="ok", *, in_tok=7, out_tok=3, model="deepseek-v4-1-fla
 
 
 def _rows(tmp):
-    p = tmp / "phase1/quota/ledger.jsonl"
+    # Task0：新账落 phase2 根（见 env fixture）；Phase 1 封存账不被写打开。
+    p = tmp / "phase2/quota/ledger.jsonl"
     return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
 
 

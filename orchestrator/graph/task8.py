@@ -23,14 +23,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
-import shutil
-import time
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Callable
 
 from orchestrator.agent_runner.runner import RunSpec
 from orchestrator.common.callcache import CallReplay, request_fingerprint
+from orchestrator.common.clock import utc_now_iso_z
+from orchestrator.common.fsutil import atomic_write_bytes, atomic_write_text
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -139,8 +139,8 @@ def _stage_calibration(dst: Path) -> None:
         raise GraphStateError(
             f"Task8 标定件 schema 不符：{cal.get('schema')!r}，"
             f"要求 {CALIBRATION_SCHEMA_ID}")
-    shutil.copyfile(CALIBRATION_SOURCE, dst)
-    os.chmod(dst, 0o600)
+    # S-6：copy→chmod 收口 fsutil 原子写（读字节→0600 tmp+replace）。
+    atomic_write_bytes(dst, CALIBRATION_SOURCE.read_bytes())
 
 
 def make_spec_factory(thread_id: str, coding_batch: str,
@@ -171,12 +171,11 @@ def make_spec_factory(thread_id: str, coding_batch: str,
 
         target = workdir / scenario["script"]
         if not target.exists():
-            shutil.copyfile(template, target)
-            os.chmod(target, 0o700)
+            # S-6：可执行模板经 fsutil 原子落盘并锁 0700（回退语义不变）。
+            atomic_write_bytes(target, template.read_bytes(), mode=0o700)
         versions = workdir / "versions.txt"
         if not versions.exists():
-            versions.write_text(_installed_versions(), encoding="utf-8")
-            os.chmod(versions, 0o600)
+            atomic_write_text(versions, _installed_versions())
         cal = workdir / CALIBRATION_NAME
         if not cal.exists():
             _stage_calibration(cal)
@@ -229,9 +228,8 @@ def _evidence_dir() -> Path:
 
 def _write_evidence(stem: str, kind: str, payload: dict) -> str:
     p = _evidence_dir() / f"{stem}.{kind}.json"
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
-                 encoding="utf-8")
-    os.chmod(p, 0o600)
+    # S-6：原子写 0600 收口 fsutil。
+    atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
     return f"phase1/task8_track2/evidence/{p.name}"
 
 
@@ -273,7 +271,10 @@ class _VisualEvidenceGateway:
 
     def call_visual(self, prompt: str, image_b64: str, **kwargs):
         stem = f"rung4_{self._run_id}_{self._split}"
-        fp = request_fingerprint(prompt, image_b64, dict(kwargs))
+        model = self._g.model_id("visual_rollout")
+        # S-8：指纹并入 stage/model，同 prompt 跨阶段/跨模型不得错配重放。
+        fp = request_fingerprint(prompt, image_b64, dict(kwargs),
+                                 stage="visual_rollout", model=model)
         if self._cache is not None and self._cache_key is not None:
             hit = self._cache.get(self._cache_key, fp)
         else:
@@ -283,9 +284,9 @@ class _VisualEvidenceGateway:
             self.req_ref = f"{self.REF_PREFIX}/{stem}.req.json"
             return hit["raw"], tuple(hit["usage"])
 
-        model = self._g.model_id("visual_rollout")
         req_ref = _write_evidence(stem, "req", {
-            "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            # P2（Task0）：Phase 2 新证据行统一严格 UTC Z。
+            "ts_iso": utc_now_iso_z(),
             "stage": "visual_rollout",
             "model": model,
             "thread_id": self._thread, "batch_id": self._batch,
@@ -430,8 +431,8 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
             labels = [f"frame {i:03d}" for i in idx]
             chosen = [frames[i] for i in idx]
             collage_png = workdir / f"rung4_collage_{key}.png"
-            collage_png.write_bytes(build_collage_png(chosen, labels))
-            os.chmod(collage_png, 0o600)
+            # S-6：原子写 0600 收口 fsutil。
+            atomic_write_bytes(collage_png, build_collage_png(chosen, labels))
             image_b64 = collage_b64(chosen, labels)
 
             ev_gateway = _VisualEvidenceGateway(

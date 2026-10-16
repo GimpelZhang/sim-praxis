@@ -95,6 +95,23 @@ ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute,display \
     PYOPENGL_PLATFORM=egl \
     HF_ENDPOINT=https://hf-mirror.com
+
+# 5b) Phase 2 Task0 非 root 运行账号（P4）。默认仍以 root 启动——本层不切 USER，
+#     旧镜像/旧 compose 行为完全可回退；由 docker-compose.yml 显式
+#     user: "${SIMPRAXIS_UID:-1000}:${SIMPRAXIS_GID:-1000}" 选择 agent 身份。
+#     宿主 bind 源全部 1000:1000（00_env G-4 探针守门），挂载点所有权随宿主源。
+ARG UID=1000
+ARG GID=1000
+RUN set -eux; \
+    if ! getent group "$GID" >/dev/null; then groupadd -g "$GID" agent; fi; \
+    if ! id agent >/dev/null 2>&1; then \
+      useradd -u "$UID" -g "$GID" -m -s /bin/bash agent; \
+    fi; \
+    mkdir -p /home/agent/.cache/huggingface /home/agent/.cache/modelscope \
+             /home/agent/weights /home/agent/runs /tmp/.X11-unix \
+    && chown -R "$UID:$GID" /home/agent \
+    && chmod 1777 /tmp/.X11-unix
+
 COPY entrypoint.sh /usr/local/bin/simpraxis-entrypoint.sh
 RUN chmod +x /usr/local/bin/simpraxis-entrypoint.sh
 WORKDIR /workspace

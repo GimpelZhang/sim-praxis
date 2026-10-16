@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from orchestrator.common.fsutil import atomic_write_text
+
 from .clips import FPS, H, N_FRAMES, W, encode_mp4
 
 CONTACT_FRAME = 30
@@ -123,7 +125,8 @@ def write_gait_clip_bundle(kind: str, dir_path: "str | Path") -> dict:
     d = Path(dir_path)
     frames, meta = render_gait_clip(kind)
     mp4 = encode_mp4(frames, d / f"{kind}.mp4", fps=FPS)
-    (d / f"{kind}.ground_truth.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # S-6：ground_truth 原子写 0600 收口 fsutil（原裸 write_text 无 chmod）。
+    atomic_write_text(d / f"{kind}.ground_truth.json",
+                      json.dumps(meta, ensure_ascii=False, indent=2))
     return {"frames": frames, "mp4": str(mp4), "ground_truth": meta,
             "contact_frame": CONTACT_FRAME}

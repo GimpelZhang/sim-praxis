@@ -1,0 +1,26 @@
+{
+  "artifact": "quota_pause v2 schema 签收件（Phase 2 Task0）",
+  "schema_version": 2,
+  "keys": [
+    "schema_version",
+    "status",
+    "stage",
+    "reason",
+    "paused_at_epoch",
+    "paused_at_iso",
+    "resume_at_epoch",
+    "resume_at_iso",
+    "scope",
+    "trigger",
+    "resume_ticket",
+    "affected_stages"
+  ],
+  "freeze_rule": "签收前与签收后，代码只允许写以上 12 键（orchestrator/gateway/quota_ledger.py::QUOTA_PAUSE_SCHEMA_V2_KEYS 单一源，写件断言锁键序与键集）；扩键/改名/语义变更必须先取得用户书面签收并升 schema_version。",
+  "install": "scripts/00_env.sh 首次 source 时以 0600 安装为 $SIMPRAXIS_PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json；已存在（含已签收件）绝不覆盖。",
+  "user_signoff": {
+    "signed_by": "",
+    "signed_at": "",
+    "decision": "",
+    "note": "签收时手写：同意/拒绝 + 日期；空白件视为尚未签收，代码按冻结 12 键执行。"
+  }
+}

@@ -3,10 +3,11 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from orchestrator.common.fsutil import atomic_write_text
 
 
 def evidence_dir() -> Path:
@@ -35,15 +36,9 @@ def write_evidence(name: str, payload: dict[str, Any]) -> Path:
     """tmp+replace 原子写，权限 0600；同文件可多次合并（probe C 三轮写同一文件）。"""
     path = evidence_dir() / name
     payload = {"updated_at": now_iso(), **payload}
-    fd, tmp = tempfile.mkstemp(prefix=f".{name}.", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, ensure_ascii=False, indent=2)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    # Task0（arch 合并）：第二套 mkstemp 实现删除，统一走
+    # orchestrator.common.fsutil.atomic_write_text（mkstemp→fchmod→fsync→replace）。
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2))
     return path
 
 

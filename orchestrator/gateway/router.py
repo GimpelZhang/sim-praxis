@@ -56,6 +56,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from datetime import datetime, timezone
 import os
 import random
 import re
@@ -82,7 +83,12 @@ import litellm
 import requests
 import yaml
 
+from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.runtime_paths import (
+    gateway_state_dir,
+    gateway_state_path,
+)
 from orchestrator.common.secrets import redact_text
 
 # 锁内适配（Task2 首次实呼取证 2026-10-14，litellm==1.99.4 / pydantic==2.11.10）：
@@ -210,12 +216,12 @@ class EmptyResponseError(GatewayError):
 # ---- 配额长熔断状态（与 v3 同契约，alias 字段改名 stage） ----
 
 def _state_dir() -> Path:
-    return Path(os.environ.get("SIMPRAXIS_GATEWAY_STATE",
-                               "/mnt/artifacts/simpraxis/gateway_state"))
+    # Task0：路径解析统一入口在 orchestrator.common.runtime_paths。
+    return gateway_state_dir()
 
 
 def _state_path() -> Path:
-    return _state_dir() / PAUSE_FILENAME
+    return gateway_state_path()
 
 
 def load_pause_state() -> dict | None:
@@ -248,8 +254,21 @@ def is_paused(stage: str | None = None, now: float | None = None) -> dict | None
         return None
     now = time.time() if now is None else now
     resume = state.get("resume_at_epoch")
-    if resume is not None and now >= float(resume):
-        return None
+    if resume is not None:
+        # LOW-4：resume_at_epoch 损坏（非数字/NaN 等）曾裸 ValueError/TypeError，
+        # 调用栈未捕获时可能 fail-open 触网。统一按熔断件损坏 fail-closed 处理。
+        try:
+            resume_at = float(resume)
+        except (TypeError, ValueError) as exc:
+            raise PauseStateCorruptError(
+                "熔断状态文件 resume_at_epoch 非数值，人工核查（fail-closed 禁止触网）："
+                f"{_state_path()}：{resume!r}") from exc
+        if resume_at != resume_at:  # NaN：永不成立的过期比较同样按损坏处理
+            raise PauseStateCorruptError(
+                "熔断状态文件 resume_at_epoch=NaN（永不恢复），人工核查："
+                f"{_state_path()}")
+        if now >= resume_at:
+            return None
     return state
 
 
@@ -287,6 +306,12 @@ def pause_ignore_allowed(state: dict) -> "tuple[bool, str]":
     return True, ""
 
 
+def _epoch_utc_iso_z(epoch: float) -> str:
+    """epoch 秒 -> 严格 UTC Z 串（P2：熔断态时间字串与 Phase 2 台账同口径）。"""
+    return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+
+
 def _write_pause_state(stage: str, reason: str, wait_sec: int) -> dict:
     now = time.time()
     state = {
@@ -294,10 +319,9 @@ def _write_pause_state(stage: str, reason: str, wait_sec: int) -> dict:
         "stage": stage,
         "reason": redact(reason)[:500],
         "paused_at_epoch": now,
-        "paused_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(now)),
+        "paused_at_iso": _epoch_utc_iso_z(now),
         "resume_at_epoch": now + wait_sec,
-        "resume_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z",
-                                       time.localtime(now + wait_sec)),
+        "resume_at_iso": _epoch_utc_iso_z(now + wait_sec),
     }
     # G-7：0600 tmp+replace（先 fchmod 后 replace，杜绝 umask 权限窗口），
     # tmp 名带 pid+随机串，并发写者不互踩固定 .json.tmp。
@@ -431,23 +455,45 @@ def _litellm_text(resp: Any) -> str:
     except Exception:  # noqa: BLE001
         return ""
     if isinstance(content, list):
-        content = "".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
+        # S-10/G-12：只信任解析后 type=="text" 的块；tool/thinking/任意 dict 块
+        # 不冒充答案文本（与直 POST 的 _message_text 同口径）。
+        content = "".join(
+            str(b.get("text", "")) for b in content
+            if isinstance(b, dict) and b.get("type") == "text")
     return str(content)
 
 
-def _litellm_usage(resp: Any) -> "tuple[int | None, int | None]":
-    """从 litellm 响应取 token 用量（Anthropic 形态 input_tokens，OpenAI 形态 prompt_tokens）。"""
+def _usage_num(usage: Any, *names: str) -> int | None:
+    """usage 对象按候选属性名取非布尔非负整数，取不到/形状不符返回 None（不猜）。"""
+    for n in names:
+        v = getattr(usage, n, None)
+        if type(v) is int and v >= 0:
+            return v
+    return None
+
+
+def _dict_usage_num(body: dict, name: str) -> int | None:
+    """直 POST usage dict 取数：只认非布尔非负 int，其余 None（不猜不转）。"""
+    v = body.get(name)
+    return v if type(v) is int and v >= 0 else None
+
+
+def _litellm_usage(
+    resp: Any,
+) -> "tuple[int | None, int | None, int | None, int | None]":
+    """从 litellm 响应取 token 用量，返回四元组
+    (input, output, cache_read, cache_create)。
+
+    前两项取 Anthropic 形态 input_tokens / OpenAI 形态 prompt_tokens；
+    cache 两字段只认 Anthropic prompt-caching 正名（cache_read_input_tokens /
+    cache_creation_input_tokens），getattr 链取不到即 None，不做别名猜测。
+    bool 是 int 子类，一律 type(v) is int 严口径拒绝（与 callcache C2 对称）。
+    """
     usage = getattr(resp, "usage", None)
-
-    def _num(*names: str) -> int | None:
-        for n in names:
-            v = getattr(usage, n, None)
-            if isinstance(v, int) and v >= 0:
-                return v
-        return None
-
-    return (_num("input_tokens", "prompt_tokens"),
-            _num("output_tokens", "completion_tokens"))
+    return (_usage_num(usage, "input_tokens", "prompt_tokens"),
+            _usage_num(usage, "output_tokens", "completion_tokens"),
+            _usage_num(usage, "cache_read_input_tokens"),
+            _usage_num(usage, "cache_creation_input_tokens"))
 
 
 def _node_contains_image(node: Any) -> bool:
@@ -717,18 +763,24 @@ class ModelGateway:
             raise
         if self._billing is not None:
             self._billing.record(stage, ok=True, model=model_id,
-                                 tokens_in=usage[0], tokens_out=usage[1])
-        return content, usage
+                                 tokens_in=usage[0], tokens_out=usage[1],
+                                 tokens_cache_read=usage[2],
+                                 tokens_cache_create=usage[3])
+        # 对外契约保持 (input, output) 二元组；cache 两列只入账不透出。
+        return content, (usage[0], usage[1])
 
     def _chat_loop(self, *, stage: str, model_id: str, token: str, base_url: str,
                    completion: Callable[..., Any], messages: list[dict[str, Any]],
                    max_tokens: int, temperature: float, timeout: int
-                   ) -> tuple[str, "tuple[int | None, int | None]"]:
+                   ) -> tuple[str, "tuple[int | None, int | None, int | None, int | None]"]:
         """call() 的退避/熔断重试循环（不含计费；内部重试多少次都只算一次逻辑调用）。"""
         attempt = 0
         wait_total = 0.0
         while True:
             try:
+                # D-8（A12 thinking 收口）：Task6 prompt-cache/thinking 诊断完成前，
+                # 两条传输路径一律不传 thinking 参数（Ark 浮动别名曾吃光输出预算，
+                # 见 test_04 事故）；开启时机与诊断证据见 Phase 2 计划 Task6。
                 resp = completion(
                     model=f"anthropic/{model_id}",
                     api_base=base_url,
@@ -756,11 +808,13 @@ class ModelGateway:
                     wait_total += wait
                     attempt += 1
                     continue
-                in_tok, out_tok = _litellm_usage(resp)
-                logger.info("chat ok stage=%s requested=%s echo=%s tokens in=%s out=%s",
-                            stage, model_id, getattr(resp, "model", "?"), in_tok, out_tok)
+                in_tok, out_tok, cache_read, cache_create = _litellm_usage(resp)
+                logger.info("chat ok stage=%s requested=%s echo=%s tokens in=%s out=%s "
+                            "cache_read=%s cache_create=%s",
+                            stage, model_id, getattr(resp, "model", "?"), in_tok, out_tok,
+                            cache_read, cache_create)
                 _clear_stale_pause_state()
-                return content, (in_tok, out_tok)
+                return content, (in_tok, out_tok, cache_read, cache_create)
             except RateLimitError as exc:
                 if _is_quota_error(exc):
                     state = _write_pause_state(stage, _error_text(exc), self.quota_pause_sec)
@@ -814,9 +868,13 @@ class ModelGateway:
             except Exception as exc:  # noqa: BLE001
                 if attempt + 1 >= 2:
                     raise GatewayError(f"未分类错误连续出现：{_error_text(exc)}") from exc
+                # S-10/G-6：未分类错误的唯一一次重试也并入累计等待预算
+                # （max_total_wait=300s 共用），预算外等待不再存在。
+                u_wait = min(self.max_backoff, self.base_backoff)
+                self._check_wait_budget(wait_total, u_wait, "未分类错误退避")
                 logger.warning("未分类错误 %s，短暂重试一次", type(exc).__name__)
-                self._sleep(min(self.max_backoff, self.base_backoff))
-                wait_total += self.base_backoff
+                self._sleep(u_wait)
+                wait_total += u_wait
                 attempt += 1
 
     def call_visual(self, prompt: str, image_b64: str, *,
@@ -847,7 +905,14 @@ class ModelGateway:
             _resp, body = self._post_messages(
                 stage, model_id, blocks, max_tokens=max_tokens, timeout=timeout)
             usage_body = body.get("usage") or {}
-            usage = (usage_body.get("input_tokens"), usage_body.get("output_tokens"))
+            if not isinstance(usage_body, dict):
+                usage_body = {}
+            # Task0：cache 两列只认 Anthropic 正名；非布尔非负整数才入账，否则 None。
+            usage = (
+                _dict_usage_num(usage_body, "input_tokens"),
+                _dict_usage_num(usage_body, "output_tokens"),
+                _dict_usage_num(usage_body, "cache_read_input_tokens"),
+                _dict_usage_num(usage_body, "cache_creation_input_tokens"))
             text = _message_text(body)
         except MissingGatewayCredentialError as exc:
             # G-2：凭据缺失发生在发网前，只写 seq=null blocked 审计行
@@ -863,8 +928,11 @@ class ModelGateway:
             raise
         if self._billing is not None:
             self._billing.record(stage, ok=True, model=model_id,
-                                 tokens_in=usage[0], tokens_out=usage[1])
-        return text, usage
+                                 tokens_in=usage[0], tokens_out=usage[1],
+                                 tokens_cache_read=usage[2],
+                                 tokens_cache_create=usage[3])
+        # 对外契约保持 (input, output) 二元组；cache 两列只入账不透出。
+        return text, (usage[0], usage[1])
 
     # ---- 实呼校验：直 POST /v1/messages（如实记录 http_status / type=message） ----
 
@@ -873,6 +941,7 @@ class ModelGateway:
                        timeout: int = 60) -> tuple[Any, dict]:
         token, base_url = _creds()
         url = base_url.rstrip("/") + "/v1/messages"
+        # D-8：直 POST 同样不传 thinking（Task6 诊断前关闭，见 _chat_loop 注释）。
         payload = {"model": model_id, "max_tokens": max_tokens,
                    "messages": [{"role": "user", "content": content_blocks}]}
 
@@ -1072,8 +1141,8 @@ def _write_validate_doc(doc: dict) -> Path:
     out_dir = root / ts
     out_dir.mkdir(parents=True, exist_ok=True)
     raw = out_dir / "result.json"
-    raw.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(raw, 0o600)
+    # S-6：原子写 0600 收口 fsutil。
+    atomic_write_text(raw, json.dumps(doc, ensure_ascii=False, indent=2))
     latest = root / "latest"
     if latest.is_symlink() or latest.exists():
         latest.unlink()
@@ -1092,8 +1161,8 @@ def _write_failure_doc(doc: dict) -> Path:
     out_dir = root / ts
     out_dir.mkdir(parents=True, exist_ok=True)
     raw = out_dir / "FAILURE.json"
-    raw.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.chmod(raw, 0o600)
+    # S-6：原子写 0600 收口 fsutil。
+    atomic_write_text(raw, json.dumps(doc, ensure_ascii=False, indent=2))
     return raw
 
 
