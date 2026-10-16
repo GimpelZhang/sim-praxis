@@ -20,6 +20,11 @@ Gate2 卡（原生 q2_overlay.mp4 + outcome/mechanism 双结论），真实阻�
     <q2_carla>/human_gate/q2_gate.log     过程日志
     <q2_carla>/human_gate/decision.json   结构化裁决（simpraxis.q2_human_gate.v1，0600）
 
+Phase 2 Task0a（纪律 12）：真人 approve/card_form 落 decision.json 后，经
+memory_flywheel.phase1.offgraph_learning 图外通路向 phase1_learnings 补沉淀
+一行（gate2_accepted_supplementary, rung=1）；reject/异常不写。回写失败
+FATAL 退出（裁决件已保留），人工可对既有 decision.json 经该模块 CLI 补跑。
+
 退出码：0=真人 approve；3=真人 reject_with_comments（如实失败，不掩盖）；
 1=环境/证据缺失或等待异常。
 
@@ -360,6 +365,18 @@ class GateLog:
         atomic_write_text(self.path, "\n".join(self.lines) + "\n", mode=0o600)
 
 
+def _offgraph_learning_writer(decision_path: Path) -> dict:
+    """纪律 12 默认通路：真人 approve 落 decision.json 后图外补沉淀一行。
+
+    evidence_relpath=None 让 LearningStore 按双根自动换算（生产 decision.json
+    在 $SIMPRAXIS_RUN_DIR 下 → @runs/ 前缀 relpath）；测试注入 offgraph_writer
+    旁路，绝不误写真实学习表。
+    """
+    from memory_flywheel.phase1.offgraph_learning import write_offgraph_learning
+    return write_offgraph_learning(
+        decision_json=decision_path, evidence_relpath=None)
+
+
 def run(
     paths: Q2Paths,
     *,
@@ -367,6 +384,7 @@ def run(
     count_paid=None,
     ffprobe_runner=None,
     snow_probe=probe_engine_has_snow,
+    offgraph_writer=_offgraph_learning_writer,
 ) -> int:
     """发卡主流程（环境守卫在 main；测试直接调本函数注入依赖）。"""
     from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
@@ -526,6 +544,22 @@ def run(
     else:
         glog.log(f"[q2-gate] 真人打回（{grow['decision']}），意见："
                  f"{grow['human_notes']!r}；不掩盖、不重发")
+    if code == 0:
+        # Phase 2 Task0a（纪律 12）：图外补点验同责沉淀——真人 approve/card_form
+        # 后经 offgraph 通路补一行学习（gate2_accepted_supplementary, rung=1），
+        # 今后不允许再出现 0 沉淀。decision.json 已原子落盘，回写失败不得假装
+        # 成功：FATAL 退出并保留裁决件，由人工经 CLI 对既有 decision.json 补跑。
+        try:
+            learning = offgraph_writer(paths.decision_path)
+        except Exception as exc:  # noqa: BLE001
+            glog.log(f"[q2-gate] FATAL：图外学习回写失败（decision.json 已保留，"
+                     f"需手工 CLI 补沉淀：python -m memory_flywheel.phase1."
+                     f"offgraph_learning --decision {paths.decision_path}"
+                     f" --relpath <@runs/.../decision.json>）：{exc}")
+            glog.flush()
+            return 1
+        glog.log(f"[q2-gate] 图外学习回写完成（纪律 12）：id={learning['id']} "
+                 f"gate_source={learning['gate_source']} rung={learning['rung']}")
     glog.flush()
     return code
 

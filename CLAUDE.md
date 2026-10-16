@@ -88,7 +88,10 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
 - 入库：`python -m memory_flywheel.scripts.ingest_kb --rebuild`；切块常量
   TARGET_CHARS=1200/HARD_CHARS=2000，Qxx 原子块，文件级幂等替换。
 - `phase1_learnings`（12 列含 vector，复用 mpnet 不二次下载）与 kb_chunks 同库独立；
-  当前 4 行。**生产召回尚未接线（production_recall_hits=0），勿声称飞轮已闭环**——Phase 2 项。
+  当前 5 行（Phase 2 Task0a Q2 补点验经用户授权 4→5：gate2_accepted_supplementary/
+  rung=1，图外回写走 `memory_flywheel.phase1.offgraph_learning`，纪律 12；老 4 行
+  不重写，kb_chunks 恒 1542）。**生产召回尚未接线（production_recall_hits=0），勿声称
+  飞轮已闭环**——Phase 2 项。
 
 ## 常用命令
 

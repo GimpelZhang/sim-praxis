@@ -19,9 +19,11 @@
   id, text, vector, namespace, layer, run_id, track, rung, sim_engine,
   gate_source, evidence_relpath, created_at
 
-本模块**刻意不提供** ``__main__`` 写动作与删表脚本：回写只能经图节点
-（orchestrator.graph.learning.make_learning_seam）发生；新表删除需单独
-书面授权（删除守卫，计划 L538）。
+本模块**刻意不提供** ``__main__`` 写动作与删表脚本：图内回写只能经图节点
+（orchestrator.graph.learning.make_learning_seam）发生；图外运行（补点验/
+点验/烟测，Phase 2 纪律 12）经 memory_flywheel.phase1.offgraph_learning
+单一通路回写，且 accepted 行必须有真人 decision.json approve；新表删除需
+单独书面授权（删除守卫，计划 L538）。
 """
 from __future__ import annotations
 
@@ -29,7 +31,6 @@ import hashlib
 import json
 import os
 import re
-import time
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,7 @@ import pyarrow as pa
 import lancedb
 
 from memory_flywheel.embedding_selector import select_embedding
+from orchestrator.common.clock import utc_now_iso_z
 
 TABLE_NAME = "phase1_learnings"
 NAMESPACE = "phase1_learnings"          # 固定值（不进 vector_engine.NAMESPACES）
@@ -48,11 +50,18 @@ MAX_RUNG = 4
 
 # gate_source 白名单：Gate2 验收通过 / human_failure 结案（阶段来自图节点分类）。
 GATE_ACCEPTED = "gate2_accepted"
+# Phase 2 Task0a（纪律 12）：图外运行（补点验/点验/烟测）真人 Gate2 点验
+# 通过的补沉淀行。不是失败结案，故不被 _FAILURE_RE 匹配，rung 规则与
+# gate2_accepted 相同（必须 >=1；Q2 不经 Rung1-4 阶梯，按「已过最低自动化
+# 核验级」如实记 rung=1，不得记 4——Rung4 是 VLM 级）。仍走白名单枚举，
+# 不放宽为任意字符串。
+GATE_ACCEPTED_SUPPLEMENTARY = "gate2_accepted_supplementary"
 GATE_FAILURE_AGENT = "human_failure_agent_run"
 GATE_FAILURE_GATE1 = "human_failure_gate1"
 GATE_FAILURE_GATE2 = "human_failure_gate2"
 GATE_SOURCES = frozenset({
-    GATE_ACCEPTED, GATE_FAILURE_AGENT, GATE_FAILURE_GATE1, GATE_FAILURE_GATE2,
+    GATE_ACCEPTED, GATE_ACCEPTED_SUPPLEMENTARY,
+    GATE_FAILURE_AGENT, GATE_FAILURE_GATE1, GATE_FAILURE_GATE2,
 })
 _FAILURE_RE = re.compile(r"^human_failure_(agent_run|gate1|gate2)$")
 
@@ -249,7 +258,9 @@ class LearningStore:
             raise ValueError(f"{gate_source} 的 rung 必须为 0（失败也是学习），"
                              f"收到 {rung}")
         if not is_failure and rung == 0:
-            raise ValueError("gate2_accepted 的 rung 必须 >=1")
+            raise ValueError(
+                "accepted 类 gate_source（gate2_accepted/"
+                "gate2_accepted_supplementary）的 rung 必须 >=1")
         if not isinstance(sim_engine, str):
             raise ValueError("sim_engine 必须是字符串（Gate1 前失败可传 ''）")
         # 锁内适配（Task7 首条真实 Gate2 一次通过 run 取证，2026-10-15
@@ -285,7 +296,10 @@ class LearningStore:
             "sim_engine": sim_engine,
             "gate_source": gate_source,
             "evidence_relpath": rel,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            # Phase 2 Task0a 起新行统一严格 UTC Z（clock.py 唯一时钟源）；
+            # 历史 4 行的 +0000/+0800 created_at 永不重写（先删后写只在同参重放
+            # 时命中自己的 id，老行不受影响）。
+            "created_at": utc_now_iso_z(),
         }
         row["vector"] = self.embed([text])[0]
         tbl = self.table(create=True)

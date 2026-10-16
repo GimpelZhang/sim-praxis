@@ -272,6 +272,35 @@ def test_07_field_validation(store, roots):
     assert store.count() == 0
 
 
+@pytest.mark.parametrize("source", [
+    "gate2_accepted",
+    "gate2_accepted_supplementary",   # Task0a 纪律 12 图外补沉淀新值
+    "human_failure_agent_run",
+    "human_failure_gate1",
+    "human_failure_gate2",
+])
+def test_07b_gate_source_whitelist_enum(store, roots, source):
+    """Task0a：新 gate_source 进白名单枚举（非 failure、rung>=1），老 4 值语义
+    不变；任意他串仍在 test_07 被 phase1_sync 断言拒绝（不放宽任意字符串）。"""
+    from memory_flywheel.phase1.learning_store import _FAILURE_RE
+    _, ev_root = roots
+    w1 = ev_root / "runs" / "w1"
+    w1.mkdir(parents=True, exist_ok=True)
+    (w1 / "telemetry.json").write_text(
+        json.dumps({"_fixture": True}), encoding="utf-8")
+    is_failure = bool(_FAILURE_RE.match(source))
+    summary = store.add_learning(
+        run_id="w1", track="track1",
+        rung=0 if is_failure else 1, sim_engine="x", gate_source=source,
+        evidence_relpath="runs/w1/telemetry.json",
+        failure_symptom="s" if is_failure else "",
+        fix_action="f" if is_failure else "",
+        human_opinion="h" if is_failure else "",
+        effective=False if is_failure else True)
+    assert summary["gate_source"] == source
+    assert store.count() == 1
+
+
 def test_08_own_table_dim_guard(roots):
     uri, ev_root = roots
     db = lancedb.connect(str(uri))

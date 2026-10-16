@@ -266,7 +266,9 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
-    "scripts/milestone1/q2_human_gate.py": {449},
+    # Task0a 在 run() 前插入 _offgraph_learning_writer，449 → 467（纯位移，
+    # 无新增 claim/upsert；diff 已人工核对）
+    "scripts/milestone1/q2_human_gate.py": {467},
 }
 
 

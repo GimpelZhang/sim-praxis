@@ -137,14 +137,30 @@ def _factory(store, **kw):
     return _make
 
 
+class FakeOffgraphWriter:
+    """Task0a 纪律 12 接线：记录回写调用，绝不触真实学习表。"""
+
+    def __init__(self):
+        self.calls: list[Path] = []
+
+    def __call__(self, decision_path):
+        self.calls.append(Path(decision_path))
+        return {"id": "fixture-offgraph-id",
+                "gate_source": "gate2_accepted_supplementary", "rung": 1}
+
+
 # ---------------- 退出矩阵 ----------------
 
 def test_exit0_on_human_approve_card_form(site):
     store = PendingStore(site.gates_db)
+    writer = FakeOffgraphWriter()
     code = q2.run(site, gateway_factory=_factory(store),
-                  count_paid=lambda: 0, **_facts_kwargs())
+                  count_paid=lambda: 0, offgraph_writer=writer,
+                  **_facts_kwargs())
     store.close()
     assert code == 0
+    # Task0a 纪律 12：approve 后恰好回写一次，指针就是本次 decision.json
+    assert writer.calls == [site.decision_path]
     result = json.loads(site.decision_path.read_text(encoding="utf-8"))
     assert result["human_decision"]["decision"] == "approve"
     assert result["human_decision"]["source"] == "card_form"
@@ -167,13 +183,16 @@ def test_exit3_on_human_reject_card_form(site):
                          outcome=("reject", "card_form", None))
         gw_holder["gw"] = gw
         return gw
+    writer = FakeOffgraphWriter()
     code = q2.run(site, gateway_factory=factory, count_paid=lambda: 0,
-                  **_facts_kwargs())
+                  offgraph_writer=writer, **_facts_kwargs())
     assert code == 3
     result = json.loads(site.decision_path.read_text(encoding="utf-8"))
     assert result["human_decision"]["decision"] == "reject_with_comments"
     assert "真人打回意见" in result["human_decision"]["human_notes"]
     assert gw_holder["gw"].requests[0]["thread"] == THREAD
+    # Task0a：reject 不得沉淀 accepted 学习行
+    assert writer.calls == []
 
 
 def test_exit1_missing_evidence_no_gateway(site):
@@ -320,10 +339,13 @@ def test_h2_trim_passthrough_and_explanation_from_facts(site):
         gw = FakeGateway(PendingStore(site.gates_db))
         holder["gw"] = gw
         return gw
+    writer = FakeOffgraphWriter()
     code = q2.run(site, gateway_factory=factory, count_paid=lambda: 0,
-                  **_facts_kwargs())
+                  offgraph_writer=writer, **_facts_kwargs())
     assert code == 0
     req = holder["gw"].requests[0]
+    # Task0a 纪律 12：approve 路径接线恰好一次
+    assert writer.calls == [site.decision_path]
     trim = req["trim"]
     assert set(trim) == {"trim_start", "trim_seconds",
                          "contact_moment_s", "source_duration_s"}
