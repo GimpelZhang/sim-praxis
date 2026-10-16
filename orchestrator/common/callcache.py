@@ -68,8 +68,10 @@ class CallReplay:
         if rec.get("req_sha256") != fingerprint:
             return None
         usage = rec.get("usage")
+        # C2 口径：usage 必须是两个“非布尔”非负整数——bool 是 int 子类，
+        # isinstance(True, int) 为 True，故用 type(v) is int 严口径拒布尔。
         if (not isinstance(usage, list) or len(usage) != 2
-                or not all(isinstance(v, int) and v >= 0 for v in usage)):
+                or not all(type(v) is int and v >= 0 for v in usage)):
             return None
         if not isinstance(rec.get("raw"), str) or not rec.get("model"):
             return None
@@ -81,6 +83,10 @@ class CallReplay:
             usage: "tuple[int, int] | list[int]", fingerprint: str,
             ts_iso: "str | None" = None) -> None:
         """成功调用后落缓存（0600 原子写）。失败/异常路径禁止调用。"""
+        # C2 口径：入参同样拒绝布尔（bool 是 int 子类），与 get 的严口径对称。
+        if (not isinstance(usage, (list, tuple)) or len(usage) != 2
+                or not all(type(v) is int and v >= 0 for v in usage)):
+            raise ValueError("usage 必须是两个非布尔非负整数 (input_tokens, output_tokens)")
         rec = {
             "schema": SCHEMA,
             "kind": kind,

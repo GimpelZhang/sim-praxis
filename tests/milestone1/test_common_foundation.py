@@ -249,3 +249,21 @@ def test_callcache_bad_key_rejected(tmp_path: Path):
     with pytest.raises(ValueError):
         cc.put("a/b", kind="x", model="m", raw="r", usage=(1, 1),
                fingerprint="fp")
+
+
+def test_callcache_bool_usage_rejected_on_get_and_put(tmp_path: Path):
+    # C2 严口径（评审 LOW-1）：usage 必须是非布尔非负整数。bool 是 int 子类，
+    # 被篡改/手滑写成 [true, 20] 的缓存记录按 miss 处理（安全方向：正常重呼）。
+    cc = callcache.CallReplay(tmp_path / ".call_cache")
+    fp = callcache.request_fingerprint("p")
+    for bad in ([True, 20], [10, False], [True, False]):
+        rec = {"schema": callcache.SCHEMA, "model": "m", "raw": "r",
+               "usage": bad, "req_sha256": fp}
+        key = "k_" + "_".join("t" if x else "f" for x in bad)
+        (cc.dir / f"{key}.json").write_text(json.dumps(rec), encoding="utf-8")
+        assert cc.get(key, fp) is None
+    # 写路径同口径：布尔 usage 直接拒绝，绝不落盘
+    with pytest.raises(ValueError):
+        cc.put("kb", kind="x", model="m", raw="r", usage=(True, 1),
+               fingerprint=fp)
+    assert not (cc.dir / "kb.json").exists()
