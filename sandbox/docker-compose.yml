@@ -2,8 +2,19 @@ services:
   sim-sandbox:
     build:
       context: ./docker
-      dockerfile: Dockerfile
-    image: sim-praxis/sandbox:phase0
+      # 锁内适配（Task8，2026-10-15，规则8）：改用 Dockerfile.task8 离线 delta
+      # overlay——FROM 钉死 Task7 终态镜像 tag task7-base（= sha256:50b6e10…），
+      # genesis 闭包 wheel 经下方 additional_contexts bind-mount 离线装配
+      # （--no-index），wheel 不进 git 上下文/不进镜像层。起因：劣化网络下 83.5MB
+      # genesis wheel 在线构建 6 次 resume 仍 incomplete-download。从零在线构建的
+      # 规范配方仍保留在 Dockerfile（网络恢复时可直接复现全量镜像）。
+      dockerfile: Dockerfile.task8
+      additional_contexts:
+        wheels1: /mnt/caches/simpraxis/wheelhouse_task8
+        wheels2: /mnt/caches/simpraxis/wheelhouse_task8_extras
+      # 离线 overlay 不触网；host 保留仅作回退路径，不取包即无副作用。
+      network: host
+    image: sim-praxis/sandbox:phase1-task8
     container_name: sim_praxis_sandbox
     restart: "no"          # 不用 unless-stopped：GPU 必须能被显式释放
     init: true

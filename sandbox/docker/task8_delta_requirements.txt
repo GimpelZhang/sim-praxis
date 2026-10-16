@@ -1,0 +1,12 @@
+# Task8 Track2 delta overlay 闭包（锁内适配：离线 wheel 装配，规则8，2026-10-15）
+# 仅列相对 Task7 终态镜像（sim-praxis/sandbox:task7-base
+# = sha256:50b6e10df854db40ea41e33f3ed9731a9d5d35b2d9d2ccf9b9f178d8565e4bfe）
+# 的增量；全部 wheel 来自 wheelhouse_task8(_extras)，--no-index 零网络。
+# 版本口径与 requirements-container.txt Task8 段完全一致（D=A 保全部 pin /
+# D2=B′ 保留 CUDA 用户态库 12.9.86）；传递闭包由 wheelhouse 自身满足。
+genesis-world==1.3.3
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-nvjitlink-cu12==12.9.86
+Pillow==11.3.0
+pyglet==3.0.dev11
+libigl==2.6.4.dev1

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "stage": "visual_rollout",
+  "scope": "task8_track2_humanoid_dr",
+  "answer_set": ["yes", "no"],
+  "frame_layout": "6 个视频帧（首/早/中早/中/中晚/末），可能来自对照分屏视频（左右两半分别是同一时刻的两臂）。",
+  "instruction": "只根据拼图中的 6 个视频帧回答；逐题返回 yes/no 与置信度，禁止推测帧外信息。画面为侧视双足人形在平面上步行/受推：冰面条件下足部打滑与倾覆是预期物理现象，不算缺陷；只有几何/时序不自洽才算缺陷。",
+  "questions": [
+    {"id": "q1",
+     "text": "足底与地面的几何关系是否始终正常（触地时脚踩在地面线上，无陷入地面或凭空悬空）？冰面打滑时的水平滑动不算问题。",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q2",
+     "text": "躯干与双足的运动是否平滑连续，没有帧间高频抖动或像素级来回跳动（倾覆过程中的连续快速运动不算抖动）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q3",
+     "text": "画面中是否能辨认出步行/踏步行为（双足交替离地与落地）或受推后连续的倾覆过程，而不是人形全程静止/贴地滑行？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q4",
+     "text": "人形各部位是否没有非物理的瞬移/跳变（同一部位相邻帧位置突然跳到不远处）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q5",
+     "text": "人形与地面的轮廓是否保持几何一致（无形状畸变、破碎、闪烁或穿模拉线）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q6",
+     "text": "末帧几何是否正常（站立者足踩地面线；若发生倾覆，躯干贴近地面且与地面接触，而非悬空或埋入）？",
+     "good_answer": "yes",
+     "defect_if": "no"}
+  ],
+  "low_confidence_flag": "low_confidence",
+  "scoring": {
+    "defect_answer": "任一 defect_if 方向作答即记该题检出缺陷",
+    "n_defects": "defect_if 命中的题数",
+    "note": "冰面滑移/跌倒属于实验预期物理结果，不是缺陷；本 rubric 只查渲染/几何/时序不自洽。Rung4 永不单独放行；规则/VLM 分歧仅升级人工（D8）。"
+  }
+}

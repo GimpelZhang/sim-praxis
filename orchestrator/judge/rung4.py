@@ -32,10 +32,12 @@ def load_rubric() -> dict:
 
 
 def build_prompt(rubric: dict) -> str:
+    layout = rubric.get("frame_layout",
+                        "2×3 抽帧拼图（首/接触-5帧/接触/接触+5帧/中/末）。")
     lines = [
         "你是具身智能仿真视频的物理一致性核查员。下面是同一段 rollout 的",
-        "2×3 抽帧拼图（首/接触-5帧/接触/接触+5帧/中/末）。逐题作答，只允许",
-        "从 yes/no 中二选一；看不清楚就把 low_confidence 置 true。",
+        layout,
+        "逐题作答，只允许从 yes/no 中二选一；看不清楚就把 low_confidence 置 true。",
         "严格输出 JSON（不要解释、不要 markdown 围栏）：",
         '{"answers":[{"id":"q1","answer":"yes"}, ...], "low_confidence": false}',
         "",

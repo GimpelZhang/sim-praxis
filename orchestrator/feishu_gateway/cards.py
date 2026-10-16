@@ -100,13 +100,196 @@ def _yn(ok: Any) -> str:
     return "是" if bool(ok) else "否"
 
 
+def _task8_batch_metrics_md(metrics: dict[str, Any]) -> str:
+    """Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）的卡片渲染。
+
+    与 Task7 单 rollout 完全不同的语义：上半屏判证据可信度（Rung1–3 文件级
+    三级判定 + 两处分屏 Rung4），下半屏原样展示组对照与预注册假设状态。
+    L571：矛盾/不可分辨本身是结论，卡片不设「实验组必须更好」的褒贬措辞。
+    """
+    rungs = metrics.get("rungs") if isinstance(metrics.get("rungs"), dict) else {}
+    run_id = metrics.get("run_id") or "-"
+    lines = [f"**Rung 1–4 验收指标 · Task8 DR 对照 batch**（run `{run_id}`，"
+             f"引擎 `{metrics.get('engine', '-')}`）"]
+
+    errs = metrics.get("schema_errors") or []
+    vector = metrics.get("vector") if isinstance(metrics.get("vector"), dict) else {}
+    if errs:
+        lines.append("")
+        lines.append("🚧 batch 结构校验未通过，Rung1–3 一律保守判负：")
+        for e in list(errs)[:8]:
+            lines.append(f"  - {e}")
+        lines.append("")
+        lines.append("Rung1–3：" + " / ".join(
+            f"R{i} {_tick(vector.get(f'rung{i}'))}" for i in (1, 2, 3)))
+        return "\n".join(lines)
+
+    r1 = rungs.get("rung1") if isinstance(rungs.get("rung1"), dict) else {}
+    c1 = r1.get("checks") if isinstance(r1.get("checks"), dict) else {}
+    cal = c1.get("calibration") if isinstance(c1.get("calibration"), dict) else {}
+    sel = cal.get("selected_window") if isinstance(cal.get("selected_window"), dict) else {}
+    if c1:
+        lines += [
+            "",
+            f"{_tick(r1.get('pass'))} **Rung1 产物齐套 / 全部有限 / 标定件**",
+            f"  - 九 run telemetry 齐套：{_tick(c1.get('artifacts_complete'))}"
+            f"（n_runs={c1.get('n_runs')}，seeds={c1.get('seeds')}）；缺件："
+            f"{c1.get('missing_artifacts') or '无'}",
+            f"  - series/outcomes 全部数值有限：{_tick(c1.get('all_finite'))}",
+            f"  - 推力选窗标定件 v2：{sel.get('push_n_N', '-')} N × "
+            f"{sel.get('push_dur_s', '-')} s；跨进程逐位复验 "
+            f"all_bit_exact={_tick(cal.get('all_bit_exact'))}",
+        ]
+    else:
+        lines += ["", f"{_tick(r1.get('pass'))} **Rung1**（无明细）"]
+
+    r2 = rungs.get("rung2") if isinstance(rungs.get("rung2"), dict) else {}
+    c2 = r2.get("checks") if isinstance(r2.get("checks"), dict) else {}
+    if c2:
+        diffs = c2.get("disagreements") or []
+        lines += [
+            "",
+            f"{_tick(r2.get('pass'))} **Rung2 独立重算对质**（不信脚本自报："
+            "从 50 Hz series 重算跌倒帧/滑移/峰速/接触力，对质 outcomes 与 CSV）",
+            f"  - 重算分歧 run 数：{len(diffs)}"
+            + ("" if not diffs else f"（{[d.get('run_id') for d in diffs][:4]}）"),
+        ]
+    else:
+        lines += ["", f"{_tick(r2.get('pass'))} **Rung2**（无明细）"]
+
+    r3 = rungs.get("rung3") if isinstance(rungs.get("rung3"), dict) else {}
+    c3 = r3.get("checks") if isinstance(r3.get("checks"), dict) else {}
+    if c3:
+        violations = c3.get("violations") or []
+        lines += [
+            "",
+            f"{_tick(r3.get('pass'))} **Rung3 物理界 / 扰动交付 / 时间轴**",
+            f"  - 滑移速度界 {c3.get('slip_v_bound_mps')} m/s；接触力界 "
+            f"{c3.get('contact_force_bound_N')} N（DR Kp 包络另有 20 kN 先验界）",
+            f"  - 时间轴等距 dt={c3.get('timeline_regular_dt_s')} s；扰动交付："
+            f"{c3.get('disturbance')}",
+            f"  - 违规 {len(violations)} 条："
+            + ("无" if not violations else f"{violations[:3]}"),
+        ]
+    else:
+        lines += ["", f"{_tick(r3.get('pass'))} **Rung3**（无明细）"]
+
+    # ---- 组对照（科学结论段；原样展示，不做褒贬）----
+    groups = metrics.get("groups") if isinstance(metrics.get("groups"), dict) else {}
+    contrast = metrics.get("contrast") if isinstance(metrics.get("contrast"), dict) else {}
+    if groups:
+        name_zh = {"normal": "normal 正常地面 μ=0.7（对照）",
+                   "ice_nominal": "ice_nominal 冰面 μ=0.05",
+                   "ice_dr": "ice_dr DR 包络"}
+        lines += ["", "**三臂组统计（每臂 3 种子；跌倒帧 null=存活）**"]
+        for arm in ("normal", "ice_nominal", "ice_dr"):
+            g = groups.get(arm)
+            if not isinstance(g, dict):
+                continue
+            lines.append(
+                f"  - {name_zh.get(arm, arm)}：成功率 "
+                f"{g.get('success_rate')}（跌倒 {g.get('n_fell')}/{g.get('n')}），"
+                f"跌倒帧 {g.get('fall_frames')}；推力后峰速 max/均值 "
+                f"{g.get('postpush_vmax_max_mps')}/{g.get('postpush_vmax_mean_mps')} "
+                f"m/s；滑移距离均值 {g.get('slip_dist_mean_m')} m；"
+                f"最大倾角 {g.get('tilt_max_deg_max')}°")
+            if arm == "ice_dr" and g.get("mu_per_seed") is not None:
+                lines.append(f"    - 各籽实际 μ：{g.get('mu_per_seed')}")
+    if contrast:
+        dr = contrast.get("dr_vs_nominal") if isinstance(
+            contrast.get("dr_vs_nominal"), dict) else {}
+        lines += [
+            "",
+            "**预注册对照（判据写于正式 batch 之前）**",
+            f"  - 对照组三籽全部存活（control_stands）："
+            f"{_yn(contrast.get('control_stands'))}",
+            f"  - 冰/干 推力后峰速组均比 "
+            f"{contrast.get('ice_over_normal_postpush_ratio')}，预注册界 ≥"
+            f"{contrast.get('preregistered_ratio')}（ordered_slip）："
+            f"{_yn(contrast.get('ordered_slip'))}",
+            f"  - DR vs 名义冰面：跌倒更少 {_yn(dr.get('fewer_falls'))}，"
+            f"峰速更低 {_yn(dr.get('lower_postpush_slip'))}，"
+            f"方向 **{dr.get('direction', '-')}**",
+            f"  - 假设状态 **{contrast.get('hypothesis_status', '-')}**",
+            f"  - L571：{contrast.get('l571_note', '')}",
+        ]
+
+    dr_env = metrics.get("dr_envelope") if isinstance(
+        metrics.get("dr_envelope"), dict) else {}
+    if dr_env:
+        lines.append("")
+        lines.append("DR 包络（摘要）：" + "；".join(
+            f"{k}={v}" for k, v in list(dr_env.items())[:6]))
+    disturbance = metrics.get("disturbance") if isinstance(
+        metrics.get("disturbance"), dict) else {}
+    if disturbance:
+        lines.append("扰动参数（摘要）：" + "；".join(
+            f"{k}={v}" for k, v in list(disturbance.items())[:6]))
+
+    # ---- Rung4：两张对照分屏各一次六题核片 ----
+    r4 = rungs.get("rung4")
+    if not isinstance(r4, dict):
+        r4 = metrics.get("rung4") if isinstance(metrics.get("rung4"), dict) else None
+    lines.append("")
+    if isinstance(r4, dict):
+        lines.append(f"**Rung4 视觉模型独立核片**（两张对照分屏各 6 题；"
+                     f"mode={r4.get('mode')}，只给意见，永不单独放行）")
+        status, mode = r4.get("status"), r4.get("mode")
+        if status == "uncalibrated" or mode == "uncalibrated":
+            lines.append("  - 未标定：本次未发视觉判定（零网络），"
+                         "以 Rung1–3 规则 + 你本人看分屏为准")
+        elif status == "vlm_error":
+            lines.append("  - ⚠️ 视觉模型调用失败（不伪造成通过），以你本人看片为准")
+        else:
+            n_clean = (r4.get("n_items", 0) or 0) - (r4.get("n_defects", 0) or 0)
+            lines.append(
+                f"  - 两分屏共 {r4.get('n_items')} 道原子题：{n_clean} 未见缺陷，"
+                f"报缺陷 {r4.get('n_defects')}；低置信：{_yn(r4.get('low_confidence'))}")
+            for sp in r4.get("splits", []):
+                lines.append(
+                    f"    - `{sp.get('split')}`：status={sp.get('status')}，"
+                    f"缺陷 {sp.get('n_defects')}，低置信 {_yn(sp.get('low_confidence'))}")
+            if mode == "record_only":
+                lines.append("  - 当前为 record_only 标定模式：VLM 结果仅展示留痕，"
+                             "不参与任何自动放行，本 Gate2 完全由你裁决")
+            if r4.get("disagreement"):
+                lines.append(f"  - ⚠️ 规则/视觉分歧（{r4.get('disagreement')}）："
+                             "以 Rung1–3 规则为准，由你裁决（D8）")
+    else:
+        lines.append("**Rung4 视觉模型独立核片**：本次无结果")
+
+    rules_pass = metrics.get("rules_pass")
+    lines += [
+        "",
+        f"**Rung1–3 证据可信度汇总：{_tick(rules_pass)}**"
+        f"（R1 {_tick(vector.get('rung1'))} / R2 {_tick(vector.get('rung2'))} "
+        f"/ R3 {_tick(vector.get('rung3'))}）。Rung1–3 只回答证据是否可信；"
+        "DR 是否改善由上方 contrast 原样呈现，矛盾按 L571 由你裁决。",
+    ]
+    artifacts = metrics.get("artifacts") if isinstance(
+        metrics.get("artifacts"), dict) else {}
+    if artifacts:
+        wd = metrics.get("workdir")
+        lines.append(f"证据目录：{wd or '（batch workdir）'}；CSV "
+                     f"`{artifacts.get('csv')}`、summary `{artifacts.get('summary')}`"
+                     f"、拼图 `{artifacts.get('collage')}`")
+    banner = metrics.get("banner")
+    if banner:
+        lines.append(f"⚠️ {banner}")
+    return "\n".join(lines)
+
+
 def _rungs_metrics_md(metrics: dict[str, Any]) -> "str | None":
     """Task5/7 嵌套 metrics（metrics['rungs'].rungN.pass/checks）的自解释渲染。
 
     真人 Gate2 打回逐字要求（2026-10-15）：「指标不能全是 -」。这里只读真实
     判定结果，不出任何指标字面量；schema 失败时 rungs 只有 pass，按结构判负展示。
     无嵌套 rungs 的旧式扁平 metrics 返回 None，由调用方走扁平兜底。
+    Task8 Track2 batch 指标（metrics_kind=task8_gait_batch）走独立渲染器：
+    三臂组统计 + 预注册对照与单 rollout 语义不同，不可复用 Task7 明细。
     """
+    if metrics.get("metrics_kind") == "task8_gait_batch":
+        return _task8_batch_metrics_md(metrics)
     rungs = metrics.get("rungs")
     if not isinstance(rungs, dict):
         return None

@@ -46,6 +46,7 @@ from orchestrator.graph.topology import export_svg, export_text
 
 RECURSION_LIMIT = 25  # 契约 L487
 TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 stage 批次）
+TASK8 = 8             # Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）
 
 
 def _last_event(state: dict, kind: str) -> "dict | None":
@@ -108,6 +109,9 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
         if args.task == TASK7:
             from orchestrator.graph.task7 import build_gate2_explanation
             explanation = build_gate2_explanation(state, rec)
+        elif args.task == TASK8:
+            from orchestrator.graph.task8 import build_gate2_explanation
+            explanation = build_gate2_explanation(state, rec)
         return feishu.request_gate2_approval(
             thread, title, state["metrics"],
             video_path=rec.get("video_path"),
@@ -119,24 +123,32 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     # Task6：学习回写走同库独立新表 phase1_learnings（mpnet 768 复用，0 付费）
     learning = make_learning_seam(LearningStore())
 
-    # Task7 Track1：注入真实 agent_run（容器/子进程实跑场景脚本，coding 批次）
-    # 与真实 evaluate（Rung1–3 文件判定 + Rung4 视频实呼，visual 批次）。
-    # 三 stage 凭据相互独立：direction 走外层 billing_context（macro 批次），
-    # coding/visual 在各自接缝内开自己的 billing_context(task=7)；非 Task7
-    # 保持 Task3 语义（接缝为 None，真实走到即 TaskSeamError / file_backed）。
+    # Task7 Track1 / Task8 Track2：注入真实 agent_run（容器/子进程实跑场景
+    # 脚本，coding 批次）与真实 evaluate（Rung1–3 文件判定 + Rung4 视频实呼，
+    # visual 批次）。三 stage 凭据相互独立：direction 走外层 billing_context
+    # （macro 批次），coding/visual 在各自接缝内开自己的 billing_context
+    # （task=7/8）；其余任务保持 Task3 语义（接缝为 None，真实走到即
+    # TaskSeamError / file_backed）。
     agent_run_seam_impl = None
     evaluate_seam_impl = None
-    if args.task == TASK7:
+    if args.task in (TASK7, TASK8):
         if not args.coding_batch_id or not args.visual_batch_id:
             raise SystemExit(
-                "Task7 必须同时提供 --coding-batch-id 与 --visual-batch-id；"
-                "--batch-id 为 direction 的 macro_ideation 批次")
+                f"Task{args.task} 必须同时提供 --coding-batch-id 与 "
+                "--visual-batch-id；--batch-id 为 direction 的 macro_ideation 批次")
         from orchestrator.agent_runner.runner import (
             AgentRunner, agent_run_seam as _agent_run_seam,
         )
-        from orchestrator.graph.task7 import (
-            make_evaluate_seam, make_spec_factory,
-        )
+        if args.task == TASK8:
+            # Task8 spec 跑 batch 子命令（三臂×3 种子聚合产物）；evaluate 走
+            # gait_rungs 三级文件判定 + 两张分屏的步态 Rung4。
+            from orchestrator.graph.task8 import (
+                make_evaluate_seam, make_spec_factory,
+            )
+        else:
+            from orchestrator.graph.task7 import (
+                make_evaluate_seam, make_spec_factory,
+            )
         runner = AgentRunner(gateway, VectorEngine())
         spec_factory = make_spec_factory(
             thread, args.coding_batch_id, task_title=title)
@@ -219,11 +231,12 @@ def main(argv: "list[str] | None" = None) -> int:
         p.add_argument("--batch-id", required=True, dest="batch_id",
                        help="direction/macro_ideation 批次凭据")
         p.add_argument("--task", type=int, default=2,
-                       help="计费任务号（Task2 方向=2，Task7 Track1=7）")
+                       help="计费任务号（Task2 方向=2，Task7 Track1=7，"
+                            "Task8 Track2=8）")
         p.add_argument("--coding-batch-id", dest="coding_batch_id", default=None,
-                       help="Task7 coding_debug 批次凭据（task=7 必填）")
+                       help="coding_debug 批次凭据（task=7/8 必填）")
         p.add_argument("--visual-batch-id", dest="visual_batch_id", default=None,
-                       help="Task7 visual_rollout 批次凭据（task=7 必填）")
+                       help="visual_rollout 批次凭据（task=7/8 必填）")
         p.add_argument("--task-title", default=None)
 
     p_run = sub.add_parser("run", help="首次运行（gate 处阻塞等真人）")

@@ -36,12 +36,29 @@ RUN set -eux; \
     || python3 -m pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1
 
 # 4) 渲染探针依赖
+# 锁内适配（2026-10-15 Task8 构建实测，规则8）：
+# (a) BuildKit 默认 bridge 命名空间内 pip 取清华索引整体失败
+#     （numpy==1.26.4 from versions: none），--network host 直连同机实测
+#     /simple/ 200（1.3MB/23s）→ compose build.network=host；
+# (b) 裸 ARG 不会成为 pip 环境变量，必须在 RUN 行内展开为命令前缀 env，
+#     否则 PIP_DEFAULT_TIMEOUT/PIP_RETRIES 对 pip 不生效（pip 15s 默认超时
+#     下大索引页反复中断）；
+# (c) 代理（127.0.0.1:10900）长会话传输中途停滞，构建命令显式 unset 代理
+#     走直连。以上只影响构建取包路径，不改镜像内容/不松 pin。
+ARG PIP_DEFAULT_TIMEOUT=120
+ARG PIP_RETRIES=8
 COPY requirements-container.txt /tmp/requirements-container.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements-container.txt
+RUN PIP_DEFAULT_TIMEOUT=$PIP_DEFAULT_TIMEOUT PIP_RETRIES=$PIP_RETRIES \
+    python3 -m pip install --no-cache-dir -r /tmp/requirements-container.txt
 
-# 4b) m-d：容器侧依赖一致性在构建期锁死——pip check 零冲突 + 关键包精确版本断言，
+# 4b) m-d：容器侧依赖一致性在构建期锁死——关键包精确版本断言，
 #     防止容器内隐式升级（如 numpy 2.x）导致探针/torch 运行期才爆。
-RUN python3 -m pip check
+# Task8 D2（用户书面裁定 B′，2026-10-15）：torch 2.4.1 精确钉 nvrtc/nvjitlink
+#     ==12.4.99 与 gs-madrona 0.0.10 要求 >=12.8 的元数据矛盾在任一方向都无法
+#     让 pip check 归零；终态 12.9.86（双向运行时实测等价），构建期改白名单：
+#     仅允许这两条已知 torch 冲突，任何其他冲突即失败。
+COPY pip_check_whitelist.py /tmp/pip_check_whitelist.py
+RUN python3 /tmp/pip_check_whitelist.py
 # Task7：追加 mujoco/mani_skill/sapien 精确版本断言（探针 attempt2 钉死，只加不放）
 RUN python3 -c "import numpy, imageio, OpenGL; \
     assert numpy.__version__ == '1.26.4', numpy.__version__; \
@@ -54,6 +71,22 @@ RUN python3 -c "import mujoco, mani_skill, sapien, gymnasium; \
     assert sapien.__version__ == '3.0.3', sapien.__version__; \
     assert gymnasium.__version__ == '1.4.0', gymnasium.__version__; \
     print('container task7 versions OK')"
+# Task8：genesis-world 1.3.3 闭包版本断言。锁内适配（2026-10-15 构建实测）：
+# 构建期 RUN 无 GPU/显示设备，import genesis 会经 pyglet 触发
+# "'NoneType' object has no attribute 'Window'"，故只用 importlib.metadata 断言；
+# 真正 import genesis/gs_madrona/igl + 建场/接触/EGL 出帧由运行期探针 verify，
+# 见 sandbox/probes/probe_genesis.py。
+RUN python3 -c "import importlib.metadata as m; \
+    assert m.version('genesis-world') == '1.3.3', m.version('genesis-world'); \
+    assert m.version('gs-madrona') == '0.0.10'; \
+    assert m.version('quadrants') == '1.3.0'; \
+    assert m.version('numba') == '0.68.0'; \
+    assert m.version('nvidia-cuda-nvrtc-cu12') == '12.9.86'; \
+    assert m.version('nvidia-nvjitlink-cu12') == '12.9.86'; \
+    assert m.version('pillow') == '11.3.0'; \
+    assert m.version('pyglet') == '3.0.dev11'; \
+    assert m.version('libigl') == '2.6.4.dev1'; \
+    print('container task8 versions OK')"
 
 # 5) NVIDIA 无头渲染声明 + 镜像/网络默认
 # 注意：HF_TOKEN 绝不作为 --build-arg 传入、绝不写进镜像层（m11）；

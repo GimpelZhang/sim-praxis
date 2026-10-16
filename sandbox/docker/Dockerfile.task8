@@ -1,0 +1,47 @@
+# Dockerfile.task8 —— Task8 Track2 Genesis delta overlay（锁内适配：离线 wheel 装配）
+# 规则8（版本与网络）+ Task8 决策 D=A（genesis-world 1.3.3 保全部 pin）/
+# D2=B′（CUDA 用户态库 12.9.86，torch 两条元数据冲突白名单放行）。
+#
+# 为什么不是主 Dockerfile 在线追加层（2026-10-15 实测证据 phase1/task8_track2/build/）：
+#   劣化网络下 genesis 83.5MB wheel 经清华源连续 6 次 resume 后 incomplete-download
+#   （33.0/83.5MB，"This is an issue with network connectivity, not pip"）；
+#   build.network=host + pip 超时/重试 ARG 仍不稳定。改为：宿主侧逐叶 wheel 下载
+#   （wheelhouse_task8 47 文件 709MB + wheelhouse_task8_extras 15 闭包补缺），
+#   容器内 --no-index 离线装配。该闭包先在 throwaway 容器全量验证
+#   （INSTALL_RC=0 / 九版本断言 / imports OK / pip check 白名单 0 → OVERLAY_PROBE_OK）。
+#
+# 基线钉死：本地 tag sim-praxis/sandbox:task7-base（= 下方 sha256，构建前由
+#   docker tag 50b6e10df854... sim-praxis/sandbox:task7-base 建立；
+#   FROM 不写浮动 tag phase0，避免 delta 叠 delta）。
+# wheel 经 BuildKit additional build context（compose 里 additional_contexts）
+#   bind-mount 进 RUN，709MB 不进镜像层、不进 git 上下文（仓库 10MB 红线）。
+# pygltflib 1.16.0 上游只发 sdist：--no-build-isolation 复用镜像内
+#   setuptools/wheel 本地构建（throwaway 已证），不需网络取构建依赖。
+FROM sim-praxis/sandbox:task7-base
+
+COPY task8_delta_requirements.txt /tmp/t8_delta_req.txt
+COPY pip_check_whitelist.py /tmp/pip_check_whitelist_task8.py
+
+RUN --mount=type=bind,from=wheels1,target=/wheels1 \
+    --mount=type=bind,from=wheels2,target=/wheels2 \
+    python3 -m pip install --no-cache-dir --no-index \
+        --find-links /wheels1 --find-links /wheels2 \
+        --no-build-isolation -r /tmp/t8_delta_req.txt
+
+# Task8 九项版本断言（与主 Dockerfile Task8 块逐项相同，只加不放）
+# 锁内适配（2026-10-15 构建实测）：构建期 RUN 无 GPU/显示设备，`import genesis`
+# 会经 pyglet 触发 "'NoneType' object has no attribute 'Window'"。故构建期只做
+# importlib.metadata 版本断言（不 import 图形栈）；真正 import genesis/gs_madrona/
+# igl + 建场/接触/EGL 出帧由运行期 sandbox/probes/probe_genesis.py 把关。
+RUN python3 -c "import importlib.metadata as m; \
+    exp = {'genesis-world': '1.3.3', 'gs-madrona': '0.0.10', 'quadrants': '1.3.0', \
+      'numba': '0.68.0', 'nvidia-cuda-nvrtc-cu12': '12.9.86', \
+      'nvidia-nvjitlink-cu12': '12.9.86', 'pillow': '11.3.0', \
+      'pyglet': '3.0.dev11', 'libigl': '2.6.4.dev1'}; \
+    got = {k: m.version(k) for k in exp}; \
+    bad = {k: (got[k], exp[k]) for k in exp if got[k] != exp[k]}; \
+    assert not bad, bad; \
+    print('container task8 overlay versions OK')"
+
+# D2 白名单：构建期锁死，仅允许 torch 2.4.1 与 12.9.86 两库的已知元数据冲突
+RUN python3 /tmp/pip_check_whitelist_task8.py

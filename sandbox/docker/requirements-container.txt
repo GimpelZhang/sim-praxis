@@ -13,3 +13,21 @@ sapien==3.0.3
 mplib==0.1.1
 pytorch-kinematics==0.7.6
 gymnasium==1.4.0
+
+# Task8 Track2（2026-10-15 追加不松既有 pin；决策 D-T8-GENESIS-VERSION=A
+# genesis-world 1.3.3 保全部 pin，D2-T8-CUDA-USERSPACE-LIBS=B′ 保留 CUDA
+# 用户态库 12.9.86；证据 phase1/task8_track2/install_compat/）：
+# Q1 Genesis 结冰/油污 DR 对照实验。闭包经 --no-index dry-run + 真 A800
+# 容器实测（dryrun133_report.json、genesis_probe_129.json）。
+# 必须显式钉的四条传递依赖：
+# - nvidia 两库 12.9.86：gs-madrona==0.0.10（genesis 硬钉）要求 >=12.8，
+#   torch 2.4.1 METADATA 精确钉 ==12.4.99 的两条 pip check 冲突经 D2 以
+#   Dockerfile 白名单口径记录在案（仅允许这两条，见 pip_check_whitelist.py）；
+# - Pillow 11.3.0：moviepy==2.2.1 要求 pillow<12,>=9.2（Task7 时 12.3.0 被下拉）；
+# - pyglet/libigl 钉 PyPI 实际取到的 dev 版本（闭包解析即 dev1/dev11）。
+genesis-world==1.3.3
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-nvjitlink-cu12==12.9.86
+Pillow==11.3.0
+pyglet==3.0.dev11
+libigl==2.6.4.dev1
