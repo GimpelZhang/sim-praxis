@@ -39,11 +39,14 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
    `ModelGateway.call("macro_ideation"|"coding_debug"|"visual_rollout", ...)`，
    禁止直填模型 ID。macro/coding 两阶段视觉未测，禁止向其发 image block；视觉唯一入口
    `call_visual` 硬绑 visual_rollout。
-2. **付费调用有预算**：经方舟的实呼都计费；账套 Phase 0 用 8 次、Phase 1 后全局 **29/36**
-   常态（硬顶 48，余 7），失败/发网前失败也占 seq。新的实呼/重验批次须用户书面批准、
-   逐次 ledger 记录；单测一律 monkeypatch 禁止真实联网，付费测试带 paid marker +
-   `SIMPRAXIS_ALLOW_PAID=1` 首行守卫，收尾跑 `pytest tests -q -k "not test_04" -m "not paid"`。
-   读 ledger 先看 `ts_iso` 时区后缀（历史行 +0000/+0800 混写）。
+2. **付费调用有预算（2026-10-16 起授权自治）**：经方舟的实呼都计费；账套 Phase 0 用 8 次、
+   Phase 1 台账 29/36（另有 3 次 test_04 误触，见 P1 Complete 事故补记）。**各阶段/Task 的
+   实呼批次与预算上限（含提高项目总预算）不再需要报用户批准，由 Agent 自主决定**；但逐次
+   ledger 记账、失败/发网前失败也占 seq、批次批准件落 `quota/approvals/`、完成时如实汇报
+   用量等纪律不变。单测一律 monkeypatch 禁止真实联网，付费测试带 paid marker +
+   `SIMPRAXIS_ALLOW_PAID=1` 首行守卫（test_04 目前无守卫，勿裸跑），收尾跑
+   `pytest tests -q -k "not test_04" -m "not paid"`。读 ledger 先看 `ts_iso` 时区后缀
+   （历史行 +0000/+0800 混写）。模型 ID 变更仍按规则 1 必须请示，本授权不含模型变更。
 3. **KB 仓永远只读**：不提交、不修改；HEAD 钉死 `aac53313c620efa6217fd51a55834b006d78e689`
    （preflight/ingest/e2e 三处断言）；kb_chunks 1542 行/104 Q 块基线不变。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
