@@ -48,8 +48,12 @@ def _load_script(name: str):
 
 
 @pytest.fixture(autouse=True)
-def _fixture_solutions_root(monkeypatch):
-    # 默认把内容层根钉到引擎仓合成 fixture，活 KB 测试自行显式覆盖。
+def _fixture_solutions_root(request, monkeypatch):
+    # 合成 fixture env 只对引擎纯测（1-4、9）生效；kb_integration 活库测试必须
+    # 走真实 $KB_ROOT/solutions——否则 ingester 按 env 发现合成方案，先删后写
+    # 会把活 solution_chunks 替换成 fixture 块（QA 实测 82→14 写穿事故）。
+    if "kb_integration" in request.keywords:
+        return
     monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT", str(FIXTURE_SOLUTIONS))
 
 
@@ -224,6 +228,14 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
         "track2_questions/01_ice_floor_humanoid_dr",
         "track2_questions/02_lidar_weather"}
     assert set(df["kind"].unique()) == {"readme", "manifest", "code"}
+    # 显式 kb_root 必须钉死内容层为活 KB/solutions（env 改道 fail-closed），
+    # 且每方案块数等于真实内容口径（fixture 合成方案仅 3/3/3/5，可直接揭穿写穿）。
+    assert ing.solutions_dir.resolve() == (kb / "solutions").resolve()
+    assert df.groupby("solution_id").size().sort_index().to_dict() == {
+        "track1_tools/01_maniskill_pushcube": 15,
+        "track1_tools/02_mujoco_contact_push": 10,
+        "track2_questions/01_ice_floor_humanoid_dr": 22,
+        "track2_questions/02_lidar_weather": 35}
 
     # 幂等重跑（本工具设计语义）：solution_chunks 行数不翻倍，老两表冻结
     total_before = ing.count()
@@ -347,6 +359,20 @@ def test_bundle_verify_roundtrip(tmp_path, monkeypatch):
     mp.write_text(json.dumps(tampered, ensure_ascii=False), encoding="utf-8")
     problems = vb.verify_bundle(core, sim_root=REPO_ROOT)
     assert any("core 包表集" in p for p in problems), problems
+
+    # 10. 构造期内容层改道守卫（QA 实测写穿事故的固化）：显式 kb_root 与
+    # SIMPRAXIS_SOLUTIONS_ROOT 不一致必须 fail-closed，且发生在任何 mkdir/写之前。
+    from memory_flywheel.scripts.ingest_solutions import (
+        SolutionIngestError, SolutionIngester)
+    other = tmp_path / "elsewhere" / "solutions"
+    other.mkdir(parents=True)
+    monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT", str(other))
+    kb_other = tmp_path / "kbother"
+    (kb_other / "solutions").mkdir(parents=True)
+    uri_dst = tmp_path / "must_not_be_created" / "lancedb"
+    with pytest.raises(SolutionIngestError, match="内容层指向冲突"):
+        SolutionIngester(kb_root=kb_other, uri=str(uri_dst))
+    assert not uri_dst.exists(), "fail-closed 不得在拒绝前创建任何数据路径"
 
     # 集成开关 + 活数据/活资产包都在场时，追加活 extended 包 verify（lead 实跑
     # bundle 后必过）；条件不满足时仅本块 no-op，合成往返断言始终执行、永不跳过。

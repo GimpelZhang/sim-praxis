@@ -89,14 +89,36 @@ def _chunks_for_file(rel: str, raw: bytes) -> list[tuple[int, str, str]]:
 class SolutionIngester:
     def __init__(self, *, kb_root: Path | None = None,
                  solutions_dir: Path | None = None, uri: str | None = None):
-        self.solutions_dir = solutions_dir or solutions_root()
-        if kb_root is not None:
+        # 内容层解析优先级（Task0b QA 修复：防 env 改道把合成 fixture 先删后写
+        # 写穿活 solution_chunks）：显式 solutions_dir > 显式 kb_root（钉死
+        # kb_root/solutions）> env SIMPRAXIS_SOLUTIONS_ROOT。
+        if solutions_dir is not None:
+            self.solutions_dir = Path(solutions_dir)
+            if kb_root is not None:
+                self.kb_root = Path(kb_root)
+            elif self.solutions_dir.name == "solutions":
+                # 显式给了 solutions 目录（彩排/fixture）：KB 根即其上一级
+                self.kb_root = self.solutions_dir.parent
+            else:
+                self.kb_root = Path(os.environ.get("KB_ROOT", str(DEFAULT_KB_ROOT)))
+        elif kb_root is not None:
             self.kb_root = Path(kb_root)
-        elif self.solutions_dir.name == "solutions":
-            # 显式给了 solutions 目录（彩排/fixture）：KB 根即其上一级
-            self.kb_root = self.solutions_dir.parent
+            self.solutions_dir = self.kb_root / "solutions"
         else:
-            self.kb_root = Path(os.environ.get("KB_ROOT", str(DEFAULT_KB_ROOT)))
+            self.solutions_dir = solutions_root()
+            if self.solutions_dir.name == "solutions":
+                self.kb_root = self.solutions_dir.parent
+            else:
+                self.kb_root = Path(os.environ.get("KB_ROOT", str(DEFAULT_KB_ROOT)))
+        # fail-closed：env 与显式解析不一致即拒绝（典型险情：测试 autouse fixture
+        # 把 SIMPRAXIS_SOLUTIONS_ROOT 指到合成 fixture，而 kb_root 是活库）。
+        env_solutions = os.environ.get("SIMPRAXIS_SOLUTIONS_ROOT")
+        if env_solutions and \
+                Path(env_solutions).resolve() != self.solutions_dir.resolve():
+            raise SolutionIngestError(
+                f"内容层指向冲突：解析结果 {self.solutions_dir}，但 "
+                f"SIMPRAXIS_SOLUTIONS_ROOT={env_solutions}（拒绝按 env 改道，"
+                "防止合成/异源内容先删后写写穿活 solution_chunks）")
         self.uri = uri or os.environ.get(
             "SIMPRAXIS_LANCEDB_URI",
             str(self.kb_root / "data" / "lancedb"))
