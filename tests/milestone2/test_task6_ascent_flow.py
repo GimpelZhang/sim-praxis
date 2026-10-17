@@ -6,9 +6,12 @@ task6.py 工厂与 V2 track 脚本是 Task6 出生件，出生前可锁定的 3 
 
   本批（3 测）：
   1. test_task6_thread_uses_ascent_classifier
-     图节点口径：initial_state(thread_id=t6-genesis-ascent...) 经
-     node_classify(state, GraphDeps(v1_index=夹具dict)) 判 ascent；钉死跨线程
-     归并（Task6 新线程复用 V1 t8 档案，分类只按 track+题面 sha）。
+     真实双线程口径：V1 档案登记 thread_id=t8-genesis-20261016a（与生产
+     v1_index.json 同构），Task6 运行线程 t6-genesis-ascent-20261017a。
+     initial_state(t6…) 经 node_classify(state, GraphDeps(v1_index=夹具dict))
+     判 ascent，v1_archive 归并回 t8 档案；classify_run 只按 track+题面
+     逐字+sha 命中、从不读 thread_id（payload 改任意线程值结果逐字段相等）。
+     若回归成按线程过滤，Task6 会静默 standard 白烧 macro（Task2 C1 同类面）。
   2. test_q1_contradiction_not_overwritten
      Q1 红线（硬规则 7）：冻结 V1 workdir 经 evaluate_batch 独立重算捕获的
      groups/contrast（fixture v1_contrast_q1.json）现算必须逐值同值且保持
@@ -39,6 +42,7 @@ from orchestrator.graph.ascent import (
     ASCENT,
     STANDARD,
     build_ascent_messages,
+    classify_run,
     load_v1_index,
 )
 from orchestrator.graph.nodes import GraphDeps, initial_state, node_classify
@@ -80,9 +84,21 @@ def test_task6_thread_uses_ascent_classifier(tmp_path):
     # Task6 跑在新线程 t6-…，复用的是冻结 V1 档案 t8-…。
     assert state["thread_id"] == T6_THREAD
     assert arc["thread_id"] == V1_THREAD
+    assert arc["thread_id"] != state["thread_id"]   # 锁死「新线程复用旧档案」
     assert arc["host_workdir"] == str(workdir)
     assert [f["relpath"] for f in arc["files"]][:3] == [
         "summary.json", SPLIT_RELS[0], SPLIT_RELS[1]]
+
+    # classify_run 只按 track+题面逐字+sha 命中，从不读 thread_id：payload
+    # 显式携带运行线程 t6 与任意别的线程值，分类结果必须逐字段相等。
+    r_t6 = classify_run(
+        {"track": "track2", "question": question, "thread_id": T6_THREAD},
+        index)
+    r_other = classify_run(
+        {"track": "track2", "question": question,
+         "thread_id": "any-other-thread-9z9"}, index)
+    assert r_t6 == r_other == out
+    assert r_t6["v1_archive"]["thread_id"] == V1_THREAD
 
     # 对照：同一 t6 线程 id 配未登记题面 → standard（线程前缀不构成命中）
     unregistered = initial_state(
@@ -119,19 +135,31 @@ def test_q1_contradiction_not_overwritten(tmp_path):
         initial_state(thread_id=T6_THREAD, track="track2",
                       question=index["entries"][0]["question"]),
         GraphDeps(v1_index=load_v1_index(tmp_path / "cls" / "v1_index.json")))
+    user_body = "USER-BODY"
     msgs = build_ascent_messages(
         [{"role": "system", "content": "SYS"},
-         {"role": "user", "content": "USER-BODY"}],
+         {"role": "user", "content": user_body}],
         v1_archive=classified["v1_archive"],
         ascent_targets=classified["ascent_targets"])
+    assert msgs[0] == {"role": "system", "content": "SYS"}
     text = msgs[1]["content"]
-    # 字面量取自 render_v1_metrics 真实渲染（全角逗号）：两冰臂各一次
+    # 只做前缀式插入：system 不动、user 原文逐字节保留
+    assert text.endswith(user_body)
+    head = text[: -len(user_body)]
+    # 真实档案数值经 render_v1_metrics 进批判段（先实跑确认的全角逗号字面量）：
+    # 结冰名义/结冰+DR 两臂各一次 success_rate=0.0，n_fell=3
     assert text.count("success_rate=0.0，n_fell=3") == 2
-    # normal 臂：3 跑倒 2（对照不稳健的事实）在场
-    assert "n_fell=2" in text
-    # 矛盾状态串不被插入段改名/映射（段内不消费该串，原文结论只能原样保留）
-    head = text[: -len("USER-BODY")]
+    # 正常臂：0.333… 成功率 + 3 跑倒 2（对照不稳健的事实）在场
+    assert "success_rate=0.3333333333333333，n_fell=2" in text
+    # 插入段不得出现把矛盾「解决掉」的覆盖性文案，防翻案硬约束必须在场
+    for banned in ("已解决", "矛盾已改善", "contradiction_control_not_robust →",
+                   "hypothesis_status 映射"):
+        assert banned not in head
+    assert "禁止凑加权总分翻案" in head
+    # 插入段不消费/改名矛盾状态串（render_v1_metrics 无此字段）
     assert "contradiction_control_not_robust" not in head
+    # render_v1_metrics 不渲染 hypothesis_status/0.824（Q1 裁决显式进 Gate2/
+    # 演化志是 Task6 接线设计项）：本测不对其入批判段做断言。
 
 
 # ---------------------------------------------------------------------------
