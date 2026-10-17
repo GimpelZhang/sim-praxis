@@ -13,6 +13,11 @@ schema 演进（H-1/H-6，2026-10-16）：对**已存在的生产库**纯增量�
     task_title 三列（ALTER ADD，列序追加，原 13 列一字不动）；
   - 新增 inbound_messages 表：通道② P2P 入站消息去重（message_id 主键，
     与意见追加在同一事务内写入，重投不产生重复意见）。
+  - user_version 1→2（Phase 2 Task3）：pending_gates 与
+    pending_gates_history 各追加 media_message_id_v1 / media_message_id_v2
+    两列（Gate2 双媒体 Diff 卡：V1 历史视频/V2 本次视频各最多推一次，
+    崩溃重挂只补缺失件）；老行回填 NULL，原单列 media_message_id 保留不动，
+    标准 Gate2 路径继续只写该列。
 """
 from __future__ import annotations
 
@@ -79,16 +84,19 @@ CREATE TABLE IF NOT EXISTS inbound_messages(
 """
 
 # 当前 schema 版本（PRAGMA user_version）。每个版本只做纯增量 ALTER/CREATE。
-_USER_VERSION = 1
+_USER_VERSION = 2
 
 _HISTORY_COLS = (
     "thread_id, gate, status, choice, decision, human_notes, source, "
     "card_message_id, media_message_id, open_chat_id, operator_open_id, "
-    "created_at, decided_at"
+    "created_at, decided_at, media_message_id_v1, media_message_id_v2"
 )
 
 # PENDING 行允许被回填的消息列（只允许 NULL -> 非 NULL，禁止覆盖，重启重挂用）
-_FILLABLE = ("card_message_id", "media_message_id", "open_chat_id")
+# Task3：media_message_id_v1/v2 为双媒体 Diff Gate2 的两列送达记账；
+# 老单列 media_message_id 保留给标准 Gate2，两条路径互不写对方的列。
+_FILLABLE = ("card_message_id", "media_message_id", "open_chat_id",
+             "media_message_id_v1", "media_message_id_v2")
 
 # purge_thread_like 的 LIKE 逃逸符（与 probes/probe_c_form.py 历史裸 DELETE 同款）
 _LIKE_ESCAPE = "\\"
@@ -157,6 +165,26 @@ class PendingStore:
                 "ALTER TABLE pending_gates ADD COLUMN task_title TEXT"
             )
             self._conn.execute(_DDL_INBOUND)
+        if version < 2:
+            # Phase 2 Task3：Gate2 双媒体 Diff 卡的两列送达消息 id。
+            # 四列全部可空（老行回填 NULL，元数据级 ALTER 不重写既有行）；
+            # 主表与 history 同步加列，归档 INSERT...SELECT 的列单保持一致。
+            self._conn.execute(
+                "ALTER TABLE pending_gates "
+                "ADD COLUMN media_message_id_v1 TEXT"
+            )
+            self._conn.execute(
+                "ALTER TABLE pending_gates "
+                "ADD COLUMN media_message_id_v2 TEXT"
+            )
+            self._conn.execute(
+                "ALTER TABLE pending_gates_history "
+                "ADD COLUMN media_message_id_v1 TEXT"
+            )
+            self._conn.execute(
+                "ALTER TABLE pending_gates_history "
+                "ADD COLUMN media_message_id_v2 TEXT"
+            )
         self._conn.execute(f"PRAGMA user_version = {_USER_VERSION};")
 
     def close(self) -> None:
@@ -218,13 +246,21 @@ class PendingStore:
         card_message_id: "str | None" = None,
         media_message_id: "str | None" = None,
         open_chat_id: "str | None" = None,
+        media_message_id_v1: "str | None" = None,
+        media_message_id_v2: "str | None" = None,
     ) -> None:
-        """消息发送成功后回填（同样只 COALESCE，不覆盖）。"""
+        """消息发送成功后回填（同样只 COALESCE，不覆盖）。
+
+        Task3：media_message_id_v1/v2 是双媒体 Diff Gate2 的分列回填；
+        标准 Gate2 的老单列 media_message_id 语义不变。
+        """
         sets, vals = [], []
         params: dict[str, Optional[str]] = {
             "card_message_id": card_message_id,
             "media_message_id": media_message_id,
             "open_chat_id": open_chat_id,
+            "media_message_id_v1": media_message_id_v1,
+            "media_message_id_v2": media_message_id_v2,
         }
         for col in _FILLABLE:
             if params[col] is not None:

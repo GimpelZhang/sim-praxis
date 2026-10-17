@@ -261,7 +261,9 @@ def test_nonroot_compose_config():
 
 PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 唯一合法生产发送闸门（H-5 claim + 重发 upsert）
-    "orchestrator/feishu_gateway/client.py": {871, 949},
+    # Task0 后 Task3 前的位移：871→877（upsert）、949→955（标准 Gate2 claim）；
+    # Task3 新增 1107（双媒体 Diff Gate2 的 H-4 claim，同一占位协议第二发送闸门）。
+    "orchestrator/feishu_gateway/client.py": {877, 955, 1107},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）

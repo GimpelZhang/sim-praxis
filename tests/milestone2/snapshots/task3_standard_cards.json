@@ -1,0 +1,217 @@
+{
+  "gate1_v2": {
+    "body": {
+      "elements": [
+        {
+          "tag": "div",
+          "text": {
+            "content": "**任务目标**：快照任务：推块入盒（标准路径不回归）\n请在下方选择批准的方案；打回请在意见框填写具体意见（必填，会原样带回重做）。",
+            "tag": "lark_md"
+          }
+        },
+        {
+          "tag": "div",
+          "text": {
+            "content": "**方案 1：MuJoCo 方案 A**\n- 物理基座：`mujoco315`\n- 思路/重点：最小接触推送，先做摩擦标定再发力控\n- 预期产出：runs/a/rollout.mp4、runs/a/metrics.json",
+            "tag": "lark_md"
+          }
+        },
+        {
+          "elements": [
+            {
+              "input_type": "multiline_text",
+              "max_length": 1000,
+              "name": "feedback_0",
+              "placeholder": {
+                "content": "打回时必填：具体意见（会原样带回方案重做）",
+                "tag": "plain_text"
+              },
+              "required": false,
+              "tag": "input"
+            },
+            {
+              "action_type": "form_submit",
+              "name": "approve_0",
+              "tag": "button",
+              "text": {
+                "content": "批准方案 1",
+                "tag": "plain_text"
+              },
+              "type": "primary",
+              "value": {
+                "choice": 0,
+                "decision": "approve",
+                "gate": 1
+              }
+            },
+            {
+              "action_type": "form_submit",
+              "name": "reject_0",
+              "tag": "button",
+              "text": {
+                "content": "打回并提出意见",
+                "tag": "plain_text"
+              },
+              "type": "danger",
+              "value": {
+                "choice": 0,
+                "decision": "reject_with_comments",
+                "gate": 1
+              }
+            }
+          ],
+          "name": "gate1_form_0",
+          "tag": "form"
+        },
+        {
+          "tag": "div",
+          "text": {
+            "content": "**方案 2：Genesis 方案 B**\n- 物理基座：`genesis133`\n- 思路/重点：刚体接触基线对照\n- 预期产出：runs/b/rollout.mp4",
+            "tag": "lark_md"
+          }
+        },
+        {
+          "elements": [
+            {
+              "input_type": "multiline_text",
+              "max_length": 1000,
+              "name": "feedback_1",
+              "placeholder": {
+                "content": "打回时必填：具体意见（会原样带回方案重做）",
+                "tag": "plain_text"
+              },
+              "required": false,
+              "tag": "input"
+            },
+            {
+              "action_type": "form_submit",
+              "name": "approve_1",
+              "tag": "button",
+              "text": {
+                "content": "批准方案 2",
+                "tag": "plain_text"
+              },
+              "type": "default",
+              "value": {
+                "choice": 1,
+                "decision": "approve",
+                "gate": 1
+              }
+            },
+            {
+              "action_type": "form_submit",
+              "name": "reject_1",
+              "tag": "button",
+              "text": {
+                "content": "打回并提出意见",
+                "tag": "plain_text"
+              },
+              "type": "danger",
+              "value": {
+                "choice": 1,
+                "decision": "reject_with_comments",
+                "gate": 1
+              }
+            }
+          ],
+          "name": "gate1_form_1",
+          "tag": "form"
+        }
+      ]
+    },
+    "config": {
+      "update_multi": true,
+      "wide_screen_mode": true
+    },
+    "header": {
+      "template": "blue",
+      "title": {
+        "content": "【SimPraxis】Gate 1：研究方案审批",
+        "tag": "plain_text"
+      }
+    },
+    "schema": "2.0"
+  },
+  "gate2_v2": {
+    "body": {
+      "elements": [
+        {
+          "tag": "div",
+          "text": {
+            "content": "📋 **审批前请先读：任务背景与视频解读（真人 Gate2 要求补充）**\n\n**这个仿真在做什么**\n推块入盒\n\n**解决 / 验证什么问题**\n验证最小接触\n\n**发来的视频怎么看**\n俯视滚出",
+            "tag": "lark_md"
+          }
+        },
+        {
+          "tag": "hr"
+        },
+        {
+          "tag": "div",
+          "text": {
+            "content": "**任务目标**：快照任务：推块入盒（标准路径不回归）\n原片 42.0s，裁剪区间 0.0–30.0s\n**Rung 1-4 验收指标**：\n- 位姿误差：0.018\n- 最大接触深度：0.004\n- 接触持续：1.2s\n- jerk 平顺度：中\n\n内网视频/证据链接（headless）：http://headless.local/run/x",
+            "tag": "lark_md"
+          }
+        },
+        {
+          "elements": [
+            {
+              "input_type": "multiline_text",
+              "max_length": 1000,
+              "name": "feedback",
+              "placeholder": {
+                "content": "打回时必填：具体意见（会原样带回方案重做）",
+                "tag": "plain_text"
+              },
+              "required": false,
+              "tag": "input"
+            },
+            {
+              "action_type": "form_submit",
+              "name": "approve",
+              "tag": "button",
+              "text": {
+                "content": "验收通过",
+                "tag": "plain_text"
+              },
+              "type": "primary",
+              "value": {
+                "decision": "approve",
+                "gate": 2,
+                "video_fallback": false
+              }
+            },
+            {
+              "action_type": "form_submit",
+              "name": "reject",
+              "tag": "button",
+              "text": {
+                "content": "打回并提出意见",
+                "tag": "plain_text"
+              },
+              "type": "danger",
+              "value": {
+                "decision": "reject_with_comments",
+                "gate": 2,
+                "video_fallback": false
+              }
+            }
+          ],
+          "name": "gate2_form",
+          "tag": "form"
+        }
+      ]
+    },
+    "config": {
+      "update_multi": true,
+      "wide_screen_mode": true
+    },
+    "header": {
+      "template": "green",
+      "title": {
+        "content": "【SimPraxis】Gate 2：仿真结果验收",
+        "tag": "plain_text"
+      }
+    },
+    "schema": "2.0"
+  }
+}

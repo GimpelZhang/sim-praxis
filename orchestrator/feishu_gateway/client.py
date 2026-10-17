@@ -30,6 +30,8 @@ from .cards import (
     build_gate1_card,
     build_gate1_card_v2,
     build_gate2_card,
+    build_gate2_card_diff,
+    build_gate2_card_diff_v2,
     build_gate2_card_v2,
     build_reminder_card,
     build_reminder_card_v2,
@@ -630,9 +632,10 @@ class FeishuGateway:
 
         共享 P2P 会话里多个审批并存，旧实现「取最近一行」会把意见记错线程。
         现只在 status='PENDING' 行里，用 parent_id/root_id/thread_id 匹配该行
-        的 card_message_id 或 media_message_id（回复卡片或回复视频均可）。
-        返回 (唯一匹配行|None, 该会话全部 PENDING 候选)；匹配 0 或 >1 时第一
-        元素为 None，由调用方回歧义提示、不落库。
+        的 card_message_id 或任一媒体消息 id（标准 Gate2 的 media_message_id；
+        Task3 双媒体 Diff Gate2 的 media_message_id_v1/v2——回复卡片或回复任一
+        视频均可）。返回 (唯一匹配行|None, 该会话全部 PENDING 候选)；匹配 0 或
+        >1 时第一元素为 None，由调用方回歧义提示、不落库。
         """
         refs = {r for r in (ev.get("parent_id"), ev.get("root_id"),
                             ev.get("thread_id")) if r}
@@ -642,7 +645,10 @@ class FeishuGateway:
             return None, pending
         matches = [
             r for r in pending
-            if r["card_message_id"] in refs or r["media_message_id"] in refs
+            if r["card_message_id"] in refs
+            or r["media_message_id"] in refs
+            or r.get("media_message_id_v1") in refs
+            or r.get("media_message_id_v2") in refs
         ]
         if len(matches) == 1:
             return matches[0], pending
@@ -1020,6 +1026,136 @@ class FeishuGateway:
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 
+    # ---------- Phase 2 Task3：双媒体 Diff Gate2 ----------
+
+    # 列标签行只在本次实际推送该列视频时发送，从不落 store（重挂不重发标签）。
+    _DIFF_LABEL_V1 = "① V1 历史视频（冻结档案）"
+    _DIFF_LABEL_V2 = "② V2 本次视频（候选实证）"
+
+    def _send_diff_column(
+        self,
+        thread_id: str,
+        column: str,
+        label: str,
+        existing_id: "str | None",
+        video_path: "str | None",
+        trim: "dict | None",
+        *,
+        duration_ms: "int | None",
+        cover_png: "str | None",
+    ) -> "tuple[str | None, bool, str, int | None]":
+        """推送双媒体中的一列并回填该列消息 id；返回 (id, fallback, detail, step)。
+
+        existing_id 非空（H-4 占位行已记账）= 该列此前已送达：不重发标签、不重发
+        视频。缺列且本次没给路径 → fail-closed 抛错，不用单媒体冒充双媒体看板。
+        """
+        if existing_id:
+            return (existing_id, False,
+                    f"复用已发送 {column} 视频（重挂接管，未重复推送）", None)
+        if not video_path:
+            raise ValueError(
+                f"Gate2(diff) {column} 列无已送达消息 id 且未提供视频路径，"
+                "无法补发；禁止以单媒体冒充双媒体 Diff 看板")
+        # 标签行紧贴该列视频之前；两列严格顺序由调用方 v1→v2 串行保证。
+        self.send_text(self.owner_open_id, label)
+        vr = self.send_video_native(video_path, duration_ms=duration_ms,
+                                    cover_png=cover_png, trim=trim)
+        media_id = vr["media_message_id"]
+        if media_id is not None:
+            # H-4：送达即刻单列回填——即便随后崩在第二列/卡片，接管方也只补缺件。
+            self.store.attach_message_ids(
+                thread_id, 2, **{f"media_message_id_{column}": media_id})
+        return media_id, bool(vr["video_fallback"]), vr["detail"], vr["ladder_step"]
+
+    def request_gate2_diff_approval(
+        self,
+        thread_id: str,
+        task_title: str,
+        v1_video: str,
+        v2_video: str,
+        metrics_diff: list[dict[str, Any]],
+        pareto_verdict: "str | dict[str, Any]",
+        *,
+        duration_ms: "int | None" = None,
+        cover_png: "str | None" = None,
+        trim: "dict | None" = None,
+        explanation: "dict[str, str] | None" = None,
+        max_wait: "float | None" = None,
+    ) -> dict:
+        """Task3 双媒体 Diff Gate2：V1 历史视频 + V2 本次视频 + Δ 裁决卡。
+
+        严格顺序（H-4 占位先行，LOW-6 崩溃接管）：
+        claim 占位 → 标签「① V1 历史视频」→ 原生视频 V1（成功即回填 v1 列）
+        → 标签「② V2 本次视频」→ 原生视频 V2（回填 v2 列）→ Diff 表单卡 →
+        阻塞等待人类最终裁决。任一已送达列不重发、其标签行也不重发（标签从不
+        持久化）；两列都在则只补卡片；占位被他方持有且卡片已发 → 只等待。
+        metrics_diff/pareto_verdict 在任何副作用之前先过卡片构造校验（fail-closed）。
+        duration_ms/cover_png/trim 两列同参（V1/V2 是否同截窗由调用方决定）。
+        """
+        gate = 2
+        trim = validate_trim(trim)
+        # 预检：非法 Δ 行/裁决值在占位与推送之前抛错（构造为纯函数，零副作用）。
+        build_gate2_card_diff_v2(task_title, metrics_diff, pareto_verdict,
+                                 explanation=explanation)
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
+            self._log.info(
+                "Gate2(diff) 重启重挂 thread=%s message_id=%s（不重发卡片）",
+                thread_id, row["card_message_id"])
+        else:
+            self._reopen_round(thread_id, gate)
+            claimed = self.store.claim_pending(thread_id, gate,
+                                                task_title=task_title)
+            other_card_ready = False
+            if not claimed:
+                existing = self.store.get_pending(thread_id, gate)
+                if existing is not None and existing["status"] == "PENDING" \
+                        and existing["card_message_id"]:
+                    other_card_ready = True
+                    self._log.warning(
+                        "Gate2(diff) 占位已被他方持有且卡片已发，本次不重复推视频 "
+                        "thread=%s card=%s", thread_id,
+                        existing["card_message_id"])
+            if not other_card_ready:
+                stale = None if claimed else self.store.get_pending(thread_id, gate)
+                v1_existing = stale["media_message_id_v1"] if stale else None
+                v2_existing = stale["media_message_id_v2"] if stale else None
+                # 严格 v1→v2 串行：标签/视频成对，缺哪列补哪列，顺序不可调换。
+                v1_id, fb1, detail1, _ = self._send_diff_column(
+                    thread_id, "v1", self._DIFF_LABEL_V1, v1_existing,
+                    v1_video, trim, duration_ms=duration_ms,
+                    cover_png=cover_png)
+                v2_id, fb2, detail2, step2 = self._send_diff_column(
+                    thread_id, "v2", self._DIFF_LABEL_V2, v2_existing,
+                    v2_video, trim, duration_ms=duration_ms,
+                    cover_png=cover_png)
+                video_fallback = fb1 or fb2
+                # 卡片注记以 V2 本次视频的实际阶梯为准（复用列 step=None）。
+                trim_note = self._build_trim_note(trim, step2)
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate2_card_diff(task_title, metrics_diff,
+                                          pareto_verdict,
+                                          video_fallback=video_fallback,
+                                          explanation=explanation,
+                                          trim_note=trim_note),
+                    build_gate2_card_diff_v2(task_title, metrics_diff,
+                                             pareto_verdict,
+                                             video_fallback=video_fallback,
+                                             explanation=explanation,
+                                             trim_note=trim_note),
+                    form_required=True,
+                )
+                self.store.attach_message_ids(
+                    thread_id, gate, card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"],
+                    media_message_id_v1=v1_id, media_message_id_v2=v2_id)
+                self._log.info(
+                    "Gate2(diff) 卡片已发出 thread=%s schema=%s v1=%s v2=%s",
+                    thread_id, sent["schema"], detail1, detail2)
+        self._event_for(thread_id, gate)
+        return self._await_decision(thread_id, gate, max_wait=max_wait)
+
     def close(self) -> None:
         self.stop_ws()
         self.store.close()
@@ -1044,6 +1180,33 @@ def get_gateway(app_ctx: dict[str, Any]) -> FeishuGateway:
         on_p2p_text=app_ctx.get("on_p2p_text"),
         on_card_action=app_ctx.get("on_card_action"),
     )
+
+
+# ---------- Phase 2 Task3：run_mode 纯选择器（真实图缝 Task6 才接） ----------
+# run_mode 字面量必须与 orchestrator.graph.ascent.STANDARD/ASCENT 同值；依赖方向
+# 是 graph → feishu_gateway（见 graph/__init__.py），client 禁止反向 import graph
+# 形成环，故在此钉死同值常量，漂移由 tests/milestone2/test_task3_diff_cards.py
+# 的选择器测试对质。
+RUN_MODE_STANDARD = "standard"
+RUN_MODE_ASCENT = "ascent"
+
+
+def _run_mode(state: Any) -> str:
+    if not isinstance(state, dict):
+        return RUN_MODE_STANDARD
+    return state.get("run_mode") or RUN_MODE_STANDARD
+
+
+def select_gate1_card_view(state: Any) -> str:
+    """按 state.run_mode 选 Gate1 卡视图：ascent→'ascent' 升阶假设卡，余标准。"""
+    return ("ascent" if _run_mode(state) == RUN_MODE_ASCENT
+            else RUN_MODE_STANDARD)
+
+
+def select_gate2_requestor(state: Any) -> str:
+    """按 state.run_mode 选 Gate2 请求器：ascent→'diff' 双媒体，余标准单视频。"""
+    return ("diff" if _run_mode(state) == RUN_MODE_ASCENT
+            else RUN_MODE_STANDARD)
 
 
 def gateway_from_env(**overrides: Any) -> FeishuGateway:

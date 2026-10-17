@@ -16,8 +16,17 @@
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Optional
+
+from orchestrator.judge.pareto import (
+    DOMINATED_BY_V1,
+    METRIC_DIRECTIONS,
+    METRIC_EPSILON,
+    NON_DOMINATED,
+    V2_DOMINATES,
+)
 
 FEEDBACK_PLACEHOLDER = "打回时必填：具体意见（会原样带回方案重做）"
 REJECT_EMPTY_TOAST = {"type": "error", "content": "打回必须填写意见"}
@@ -761,6 +770,323 @@ def build_gate2_card_v2(
         "config": {"update_multi": True, "wide_screen_mode": True},
         "header": _v2_header("green", "【SimPraxis】Gate 2：仿真结果验收"),
         "body": {"elements": body},
+    }
+
+
+# ---------------- Phase 2 Task3：ascent 升阶卡 / 双媒体 Diff 卡 ----------------
+
+# Pareto 六指标中文名（与 judge.pareto.METRIC_DIRECTIONS 同一指标集）。
+_METRIC_LABELS = {
+    "success_rate": "成功率",
+    "slip_dist_mean_m": "滑移距离均值 (m)",
+    "postpush_vmax_mean_mps": "推力后峰速均值 (m/s)",
+    "tilt_max_deg_max": "最大倾角 (°)",
+    "solve_wallclock_s": "求解墙钟 (s)",
+    "vram_peak_gb": "显存峰值 (GB)",
+}
+
+# Pareto 三态机判的用户可见文案（机判仅参考，绝不代决）。
+_PARETO_VERDICT_TEXT = {
+    V2_DOMINATES: "机判结论：V2 支配 V1（六项指标在容差内全部不差，"
+                  "且至少一项严格超越）。",
+    NON_DOMINATED: "机判结论：non_dominated——互有胜负或全部容差内持平，"
+                   "V2 未支配 V1（禁止凑加权总分翻案）。",
+    DOMINATED_BY_V1: "机判结论：V2 被 V1 支配（无严格超越项，且至少一项"
+                     "严格劣化）。",
+}
+
+
+def _fmt_num(value: "int | float") -> str:
+    """指标数值统一渲染：:.6g（bool 已在调用前挡掉，NaN/Inf 拒绝）。"""
+    return f"{float(value):.6g}"
+
+
+def _finite_number(value: Any, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where} 必须是实数，收到 {type(value).__name__}")
+    f = float(value)
+    if not math.isfinite(f):
+        raise ValueError(f"{where} 必须是有限值，收到 {value!r}")
+    return f
+
+
+def _direction_word(sign: int) -> str:
+    return "越大越好" if sign == 1 else "越小越好"
+
+
+def _cell(text: Any) -> str:
+    """表格单元格内的 LLM 文本：过 md_escape 后再转义行内竖线。
+
+    md_escape（S-4）只转行首竖线（防伪表格行）；而单元格内的行内 ``|``
+    同样会截断列结构，故表格场景在此追加一道（不改动 md_escape 本体）。
+    """
+    return md_escape(text).replace("|", "\\|")
+
+
+def _claim_row_left(metric: str) -> str:
+    """V1 列：指标标识 + 改善方向；V1 基线数值见卡片顶部 V1 摘要（不在此伪造）。"""
+    return (f"`{metric}` {_METRIC_LABELS[metric]}（{_direction_word(METRIC_DIRECTIONS[metric])}）；"
+            "V1 基线见上方冻结档案摘要")
+
+
+def _validated_claim(claim: Any, idx: int) -> dict:
+    """ascent_claims 卡片入口校验（生产值已由 setter 规范化；此处 fail-closed）。"""
+    where = f"ascent_claims[{idx}]"
+    if not isinstance(claim, dict):
+        raise ValueError(f"{where} 不是对象")
+    metric = claim.get("metric")
+    if metric not in METRIC_DIRECTIONS:
+        raise ValueError(f"{where}.metric={metric!r} 不在 Pareto 指标集")
+    direction = claim.get("direction")
+    if direction not in (1, -1):
+        raise ValueError(f"{where}.direction={direction!r} 只允许 1/-1")
+    if direction != METRIC_DIRECTIONS[metric]:
+        raise ValueError(f"{where} 方向与指标 {metric} 的改善方向冲突")
+    task = claim.get("task")
+    if not isinstance(task, str) or not task.strip():
+        raise ValueError(f"{where}.task 必须是非空字符串")
+    target = _finite_number(claim.get("target"), f"{where}.target")
+    epsilon = _finite_number(claim.get("epsilon"), f"{where}.epsilon")
+    if epsilon < 0:
+        raise ValueError(f"{where}.epsilon 必须非负")
+    return {"metric": metric, "direction": int(direction),
+            "task": task.strip(), "target": target, "epsilon": epsilon}
+
+
+def _ascent_proposal_md(idx: int, p: dict[str, Any]) -> str:
+    engine = p.get("sim_engine") or p.get("simulator") or "-"
+    focus = p.get("first_principles") or p.get("focus") or "-"
+    artifacts = _format_artifacts(p.get("expected_artifacts")
+                                   or p.get("artifacts"))
+    lines = [
+        f"**方案 {idx + 1}：{md_escape(p.get('name', '-'))}**",
+        f"- 物理基座：{inline_code(engine)}",
+        f"- 思路/重点：{md_escape(focus)}",
+        f"- 预期产出：{md_escape(artifacts)}",
+    ]
+    raw_claims = p.get("ascent_claims")
+    if raw_claims is None:
+        lines.append("- ascent_claims：本候选未给出可量化超越假设"
+                     "（未承诺超越项，批准前请自行对质 V1 摘要）")
+    else:
+        if not isinstance(raw_claims, list) or not raw_claims:
+            raise ValueError("ascent_claims 若给出必须是非空数组")
+        claims = [_validated_claim(c, j) for j, c in enumerate(raw_claims)]
+        lines.append("")
+        lines.append("| V1 指标（冻结档案基线） | V2 升阶假设（本候选承诺） |")
+        lines.append("| --- | --- |")
+        for c in claims:
+            arrow = "↑ 增大" if c["direction"] == 1 else "↓ 减小"
+            right = (f"目标 `{_fmt_num(c['target'])}`；容差 ε="
+                     f"`{_fmt_num(c['epsilon'])}`；方向 {arrow}；"
+                     f"验证任务：{_cell(c['task'])}")
+            lines.append(f"| {_claim_row_left(c['metric'])} | {right} |")
+    return "\n".join(lines)
+
+
+def _ascent_intro_md(task_title: str, v1_summary: "str | None") -> list[str]:
+    blocks = [
+        f"**任务目标**：{md_escape(task_title)}",
+        "**RSI 螺旋升阶模式（ascent）**：本题存在冻结 V1 档案，禁止伪装首次"
+        "求解。下列 V2 候选以 V1 列为基线逐条给出可量化超越假设；Pareto 原则："
+        "六项指标全部不差（含容差）且至少一项严格超越才算 V2 支配，互有胜负"
+        "必须如实判 non_dominated，禁止凑加权总分。打回请在意见框填写具体意见。",
+    ]
+    if isinstance(v1_summary, str) and v1_summary.strip():
+        # 调用方契约：v1_summary 为 render_v1_metrics 对 sha256 锁定档案渲染的
+        # 机器文本（数值/常量，非 LLM 自由文本），与指标渲染器同一信任层。
+        blocks.append("**V1 指标摘要（冻结档案基线）**\n" + v1_summary.strip())
+    return blocks
+
+
+def build_gate1_card_ascent(
+    task_title: str,
+    proposals: list[dict[str, Any]],
+    v1_summary: "str | None" = None,
+    feedback_required: bool = True,
+) -> dict:
+    """Gate1 升阶假设卡（仅 schema 2.0，风格对齐 build_gate1_card_v2）。
+
+    内容=任务目标 + V1 冻结指标摘要 + 每候选 V1 指标列 vs V2 假设列两列对照
+    （ascent_claims 逐条 metric/方向/target/epsilon/task 表格）。表单按钮 value
+    与标准 Gate1 完全一致（gate=1/decision/choice），parse_card_event 无需改
+    协议；feedback_<i> 多方案键名沿用 11310 适配。按 Task3 边界不另起 1.0
+    分支（真实 schema 2.0 STOP 核验在 Task6）。
+    """
+    body: list[dict] = [_div_lark_md(md) for md in
+                        _ascent_intro_md(task_title, v1_summary)]
+    if not feedback_required:
+        body.append(_div_lark_md("_本轮反馈意见为选填（测试模式）_"))
+    for idx, p in enumerate(proposals):
+        body.append(_div_lark_md(_ascent_proposal_md(idx, p)))
+        body.append(_gate1_form_2(idx))
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "wide_screen_mode": True},
+        "header": _v2_header("blue",
+                             "【SimPraxis】Gate 1：升阶研究方案审批（V1→V2）"),
+        "body": {"elements": body},
+    }
+
+
+def _normalize_pareto_verdict(verdict: Any) -> str:
+    """verdict 接受三态字符串或 {'verdict': ...} dict（state.pareto_verdict）。"""
+    if isinstance(verdict, dict):
+        verdict = verdict.get("verdict")
+    if verdict not in _PARETO_VERDICT_TEXT:
+        raise ValueError(
+            f"pareto_verdict 必须是 {sorted(_PARETO_VERDICT_TEXT)} 之一，"
+            f"收到 {verdict!r}")
+    return verdict
+
+
+def _normalize_diff_rows(metrics_diff: Any) -> list[tuple[str, float, float]]:
+    """校验 Δ 表行：恰为 Pareto 六指标各一行 [{metric, v1, v2}, ...]。
+
+    缺指标/多指标/重复/非有限值一律 fail-closed——Δ 表是 Pareto 机判的证据面板，
+    缺行的「支配」结论不成立。输出按 METRIC_DIRECTIONS 固定顺序排列（可复现）。
+    """
+    if not isinstance(metrics_diff, list) or not metrics_diff:
+        raise ValueError("metrics_diff 必须是非空行数组 [{metric, v1, v2}, ...]")
+    by_metric: dict[str, tuple[float, float]] = {}
+    for i, row in enumerate(metrics_diff):
+        where = f"metrics_diff[{i}]"
+        if not isinstance(row, dict):
+            raise ValueError(f"{where} 不是对象")
+        metric = row.get("metric")
+        if metric not in METRIC_DIRECTIONS:
+            raise ValueError(f"{where}.metric={metric!r} 不在 Pareto 指标集")
+        if metric in by_metric:
+            raise ValueError(f"{where}.metric={metric!r} 重复")
+        v1 = _finite_number(row.get("v1"), f"{where}.v1")
+        v2 = _finite_number(row.get("v2"), f"{where}.v2")
+        by_metric[metric] = (v1, v2)
+    missing = sorted(set(METRIC_DIRECTIONS) - set(by_metric))
+    extra = sorted(set(by_metric) - set(METRIC_DIRECTIONS))
+    if missing or extra:
+        raise ValueError(
+            f"metrics_diff 必须恰含六项 Pareto 指标（缺 {missing}，多余 {extra}）")
+    return [(m, *by_metric[m]) for m in METRIC_DIRECTIONS]
+
+
+def _diff_arrow(metric: str, v1: float, v2: float) -> str:
+    """方向箭头与 Pareto 容差口径一致：ε 带内 ≈ 持平，带外按改善方向 ↑/↓。
+
+    success_rate 绝对 ε=0（任何非零 Δ 都计胜负）；其余相对 |V1| 的 5%。
+    """
+    direction = METRIC_DIRECTIONS[metric]
+    mode, value = METRIC_EPSILON[metric]
+    band = 0.0 if mode == "absolute" else value * abs(v1)
+    signed = direction * (v2 - v1)
+    if signed > band:
+        return "↑ 改善"
+    if signed < -band:
+        return "↓ 劣化"
+    return "≈ 持平"
+
+
+def _gate2_diff_md(
+    task_title: str,
+    metrics_diff: list[tuple[str, float, float]],
+    verdict: str,
+    *,
+    video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
+) -> str:
+    lines = [f"**任务目标**：{md_escape(task_title)}"]
+    if trim_note:
+        lines.append(trim_note)
+    explain_md = _explanation_md(explanation)
+    if explain_md:
+        lines += [explain_md, "---"]
+    lines += [
+        "请对照上方两条视频：**① V1 历史视频**（冻结档案）与 "
+        "**② V2 本次视频**（候选实证），逐行核对下表。",
+        "",
+        "| 指标 | V1（冻结档案） | V2（本次） | Δ（V2−V1） | 方向 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for metric, v1, v2 in metrics_diff:
+        delta = v2 - v1
+        lines.append(
+            f"| `{metric}` {_METRIC_LABELS[metric]} | {_fmt_num(v1)} "
+            f"| {_fmt_num(v2)} | {delta:+.6g} "
+            f"| {_diff_arrow(metric, v1, v2)} |")
+    lines += [
+        "",
+        _PARETO_VERDICT_TEXT[verdict],
+        "机判仅作参考，绝不代决；是否接受由你做**人类最终裁决**（二选一）。"
+        "方向列按各指标改善方向与 Pareto 同一 ε 容差判定"
+        "（↑ 带外改善 / ↓ 带外劣化 / ≈ 容差内持平）。",
+    ]
+    if video_fallback:
+        lines += ["",
+                  "⚠️ 至少一条原生视频上传失败已降级（video_fallback=true），"
+                  "请通过证据目录查看原片后再裁决。"]
+    return "\n".join(lines)
+
+
+def build_gate2_card_diff_v2(
+    task_title: str,
+    metrics_diff: list[dict[str, Any]],
+    pareto_verdict: "str | dict[str, Any]",
+    *,
+    video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
+) -> dict:
+    """Gate2 双媒体 Diff 卡（schema 2.0）：Δ 表 + Pareto 机判 + 人类最终裁决。
+
+    metrics_diff: [{"metric": <Pareto 六指标之一>, "v1": float, "v2": float}]，
+    由调用方按重算汇总值组装（脚本自报 outcome 不得入表）。表单 value 与标准
+    Gate2 完全一致（gate=2/decision），回调协议不变。
+    """
+    rows = _normalize_diff_rows(metrics_diff)
+    verdict = _normalize_pareto_verdict(pareto_verdict)
+    body = [_div_lark_md(_gate2_diff_md(
+        task_title, rows, verdict, video_fallback=video_fallback,
+        explanation=explanation, trim_note=trim_note))]
+    body.append(_div_lark_md("**人类最终裁决（二选一；机判不代决）**"))
+    body.append(_gate2_form_2(video_fallback))
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "wide_screen_mode": True},
+        "header": _v2_header("green",
+                             "【SimPraxis】Gate 2：V1→V2 双视频 Diff 验收"),
+        "body": {"elements": body},
+    }
+
+
+def build_gate2_card_diff(
+    task_title: str,
+    metrics_diff: list[dict[str, Any]],
+    pareto_verdict: "str | dict[str, Any]",
+    *,
+    video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
+) -> dict:
+    """Gate2 双媒体 Diff 卡 1.0 形态（2.0 被拒时的降级，裁决控件仍可操作）。"""
+    rows = _normalize_diff_rows(metrics_diff)
+    verdict = _normalize_pareto_verdict(pareto_verdict)
+    form = _gate2_form_1()
+    if video_fallback:
+        for btn in form["elements"][1]["actions"]:
+            btn["value"] = dict(btn["value"], video_fallback=True)
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "green",
+                   "title": {"tag": "plain_text",
+                             "content": "【SimPraxis】Gate 2：V1→V2 双视频 Diff 验收"}},
+        "elements": [
+            {"tag": "markdown", "content": _gate2_diff_md(
+                task_title, rows, verdict, video_fallback=video_fallback,
+                explanation=explanation, trim_note=trim_note)},
+            {"tag": "markdown",
+             "content": "**人类最终裁决（二选一；机判不代决）**"},
+            form,
+        ],
     }
 
 

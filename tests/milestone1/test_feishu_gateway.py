@@ -1344,14 +1344,23 @@ def test_28_schema_migration_from_user_version_0(tmp_path):
     raw.close()
 
     s = PendingStore(db)
-    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 1
+    # Task3：v0 老库一次性增量到 user_version=2（v1 提醒三列 + 双媒体两列）。
+    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 2
     cols = {r[1] for r in s._conn.execute("PRAGMA table_info(pending_gates);")}
+    hcols = {r[1] for r in s._conn.execute(
+        "PRAGMA table_info(pending_gates_history);")}
     assert {"reminder_count", "last_reminder_at", "task_title"} <= cols
+    assert {"media_message_id_v1", "media_message_id_v2"} <= cols
+    assert {"media_message_id_v1", "media_message_id_v2"} <= hcols
     # 原 13 列顺序/名字未动
     assert list(cols)  # sanity
     row = s.get_pending("oldrow", 1)
     assert row["reminder_count"] == 0 and row["last_reminder_at"] is None
     assert row["card_message_id"] == "om_old"
+    # Task3：老行双媒体两列回填 NULL，老单列 media_message_id 不动
+    assert row["media_message_id_v1"] is None
+    assert row["media_message_id_v2"] is None
+    assert row["media_message_id"] is None
     # 老库行可直接享受新能力（意见追加 + 去重表）
     assert s.append_human_note("oldrow", 1, "[文本 10:00:00] 迁移后意见",
                                message_id="om_mig_1", open_chat_id=CHAT)
