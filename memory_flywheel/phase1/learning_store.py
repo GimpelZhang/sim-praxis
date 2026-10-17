@@ -38,6 +38,7 @@ import pyarrow as pa
 
 import lancedb
 
+from memory_flywheel import kb_pins
 from memory_flywheel.embedding_selector import select_embedding
 from orchestrator.common.clock import utc_now_iso_z
 
@@ -105,11 +106,9 @@ class LearningStore:
                  evidence_root: "str | Path | None" = None,
                  runs_evidence_root: "str | Path | None" = None):
         # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
-        self.uri = uri or os.environ.get(
-            "SIMPRAXIS_LANCEDB_URI",
-            str(Path(os.environ.get(
-                "KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
-                / "data" / "lancedb"))
+        self.uri = uri or kb_pins.default_lancedb_uri()
+        # Task0b QA（M1）：缺链/实体 data/ 在任何 mkdir 之前 fail-closed。
+        kb_pins.ensure_content_data_link(self.uri)
         Path(self.uri).mkdir(parents=True, exist_ok=True)
         self.config = select_embedding()
         self.dim = int(self.config["dim"])

@@ -116,7 +116,8 @@ def validate(matrix_path: "str | Path" = DEFAULT_MATRIX,
                 if len(parts) < 2 or not parts[-1].endswith(".md"):
                     continue
                 status, rel = parts[0], parts[-1]
-                if status.startswith(("M", "D", "R")):
+                # L7：C(copy)/T(typechange) 同样不是「只增」，纳入违例集。
+                if status.startswith(("M", "D", "R", "C", "T")):
                     errors.append(
                         f"knowledge/ 自 meta.kb_commit 后被{status}（只增不改）：{rel}")
                 elif status.startswith("A"):

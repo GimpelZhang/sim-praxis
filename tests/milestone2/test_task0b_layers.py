@@ -7,6 +7,9 @@
      与 paid marker 同构的自动 skip，不是 test.skip 放水；活断言一条不弱）；
   9   tmp 合成资产包 core/extended 往返 + 篡改拒绝（默认必过），另在集成
      开关下追加活资产包 verify。
+QA 修复轮追加 4b-4g 六个默认测试（数据链三态/strict 基线/对称文件集/
+树卫生/solution_id 闸/未跟踪 md），断言一条不弱；test 7 内追加 strict
+自动判定与规范方案集活断言。
 全部 0 付费 0 触网；活库嵌入一律 HF_HUB_OFFLINE=1 + /mnt 缓存 mpnet。
 """
 from __future__ import annotations
@@ -165,6 +168,223 @@ def test_engine_repo_has_no_question_scripts():
 
 
 # ---------------------------------------------------------------------------
+# 4b. QA M1：内容数据链三态（实体目录/缺失/有效软链）
+# ---------------------------------------------------------------------------
+
+_PRUNE_CACHE = shutil.ignore_patterns(
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache")
+
+
+def _fake_content_kb(tmp_path, *, data_link_target: "Path | None" = None,
+                     entity_data: bool = False, monkeypatch=None) -> Path:
+    """合成内容仓：solutions=去缓存的 fixture 树；data 按三态构造。
+
+    env 钉死 KB_ROOT 指向合成仓、清掉 SIMPRAXIS_LANCEDB_URI（否则宿主机
+    00_env 注入的活库 URI 会改道默认构造），SOLUTIONS_ROOT 与合成仓对齐。
+    """
+    kb = tmp_path / "kb"
+    shutil.copytree(FIXTURE_SOLUTIONS, kb / "solutions", ignore=_PRUNE_CACHE)
+    if entity_data:
+        (kb / "data" / "lancedb").mkdir(parents=True)
+    elif data_link_target is not None:
+        data_link_target.mkdir(parents=True, exist_ok=True)
+        (kb / "data").symlink_to(data_link_target, target_is_directory=True)
+    if monkeypatch is not None:
+        monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+        monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
+        monkeypatch.delenv("SIMPRAXIS_LANCEDB_URI", raising=False)
+        monkeypatch.setenv("KB_ROOT", str(kb))
+        monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT", str(kb / "solutions"))
+    return kb
+
+
+def test_content_data_link_three_states(tmp_path, monkeypatch):
+    """(a) 实体 data/ (b) data 缺失：三构造器全 DataLayerError 且不新建路径；
+    (c) data 为有效软链：三构造器均可构造（嵌入懒加载，0 触网）。"""
+    from memory_flywheel import kb_pins
+    from memory_flywheel.phase1.learning_store import LearningStore
+    from memory_flywheel.scripts.ingest_solutions import SolutionIngester
+    from memory_flywheel.vector_engine import VectorEngine
+
+    # (a) 实体目录 split-brain
+    kb = _fake_content_kb(tmp_path, entity_data=True, monkeypatch=monkeypatch)
+    ctor_label = ("VectorEngine", "LearningStore", "SolutionIngester")
+    ctors = (VectorEngine, LearningStore,
+             lambda: SolutionIngester(kb_root=kb))
+    snapshot = sorted(p.relative_to(kb).as_posix()
+                      for p in (kb / "data").rglob("*"))
+    for label, ctor in zip(ctor_label, ctors):
+        with pytest.raises(kb_pins.DataLayerError):
+            ctor()
+    assert sorted(p.relative_to(kb).as_posix()
+                  for p in (kb / "data").rglob("*")) == snapshot, \
+        f"{label} fail-closed 不得新建任何数据路径"
+
+    # (b) data 缺失（缺链新克隆）
+    shutil.rmtree(kb / "data")
+    for ctor in ctors:
+        with pytest.raises(kb_pins.DataLayerError):
+            ctor()
+    assert not (kb / "data").exists(), "拒绝后不得在公开内容仓实建 data/"
+
+    # (c) 有效软链 -> 另一 tmp 实体目录：全部可构造
+    shutil.rmtree(kb)
+    target = tmp_path / "datalayer"
+    kb = _fake_content_kb(tmp_path, data_link_target=target,
+                          monkeypatch=monkeypatch)
+    VectorEngine()
+    LearningStore()
+    SolutionIngester(kb_root=kb)
+    # 库实体落在软链目标，内容仓 data 仍是软链本身（未变实体目录）
+    assert kb.joinpath("data").is_symlink()
+    assert target.joinpath("lancedb").is_dir()
+
+
+# ---------------------------------------------------------------------------
+# 4c. QA M1/M2：strict 基线缺表 fail-closed；非 strict 彩排保留 None 容忍
+# ---------------------------------------------------------------------------
+
+def test_strict_baseline_missing_tables_fail_closed(tmp_path, monkeypatch):
+    """伪造 KB（data→空目标）：无基线两表时 strict ingest 抛错，不建 solution_chunks。"""
+    from memory_flywheel import kb_pins
+    from memory_flywheel.scripts.ingest_solutions import (
+        TABLE_NAME, SolutionIngestError, SolutionIngester)
+
+    kb = _fake_content_kb(tmp_path, data_link_target=tmp_path / "datalayer",
+                          monkeypatch=monkeypatch)
+    subprocess.run(["git", "init", "-q"], cwd=kb, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "x", "--allow-empty"], cwd=kb, check=True)
+
+    ing = SolutionIngester(kb_root=kb)
+    assert kb_pins.is_content_data_uri(ing.uri, kb_root=kb) is True
+    with pytest.raises(SolutionIngestError, match="strict 基线表缺失"):
+        ing.ingest(expect_kb_rows=1542, expect_learnings=5)
+    assert TABLE_NAME not in ing.db.table_names()
+    assert not (tmp_path / "datalayer" / "lancedb"
+                / f"{TABLE_NAME}.lance").exists()
+
+    # 非内容层 URI（tmp 彩排库）自动 non-strict：基线表缺失被容忍，dry-run 可走通
+    rehe_uri = tmp_path / "rehearsal" / "lancedb"
+    rehe = SolutionIngester(kb_root=kb, uri=str(rehe_uri))
+    assert kb_pins.is_content_data_uri(str(rehe_uri), kb_root=kb) is False
+    out = rehe.ingest(expect_kb_rows=1542, expect_learnings=5, dry_run=True)
+    assert out["dry_run"] is True
+
+
+# ---------------------------------------------------------------------------
+# 4d. QA L1：load_manifest 对称文件集（未登记文件/符号链接拒，缓存目录豁免）
+# ---------------------------------------------------------------------------
+
+def test_load_manifest_symmetric_file_set(tmp_path):
+    src = FIXTURE_SOLUTIONS / "track1_tools" / "01_maniskill_pushcube"
+
+    def _fresh_copy(name: str) -> Path:
+        dst = tmp_path / name / "track1_tools" / "01_maniskill_pushcube"
+        shutil.copytree(src, dst, ignore=_PRUNE_CACHE)
+        return dst
+
+    bad = _fresh_copy("b1")
+    (bad / "notes.txt").write_text("未登记笔记", encoding="utf-8")
+    with pytest.raises(SolutionError, match="未登记"):
+        load_manifest(bad)
+
+    cached = _fresh_copy("b2")
+    (cached / "__pycache__").mkdir()
+    (cached / "__pycache__" / "x.pyc").write_bytes(b"\x00")
+    manifest = load_manifest(cached)  # 缓存目录整段豁免
+    assert manifest.solution_id == "track1_tools/01_maniskill_pushcube"
+
+    linked = _fresh_copy("b3")
+    outside = tmp_path / "outside.py"
+    outside.write_text("# external", encoding="utf-8")
+    (linked / "evil_link.py").symlink_to(outside)
+    with pytest.raises(SolutionError, match="符号链接"):
+        load_manifest(linked)
+
+
+# ---------------------------------------------------------------------------
+# 4e. QA L4：check_solutions 树卫生（游离目录/缓存目录报错；规范树干净）
+# ---------------------------------------------------------------------------
+
+def test_check_solutions_tree_hygiene(tmp_path):
+    cs = _load_script("check_solutions.py")
+
+    # 合成树：1 个规范方案 + 1 个缺 manifest 的游离目录 + 1 个缓存目录
+    kb = tmp_path / "kb"
+    sroot = kb / "solutions"
+    shutil.copytree(FIXTURE_SOLUTIONS / "track1_tools" / "01_maniskill_pushcube",
+                    sroot / "track1_tools" / "01_maniskill_pushcube",
+                    ignore=_PRUNE_CACHE)
+    (sroot / "track1_tools" / "99_stray_no_manifest").mkdir(parents=True)
+    gaps = cs.check_manifest_gaps(kb)
+    assert any("99_stray_no_manifest" in e for e in gaps), gaps
+    (sroot / "track1_tools" / "01_maniskill_pushcube" / "__pycache__").mkdir()
+    cache_errs = cs.check_cache_dirs(kb)
+    assert any("__pycache__" in e for e in cache_errs), cache_errs
+
+    # 规范 4 方案树（去缓存复制体）：两类卫生检查全空，完整 check_solutions 也全过
+    clean = tmp_path / "clean"
+    shutil.copytree(FIXTURE_SOLUTIONS, clean / "solutions", ignore=_PRUNE_CACHE)
+    assert cs.check_manifest_gaps(clean) == []
+    assert cs.check_cache_dirs(clean) == []
+    assert cs.check_solutions(clean) == []
+
+    # 物理卫生后 fixture 树本身不得有游离方案目录（缓存检查走去缓存复制体，
+    # 因 gate_static 的 py_compile 可能在 fixture 旁重建 __pycache__）。
+    fixture_kb = REPO_ROOT / "tests" / "fixtures"
+    assert cs.check_manifest_gaps(fixture_kb) == []
+
+
+# ---------------------------------------------------------------------------
+# 4f. QA L3：validate_solution_id + query_solutions where 拼接前闸
+# ---------------------------------------------------------------------------
+
+def test_validate_solution_id_and_query_guard(tmp_path, monkeypatch):
+    from orchestrator.solutions import validate_solution_id
+    from memory_flywheel.scripts.ingest_solutions import (
+        TABLE_NAME, SolutionIngester)
+
+    good = "track2_questions/02_lidar_weather"
+    assert validate_solution_id(good) == good
+    for bad in ("../x", "track3_x/01_a", "track1_tools/1_x",
+                "track1_tools/01_x' OR '1'='1", "", "track1_tools"):
+        with pytest.raises(SolutionError):
+            validate_solution_id(bad)
+
+    kb = _fake_content_kb(tmp_path, data_link_target=tmp_path / "datalayer",
+                          monkeypatch=monkeypatch)
+    ing = SolutionIngester(kb_root=kb)
+    # solution_chunks 尚不存在：非法 id 必须在 embed/table() 之前抛错（不触库不触网）
+    with pytest.raises(SolutionError):
+        ing.query_solutions("任意查询", solution_id="../../x")
+    assert TABLE_NAME not in ing.db.table_names()
+
+
+# ---------------------------------------------------------------------------
+# 4g. QA L5：check_knowledge_hash_set 必须看见未跟踪 md
+# ---------------------------------------------------------------------------
+
+def test_knowledge_untracked_md_detected(tmp_path):
+    from memory_flywheel import kb_pins
+
+    root = tmp_path / "kbwc"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "knowledge").mkdir()
+    (root / "knowledge" / "extra_untracked.md").write_text(
+        "# 未跟踪新增\n", encoding="utf-8")
+
+    errors = kb_pins.check_knowledge_hash_set(root)
+    assert any("extra_untracked.md" in e and "未被 git 跟踪" in e
+               for e in errors), errors
+    # 基线缺失错误照旧（32 个基线文件一个都不在）
+    assert any("基线文件丢失" in e for e in errors), errors
+    # 已登记基线集本身不被误报为未跟踪
+    assert not any("00-index" in e and "未被 git 跟踪" in e for e in errors)
+
+
+# ---------------------------------------------------------------------------
 # 5. test_knowledge_hash_set_baseline（kb_integration）
 # ---------------------------------------------------------------------------
 
@@ -215,6 +435,13 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
     if TABLE_NAME not in ing.db.table_names():
         pytest.skip("solution_chunks 尚未入库（先跑 "
                     "python -m memory_flywheel.scripts.ingest_solutions）")
+
+    # QA M1/M2：活路径 strict 自动判定必须为 True；discover id 集恰好等于规范集
+    from memory_flywheel import kb_pins
+    assert kb_pins.is_content_data_uri(ing.uri, kb_root=kb) is True
+    discovered = {f"{d.parent.name}/{d.name}"
+                  for d in ing.discover_solution_dirs()}
+    assert discovered == set(kb_pins.EXPECTED_SOLUTION_IDS), discovered
 
     before = ing.old_table_rows()
     assert before["kb_chunks"] == 1542, before

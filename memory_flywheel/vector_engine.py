@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -31,6 +30,7 @@ import pyarrow as pa
 
 import lancedb
 
+from memory_flywheel import kb_pins
 from memory_flywheel.embedding_selector import CONFIG_PATH, select_embedding
 
 TABLE_NAME = "kb_chunks"
@@ -45,11 +45,10 @@ DOC_TYPES = (
 class VectorEngine:
     def __init__(self, uri: str | None = None):
         # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
-        self.uri = uri or os.environ.get(
-            "SIMPRAXIS_LANCEDB_URI",
-            str(Path(os.environ.get(
-                "KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
-                / "data" / "lancedb"))
+        self.uri = uri or kb_pins.default_lancedb_uri()
+        # Task0b QA（M1）：缺链/实体 data/ 在任何 mkdir 之前 fail-closed，
+        # 杜绝缺链克隆在公开内容仓实建 data/（split-brain）。
+        kb_pins.ensure_content_data_link(self.uri)
         Path(self.uri).mkdir(parents=True, exist_ok=True)
         self.config = select_embedding()
         self.dim = int(self.config["dim"])
@@ -123,11 +122,9 @@ class VectorEngine:
         返回是否真的删过旧表。
         """
         # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
-        uri = uri or os.environ.get(
-            "SIMPRAXIS_LANCEDB_URI",
-            str(Path(os.environ.get(
-                "KB_ROOT", "/home/vipuser/embodied-ai-sim-knowledge-base"))
-                / "data" / "lancedb"))
+        uri = uri or kb_pins.default_lancedb_uri()
+        # Task0b QA（M1）：connect 同样先过软链闸（--rebuild 不得实建 data/）。
+        kb_pins.ensure_content_data_link(uri)
         db = lancedb.connect(uri)
         if TABLE_NAME in db.table_names():
             db.drop_table(TABLE_NAME)

@@ -31,9 +31,28 @@ _SEGMENT_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TRACKS = ("track1", "track2")
 
+# 公开内容层里允许出现的缓存目录段名（Python/pytest/mypy/ruff 副产物，非方案落件）。
+# load_manifest 对称文件集校验与 scripts/kb/check_solutions.py 树卫生共用单真值。
+CACHE_DIR_NAMES = frozenset(
+    {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"})
+
 
 class SolutionError(Exception):
     """方案清单/落件不合规：调用方必须停止，不得兜底生成。"""
+
+
+def validate_solution_id(solution_id: str) -> str:
+    """solution_id C4 校验（不合规 SolutionError），合规原样返回。
+
+    resolve_solution 与入库器 query_solutions 的 where 拼接共用此闸：
+    非法 id 不触文件系统/不触库。
+    """
+    if not isinstance(solution_id, str) \
+            or not _SOLUTION_ID_RE.match(solution_id):
+        raise SolutionError(
+            "solution_id 必须形如 track{1,2}_{tools|questions}/NN_slug，"
+            f"收到 {solution_id!r}")
+    return solution_id
 
 
 @dataclass(frozen=True)
@@ -73,9 +92,11 @@ class SolutionManifest:
     def stage(self, workdir: "str | Path") -> StagedSolution:
         """把方案逐件落进 workdir（0700 目录；入口 0700，其余 0600）。
 
-        幂等语义对齐 Task7/8 既有 stage：已存在的落件不覆盖——coding 轮次在
-        workdir 内的补丁必须跨 spec 重建保留；新副本（新 run 目录）才逐件写入。
-        新写入件落盘后复算 sha256，不符即 SolutionError（理论不可能，防御性）。
+        真实契约：同一 workdir 重入不覆盖既有件，但每件（含既有件）落盘后都
+        逐件复算 sha256 且必须等于 manifest——因此 workdir 内被改写过的目录
+        重入 stage 立即 SolutionError（不存在「保留 coding 补丁」语义：补丁会
+        改字节，sha 复核必拒）。run_idx 单调使同 workdir 重 stage 实际不可达，
+        此复核属防御性 fail-closed；新副本（新 run 目录）逐件写入并复算。
         """
         work = ensure_private_dir(Path(workdir), mode=0o700)
         staged: dict[str, Path] = {}
@@ -139,6 +160,39 @@ def _validate_relpath(rel: object, solution_dir: Path) -> Path:
             and solution_dir.resolve() not in target.parents:
         raise SolutionError(f"files[].relpath 逃逸方案目录：{rel!r}")
     return target
+
+
+def _check_registered_tree(sdir: Path, registered: frozenset[str]) -> None:
+    """对称文件集校验（L1）：磁盘树不得含 manifest/files[] 之外的常规文件或符号链接。
+
+    路径任一段命中 CACHE_DIR_NAMES 的整段豁免（缓存副产物不是方案落件）；
+    其余未登记常规文件/任何符号链接一律 SolutionError，最多列出 10 个路径
+    （公开内容层防御纵深：清单必须与磁盘树对称）。
+    """
+    allowed = registered | {"manifest.yaml"}
+    unknown: list[str] = []
+
+    def _walk(d: Path) -> None:
+        for entry in sorted(d.iterdir()):
+            rel_parts = entry.relative_to(sdir).parts
+            if any(seg in CACHE_DIR_NAMES for seg in rel_parts):
+                continue
+            if entry.is_symlink():
+                unknown.append(entry.relative_to(sdir).as_posix() + "（符号链接）")
+            elif entry.is_dir():
+                _walk(entry)
+            elif entry.is_file():
+                rel = entry.relative_to(sdir).as_posix()
+                if rel not in allowed:
+                    unknown.append(rel)
+
+    _walk(sdir)
+    if unknown:
+        shown = ", ".join(unknown[:10])
+        tail = f" 等 {len(unknown)} 项" if len(unknown) > 10 else ""
+        raise SolutionError(
+            f"方案目录含未登记文件（manifest files[] 之外，须对称登记）："
+            f"{shown}{tail}（方案 {sdir.name}）")
 
 
 def _validate_v1_relpath(value: object) -> str | None:
@@ -284,6 +338,8 @@ def load_manifest(solution_dir: "str | Path") -> SolutionManifest:
             raise SolutionError(
                 "provenance.repo_version_sha256 必须是 64 位小写十六进制")
 
+    _check_registered_tree(sdir, frozenset(f.relpath for f in files))
+
     return SolutionManifest(
         solution_dir=sdir,
         solution_id=sid,
@@ -304,10 +360,7 @@ def load_manifest(solution_dir: "str | Path") -> SolutionManifest:
 def resolve_solution(solution_id: str,
                      kb_root: "str | Path | None" = None) -> SolutionManifest:
     """按 solution_id 从内容层解析方案（缺目录/违规均 SolutionError）。"""
-    if not isinstance(solution_id, str) or not _SOLUTION_ID_RE.match(solution_id):
-        raise SolutionError(
-            "solution_id 必须形如 track{1,2}_{tools|questions}/NN_slug，"
-            f"收到 {solution_id!r}")
+    validate_solution_id(solution_id)
     root = solutions_root(kb_root).resolve()
     sdir = root / solution_id
     if not sdir.is_dir():

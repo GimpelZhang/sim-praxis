@@ -75,10 +75,87 @@ KNOWLEDGE_BASELINE_FILES: dict[str, str] = {
 # 并把 "knowledge/...md": "<sha256>" 显式加到此表；未登记的额外 md 一律判失败。
 KNOWLEDGE_ADDITIONS: dict[str, str] = {}
 
+# Task0b QA（M2）：solution_chunks 规范方案全集（4 方案；单真值）。
+# scripts/kb/check_solutions.py 树校验与 ingest_solutions strict 模式共同引用，
+# 缺/多方案或表内孤儿 solution_id 一律 fail-closed。
+EXPECTED_SOLUTION_IDS: tuple[str, ...] = (
+    "track1_tools/01_maniskill_pushcube",
+    "track1_tools/02_mujoco_contact_push",
+    "track2_questions/01_ice_floor_humanoid_dr",
+    "track2_questions/02_lidar_weather",
+)
+
+
+class DataLayerError(RuntimeError):
+    """内容仓 data/ 软链缺失/悬空/实体目录 split-brain：拒绝在公开内容仓实建 data/。
+
+    三个 LanceDB 构造入口（VectorEngine/LearningStore/SolutionIngester）在任何
+    mkdir/connect 之前先过 ensure_content_data_link 闸；缺链新克隆不得靠
+    ``Path(uri).mkdir`` 在公开内容仓里实建实体数据目录。
+    """
+
 
 def expected_knowledge_files() -> dict[str, str]:
     """基线集 + 已签收追加集（后者 Task0b 时为空）。"""
     return {**KNOWLEDGE_BASELINE_FILES, **KNOWLEDGE_ADDITIONS}
+
+
+def _kb_root_path(kb_root: "str | Path | None") -> Path:
+    if kb_root is None:
+        kb_root = os.environ.get("KB_ROOT", str(DEFAULT_KB_ROOT))
+    return Path(kb_root)
+
+
+def default_lancedb_uri() -> str:
+    """默认 LanceDB 库 URI 单真值：$SIMPRAXIS_LANCEDB_URI > $KB_ROOT/data/lancedb。
+
+    Task0b QA（M1）：原先同一表达式散在 vector_engine/learning_store/
+    ingest_solutions 三处，收口到此。
+    """
+    return os.environ.get(
+        "SIMPRAXIS_LANCEDB_URI",
+        str(_kb_root_path(None) / "data" / "lancedb"))
+
+
+def is_content_data_uri(uri: "str | Path", *,
+                        kb_root: "str | Path | None" = None) -> bool:
+    """uri 解析后是否位于内容仓 data/ 之下（等于 data/lancedb 或更深）。
+
+    用 resolve(strict=False) 跟随既有软链：活路径
+    $KB_ROOT/data/lancedb 与其实体目标 /mnt/.../data/lancedb 判定一致。
+    """
+    data_dir = (_kb_root_path(kb_root) / "data").resolve(strict=False)
+    target = Path(uri).resolve(strict=False)
+    return target == data_dir or target.is_relative_to(data_dir)
+
+
+def ensure_content_data_link(uri: "str | Path", *,
+                             kb_root: "str | Path | None" = None) -> None:
+    """内容层数据 URI 软链闸（先于任何 mkdir/connect 调用）。
+
+    - 非内容层 URI（tmp 彩排库、不经内容仓 data/ 的显式路径）直接放行；
+    - 内容层路径要求 data/ 必须是指向存在目标的 symlink；悬空/实体目录/缺失
+      三种状态全部 DataLayerError，杜绝缺链克隆在公开内容仓实建 data/。
+    """
+    if not is_content_data_uri(uri, kb_root=kb_root):
+        return
+    root = _kb_root_path(kb_root)
+    data = root / "data"
+    fix = "python scripts/kb/migrate_data_layer.py --apply"
+    if data.is_symlink():
+        if not data.exists():
+            raise DataLayerError(
+                f"数据层软链悬空：{data} -> {os.readlink(data)}（目标不存在）。"
+                f"先恢复实体目标或重跑 {fix}；拒绝在公开内容仓实建 data/")
+        return
+    if data.exists():
+        raise DataLayerError(
+            f"{data} 是实体目录而非软链（split-brain）：内容仓 data/ 必须软链到"
+            "闭源数据层（/mnt/artifacts/embodied-kb/data）。处置："
+            f"{fix} 或人工迁移后建链；拒绝在公开内容仓实建 data/")
+    raise DataLayerError(
+        f"内容仓缺数据层软链：{data} 不存在。先跑 {fix} 建链（实体落 /mnt，"
+        "data 仅为软链）；拒绝在公开内容仓实建 data/")
 
 
 def _git(kb_root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -113,17 +190,30 @@ def check_knowledge_hash_set(kb_root: "str | Path" = DEFAULT_KB_ROOT) -> list[st
 
     既有文件 sha 不符=被修改（错误）；缺基线文件=错误；出现未登记的额外
     md=错误（新增必须显式登记 KNOWLEDGE_ADDITIONS）。
+
+    Task0b QA（L5）：git ls-files 看不见未跟踪文件，故另 rglob 工作树
+    knowledge/**/*.md，任何未被 git 跟踪的 md 单独报错（堵 docstring 承诺洞）。
     """
     kb_root = Path(kb_root)
     expected = expected_knowledge_files()
     errors: list[str] = []
     actual: dict[str, str] = {}
-    for rel in tracked_knowledge_md(kb_root):
+    tracked = set(tracked_knowledge_md(kb_root))
+    for rel in tracked:
         p = kb_root / rel
         if not p.is_file():
             errors.append(f"knowledge 文件缺失：{rel}")
             continue
         actual[rel] = hashlib.sha256(p.read_bytes()).hexdigest()
+    know_dir = kb_root / "knowledge"
+    if know_dir.is_dir():
+        for p in sorted(know_dir.rglob("*.md")):
+            if not p.is_file():
+                continue
+            rel = p.relative_to(kb_root).as_posix()
+            if rel not in tracked:
+                errors.append(
+                    f"knowledge/ 工作树存在未被 git 跟踪的 md（须签收登记并提交）：{rel}")
     for rel, want in sorted(expected.items()):
         got = actual.get(rel)
         if got is None:

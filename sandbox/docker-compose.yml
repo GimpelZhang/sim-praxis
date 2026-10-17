@@ -53,7 +53,8 @@ services:
       FEISHU_APP_ID: ${FEISHU_APP_ID:-}
       FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
       FEISHU_RECEIVE_ID: ${FEISHU_RECEIVE_ID:-}
-      SIMPRAXIS_LANCEDB_URI: ${SIMPRAXIS_LANCEDB_URI:-}
+      # Task0b QA（L8）：数据层（LanceDB）不挂容器、不透传 SIMPRAXIS_LANCEDB_URI
+      # ——sandbox/ 全树无数据层消费者，容器内内容层只有只读 /kb（见 volumes）。
       FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-}
       # Task0b：容器内方案内容层根（宿主 $KB_ROOT/solutions 只读挂到 /kb）
       SIMPRAXIS_SOLUTIONS_ROOT: ${SIMPRAXIS_SOLUTIONS_ROOT:-/kb}

@@ -28,15 +28,17 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from memory_flywheel import kb_pins  # noqa: E402
-from orchestrator.solutions import SolutionError, load_manifest  # noqa: E402
+# CACHE_DIR_NAMES 单真值在 resolver（L1 定义处），L4 树卫生复用。
+from orchestrator.solutions import (  # noqa: E402
+    CACHE_DIR_NAMES,
+    SolutionError,
+    load_manifest,
+)
 
 # Task0b 从 Phase1 迁入的存量方案全集（6 脚本文件 / 4 方案目录）。
-EXPECTED_SOLUTIONS = [
-    "track1_tools/01_maniskill_pushcube",
-    "track1_tools/02_mujoco_contact_push",
-    "track2_questions/01_ice_floor_humanoid_dr",
-    "track2_questions/02_lidar_weather",
-]
+# 单真值在 kb_pins.EXPECTED_SOLUTION_IDS（ingest strict 模式共用）；
+# 保留本 list 别名以最小化本文件改动面。
+EXPECTED_SOLUTIONS = list(kb_pins.EXPECTED_SOLUTION_IDS)
 
 
 def _git(kb_root: Path, *args: str) -> subprocess.CompletedProcess:
@@ -87,6 +89,41 @@ def check_solutions(kb_root: Path) -> list[str]:
     return errors
 
 
+def check_manifest_gaps(kb_root: Path) -> list[str]:
+    """L4(a)：solutions/track[12]_*/* 中存在但缺 manifest.yaml 的游离目录。
+
+    check_solutions 的方案集统计只数含 manifest 的目录，游离目录此前被静默
+    忽略；公开内容层树卫生要求显式报错。
+    """
+    errors: list[str] = []
+    sroot = kb_root / "solutions"
+    if not sroot.is_dir():
+        return errors
+    for cat in sorted(sroot.glob("track[12]_*")):
+        if not cat.is_dir():
+            continue
+        for sol in sorted(cat.iterdir()):
+            if sol.is_dir() and not (sol / "manifest.yaml").is_file():
+                errors.append(
+                    f"方案目录缺 manifest.yaml（游离目录此前被静默忽略）："
+                    f"{sol.relative_to(kb_root)}")
+    return errors
+
+
+def check_cache_dirs(kb_root: Path) -> list[str]:
+    """L4(b)：solutions/ 下出现任何缓存目录（__pycache__ 等）即 error。"""
+    errors: list[str] = []
+    sroot = kb_root / "solutions"
+    if not sroot.is_dir():
+        return errors
+    for p in sorted(sroot.rglob("*")):
+        if p.name in CACHE_DIR_NAMES and p.is_dir():
+            errors.append(
+                f"solutions/ 下出现缓存目录（公开内容层树卫生，须清除）："
+                f"{p.relative_to(kb_root)}")
+    return errors
+
+
 def check_data_ignored(kb_root: Path) -> list[str]:
     errors: list[str] = []
     tracked = _git(kb_root, "ls-files", "data").stdout.splitlines()
@@ -125,6 +162,8 @@ def main() -> int:
               f"knowledge {len(kb_pins.KNOWLEDGE_BASELINE_FILES)} md 哈希集基线一致")
 
     errors.extend(check_data_ignored(kb_root))
+    errors.extend(check_manifest_gaps(kb_root))
+    errors.extend(check_cache_dirs(kb_root))
     errors.extend(check_solutions(kb_root))
 
     if errors:

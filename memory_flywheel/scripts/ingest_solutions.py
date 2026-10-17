@@ -29,11 +29,13 @@ from pathlib import Path
 import pyarrow as pa
 import yaml
 
+from memory_flywheel import kb_pins
 from memory_flywheel.embedding_selector import select_embedding
 from memory_flywheel.kb_pins import DEFAULT_KB_ROOT, head as kb_head
 from memory_flywheel.scripts.ingest_kb import (  # 复用切块器与 HARD_CHARS 常量
     HARD_CHARS, chunk_section)
-from orchestrator.solutions import SolutionError, load_manifest, solutions_root
+from orchestrator.solutions import (
+    SolutionError, load_manifest, solutions_root, validate_solution_id)
 import lancedb
 
 TABLE_NAME = "solution_chunks"
@@ -122,6 +124,9 @@ class SolutionIngester:
         self.uri = uri or os.environ.get(
             "SIMPRAXIS_LANCEDB_URI",
             str(self.kb_root / "data" / "lancedb"))
+        # Task0b QA（M1）：内容层 URI 必须经 data/ 软链，缺链/实体目录先于
+        # mkdir fail-closed（非内容层 tmp 彩排库直接放行）。
+        kb_pins.ensure_content_data_link(self.uri, kb_root=self.kb_root)
         Path(self.uri).mkdir(parents=True, exist_ok=True)
         self.config = select_embedding()
         self.dim = int(self.config["dim"])
@@ -223,22 +228,62 @@ class SolutionIngester:
                     "ingested_at": now})
         return records
 
+    def _strict_content_set_gate(self) -> list[Path]:
+        """M2：strict 模式方案集与表内 id 双重断言（任何向量化/写入之前）。"""
+        dirs = self.discover_solution_dirs()
+        found = {f"{d.parent.name}/{d.name}" for d in dirs}
+        expected = set(kb_pins.EXPECTED_SOLUTION_IDS)
+        if found != expected:
+            missing = sorted(expected - found)
+            extra = sorted(found - expected)
+            raise SolutionIngestError(
+                f"strict 方案集必须恰好等于规范集 {sorted(expected)}："
+                f"missing={missing} extra={extra}（缺/多都 fail-closed）")
+        if TABLE_NAME in self.db.table_names():
+            # lancedb 0.40 的 to_arrow/to_pandas 不支持 columns 投影，用
+            # search(None) 全表扫描 + select 只取 solution_id（不取 vector）。
+            rows = (self.db.open_table(TABLE_NAME).search(None)
+                    .select(["solution_id"]).to_list())
+            orphans = sorted({r["solution_id"] for r in rows} - expected)
+            if orphans:
+                raise SolutionIngestError(
+                    f"solution_chunks 存在不属于规范方案集的孤儿块（方案改名/"
+                    f"缺失会留垃圾，禁止继续先删后写）：{orphans}")
+        return dirs
+
     def ingest(self, *, expect_kb_rows: int, expect_learnings: int,
-               dry_run: bool = False) -> dict:
+               dry_run: bool = False,
+               require_baseline: "bool | None" = None) -> dict:
+        # Task0b QA（M1）：URI 落在内容仓 data/ 下即 strict——两张基线表必须都
+        # 在且行数精确相等（None 不再静默放行，缺表/行数不符分别报错）；
+        # tmp 彩排库（非内容层 URI）保留 None 容忍语义。
+        strict = kb_pins.is_content_data_uri(self.uri, kb_root=self.kb_root) \
+            if require_baseline is None else bool(require_baseline)
         before = self.old_table_rows()
-        if before["kb_chunks"] is not None and before["kb_chunks"] != expect_kb_rows:
-            raise SolutionIngestError(
-                f"入库前 kb_chunks={before['kb_chunks']} != 期望 {expect_kb_rows}"
-                "（拒绝在污染库上继续）")
-        if before["phase1_learnings"] is not None \
-                and before["phase1_learnings"] != expect_learnings:
-            raise SolutionIngestError(
-                f"入库前 phase1_learnings={before['phase1_learnings']} != 期望 "
-                f"{expect_learnings}")
+        for name, want in (("kb_chunks", expect_kb_rows),
+                           ("phase1_learnings", expect_learnings)):
+            got = before[name]
+            if strict:
+                if got is None:
+                    raise SolutionIngestError(
+                        f"strict 基线表缺失：{name} 不存在（拒绝在空库上写入内容层；"
+                        "先跑 ingest_kb / 学习回写建立基线，或显式 require_baseline=False "
+                        "用于 tmp 彩排库）")
+                if got != want:
+                    raise SolutionIngestError(
+                        f"strict 基线行数不符：入库前 {name}={got} != 期望 {want}"
+                        "（拒绝在污染库上继续）")
+            elif got is not None and got != want:
+                raise SolutionIngestError(
+                    f"入库前 {name}={got} != 期望 {want}（拒绝在污染库上继续）")
+
+        # Task0b QA（M2）：strict 模式方案集 == 规范集且表内无孤儿 id。
+        dirs = self._strict_content_set_gate() if strict \
+            else self.discover_solution_dirs()
 
         source_commit = kb_head(self.kb_root)
         plan: list[tuple[str, list[dict]]] = []
-        for sdir in self.discover_solution_dirs():
+        for sdir in dirs:
             try:
                 recs = self.build_records(sdir, source_commit)
             except SolutionError as exc:
@@ -280,6 +325,10 @@ class SolutionIngester:
 
     def query_solutions(self, query: str, *, top_k: int = 5,
                         solution_id: str | None = None) -> list[dict]:
+        # Task0b QA（L3）：先过 C4 solution_id 校验再拼 where，非法 id 不触库，
+        # 消裸字符串插值。
+        if solution_id is not None:
+            validate_solution_id(solution_id)
         qv = self.embed([query])[0]
         search = self.table().search(qv)
         if solution_id:

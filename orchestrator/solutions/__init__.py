@@ -5,6 +5,7 @@
 路径 C4 违规都抛 :class:`SolutionError`（fail-closed：不网络兜底、不就地生成）。
 """
 from orchestrator.solutions.resolver import (
+    CACHE_DIR_NAMES,
     DEFAULT_KB_ROOT,
     SCHEMA_ID,
     SolutionError,
@@ -14,9 +15,11 @@ from orchestrator.solutions.resolver import (
     load_manifest,
     resolve_solution,
     solutions_root,
+    validate_solution_id,
 )
 
 __all__ = [
+    "CACHE_DIR_NAMES",
     "DEFAULT_KB_ROOT",
     "SCHEMA_ID",
     "SolutionError",
@@ -26,4 +29,5 @@ __all__ = [
     "load_manifest",
     "resolve_solution",
     "solutions_root",
+    "validate_solution_id",
 ]

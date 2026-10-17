@@ -142,6 +142,9 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
     bundle = out_root / name
     if bundle.exists():
         raise BundleError(f"资产包已存在（拒绝覆盖）：{bundle}")
+    # L6：存在性检查后立即把包根建成 0700，再建 tables 子目录，消除 bundle 根
+    # 以 mkdir 默认权限瞬态存在的窗口。
+    ensure_private_dir(bundle, mode=0o700)
     ensure_private_dir(bundle / "tables", mode=0o700)
 
     db = lancedb.connect(str(uri))
