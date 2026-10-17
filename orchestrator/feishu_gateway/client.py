@@ -808,13 +808,25 @@ class FeishuGateway:
         返回三态：
         - "alive"：窗内四列中任一列相对 baseline 变化（他方在秒级上传/发卡）；
         - "stale"：观察窗结束行列值毫无变化（判他方崩溃，调用方接管补发）；
-        - "gone"：行消失（他方裁决归档的极端窗口，调用方 fail-loud）。
+        - "gone"：行消失，或状态已翻转为 DECIDED/EXPIRED（他方裁决归档的极端
+          窗口，调用方 fail-loud）。
+
+        R-LOW-2：状态翻转优先于消息列观察——对手可经 CLI/P2P 文本通道不经任何
+        消息列就把行裁定为 DECIDED/EXPIRED；只比对四列会误判 stale/alive，接管
+        补发即成孤儿媒体/孤儿卡。
         """
         deadline = time.monotonic() + CLAIM_OBSERVE_WINDOW_S
         while True:
             time.sleep(CLAIM_OBSERVE_TICK_S)
             row = self.store.get_pending(thread_id, gate)
             if row is None:
+                return "gone"
+            # R-LOW-2：先查状态再比对消息列，任何非 PENDING 终结态一律 gone。
+            if row["status"] != "PENDING":
+                self._log.warning(
+                    "Gate%s 占位行观察窗内状态翻转为 %s（他方已终结此行，四消息列"
+                    "可能仍全空），放弃接管 thread=%s",
+                    gate, row["status"], thread_id)
                 return "gone"
             if self._claim_snapshot(row) != baseline:
                 return "alive"
@@ -1052,11 +1064,22 @@ class FeishuGateway:
                         # 下方 _await_decision 纯等待同一裁决。
                         other_card_ready = True
             if not other_card_ready:
+                # R-LOW-2：首个副作用（推视频/发卡）之前对行状态做一次 fresh
+                # SELECT——claim 与观察窗读到的都是更早的快照，对手可能在两读
+                # 之间把行裁定为 DECIDED/EXPIRED（TOCTOU）。状态已翻转即放弃
+                # 接管，拒绝补发孤儿媒体/孤儿卡，与 claim 损失 gone 分支同语义。
+                fresh = self.store.get_pending(thread_id, gate)
+                if fresh is None or fresh["status"] != "PENDING":
+                    raise RuntimeError(
+                        "Gate2 占位行在首次发送前已终结（status="
+                        f"{fresh['status'] if fresh else None}），疑似他方已裁决；"
+                        "拒绝发送孤儿媒体/孤儿卡，请走 resume 读终态 "
+                        f"thread={thread_id}")
                 media_message_id = None
                 video_fallback = False
                 video_detail = "未提供视频"
                 ladder_step = None
-                stale = None if claimed else self.store.get_pending(thread_id, gate)
+                stale = None if claimed else fresh
                 reattach_media = bool(
                     stale is not None and stale["status"] == "PENDING"
                     and not stale["card_message_id"] and stale["media_message_id"])
@@ -1220,7 +1243,18 @@ class FeishuGateway:
                         # 他方存活上传中：本次零发送，纯等待同一裁决。
                         other_card_ready = True
             if not other_card_ready:
-                stale = None if claimed else self.store.get_pending(thread_id, gate)
+                # R-LOW-2：首个 _send_diff_column 副作用（标签/V1 视频）之前
+                # fresh 重读行状态，理由与标准 Gate2 同（claim/观察快照之后的
+                # TOCTOU 翻转）。非 PENDING 即走同一 gone 语义：RuntimeError
+                # fail-loud，零标签零视频零卡片，不回填任何 *_message_id_v1/v2。
+                fresh = self.store.get_pending(thread_id, gate)
+                if fresh is None or fresh["status"] != "PENDING":
+                    raise RuntimeError(
+                        "Gate2(diff) 占位行在首次发送前已终结（status="
+                        f"{fresh['status'] if fresh else None}），疑似他方已裁决；"
+                        "拒绝发送孤儿媒体/孤儿卡，请走 resume 读终态 "
+                        f"thread={thread_id}")
+                stale = None if claimed else fresh
                 v1_existing = stale["media_message_id_v1"] if stale else None
                 v2_existing = stale["media_message_id_v2"] if stale else None
                 # 严格 v1→v2 串行：标签/视频成对，缺哪列补哪列，顺序不可调换。

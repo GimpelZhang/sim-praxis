@@ -699,6 +699,95 @@ def test_standard_gate2_placeholder_vanishes_fail_closed(gw, monkeypatch):
     assert gw.store.get_pending(thread, 2) is None
 
 
+# ---------- 4c. R-LOW-2：观察窗/发送前状态翻转即放弃接管（零孤儿消息） ----------
+# 洞：双活竞争同一占位行时，对手可不经任何消息列（CLI/P2P 文本通道）把行裁定
+# 为 DECIDED/EXPIRED。旧观察只比对四个消息列，会把「四列全空但已终结」误判为
+# stale 接管补发，产生孤儿媒体/孤儿卡。修法：观察窗内状态翻转优先判 gone；
+# standard/diff 两请求方在首个发送副作用前再 fresh 重读一次（TOCTOU）。
+
+
+def test_rlow2_observe_status_flip_without_column_change_aborts_standard(
+        gw, monkeypatch):
+    # (a) 观察窗内四消息列完全不变、仅 status PENDING→DECIDED：观察判 gone，
+    # 标准 Gate2 零飞书发送，抛现有孤儿 RuntimeError。
+    thread = "th-rlow2-flip"
+    assert gw.store.claim_pending(thread, 2, task_title="他方任务")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+
+    def on_tick():
+        # 他方在窗内经 CLI 通道收裁决：不动任何消息列，只翻 status
+        assert gw.store.mark_decided(
+            thread, 2, decision="approve", source="cli")
+
+    _patch_claim_observe(monkeypatch, on_tick)
+    verdicts: list[str] = []
+    orig_observe = gw._observe_claimed_row
+
+    def wrapped_observe(*a, **k):
+        verdict = orig_observe(*a, **k)
+        verdicts.append(verdict)
+        return verdict
+
+    gw._observe_claimed_row = wrapped_observe
+    with pytest.raises(RuntimeError, match="拒绝发送孤儿媒体/孤儿卡"):
+        gw.request_gate2_approval(
+            thread, "他方任务", {"pose_error": "0.02"}, "std.mp4",
+            max_wait=1)
+    # 观察窗本身必须判 gone（而非 stale 接管、再被发送前闸拦下）
+    assert verdicts == ["gone"]
+    # 零飞书副作用：无视频、无卡片
+    assert gw._calls == [] and pushes == []
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == "DECIDED"
+    assert row["card_message_id"] is None
+    assert row["media_message_id"] is None
+
+
+@pytest.mark.parametrize("path,terminal_status", [
+    ("standard", "DECIDED"),
+    ("standard", "EXPIRED"),
+    ("diff", "DECIDED"),
+    ("diff", "EXPIRED"),
+])
+def test_rlow2_fresh_reread_before_first_send_aborts_both_requestors(
+        gw, path, terminal_status):
+    # (b) claim 成功后、首个发送副作用之前行被他方终结：standard/diff 两请求方
+    # 都在 fresh 重读处放弃——零卡片/零标签/零 v1/v2 视频，四个附件列保持 NULL。
+    thread = f"th-rlow2-fresh-{path}-{terminal_status.lower()}"
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+
+    real_claim = gw.store.claim_pending
+
+    def claim_then_other_party_terminates(*a, **k):
+        ok = real_claim(*a, **k)
+        assert ok is True  # 本次调用自己占位成功，翻转发生在其后的 TOCTOU 窗口
+        if terminal_status == "DECIDED":
+            assert gw.store.mark_decided(
+                thread, 2, decision="approve", source="cli")
+        else:
+            assert gw.store.mark_expired(thread, 2)
+        return ok
+
+    gw.store.claim_pending = claim_then_other_party_terminates
+    with pytest.raises(RuntimeError, match="拒绝发送孤儿媒体/孤儿卡"):
+        if path == "standard":
+            gw.request_gate2_approval(
+                thread, "任务", {"pose_error": "0.02"}, "std.mp4", max_wait=1)
+        else:
+            gw.request_gate2_diff_approval(
+                thread, "任务", "v1.mp4", "v2.mp4",
+                _diff_rows(), "non_dominated", max_wait=1)
+    assert gw._calls == [] and pushes == []
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == terminal_status
+    assert row["card_message_id"] is None
+    assert row["media_message_id"] is None
+    assert row["media_message_id_v1"] is None
+    assert row["media_message_id_v2"] is None
+
+
 # ---------- 5. LLM 字段 markdown 注入 ----------
 
 def test_card_md_injection_escaped_on_all_llm_fields():
