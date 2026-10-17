@@ -17,6 +17,9 @@
      题面/方案名/focus/artifacts/claims.task 的 markdown 注入全部失效。
   6. H-1：无上下文 P2P 文本即便只有一张 PENDING 也不自动绑卡；
      回复双媒体任一 id（v1/v2 列新通路）可唯一定位。
+  4b. QA-2：全空占位行存活观察窗三态（alive 零发送纯等待 / stale 窗内零变化
+     接管 / gone 行消失 fail-loud），diff 与标准 Gate2 各三测；部分回填的崩溃
+     重挂两测 spy 计数为 0（立即接管，零观察等待）。
   分流：S-9 compress_command 前导横线 ./ 前缀（实现 Task0 已有，此处补测）；
   v0→v2、v1→v2 原地迁移；select_gate1_card_view/select_gate2_requestor 纯选择器。
 
@@ -224,7 +227,8 @@ def test_ascent_card_contains_two_columns_and_claims():
     # 无 claims 的候选必须显式提示，不许静默伪装
     card_no_claims = build_gate1_card_ascent("t", [{"name": "n"}])
     assert "未给出可量化超越假设" in json.dumps(card_no_claims, ensure_ascii=False)
-    # fail-closed：方向反了/指标不存在/epsilon 负
+    # fail-closed：方向反了/指标不存在/epsilon 负/bool 冒充 int（True==1 陷阱，
+    # reviewer LOW-3：旧口径对 success_rate(+1)+True 会误放行）
     bad_cases = [
         {"metric": "success_rate", "direction": -1, "task": "x",
          "target": 1, "epsilon": 0},
@@ -232,6 +236,10 @@ def test_ascent_card_contains_two_columns_and_claims():
          "target": 1, "epsilon": 0},
         {"metric": "success_rate", "direction": 1, "task": "x",
          "target": 1, "epsilon": -0.1},
+        {"metric": "success_rate", "direction": True, "task": "x",
+         "target": 1, "epsilon": 0},
+        {"metric": "success_rate", "direction": False, "task": "x",
+         "target": 1, "epsilon": 0},
     ]
     for claim in bad_cases:
         with pytest.raises(ValueError):
@@ -427,6 +435,8 @@ def test_reattach_after_crash_pushes_only_missing_column(gw):
         return orig(video_path, **k)
 
     gw.send_video_native = routed
+    # QA-2：部分回填的崩溃现场必须零等待——根本不进存活观察窗
+    observer = _spy_observer(gw)
     t, box = _run_in_thread(lambda: gw.request_gate2_diff_approval(
         "th-crash", "接管任务", "v1.mp4", "v2.mp4",
         _diff_rows(), "non_dominated", max_wait=30))
@@ -436,6 +446,7 @@ def test_reattach_after_crash_pushes_only_missing_column(gw):
     assert kinds == ["text", "video", "interactive"], kinds
     assert _texts(gw._calls) == [gw._DIFF_LABEL_V2]
     assert pushes == ["v2.mp4"]
+    assert observer == []  # 观察窗 spy 计数为 0（立即接管）
     row = gw.store.get_pending("th-crash", 2)
     assert row["media_message_id_v1"] == "om_media_v1_saved"
     assert row["media_message_id_v2"] == "om_media_v2.mp4"
@@ -453,12 +464,15 @@ def test_reattach_both_media_present_sends_card_only(gw):
         raise AssertionError("两列均已送达，不得再推任何视频")
 
     gw.send_video_native = must_not_push
+    # QA-2：两列都在的崩溃现场同样立即接管，不进观察窗、零等待
+    observer = _spy_observer(gw)
     t, box = _run_in_thread(lambda: gw.request_gate2_diff_approval(
         "th-both", "接管任务", "v1.mp4", "v2.mp4",
         _diff_rows(), "v2_dominates", max_wait=30))
     _finish(gw, t, box, "th-both")
     assert _kinds(gw._calls) == ["interactive"]
     assert _texts(gw._calls) == [] and pushes == []
+    assert observer == []  # 观察窗 spy 计数为 0（立即接管）
     row = gw.store.get_pending("th-both", 2)
     assert row["media_message_id_v1"] == "om_media_v1_saved"
     assert row["media_message_id_v2"] == "om_media_v2_saved"
@@ -495,6 +509,194 @@ def test_missing_column_without_path_fails_closed(gw):
     assert pushes == []
     # 卡未发出、v1 未重推
     assert _kinds(gw._calls) == []
+
+
+# ---------- 4b. QA-2：全空占位行存活观察窗（alive/stale/gone） ----------
+# 双活是真实场景：Task6 runbook 含 kill-9 resume，同一 (thread, gate) 可能有
+# 两个存活调用方；claim 失败读到全空行时无法区分「他方崩溃遗留」与「他方存活
+# 处于秒级上传窗」。观察窗纯读四消息列，三态裁决，测试零真实 sleep/网络。
+
+def _spy_observer(gw):
+    """包住 _observe_claimed_row 记录进入次数（部分回填现场必须一次不进）。"""
+    entered: list[tuple] = []
+    orig = gw._observe_claimed_row
+
+    def wrapped(*a, **k):
+        entered.append((a, k))
+        return orig(*a, **k)
+
+    gw._observe_claimed_row = wrapped
+    return entered
+
+
+def _patch_claim_observe(monkeypatch, on_tick):
+    """观察窗钉成单 tick、零真实 sleep；每 tick 前跑 on_tick() 模拟他方动作。
+
+    client 全模块只有观察窗一处 time.sleep（QA-2 设计），补丁随 monkeypatch
+    teardown 自动回收，不污染其他测试。
+    """
+    monkeypatch.setattr(client_mod, "CLAIM_OBSERVE_WINDOW_S", 0.0)
+    monkeypatch.setattr(client_mod, "CLAIM_OBSERVE_TICK_S", 0.0)
+
+    def fake_sleep(_seconds):
+        on_tick()
+
+    monkeypatch.setattr(client_mod.time, "sleep", fake_sleep)
+
+
+def _watch_decide_when_waiting(gw, thread, gate=2, *, decision="approve"):
+    """他方裁决：等本次调用登记等待事件（进入 _await_decision）后立刻裁决。
+
+    用 Event.wait 轮询而非 time.sleep——观察窗测试把 time.sleep 钉成了假的。
+    """
+    key = (thread, gate)
+    tick = threading.Event()
+
+    def watcher():
+        for _ in range(1000):
+            if key in gw._events:
+                gw.store.mark_decided(thread, gate, decision=decision,
+                                      source="cli")
+                gw._set_event(thread, gate)
+                return
+            tick.wait(0.002)
+        raise AssertionError("等不到本次调用进入 _await_decision")
+
+    return threading.Thread(target=watcher, daemon=True)
+
+
+def test_dual_live_other_grows_column_sends_nothing(gw, monkeypatch):
+    thread = "th-dualive"
+    # 他方 claim 成功、四消息列全空（秒级上传窗刚开始的现场）
+    assert gw.store.claim_pending(thread, 2, task_title="他方任务")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+
+    def on_tick():
+        # 他方在观察窗内完成 V1 列回填 → 四列之一增长，证明他方存活
+        gw.store.attach_message_ids(thread, 2, media_message_id_v1="om_other_v1")
+
+    _patch_claim_observe(monkeypatch, on_tick)
+    watcher = _watch_decide_when_waiting(gw, thread)
+    watcher.start()
+    t, box = _run_in_thread(lambda: gw.request_gate2_diff_approval(
+        thread, "他方任务", "v1.mp4", "v2.mp4",
+        _diff_rows(), "v2_dominates", max_wait=30))
+    t.join(5)
+    watcher.join(2)
+    assert not t.is_alive() and not watcher.is_alive()
+    assert box.get("decision") == "approve"
+    # 双活零重复推送：本次调用零标签/零视频/零卡片
+    assert gw._calls == [] and pushes == []
+    # 他方回填的列原样保留，本次未 COALESCE 任何自己的消息 id
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == "DECIDED"
+    assert row["media_message_id_v1"] == "om_other_v1"
+    assert row["media_message_id_v2"] is None and row["card_message_id"] is None
+
+
+def test_bare_placeholder_stale_after_window_takes_over(gw, monkeypatch):
+    thread = "th-stale"
+    assert gw.store.claim_pending(thread, 2, task_title="崩溃方")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+    # 观察窗内行列值毫无变化（他方已 kill -9）→ 判陈旧，本次接管补发
+    _patch_claim_observe(monkeypatch, lambda: None)
+    t, box = _run_in_thread(lambda: gw.request_gate2_diff_approval(
+        thread, "接管任务", "v1.mp4", "v2.mp4",
+        _diff_rows(), "non_dominated", max_wait=30))
+    _finish(gw, t, box, thread)
+    # 接管序列仍是严格 ①text→①video→②text→②video→card，一件不多一件不少
+    assert _kinds(gw._calls) == [
+        "text", "video", "text", "video", "interactive"]
+    assert _texts(gw._calls) == [gw._DIFF_LABEL_V1, gw._DIFF_LABEL_V2]
+    assert pushes == ["v1.mp4", "v2.mp4"]
+
+
+def test_placeholder_row_vanishes_fail_closed(gw, monkeypatch):
+    thread = "th-gone"
+    assert gw.store.claim_pending(thread, 2, task_title="他方任务")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+
+    def on_tick():
+        # 极端窗口：观察期间他方收裁决并归档，PENDING 行消失
+        gw.store.mark_decided(thread, 2, decision="approve", source="cli")
+        assert gw.store.archive_decided(thread, 2)
+
+    _patch_claim_observe(monkeypatch, on_tick)
+    # fail-loud：明确 RuntimeError，零标签/零视频/零卡片，不新建占位（LOW-4）
+    with pytest.raises(RuntimeError, match="占位行在 claim 后消失"):
+        gw.request_gate2_diff_approval(
+            thread, "他方任务", "v1.mp4", "v2.mp4",
+            _diff_rows(), "v2_dominates", max_wait=1)
+    assert gw._calls == [] and pushes == []
+    assert gw.store.get_pending(thread, 2) is None
+
+
+def test_standard_gate2_dual_live_other_grows_column_sends_nothing(
+        gw, monkeypatch):
+    thread = "th-stdalive"
+    assert gw.store.claim_pending(thread, 2, task_title="他方任务")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+
+    def on_tick():
+        # 标准 Gate2 列在观察窗内回填 → 他方存活
+        gw.store.attach_message_ids(thread, 2, media_message_id="om_other_m")
+
+    _patch_claim_observe(monkeypatch, on_tick)
+    watcher = _watch_decide_when_waiting(gw, thread)
+    watcher.start()
+    t, box = _run_in_thread(lambda: gw.request_gate2_approval(
+        thread, "他方任务", {"pose_error": "0.02"}, "std.mp4",
+        max_wait=30))
+    t.join(5)
+    watcher.join(2)
+    assert not t.is_alive() and not watcher.is_alive()
+    assert box.get("decision") == "approve"
+    # 标准路径双活同样零视频零卡片
+    assert gw._calls == [] and pushes == []
+    row = gw.store.get_pending(thread, 2)
+    assert row["media_message_id"] == "om_other_m"
+    assert row["card_message_id"] is None
+
+
+def test_standard_gate2_bare_placeholder_stale_takes_over(gw, monkeypatch):
+    thread = "th-stdstall"
+    assert gw.store.claim_pending(thread, 2, task_title="崩溃方")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+    _patch_claim_observe(monkeypatch, lambda: None)
+    t, box = _run_in_thread(lambda: gw.request_gate2_approval(
+        thread, "接管任务", {"pose_error": "0.02"}, "std.mp4",
+        max_wait=30))
+    _finish(gw, t, box, thread)
+    # 标准接管序列：视频 → 卡片，恰两件
+    assert _kinds(gw._calls) == ["video", "interactive"]
+    assert pushes == ["std.mp4"]
+    row = gw.store.get_pending(thread, 2)
+    assert row["media_message_id"] == "om_media_std.mp4"
+    assert row["card_message_id"]
+
+
+def test_standard_gate2_placeholder_vanishes_fail_closed(gw, monkeypatch):
+    thread = "th-stdgone"
+    assert gw.store.claim_pending(thread, 2, task_title="他方任务")
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+
+    def on_tick():
+        gw.store.mark_decided(thread, 2, decision="approve", source="cli")
+        assert gw.store.archive_decided(thread, 2)
+
+    _patch_claim_observe(monkeypatch, on_tick)
+    with pytest.raises(RuntimeError, match="占位行在 claim 后消失"):
+        gw.request_gate2_approval(
+            thread, "他方任务", {"pose_error": "0.02"}, "std.mp4",
+            max_wait=1)
+    assert gw._calls == [] and pushes == []
+    assert gw.store.get_pending(thread, 2) is None
 
 
 # ---------- 5. LLM 字段 markdown 注入 ----------

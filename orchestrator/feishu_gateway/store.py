@@ -491,9 +491,17 @@ class PendingStore:
     ) -> bool:
         """H-5：发送卡片前在事务内占位（claim）。
 
-        主表同主键无任何行时插入空 PENDING 占位行并返回 True；已存在 PENDING
-        行（另一个并发调用方正在发卡）或终态行时返回 False，调用方立即退出、
-        绝不重复推视频。BEGIN IMMEDIATE 保证两个并发调用方被串行裁决。
+        主表同主键无任何行时插入空 PENDING 占位行并返回 True；同主键已有
+        PENDING 行（另一个并发调用方）或终态行时返回 False。BEGIN IMMEDIATE
+        保证两个并发调用方被串行裁决。
+
+        返回 False 不等于「立即退出」（QA-2 修正，2026-10-17）：调用方
+        （client.FeishuGateway._claim_loss_action）须按行形态三分——
+        已带 card_message_id：他方发卡完成，零发送纯等待；四消息列全空：
+        双活歧义（他方崩溃遗留 vs 他方存活处于秒级上传窗，Task6 runbook 含
+        kill-9 resume），进存活观察窗，窗内任一列增长→零发送等待、零变化→
+        判陈旧接管补发、行消失→fail-loud 拒绝孤儿媒体；任一媒体列已回填而
+        无 card：部分送达的崩溃现场，立即接管、缺啥补啥、零观察等待。
         """
         created_at = created_at_ms if created_at_ms is not None else now_ms()
         self._conn.execute("BEGIN IMMEDIATE;")

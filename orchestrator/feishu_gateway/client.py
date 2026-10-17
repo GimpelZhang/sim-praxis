@@ -53,6 +53,15 @@ from .video import (
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Gate2 双活占位行存活观察窗（QA-2 MEDIUM）：claim_pending 失败且读到「全空
+# PENDING 行」时，无法区分他方崩溃遗留与他方存活但正处于秒级上传窗——Task6
+# runbook 含 kill-9 resume，同一 (thread, gate) 两个存活调用方是真实场景。
+# 窗内轮询四个消息列：任一列增长即判他方存活（零发送、纯等待同一裁决）；
+# 窗内零变化判陈旧（本次接管补发）；行消失 fail-loud（拒绝孤儿媒体）。
+# 测试 monkeypatch 这两个常量（或 time.sleep）确定性快进，禁止真实长 sleep。
+CLAIM_OBSERVE_WINDOW_S = 8.0
+CLAIM_OBSERVE_TICK_S = 0.2
+
 
 class FeishuAPIError(RuntimeError):
     """飞书 OpenAPI 返回 code != 0（或 HTTP 层失败）。"""
@@ -782,6 +791,67 @@ class FeishuGateway:
                            gate, thread_id)
         return archived
 
+    # claim 冲突裁决观察的四个消息列（标准列 + 双媒体两列 + 卡片列）。
+    _CLAIM_OBSERVE_COLUMNS = (
+        "card_message_id", "media_message_id",
+        "media_message_id_v1", "media_message_id_v2")
+
+    @classmethod
+    def _claim_snapshot(cls, row: dict) -> tuple:
+        return tuple(row[c] for c in cls._CLAIM_OBSERVE_COLUMNS)
+
+    def _observe_claimed_row(
+        self, thread_id: str, gate: int, *, baseline: tuple
+    ) -> str:
+        """全空占位行存活观察窗（QA-2 MEDIUM），纯读 + tick 等待，绝不发送。
+
+        返回三态：
+        - "alive"：窗内四列中任一列相对 baseline 变化（他方在秒级上传/发卡）；
+        - "stale"：观察窗结束行列值毫无变化（判他方崩溃，调用方接管补发）；
+        - "gone"：行消失（他方裁决归档的极端窗口，调用方 fail-loud）。
+        """
+        deadline = time.monotonic() + CLAIM_OBSERVE_WINDOW_S
+        while True:
+            time.sleep(CLAIM_OBSERVE_TICK_S)
+            row = self.store.get_pending(thread_id, gate)
+            if row is None:
+                return "gone"
+            if self._claim_snapshot(row) != baseline:
+                return "alive"
+            if time.monotonic() >= deadline:
+                return "stale"
+
+    def _claim_loss_action(self, thread_id: str, gate: int) -> str:
+        """claim_pending 返回 False 后的统一裁决（纯读，零发送）。
+
+        - "wait"：他方卡片已发（既有快路），或全空占位行观察窗内长出列
+          （他方存活）——本次零发送，直接 _await_decision 等同一裁决；
+        - "take"：部分消息列已回填的崩溃现场（立即接管，零等待），或全空行
+          观察窗零变化（陈旧接管，缺啥补啥）；
+        - "gone"：行消失或已非 PENDING——调用方必须 fail-loud，拒绝补发
+          孤儿媒体/孤儿卡（reviewer LOW-4 同面）。
+        """
+        existing = self.store.get_pending(thread_id, gate)
+        if existing is None or existing["status"] != "PENDING":
+            return "gone"
+        if existing["card_message_id"]:
+            return "wait"
+        snapshot = self._claim_snapshot(existing)
+        if any(snapshot[1:]):  # card 必空；任一媒体列已回填=部分送达的崩溃现场
+            return "take"
+        verdict = self._observe_claimed_row(thread_id, gate, baseline=snapshot)
+        if verdict == "gone":
+            return "gone"
+        if verdict == "alive":
+            self._log.warning(
+                "Gate%s 全空占位行观察窗内有列增长（他方存活上传中），本次零发送"
+                "纯等待 thread=%s", gate, thread_id)
+            return "wait"
+        self._log.warning(
+            "Gate%s 全空占位行观察窗内零变化（判他方崩溃遗留），本次接管补发 "
+            "thread=%s", gate, thread_id)
+        return "take"
+
     def _event_for(self, thread_id: str, gate: int) -> threading.Event:
         key = (thread_id, gate)
         with self._events_lock:
@@ -937,6 +1007,9 @@ class FeishuGateway:
         计算接触时刻。H-4：发视频/卡片之前先在库内占位（PENDING 空行），
         推送失败也保留占位供下次重挂，任何路径不重复推视频；消息 id 在发送
         成功后只做一次 COALESCE 回填（不再 upsert+attach 双写）。
+        QA-2：claim 失败遇全空占位行进存活观察窗（默认 8s/0.2s tick）——
+        窗内他方长出消息列则本次零发送纯等待，零变化才判崩溃接管，行消失
+        fail-loud（见 _claim_loss_action）。
         """
         gate = 2
         # 在任何副作用之前校验 trim（非法契约直接抛错，不推视频、不写占位）。
@@ -951,7 +1024,10 @@ class FeishuGateway:
             self._reopen_round(thread_id, gate)
             # H-4：占位先行。claim 失败说明主表已有行——若已带 card_message_id
             # 视为他方发卡完成，直接进入等待、绝不重复推视频；无 card id 的
-            # PENDING 占位（他方进程崩溃遗留）由本次接管补发。
+            # claim 失败交 _claim_loss_action 三分裁决（QA-2 MEDIUM）：
+            # 部分媒体列已回填=崩溃现场，立即接管零等待；四列全空=双活歧义，
+            # 进存活观察窗（alive 零发送纯等待 / stale 接管补发）；行消失
+            # fail-loud，拒绝孤儿媒体/孤儿卡（reviewer LOW-4）。
             claimed = self.store.claim_pending(thread_id, gate,
                                                 task_title=task_title)
             other_card_ready = False
@@ -964,6 +1040,17 @@ class FeishuGateway:
                         "Gate2 占位已被他方持有且卡片已发，本次不重复推视频 "
                         "thread=%s card=%s", thread_id,
                         existing["card_message_id"])
+                else:
+                    claim_action = self._claim_loss_action(thread_id, gate)
+                    if claim_action == "gone":
+                        raise RuntimeError(
+                            "Gate2 占位行在 claim 后消失，疑似他方已裁决归档；"
+                            "拒绝发送孤儿媒体/孤儿卡，请走 resume 读终态 "
+                            f"thread={thread_id}")
+                    if claim_action == "wait":
+                        # 观察窗内他方长出列（存活上传中）：本次零发送，落到
+                        # 下方 _await_decision 纯等待同一裁决。
+                        other_card_ready = True
             if not other_card_ready:
                 media_message_id = None
                 video_fallback = False
@@ -1089,6 +1176,9 @@ class FeishuGateway:
         → 标签「② V2 本次视频」→ 原生视频 V2（回填 v2 列）→ Diff 表单卡 →
         阻塞等待人类最终裁决。任一已送达列不重发、其标签行也不重发（标签从不
         持久化）；两列都在则只补卡片；占位被他方持有且卡片已发 → 只等待。
+        QA-2：claim 失败遇全空占位行进存活观察窗（CLAIM_OBSERVE_WINDOW_S/
+        TICK_S），窗内他方长列→零标签零视频零卡片纯等待，零变化→判崩溃接管，
+        行消失→RuntimeError fail-loud。
         metrics_diff/pareto_verdict 在任何副作用之前先过卡片构造校验（fail-closed）。
         duration_ms/cover_png/trim 两列同参（V1/V2 是否同截窗由调用方决定）。
         """
@@ -1116,6 +1206,19 @@ class FeishuGateway:
                         "Gate2(diff) 占位已被他方持有且卡片已发，本次不重复推视频 "
                         "thread=%s card=%s", thread_id,
                         existing["card_message_id"])
+                else:
+                    # QA-2 MEDIUM：无 card 的 claim 失败三分裁决（与标准 Gate2
+                    # 同构）——部分回填立即接管；全空行进观察窗区分双活/崩溃；
+                    # 行消失 fail-loud，零标签零视频零卡片（reviewer LOW-4）。
+                    claim_action = self._claim_loss_action(thread_id, gate)
+                    if claim_action == "gone":
+                        raise RuntimeError(
+                            "Gate2(diff) 占位行在 claim 后消失，疑似他方已裁决"
+                            "归档；拒绝发送孤儿媒体/孤儿卡，请走 resume 读终态 "
+                            f"thread={thread_id}")
+                    if claim_action == "wait":
+                        # 他方存活上传中：本次零发送，纯等待同一裁决。
+                        other_card_ready = True
             if not other_card_ready:
                 stale = None if claimed else self.store.get_pending(thread_id, gate)
                 v1_existing = stale["media_message_id_v1"] if stale else None

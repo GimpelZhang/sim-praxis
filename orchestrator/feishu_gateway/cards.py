@@ -838,7 +838,9 @@ def _validated_claim(claim: Any, idx: int) -> dict:
     if metric not in METRIC_DIRECTIONS:
         raise ValueError(f"{where}.metric={metric!r} 不在 Pareto 指标集")
     direction = claim.get("direction")
-    if direction not in (1, -1):
+    # bool 是 int 子类（True==1），必须先排 bool 再做成员判定（reviewer LOW-3）。
+    if not (isinstance(direction, int) and not isinstance(direction, bool)
+            and direction in (1, -1)):
         raise ValueError(f"{where}.direction={direction!r} 只允许 1/-1")
     if direction != METRIC_DIRECTIONS[metric]:
         raise ValueError(f"{where} 方向与指标 {metric} 的改善方向冲突")

@@ -263,7 +263,10 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 唯一合法生产发送闸门（H-5 claim + 重发 upsert）
     # Task0 后 Task3 前的位移：871→877（upsert）、949→955（标准 Gate2 claim）；
     # Task3 新增 1107（双媒体 Diff Gate2 的 H-4 claim，同一占位协议第二发送闸门）。
-    "orchestrator/feishu_gateway/client.py": {877, 955, 1107},
+    # QA-2（2026-10-17）插入观察窗常量/方法与两请求器三态裁决，纯位移：
+    # 877→947（upsert）、955→1031（标准 Gate2 claim）、1107→1197（Diff claim）；
+    # _claim_loss_action 内只有 get_pending 读，无新增写闸门（AST 全仓扫描对账）。
+    "orchestrator/feishu_gateway/client.py": {947, 1031, 1197},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
