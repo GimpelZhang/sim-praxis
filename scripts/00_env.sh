@@ -139,8 +139,11 @@ export SIMPRAXIS_TOURS_DIR="${SIMPRAXIS_TOURS_DIR:-/mnt/assets/simpraxis/tours}"
 # 模型清点固定路径（v4：inventory 仅供换供请示取证，router 不读它做闸；v4.2 决策 3）
 export SIMPRAXIS_INVENTORY_LATEST="${SIMPRAXIS_INVENTORY_LATEST:-$SIMPRAXIS_RUN_DIR/inventory/latest/ark_models.json}"
 
+# Task0b：$SIMPRAXIS_LANCEDB_URI 指向 KB data/ 软链后的闭源数据层，其建层/建链
+# 只由 scripts/kb/migrate_data_layer.py 负责；env 绝不预建该路径，否则缺链的新克隆
+# 会被静默写穿成 KB 仓实体目录（split-brain），且绕过 check_solutions 的实体守卫。
 mkdir -p "$HF_HOME" "$FASTEMBED_CACHE_PATH" "$MODELSCOPE_CACHE" \
-         "$SIMPRAXIS_LANCEDB_URI" "$SIMPRAXIS_RUN_DIR/inventory" \
+         "$SIMPRAXIS_RUN_DIR/inventory" \
          "$SIMPRAXIS_RUN_DIR/model_validate" \
          "$SIMPRAXIS_GATEWAY_STATE" "$SIMPRAXIS_TOURS_DIR"
 
