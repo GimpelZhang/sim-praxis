@@ -20,7 +20,9 @@ from typing import Any, Callable
 
 import yaml
 
+from memory_flywheel.recall import ProductionRecall, prompt_embedded_text
 from memory_flywheel.vector_engine import VectorEngine
+from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.common.runtime_paths import phase1_root
@@ -115,6 +117,34 @@ def _evidence_block(hits: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _learning_block(learning_hits: "list[dict] | None") -> str:
+    """【实战演化避坑】段（Phase 2 Task1）：只渲染学习表真实行，逐字引用。
+
+    空/None → ""（调用方据此决定是否拼段；learning_hits=None 时 prompt 与
+    Phase 1 逐字节一致，旧测试零改动）。每行 text 原样入段，只加注来源
+    （learning_id/run_id/gate_source/rung，均为行内真实字段），不得改写、
+    截断或合成 KB 引用。
+    """
+    if not learning_hits:
+        return ""
+    lines = ["【实战演化避坑】（以下条目逐字摘自历史真实运行学习表 "
+             "phase1_learnings；必须作为避坑约束逐条对照，不得改写，"
+             "也不得伪造其中未给出的 KB 引用）"]
+    for i, h in enumerate(learning_hits, 1):
+        lines.append(
+            f"[L{i} 来源 learning_id={h.get('id', '?')} "
+            f"run_id={h.get('run_id', '?')} "
+            f"gate_source={h.get('gate_source', '?')} "
+            f"rung={h.get('rung', '?')}]\n{str(h.get('text', ''))}")
+    return "\n\n".join(lines)
+
+
+def _suffix_learning(learning_hits: "list[dict] | None") -> str:
+    """避坑段拼接到 user prompt 末尾；无命中返回 ""（旧 prompt 逐字节不变）。"""
+    block = _learning_block(learning_hits)
+    return f"\n\n{block}" if block else ""
+
+
 def _catalog_block(catalog: dict[str, dict]) -> str:
     return "\n".join(
         f"- slug={e['slug']}｜{e['display_name']}｜{e['kind']}｜"
@@ -157,7 +187,8 @@ def _system_prompt(catalog: dict[str, dict], n_hits: int) -> str:
     ).format(n=n_hits, schema=_json_schema_text(), catalog=_catalog_block(catalog))
 
 
-def _track1_user(payload: dict, hits: list[dict]) -> str:
+def _track1_user(payload: dict, hits: list[dict],
+                 learning_hits: "list[dict] | None" = None) -> str:
     urls = "\n".join(f"- {u}" for u in payload.get("urls", []))
     spine = json.loads(BLUEPRINT_PATH.read_text(encoding="utf-8"))["canonical_spine"]
     spine_text = "\n".join(
@@ -170,10 +201,12 @@ def _track1_user(payload: dict, hits: list[dict]) -> str:
         "controls_vs_experiment 写探针对照项（如 CPU/GPU 后端、不同接触求解器对照）；"
         "expected_artifacts 写具体产物文件名（探针视频/JSON/报告）。\n\n"
         f"【canonical spine】\n{spine_text}\n\n"
-        f"【知识库证据】\n{_evidence_block(hits)}")
+        f"【知识库证据】\n{_evidence_block(hits)}"
+        + _suffix_learning(learning_hits))
 
 
-def _track2_user(payload: dict, hits: list[dict]) -> str:
+def _track2_user(payload: dict, hits: list[dict],
+                 learning_hits: "list[dict] | None" = None) -> str:
     return (
         f"【Track 2：具身工程难题第一性原理实证】\n题目：{payload['question']}\n\n"
         "任务：先在 first_principles 中给出严密的第一性原理/物理推导（公式与假设），"
@@ -182,16 +215,19 @@ def _track2_user(payload: dict, hits: list[dict]) -> str:
         "- controls_vs_experiment 明确 Baseline 对照组（参数崩溃/失真）与 Ours 实验组"
         "（理论模型/高保真）及判别指标；\n"
         "- sim_engine 的选择由证据 [Si] 支撑；expected_artifacts 含对照视频与指标 JSON。\n\n"
-        f"【知识库证据】\n{_evidence_block(hits)}")
+        f"【知识库证据】\n{_evidence_block(hits)}"
+        + _suffix_learning(learning_hits))
 
 
 def build_first_messages(*, track: str, payload: dict, hits: list[dict],
-                         catalog: dict[str, dict]) -> list[dict[str, str]]:
+                         catalog: dict[str, dict],
+                         learning_hits: "list[dict] | None" = None
+                         ) -> list[dict[str, str]]:
     system = _system_prompt(catalog, len(hits))
     if track == "track1":
-        user = _track1_user(payload, hits)
+        user = _track1_user(payload, hits, learning_hits)
     elif track == "track2":
-        user = _track2_user(payload, hits)
+        user = _track2_user(payload, hits, learning_hits)
     else:
         raise DirectionError(f"未知 track={track!r}")
     return [{"role": "system", "content": system},
@@ -200,7 +236,11 @@ def build_first_messages(*, track: str, payload: dict, hits: list[dict],
 
 def build_repair_messages(messages: list[dict[str, str]], raw: str,
                           errors: list[str]) -> list[dict[str, str]]:
-    """校验失败后的唯一一次重问（NonRetryable 语义：不触网重试，只修正内容 1 次）。"""
+    """校验失败后的唯一一次重问（NonRetryable 语义：不触网重试，只修正内容 1 次）。
+
+    Task1：repair 在原 messages 上追加——首轮已渲染的【实战演化避坑】段随
+    消息历史原样保留，三入口（first/repair/reject）都带学习段。
+    """
     return messages + [
         {"role": "assistant", "content": raw[:4000]},
         {"role": "user", "content":
@@ -211,10 +251,13 @@ def build_repair_messages(messages: list[dict[str, str]], raw: str,
 
 def build_reject_messages(*, track: str, payload: dict, hits: list[dict],
                           catalog: dict[str, dict], human_notes: str,
-                          prev_proposals: list[dict]) -> list[dict[str, str]]:
+                          prev_proposals: list[dict],
+                          learning_hits: "list[dict] | None" = None
+                          ) -> list[dict[str, str]]:
     """Gate1 打回轮：人工意见最高优先级，必须逐条响应。"""
     messages = build_first_messages(track=track, payload=payload, hits=hits,
-                                    catalog=catalog)
+                                    catalog=catalog,
+                                    learning_hits=learning_hits)
     messages.append({"role": "user", "content": (
         "【人工评审意见（最高优先级，必须逐条响应）】\n"
         f"{human_notes.strip()}\n\n"
@@ -356,7 +399,9 @@ def _write_evidence(stem: str, kind: str, payload: dict) -> str:
 
 class DirectionSetter:
     def __init__(self, gateway: ModelGateway, vector_engine: VectorEngine,
-                 *, evidence_writer: "Callable | None" = None):
+                 *, evidence_writer: "Callable | None" = None,
+                 recall: "ProductionRecall | None" = None,
+                 call_cache: "CallReplay | None" = None):
         # Task3（§6.3）：本类不再持账本——preflight/记账统一由 ModelGateway.call
         # 经 BillingGate 在 billing_context 内完成；构造网关时必须传 ledger=，
         # 生产 CLI 用 billing_context(task=2, batch_id=...) 包住整个运行。
@@ -364,6 +409,28 @@ class DirectionSetter:
         self.vector_engine = vector_engine
         self._write_evidence = evidence_writer or _write_evidence
         self.catalog = load_engine_catalog()
+        # Phase 2 Task1：None=Phase 1 行为（revert 单文件回滚）；生产装配注入
+        # ProductionRecall 后启用 learning 双路召回 + 采纳遥测。
+        self.recall = recall
+        # S-5 于 Task1 关闭：macro 实呼启用调用级重放缓存（kill-9 节点重放
+        # 0 二次计费）。None=默认惰性 phase1_root()/.call_cache（与 coding/
+        # Rung4 同一缓存目录，macro_ key 前缀不冲突）；注入优先（测试 tmp）。
+        self._call_cache: "CallReplay | None" = call_cache
+
+    def _replay_cache(self) -> CallReplay:
+        if self._call_cache is None:
+            self._call_cache = CallReplay(phase1_root() / ".call_cache")
+        return self._call_cache
+
+    @staticmethod
+    def _usage_ints(usage: Any) -> "tuple[int, int] | None":
+        """真实网关返回两个非负 int；fake/无计量网关给 (None, None)——
+        此类结果不入重放缓存（CallReplay.put 不接受非 int）。"""
+        if (isinstance(usage, (list, tuple)) and len(usage) == 2
+                and all(isinstance(v, int) and not isinstance(v, bool)
+                        and v >= 0 for v in usage)):
+            return int(usage[0]), int(usage[1])
+        return None
 
     # 一次 macro 往返（含严格校验 + 最多 1 次重问），不做 Gate1 循环
     def run_direction(self, *, track: str, payload: dict, thread_id: str,
@@ -376,8 +443,19 @@ class DirectionSetter:
         validate_thread_id(thread_id)
         query = payload["question"] if track == "track2" else \
             f"{payload['name']} 架构 物理引擎 特性 闭环仿真"
-        hits = self.vector_engine.query_kb(query, namespace="capabilities",
-                                           top_k=TOP_K)
+        # Phase 2 Task1：recall 注入时 kb 路由 ProductionRecall 同参查询
+        # （retrieve 内部仍是 query_kb(namespace=capabilities, top_k=TOP_K)），
+        # ret["kb_hits"] 与原 hits 同源同语义（同一次调用返回，0 命中/校验/
+        # kb_sources 行为逐字不变），同时取 learning 路真实学习表命中；
+        # recall=None 走原查询路径（Phase 1 行为，revert 单文件）。
+        learning_hits: list[dict] = []
+        if self.recall is not None:
+            ret = self.recall.retrieve(query, site="direction")
+            hits = ret["kb_hits"]
+            learning_hits = ret["learning_hits"]
+        else:
+            hits = self.vector_engine.query_kb(query, namespace="capabilities",
+                                               top_k=TOP_K)
         if not hits:
             raise DirectionError("capabilities 检索 0 行：无证据不得产地方向")
         kb_sources = [{
@@ -387,14 +465,17 @@ class DirectionSetter:
             "doc_type": h.get("doc_type"),
         } for i, h in enumerate(hits, 1)]
 
+        # Task1：三入口统一透传避坑段（repair 轮在 messages 历史中原样保留）。
         if human_notes and prev_proposals:
             messages = build_reject_messages(track=track, payload=payload, hits=hits,
                                              catalog=self.catalog,
                                              human_notes=human_notes,
-                                             prev_proposals=prev_proposals)
+                                             prev_proposals=prev_proposals,
+                                             learning_hits=learning_hits or None)
         else:
             messages = build_first_messages(track=track, payload=payload, hits=hits,
-                                            catalog=self.catalog)
+                                            catalog=self.catalog,
+                                            learning_hits=learning_hits or None)
 
         round_meta: list[dict] = []
         raw = ""
@@ -411,29 +492,53 @@ class DirectionSetter:
             # Task3：preflight/记账在 gateway.call 内部（BillingGate）；这里只把
             # 本次实呼的 req 证据引用挂到 billing_context，成功/失败账行都能指回它。
             model = self.gateway.model_id(STAGE)
-            req_ref = self._write_evidence(stem, "req", {
-                # P2（Task0）：Phase 2 新证据行统一严格 UTC Z。
-                "ts_iso": utc_now_iso_z(),
-                "stage": STAGE, "model": model, "thread_id": thread_id,
-                "batch_id": batch_id, "track": track, "gate_round": gate_round,
-                "attempt": attempt, "max_tokens": MAX_TOKENS,
-                "temperature": TEMPERATURE,
-                "gate_bypassed_locally": bypass_stamp,
-                "messages": json.loads(redact(json.dumps(
-                    messages, ensure_ascii=False))),
-            })
-            set_current_evidence(req_ref)
-            try:
-                raw, _usage = self.gateway.call(STAGE, messages,
-                                                max_tokens=MAX_TOKENS,
-                                                temperature=TEMPERATURE)
-            except Exception as exc:
-                # 记账已在 call() 出口完成（成功一行 ok=true；任何越过 preflight 的
-                # 失败一行 ok=false，含 GatewayPausedError；StageUnresolvedError 在
-                # preflight 之前抛出，不占整数 seq）。setter 只补失败响应证据后原样抛。
-                self._write_evidence(stem, "resp", {"ok": False,
-                                                    "error": redact(str(exc))[:1000]})
-                raise
+            # Task1：prompt JSON 规范在此钉死（ensure_ascii=False,
+            # sort_keys=False）——采纳遥测 prompt_sha256 与 macro CallReplay
+            # 指纹共用同一字符串，两 sha 可交叉对账。
+            prompt_json = json.dumps(messages, ensure_ascii=False,
+                                     sort_keys=False)
+            # S-5（Task1 关闭）：macro 调用级重放，key 与 stem 同形；指纹并入
+            # stage/model，照 runner 同一口径。
+            cache = self._replay_cache()
+            cache_key = stem
+            fp = request_fingerprint(
+                prompt_json, None,
+                {"max_tokens": MAX_TOKENS, "temperature": TEMPERATURE},
+                stage=STAGE, model=model)
+            cached = cache.get(cache_key, fp)
+            replayed = cached is not None
+            req_ref = None
+            resp_ref = None
+            if replayed:
+                # kill-9 节点重放：不调 gateway、不写 req/resp、不进
+                # billing_context（0 ledger）、证据不覆盖；采纳行首呼已记，
+                # 重放不重复记账（与 0 ledger 语义对齐）。
+                raw = cached["raw"]
+                _usage = cached["usage"]
+            else:
+                req_ref = self._write_evidence(stem, "req", {
+                    # P2（Task0）：Phase 2 新证据行统一严格 UTC Z。
+                    "ts_iso": utc_now_iso_z(),
+                    "stage": STAGE, "model": model, "thread_id": thread_id,
+                    "batch_id": batch_id, "track": track, "gate_round": gate_round,
+                    "attempt": attempt, "max_tokens": MAX_TOKENS,
+                    "temperature": TEMPERATURE,
+                    "gate_bypassed_locally": bypass_stamp,
+                    "messages": json.loads(redact(json.dumps(
+                        messages, ensure_ascii=False))),
+                })
+                set_current_evidence(req_ref)
+                try:
+                    raw, _usage = self.gateway.call(STAGE, messages,
+                                                    max_tokens=MAX_TOKENS,
+                                                    temperature=TEMPERATURE)
+                except Exception as exc:
+                    # 记账已在 call() 出口完成（成功一行 ok=true；任何越过 preflight 的
+                    # 失败一行 ok=false，含 GatewayPausedError；StageUnresolvedError 在
+                    # preflight 之前抛出，不占整数 seq）。setter 只补失败响应证据后原样抛。
+                    self._write_evidence(stem, "resp", {"ok": False,
+                                                        "error": redact(str(exc))[:1000]})
+                    raise
             parse_error = None
             try:
                 obj = parse_json_object(raw)
@@ -442,13 +547,48 @@ class DirectionSetter:
             except (json.JSONDecodeError, ValueError) as exc:
                 parse_error = str(exc)
                 errors = [f"JSON 解析失败：{parse_error[:200]}"]
-            resp_ref = self._write_evidence(stem, "resp", {
-                "ok": True, "text": redact(raw),
-                "parse_error": parse_error, "validation_errors": errors,
-            })
-            round_meta.append({"attempt": attempt, "req": req_ref, "resp": resp_ref,
+            if not replayed:
+                resp_ref = self._write_evidence(stem, "resp", {
+                    "ok": True, "text": redact(raw),
+                    "parse_error": parse_error, "validation_errors": errors,
+                })
+                # QA-1 M2：put 是本调用周期最后的 commit marker，必须排在 resp
+                # 证据之后（与 runner 对齐）。若 kill 落在 put 之后/resp 之前，
+                # 新进程会命中缓存 0 实呼且永不补写 resp，致一笔 ok=true 实呼
+                # 永久缺响应证据（raw 只在被证据包排除的 .call_cache 点目录）。
+                # 现顺序：call 成功 → parse/validate（错误照常收集）→ 写 resp
+                # → put → 采纳；kill 只落在 resp 前则缓存未生，重放按 miss
+                # 安全重付并补齐证据。invalid raw 仍入缓存（既有适配 (e)：
+                # 走完 resp 再 put，repair 下一轮走新 key），仅以 usage_ints
+                # 非 None 为 put 自身条件；kind 沿用 runner 词汇表（stage 名串，
+                # coding 站为 "coding_debug"）。
+                usage_ints = self._usage_ints(_usage)
+                if usage_ints is not None:
+                    cache.put(cache_key, kind=STAGE, model=model, raw=raw,
+                              usage=usage_ints, fingerprint=fp)
+                # Task1 采纳遥测（QA-1 M1/M2）：判定点在 call **成功返回后**，
+                # 排在 resp 证据与 cache.put 之后。锁内适配（QA-1 修订）：
+                # 原「渲染后 redact 前」判定点会在发网前失败（model_id=None/
+                # 入口熔断/缺凭据/image 守卫，均在 call 内发网前抛出、无整数
+                # ledger 行）时也落采纳行，违反「未逐字渲染进实际发送的 prompt
+                # 不得产生采纳行」。唯一条件=call 成功返回：未发出/异常路径
+                # 0 采纳行（except 原样抛在上方），replay 分支不记；采纳不
+                # 依赖缓存是否写入（usage_ints 为 None 仍记）。崩溃只漏记不
+                # 重记（安全方向）。prompt 文本逐字未改，prompt_sha256 仍是
+                # 实际发送串；learning_text 取其在 prompt_json 中的逐字出现
+                # 形（JSON 转义形），未逐字渲染的命中不产生采纳行。
+                if self.recall is not None:
+                    for hit in learning_hits:
+                        self.recall.record_adoption(
+                            thread_id=thread_id, site="direction",
+                            learning_id=hit["id"], prompt_text=prompt_json,
+                            learning_text=prompt_embedded_text(
+                                str(hit.get("text", ""))))
+            round_meta.append({"attempt": attempt, "req": req_ref,
+                               "resp": resp_ref,
                                "parse_ok": parse_error is None,
-                               "validation_errors": errors})
+                               "validation_errors": errors,
+                               "replay": replayed})
             if not errors:
                 break
             if attempt < MAX_REPAIR_ASK:

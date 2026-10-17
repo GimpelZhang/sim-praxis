@@ -32,6 +32,7 @@ from typing import Any, Optional
 from langgraph.checkpoint.sqlite import SqliteSaver
 
 from memory_flywheel.phase1.learning_store import LearningStore
+from memory_flywheel.recall import ProductionRecall
 from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.common.validators import validate_batch_id, validate_thread_id
@@ -228,7 +229,13 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
         else f"Track2 实证：{payload['question'][:30]}")
 
     gateway = ModelGateway(ledger=QuotaLedger())
-    setter = DirectionSetter(gateway, VectorEngine())
+    # Phase 2 Task1：双路召回中枢——一个 VectorEngine 句柄 + 一个
+    # LearningStore 同时供 setter/runner/学习回写接缝复用（不新建第二个
+    # embedding 句柄）；recall=None 等价回滚到 Phase 1 行为。
+    vector_engine = VectorEngine()
+    learning_store = LearningStore()
+    recall = ProductionRecall(learning_store, vector_engine)
+    setter = DirectionSetter(gateway, vector_engine, recall=recall)
     thread = args.thread
     batch_id = args.batch_id
 
@@ -274,7 +281,7 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             trim=trim)
 
     # Task6：学习回写走同库独立新表 phase1_learnings（mpnet 768 复用，0 付费）
-    learning = make_learning_seam(LearningStore())
+    learning = make_learning_seam(learning_store)
 
     # Task7 Track1 / Task8 Track2：注入真实 agent_run（容器/子进程实跑场景
     # 脚本，coding 批次）与真实 evaluate（Rung1–3 文件判定 + Rung4 视频实呼，
@@ -302,7 +309,7 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             from orchestrator.graph.task7 import (
                 make_evaluate_seam, make_spec_factory,
             )
-        runner = AgentRunner(gateway, VectorEngine())
+        runner = AgentRunner(gateway, vector_engine, recall=recall)
         spec_factory = make_spec_factory(
             thread, args.coding_batch_id, task_title=title)
         agent_run_seam_impl = _agent_run_seam(runner, spec_factory)

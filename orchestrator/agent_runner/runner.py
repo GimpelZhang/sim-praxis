@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from memory_flywheel.recall import ProductionRecall, prompt_embedded_text
 from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.common.clock import utc_now_iso_z
@@ -321,9 +322,32 @@ def _kb_block(hits: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
+def _learning_block(learning_hits: "list[dict] | None") -> str:
+    """【实战演化避坑】段（Phase 2 Task1）：只渲染学习表真实行，逐字引用。
+
+    空/None → ""（调用方整段不拼，0 命中时 prompt 不出现避坑标题；
+    learning_hits=None 时消息与 Phase 1 一致，旧测试零改动）。补丁片段只能
+    来自这些真实行的 text（含修复动作/人工意见原文），不得合成 KB 引用。
+    """
+    if not learning_hits:
+        return ""
+    lines = ["以下条目逐字摘自历史真实运行学习表 phase1_learnings，必须作为"
+             "避坑约束对照；补丁只能引用这些真实条目，不得编造其中不存在的"
+             "修复或 KB 引用："]
+    for i, h in enumerate(learning_hits, 1):
+        lines.append(
+            f"[L{i} 来源 learning_id={h.get('id', '?')} "
+            f"run_id={h.get('run_id', '?')} "
+            f"gate_source={h.get('gate_source', '?')} "
+            f"rung={h.get('rung', '?')}]\n{str(h.get('text', ''))}")
+    return "\n\n".join(lines)
+
+
 def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                     snippets: list[dict], hits: list[dict],
-                    cmd: list[str]) -> list[dict[str, str]]:
+                    cmd: list[str],
+                    learning_hits: "list[dict] | None" = None
+                    ) -> list[dict[str, str]]:
     system = (
         "你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON："
         '{"patches":[{"path":"相对运行工作目录的路径","old":"原文（须唯一）",'
@@ -338,13 +362,20 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
     snippet_block = "\n\n".join(
         f"### {s['file']}:{s['line']}\n{s['snippet']}" for s in snippets) \
         or "（traceback 帧均在工作目录外，无源片段可读）"
+    # Phase 2 Task1：避坑段仅在 learning 路有真实命中时出现，置于 kb 段之后；
+    # 0 命中不拼标题（禁止据此编造 fix/KB 引用）。
+    learning_section = ""
+    learning_text = _learning_block(learning_hits)
+    if learning_text:
+        learning_section = "\n\n## 实战演化避坑（phase1_learnings 真实行，逐字引用）\n" \
+            + learning_text
     user = (
         f"{notes_block}"
         "## 失败命令\n" + " ".join(cmd) + "\n\n"
         "## traceback / 日志尾部\n" + traceback_tail + "\n\n"
         "## 相关源文件片段（仅限运行工作目录）\n" + snippet_block + "\n\n"
         "## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n"
-        + _kb_block(hits))
+        + _kb_block(hits) + learning_section)
     return [{"role": "system", "content": system},
             {"role": "user", "content": user}]
 
@@ -363,12 +394,16 @@ class AgentRunner:
                  evidence_root: "Path | None" = None,
                  subprocess_runner: "SubprocessRunner | None" = None,
                  evidence_writer: "Callable | None" = None,
-                 call_cache: "CallReplay | None" = None):
+                 call_cache: "CallReplay | None" = None,
+                 recall: "ProductionRecall | None" = None):
         self.gateway = gateway
         self.vector_engine = vector_engine
         self._evidence_root = evidence_root
         self._run = subprocess_runner or _default_subprocess
         self._write_evidence = evidence_writer  # 测试注入：(root, stem, kind, payload)->ref
+        # Phase 2 Task1：None=Phase 1 行为（revert 单文件回滚）；注入后启用
+        # learning 双路召回 + 采纳遥测（coding 站，site="coding"）。
+        self.recall = recall
         # L-1：None=调用方未注入；默认目录 phase1_root()/.call_cache 延迟到
         # 首用（且 spec.run_idx 非 None）才建，避免 Task4 直连在 /mnt 留件。
         self._call_cache: "Optional[CallReplay]" = call_cache
@@ -495,12 +530,23 @@ class AgentRunner:
 
             tail = _tb_tail(result)
             snippets = _collect_snippets(workdir, tail)
-            hits = self.vector_engine.query_kb(
-                "仿真失败 " + tail[-500:], namespace="troubleshooting",
-                top_k=TOP_K)
+            # Phase 2 Task1：recall 注入时 kb 路由 ProductionRecall 同参查询
+            # （query_kb(namespace=troubleshooting, top_k=TOP_K)），
+            # ret["kb_hits"] 与原 hits 同源同语义；learning 路只查真实学习表。
+            learning_hits: list[dict] = []
+            if self.recall is not None:
+                ret = self.recall.retrieve(
+                    "仿真失败 " + tail[-500:], site="coding")
+                hits = ret["kb_hits"]
+                learning_hits = ret["learning_hits"]
+            else:
+                hits = self.vector_engine.query_kb(
+                    "仿真失败 " + tail[-500:], namespace="troubleshooting",
+                    top_k=TOP_K)
             messages = _build_messages(
                 gate2_notes=spec.gate2_notes, traceback_tail=tail,
-                snippets=snippets, hits=hits, cmd=spec.cmd)
+                snippets=snippets, hits=hits, cmd=spec.cmd,
+                learning_hits=learning_hits or None)
             # 硬规则1：runner 永不构造 image block（双保险，网关入口亦拒）
             for mm in messages:
                 if not isinstance(mm.get("content"), str):
@@ -517,14 +563,20 @@ class AgentRunner:
             cache_key = (f"coding_{spec.thread_id}_r{spec.run_idx}"
                          f"_round{coding_calls}")
             # S-8：指纹并入 stage/model，同 prompt 跨阶段/跨模型不得错配重放。
+            # Task1：prompt JSON 串（sort_keys=True 沿用既有缓存口径）同时是
+            # 采纳遥测 prompt_sha256 的规范串——两 sha 同源可交叉对账。
+            prompt_json = json.dumps(messages, ensure_ascii=False,
+                                     sort_keys=True)
             fp = request_fingerprint(
-                json.dumps(messages, ensure_ascii=False, sort_keys=True),
+                prompt_json,
                 None,
                 {"max_tokens": MAX_TOKENS, "temperature": TEMPERATURE},
                 stage=STAGE, model=model)
             cached = cache.get(cache_key, fp) if cache is not None else None
             if cached is not None:
                 raw = cached["raw"]
+                # Task1：重放不重复记采纳行——首呼已记，节点重放属同一逻辑
+                # 调用，与 0 ledger/0 证据覆盖语义对齐。
             else:
                 req_ref = self._evidence(root, stem, "req", {
                     # P2（Task0）：Phase 2 新证据行时间戳统一严格 UTC Z。
@@ -551,6 +603,21 @@ class AgentRunner:
                 if cache is not None and usage_ints is not None:
                     cache.put(cache_key, kind=STAGE, model=model, raw=raw,
                               usage=usage_ints, fingerprint=fp)
+                # Task1 采纳遥测（QA-1 M1）：判定点在 call **成功返回后**、
+                # resp 证据写完、cache.put 之后。唯一条件=call 成功返回：
+                # 发网前失败/异常路径 0 采纳行，replay 分支不记；采纳不依赖
+                # 缓存写入（cache 为 None 或 fake 无计量 usage_ints=None 时
+                # 仍记——test_repair_fragments 的成功 fake 即此路径）。崩溃
+                # 只漏记不重记（安全方向）。prompt 文本逐字未改，
+                # prompt_sha256 仍是实际发送串，learning_text 取其在
+                # prompt_json 中的逐字出现形（JSON 转义形）。
+                if self.recall is not None:
+                    for hit in learning_hits:
+                        self.recall.record_adoption(
+                            thread_id=spec.thread_id, site="coding",
+                            learning_id=hit["id"], prompt_text=prompt_json,
+                            learning_text=prompt_embedded_text(
+                                str(hit.get("text", ""))))
             try:
                 applied = _parse_and_apply(workdir, raw)
             except PatchSafetyError as exc:
