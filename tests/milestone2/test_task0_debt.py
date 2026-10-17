@@ -648,14 +648,17 @@ def test_s10_text_block_trust_only_typed_text_blocks():
 
 
 CALL_CACHE_ALLOWLIST = {
-    ("orchestrator/agent_runner/runner.py", 417),
+    # Phase 2 Task2：RunSpec.max_coding_rounds 字段+注释纯位移（417→421），
+    # 无新增 CallReplay 落点。
+    ("orchestrator/agent_runner/runner.py", 421),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     ("orchestrator/graph/task7.py", 331),
     ("orchestrator/graph/task8.py", 428),
     # Phase 2 Task1：S-5 有意关闭——macro 方向步加调用级重放
     # （key macro_{thread}_r{round}_a{attempt}，同一 phase1 .call_cache）。
-    ("orchestrator/direction/setter.py", 422),
+    # Phase 2 Task2：ascent_claims 校验+批判段注入纯位移（422→506），落点不变。
+    ("orchestrator/direction/setter.py", 506),
 }
 
 

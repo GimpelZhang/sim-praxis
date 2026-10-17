@@ -33,6 +33,8 @@ from .gait_thresholds import (
     FALL_Z_M,
     MIN_SEEDS,
     POSTPUSH_WINDOW_S,
+    PUSH_DUR_S,
+    PUSH_FORCE_N,
     SLIP_DIST_REL_TOL,
     SLIP_V_MAX_MPS,
     TELEM_HZ,
@@ -245,7 +247,7 @@ def _check_calibration(workdir: Path) -> tuple[dict, list[str]]:
                              .get("all_bit_exact"))
     if cal.get("schema") != "simpraxis.task8.track2.push_window_calibration.v2":
         errs.append("标定件必须是 v2（确定性求解臂口径）")
-    if sel.get("push_n_N") != 35 or sel.get("push_dur_s") != 0.2:
+    if sel.get("push_n_N") != PUSH_FORCE_N or sel.get("push_dur_s") != PUSH_DUR_S:
         errs.append(f"标定选定窗口必须 35N×0.2s，实际 {sel}")
     if info["all_bit_exact"] is not True:
         errs.append("标定件跨进程逐位复验必须全部为 true")
@@ -429,7 +431,7 @@ def rung3_check(telemetries: dict[str, dict]) -> tuple[dict, dict[str, dict]]:
         if any(abs(g - DT_FRAME) > 1e-3 for g in gaps):
             violations.append(f"{run_id}: telemetry 时间轴不等距（应为 {DT_FRAME:g}s）")
         # 扰动交付：35N×.2s 且 push_t 在脚本三种子相位表内
-        if rec["push_n"] != 35.0 or abs(rec["push_dur"] - 0.2) > 1e-9:
+        if rec["push_n"] != PUSH_FORCE_N or abs(rec["push_dur"] - PUSH_DUR_S) > 1e-9:
             violations.append(
                 f"{run_id}: 扰动参数 {rec['push_n']}N×{rec['push_dur']}s ≠ 35N×0.2s")
     checks = {

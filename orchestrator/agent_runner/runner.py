@@ -90,6 +90,10 @@ class RunSpec:
     video_relpath: Optional[str] = None
     cover_relpath: Optional[str] = None
     manifest_relpath: Optional[str] = None
+    # Phase 2 Task2：每 run coding_debug 上限可配置；默认 MAX_CODING_ROUNDS(=5)
+    # 与 Phase 1 行为逐值一致。Task6 升阶 run 工厂将显式传 3（run 级收窄，
+    # 见计划 L193），本任务不改 Task7/8 既有工厂。
+    max_coding_rounds: int = MAX_CODING_ROUNDS
 
 
 @dataclass
@@ -522,11 +526,11 @@ class AgentRunner:
                         "video_path": vp, "duration_ms": dur_ms,
                         "cover_png": cover, "intranet_url": None}
 
-            # —— 失败路径：5 次调用用尽即结案，结构上不存在第 6 次调用 ——
-            if coding_calls >= MAX_CODING_ROUNDS:
+            # —— 失败路径：coding 调用用尽即结案，结构上不存在多一次调用 ——
+            if coding_calls >= spec.max_coding_rounds:
                 return self._fail(root, spec, timeline, last_result,
-                                  reason=f"{MAX_CODING_ROUNDS} 轮 coding_debug "
-                                         f"后仍失败（D10 上限）")
+                                  reason=f"{spec.max_coding_rounds} 轮 coding_debug "
+                                         f"后仍失败（RunSpec 上限；默认 D10=5）")
 
             tail = _tb_tail(result)
             snippets = _collect_snippets(workdir, tail)

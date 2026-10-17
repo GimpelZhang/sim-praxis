@@ -28,6 +28,11 @@ class SimPraxisState(TypedDict, total=False):
     telemetry_uri: str
     metrics: dict
     rung4: dict
+    # Phase 2 Task2：ascent 双模式（加法字段；旧快照缺省等价 standard）。
+    run_mode: str              # standard | ascent（classify 节点写入）
+    v1_archive: "dict | None"  # ascent 命中时的 V1 档案白名单副本
+    ascent_targets: dict       # 加严项与因子（standard 为 {}）
+    pareto_verdict: "dict | None"  # evaluate 后回填（Task4 接线）
     events: Annotated[list, operator.add]
 
 

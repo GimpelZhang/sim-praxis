@@ -57,6 +57,22 @@ CONTACT_FORCE_MAX_N = 10000.0
 # 反调；名义两臂仍用 10 kN。
 CONTACT_FORCE_MAX_N_DR = 20000.0
 
+# 预注册扰动锚点（Task2 收口为命名常量；原 gait_rungs 标定件/扰动交付两处
+# 35/0.2 字面量改为 import 同一对象，ascent_thresholds 直接 re-export）。
+PUSH_FORCE_N = 35.0
+PUSH_DUR_S = 0.2
+
+# V1（track2#1 / t8-genesis-20261016a）DR 应力包络基线：与生产脚本
+# KB solutions/track2_questions/01_ice_floor_humanoid_dr/genesis_humanoid_dr.py
+# 的 log-uniform 字面量及 V1 summary.json 的 dr_envelope 同源。Task2 ascent
+# 加严只允许在此基线上按因子外扩（见 judge/ascent_thresholds.py），禁止改值。
+DR_MU_LOGUNIFORM = (0.05, 0.4)
+DR_KP_LOGUNIFORM = (10000.0, 1000000.0)
+# Kd 基线同源于 V1 summary.json 的 dr_envelope（真实登记档案 Kd=[15,200]，
+# QA-1 LOW-3 核对）。ascent 不外扩 Kd，但 build_targets 必须逐值对质后透传，
+# 漂移/缺失即 AscentThresholdError（不再 None 透传）。
+DR_KD_LOGUNIFORM = (15.0, 200.0)
+
 # outcomes 的峰速从未取整的 vxy 取 max 后 round(3)；series 存 round(4)，
 # 在 125 帧窗口内 argmax 可能换到相邻帧（实测差 0.001 m/s）。独立重算的
 # 对质容差取 0.005 m/s（远小于有序/失序两族间距 0.5 vs 5.6 m/s）。

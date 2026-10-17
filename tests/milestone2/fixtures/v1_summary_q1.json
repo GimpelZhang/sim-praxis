@@ -1,0 +1,46 @@
+{
+  "_fixture": "simpraxis.task2.v1_summary_q1",
+  "_note": "Phase2 Task2 测试夹具：从 V1（track2#1 / t8-genesis-20261016a）summary.json 摘出的纯数值小件（无宿主路径、无视频）；dr_envelope 与三臂组统计逐值同源于真实档案，供分类/加严目标/批判段测试。视频绝不入仓。",
+  "schema": "simpraxis.task8.track2.telemetry.v1",
+  "seeds": 3,
+  "disturbance": {
+    "push_n": 35.0,
+    "push_dur_s": 0.2,
+    "push_t_by_seed": [3.0, 2.7, 3.3]
+  },
+  "dr_envelope": {
+    "mu_loguniform": [0.05, 0.4],
+    "Kp_loguniform": [10000.0, 1000000.0],
+    "Kd_loguniform": [15.0, 200.0],
+    "wrench": {"f_sigma_n": 2.0, "t_sigma_nm": 0.2}
+  },
+  "groups": {
+    "normal": {
+      "n": 3,
+      "success_rate": 0.3333333333333333,
+      "n_fell": 2,
+      "mu_per_seed": [0.7, 0.7, 0.7],
+      "slip_dist_m_mean": [0.1628, 0.122],
+      "slip_vmax_postpush_mps_max": [7.21],
+      "tilt_max_deg_max": 169.96
+    },
+    "ice_nominal": {
+      "n": 3,
+      "success_rate": 0.0,
+      "n_fell": 3,
+      "mu_per_seed": [0.05, 0.05, 0.05],
+      "slip_dist_m_mean": [0.2255, 0.1413],
+      "slip_vmax_postpush_mps_max": [5.644],
+      "tilt_max_deg_max": 157.42
+    },
+    "ice_dr": {
+      "n": 3,
+      "success_rate": 0.0,
+      "n_fell": 3,
+      "mu_per_seed": [0.089668, 0.112474, 0.338518],
+      "slip_dist_m_mean": [0.3934, 0.4794],
+      "slip_vmax_postpush_mps_max": [19.198],
+      "tilt_max_deg_max": 139.36
+    }
+  }
+}

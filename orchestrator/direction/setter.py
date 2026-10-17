@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -29,6 +30,8 @@ from orchestrator.common.runtime_paths import phase1_root
 from orchestrator.common.validators import assert_within, validate_thread_id
 from orchestrator.gateway.quota_ledger import set_current_evidence
 from orchestrator.gateway.router import ModelGateway, redact
+from orchestrator.graph.ascent import build_ascent_messages
+from orchestrator.judge.pareto import METRIC_DIRECTIONS
 
 STAGE = "macro_ideation"
 TOP_K = 8
@@ -323,9 +326,74 @@ def _normalize_artifacts(value: Any) -> "list[str] | None":
     return items
 
 
+_CLAIM_DIRECTION_WORDS = {"inc": 1, "dec": -1}
+
+
+def _normalize_claims(value: Any) -> "tuple[list[dict] | None, list[str]]":
+    """Phase 2 Task2：校验 ascent_claims（ascent 模式可选，给则非空）。
+
+    每项 {metric, direction, task, target, epsilon}：metric 必须是 Pareto
+    六指标之一；direction 只接受 ±1 或 'inc'/'dec' 且必须指向该指标的
+    改善方向（与 Pareto 方向表冲突即坏声明，fail-closed）；task 非空字符串；
+    target 有限数；epsilon 有限非负数。返回 (规范化列表, 错误列表)。
+    """
+    if not isinstance(value, list) or not value:
+        return None, ["ascent_claims 若给出必须是非空数组"]
+    errors: list[str] = []
+    out: list[dict] = []
+    for i, c in enumerate(value):
+        tag = f"ascent_claims[{i}]"
+        if not isinstance(c, dict):
+            errors.append(f"{tag} 不是对象")
+            continue
+        metric = c.get("metric")
+        if metric not in METRIC_DIRECTIONS:
+            errors.append(f"{tag}.metric={metric!r} 不在 Pareto 指标集 "
+                          f"{sorted(METRIC_DIRECTIONS)}")
+            metric = None
+        raw_dir = c.get("direction")
+        if isinstance(raw_dir, bool) or (
+                not isinstance(raw_dir, (int, str))
+                or (isinstance(raw_dir, str)
+                    and raw_dir not in _CLAIM_DIRECTION_WORDS)
+                or (isinstance(raw_dir, int) and raw_dir not in (1, -1))):
+            errors.append(f"{tag}.direction={raw_dir!r} 只允许 1/-1 或 'inc'/'dec'")
+            direction = None
+        else:
+            direction = _CLAIM_DIRECTION_WORDS[raw_dir] \
+                if isinstance(raw_dir, str) else int(raw_dir)
+        if metric is not None and direction is not None \
+                and direction != METRIC_DIRECTIONS[metric]:
+            errors.append(
+                f"{tag} 声称方向 {raw_dir!r} 与指标 {metric} 的改善方向 "
+                f"{METRIC_DIRECTIONS[metric]} 冲突（升阶假设只能指向改善）")
+        task = c.get("task")
+        if not isinstance(task, str) or not task.strip():
+            errors.append(f"{tag}.task 必须是非空字符串（对应验证任务/对照臂）")
+        target = c.get("target")
+        if isinstance(target, bool) or not isinstance(target, (int, float)) \
+                or not math.isfinite(float(target)):
+            errors.append(f"{tag}.target={target!r} 必须是有限数")
+        epsilon = c.get("epsilon")
+        if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)) \
+                or not math.isfinite(float(epsilon)) or float(epsilon) < 0:
+            errors.append(f"{tag}.epsilon={epsilon!r} 必须是有限非负数")
+        if errors:
+            continue
+        out.append({"metric": metric, "direction": direction,
+                    "task": task.strip(), "target": float(target),
+                    "epsilon": float(epsilon)})
+    return (out if not errors else None), errors
+
+
 def validate_proposals(obj: dict, *, hits: list[dict],
-                       catalog: dict[str, dict]) -> "tuple[list[dict], list[str]]":
-    """返回 (规范化 proposals, 错误列表)；错误为空即通过。"""
+                       catalog: dict[str, dict],
+                       ascent: bool = False) -> "tuple[list[dict], list[str]]":
+    """返回 (规范化 proposals, 错误列表)；错误为空即通过。
+
+    Phase 2 Task2：ascent=True 时候选可带 ascent_claims（可选，给则校验）；
+    standard 模式出现该字段即坏输入（协议外数据，fail-closed）。
+    """
     errors: list[str] = []
     if not isinstance(obj, dict):
         return [], ["顶层不是 JSON 对象"]
@@ -367,12 +435,28 @@ def validate_proposals(obj: dict, *, hits: list[dict],
         if p["name"].strip() in names:
             errors.append(f"{tag} 候选重名 {p['name']!r}（禁止多样性坍塌）")
         names.append(p["name"].strip())
-        if refs is None or slug is None:
+        # Phase 2 Task2：ascent_claims——standard 模式禁止出现；ascent 模式
+        # 可选，给则逐项校验（坏声明 fail-closed）。
+        claims = None
+        claims_bad = False
+        if "ascent_claims" in p:
+            if not ascent:
+                errors.append(f"{tag} ascent_claims 只允许在 ascent 模式出现"
+                              "（standard 模式必须缺省）")
+                claims_bad = True
+            elif p["ascent_claims"] is not None:
+                claims, claim_errors = _normalize_claims(p["ascent_claims"])
+                if claim_errors:
+                    errors.extend(f"{tag} {e}" for e in claim_errors)
+                    claims_bad = True
+        if refs is None or slug is None or claims_bad:
             continue
         qp = {f: p[f].strip() for f in _STR_FIELDS}
         qp["sim_engine"] = slug
         qp["evidence_refs"] = refs
         qp["expected_artifacts"] = artifacts
+        if ascent and claims is not None:
+            qp["ascent_claims"] = claims
         out.append(qp)
     return (out if not errors else []), errors
 
@@ -437,7 +521,9 @@ class DirectionSetter:
                       batch_id: str, gate_round: int = 0,
                       human_notes: "str | None" = None,
                       prev_proposals: "list[dict] | None" = None,
-                      bypass_stamp: bool = False) -> dict:
+                      bypass_stamp: bool = False,
+                      v1_archive: "dict | None" = None,
+                      ascent_targets: "dict | None" = None) -> dict:
         # G-5：thread_id 直接拼进证据文件名（macro_<thread>_* / proposals_<thread>_*），
         # 入口先过字符集白名单 ^[A-Za-z0-9_-]{1,64}$，拒绝遍历/分隔符形态。
         validate_thread_id(thread_id)
@@ -476,6 +562,13 @@ class DirectionSetter:
             messages = build_first_messages(track=track, payload=payload, hits=hits,
                                             catalog=self.catalog,
                                             learning_hits=learning_hits or None)
+        # Phase 2 Task2：ascent 模式在 setter 之外组装批判段插入 user 头部；
+        # None=standard，消息与 Phase 1 逐字节一致（build_ascent_messages
+        # 根本不被调用）。打回轮重建消息后同样插一次；repair 轮保留历史不重插。
+        ascent_mode = v1_archive is not None and ascent_targets
+        if ascent_mode:
+            messages = build_ascent_messages(
+                messages, v1_archive=v1_archive, ascent_targets=ascent_targets)
 
         round_meta: list[dict] = []
         raw = ""
@@ -543,7 +636,8 @@ class DirectionSetter:
             try:
                 obj = parse_json_object(raw)
                 proposals, errors = validate_proposals(
-                    obj, hits=hits, catalog=self.catalog)
+                    obj, hits=hits, catalog=self.catalog,
+                    ascent=bool(ascent_mode))
             except (json.JSONDecodeError, ValueError) as exc:
                 parse_error = str(exc)
                 errors = [f"JSON 解析失败：{parse_error[:200]}"]
@@ -599,6 +693,7 @@ class DirectionSetter:
 
         result = {
             "track": track, "thread_id": thread_id, "batch_id": batch_id,
+            "run_mode": "ascent" if ascent_mode else "standard",
             "gate_round": gate_round,
             "gate_bypassed_locally": bypass_stamp,
             "question": obj.get("question") or (payload.get("question") or payload.get("name")),

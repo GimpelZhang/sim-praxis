@@ -1,0 +1,40 @@
+{
+  "_comment": "SimPraxis V1 档案登记模板（schema: simpraxis.v1_index.v1）。操作件落在 $SIMPRAXIS_PHASE2_ROOT/v1_index.json（0700 目录/0600 文件，永不入 git）；本模板只示结构，sha256 必须由脚本对真实文件复算，禁止手写。缺文件=空索引（全部 standard）；schema/条目损坏=fail-closed。",
+  "schema": "simpraxis.v1_index.v1",
+  "generated_iso": "2026-01-01T00:00:00Z",
+  "entries": [
+    {
+      "track": "track2",
+      "question_index": 1,
+      "thread_id": "t<example-thread-id>",
+      "question": "<逐字登记的冻结题面；分类按字符串逐字相等，sha256 仅作对质>",
+      "question_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "host_workdir": "/mnt/artifacts/simpraxis/runs/phase1/<track_dir>/<question>/run_<example-thread-id>_1",
+      "files": [
+        {"relpath": "summary.json", "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+        {"relpath": "split_<arm-a>_vs_<arm-b>_s0.mp4", "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+        {"relpath": "telemetry/<arm>_s0.json", "sha256": "3333333333333333333333333333333333333333333333333333333333333333"}
+      ],
+      "dr_envelope": {
+        "mu_loguniform": [0.0, 0.0],
+        "Kp_loguniform": [0.0, 0.0],
+        "Kd_loguniform": [0.0, 0.0],
+        "wrench": {"f_sigma_n": 0.0, "t_sigma_nm": 0.0}
+      },
+      "v1_metrics": {
+        "schema": "simpraxis.task8.track2.telemetry.v1",
+        "seeds": 0,
+        "groups": {
+          "<arm>": {
+            "n": 0,
+            "success_rate": 0.0,
+            "n_fell": 0,
+            "slip_dist_m_mean": [0.0],
+            "slip_vmax_postpush_mps_max": [0.0],
+            "tilt_max_deg_max": 0.0
+          }
+        }
+      }
+    }
+  ]
+}

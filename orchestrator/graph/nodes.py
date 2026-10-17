@@ -30,8 +30,15 @@ from typing import Any, Callable, Optional
 from langgraph.graph import END, StateGraph
 
 from orchestrator.common.fsutil import atomic_write_text
+from orchestrator.judge.ascent_thresholds import AscentThresholdError
 from orchestrator.judge.seam import assemble_file_metrics
 
+from .ascent import (
+    V1IndexCorrupt,
+    V1IndexMissing,
+    classify_run,
+    load_v1_index,
+)
 from .state import SimPraxisState, run_dir_for
 
 FAILURE_JSON = "FAILURE.json"
@@ -84,6 +91,10 @@ class GraphDeps:
     #   accept 路径硬失败、failure 路径不回写（仅 Task3 风格单测/拓扑允许）
     task_title: Optional[str] = None
     run_dir: Optional[Path] = None
+    # Phase 2 Task2：V1 档案索引装载接缝。None → load_v1_index()（生产读
+    # $SIMPRAXIS_PHASE2_ROOT/v1_index.json）；测试注入确定性 dict 或 callable。
+    # 注：只装载已校验的索引 dict；分类纯逻辑在 ascent.classify_run。
+    v1_index: Optional[Any] = None
 
     def require(self, name: str, state: dict) -> dict:
         fn = getattr(self, name)
@@ -110,6 +121,48 @@ def _last_event(state: dict, kind: str) -> "dict | None":
 # ---------------------------------------------------------------------------
 # 节点
 # ---------------------------------------------------------------------------
+
+def _resolve_v1_index(deps: GraphDeps) -> "dict | None":
+    """取已校验索引：注入 dict 直用、注入 callable 调用；None 读默认路径。"""
+    if deps.v1_index is None:
+        return load_v1_index()
+    if callable(deps.v1_index):
+        return deps.v1_index()
+    return deps.v1_index
+
+
+def node_classify(state: SimPraxisState, deps: GraphDeps) -> dict:
+    """Phase 2 Task2：零付费确定性升阶分类（不发事件，保 Phase1 事件序列）。
+
+    索引文件缺失（V1IndexMissing）= 空索引（新克隆/CI 无 V1 档案，所有
+    运行 standard，标准题目不受影响）；索引损坏/schema 不符
+    （V1IndexCorrupt），或命中路径上题面 sha 对质失败、dr_envelope 与
+    登记基线漂移（AscentThresholdError）= 协议外状态，一律归一为
+    GraphStateError fail-closed（QA-1 M1：try 必须包到 classify_run）。
+    KeyError/TypeError 等真 bug 不在此吞，保持 fail-loud。
+    """
+    try:
+        index = _resolve_v1_index(deps)
+    except V1IndexMissing:
+        index = None
+    except V1IndexCorrupt as exc:
+        raise GraphStateError(f"V1 档案索引损坏，禁止静默降级：{exc}") from exc
+    try:
+        result = classify_run(
+            {"track": state.get("track"), "question": state.get("question")},
+            index)
+    except V1IndexCorrupt as exc:
+        # 题面逐字命中但 sha256 对质失败：索引自相矛盾（档案损坏）。
+        raise GraphStateError(
+            f"V1 档案题面 sha 对质失败，禁止静默降级：{exc}") from exc
+    except AscentThresholdError as exc:
+        # 命中条目 dr_envelope 与登记基线漂移：加严目标不可信（STOP 重取）。
+        raise GraphStateError(
+            f"V1 档案 DR 包络与登记基线漂移，禁止静默降级：{exc}") from exc
+    return {"run_mode": result["run_mode"],
+            "v1_archive": result["v1_archive"],
+            "ascent_targets": result["ascent_targets"]}
+
 
 def node_direction(state: SimPraxisState, deps: GraphDeps) -> dict:
     result = deps.require("direction", state)
@@ -423,6 +476,8 @@ def build_graph(deps: "GraphDeps | None" = None):
     deps = deps or GraphDeps()
     graph = StateGraph(SimPraxisState)
 
+    # Phase 2 Task2：条件入口先过零付费 classify，再单 edge 进 direction。
+    graph.add_node("classify", lambda s: node_classify(s, deps))
     graph.add_node("direction", lambda s: node_direction(s, deps))
     graph.add_node("gate1", lambda s: node_gate1(s, deps))
     graph.add_node("agent_run", lambda s: node_agent_run(s, deps))
@@ -432,9 +487,11 @@ def build_graph(deps: "GraphDeps | None" = None):
     graph.add_node("human_failure", lambda s: node_human_failure(s, deps))
     graph.add_node("done", lambda s: node_done(s, deps))
 
-    # 契约 L486：track1/track2 同入 direction（差异在节点内读数据）
+    # 契约 L486：track1/track2 同入分类（差异在 direction 节点内读数据）。
+    # Phase 2 Task2：route_track 校验后先进零付费 classify，再无条件进 direction。
     graph.set_conditional_entry_point(
-        route_track, {"track1": "direction", "track2": "direction"})
+        route_track, {"track1": "classify", "track2": "classify"})
+    graph.add_edge("classify", "direction")
 
     graph.add_edge("direction", "gate1")
     graph.add_conditional_edges("gate1", route_after_gate1, {

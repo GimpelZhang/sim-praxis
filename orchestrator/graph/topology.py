@@ -11,6 +11,7 @@ from typing import Any
 
 _NODE_LABEL = {
     "__start__": "START", "__end__": "END",
+    "classify": "classify(Phase2 Task2 零付费升阶分类)",
     "direction": "direction(Task2)",
     "gate1": "gate1(Task1 阻塞)",
     "agent_run": "agent_run(Task4 接缝)",
@@ -33,7 +34,10 @@ _CONDITIONAL = {
                  {"approve": "persist_learning",
                   "reject & gate2_rejects<2": "agent_run",
                   "reject & gate2_rejects==2 (或空意见)": "human_failure"}),
-    ("__start__",): ("route_track", {"track1": "direction", "track2": "direction"}),
+    # classify 不是条件边（classify→direction 为单一无条件边，见 raw edges），
+    # route_track 两轨只决定合法性，两轨都进 classify。
+    ("__start__",): ("route_track",
+                     {"track1": "classify", "track2": "classify"}),
 }
 
 

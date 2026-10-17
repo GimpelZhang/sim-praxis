@@ -222,6 +222,19 @@ def _payload(track: str, index: "int | None", question: "str | None") -> dict:
     return {"name": question} if track == "track1" else {"question": question}
 
 
+def _initial_state(args: argparse.Namespace, payload: dict) -> dict:
+    """从已解析冻结 payload 构造图初始状态（纯函数；QA-1 C1）。
+
+    --index 入口下 args.question 为 None：入图题面必须取自 payload
+    （track2=question / track1=name），否则 classify 对已登记 ascent 题
+    拿到空题面静默判 standard（生产路径上 Task2 主体失效）。
+    """
+    question = payload.get("question") if args.track == "track2" \
+        else payload.get("name")
+    return initial_state(thread_id=args.thread, track=args.track,
+                         question=question or "")
+
+
 def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     payload = _payload(args.track, args.index, args.question)
     title = args.task_title or (
@@ -243,10 +256,16 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
         ev = _last_event(state, "gate1_rejected")
         notes = ev["human_notes"] if ev else None
         prev = state.get("proposals") or None
+        # Phase 2 Task2：classify 节点把 run_mode/v1_archive/ascent_targets
+        # 写入 state；standard 时 archive=None/targets={}（传 None 保 Phase 1
+        # prompt 逐字节不变），ascent 时 setter 插批判段并校验 ascent_claims。
+        v1_archive = state.get("v1_archive") or None
+        ascent_targets = state.get("ascent_targets") or None
         return setter.run_direction(
             track=args.track, payload=payload, thread_id=thread,
             batch_id=batch_id, gate_round=int(state.get("gate1_rejects", 0)),
-            human_notes=notes, prev_proposals=prev)
+            human_notes=notes, prev_proposals=prev,
+            v1_archive=v1_archive, ascent_targets=ascent_targets)
 
     # 飞书长连接网关：只在真正需要时构造（topology 不需要）
     from orchestrator.feishu_gateway.client import gateway_from_env
@@ -291,6 +310,11 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     # TaskSeamError / file_backed）。
     agent_run_seam_impl = None
     evaluate_seam_impl = None
+    # 锁内适配（Phase 2 Task2）：计划 L410 提及「--task 6 走 task6 接缝工厂」。
+    # Task6 实跑工厂由 Task6 自身任务交付（含 ascent run 的 RunSpec 构造与
+    # max_coding_rounds=3），本任务不预留 task6 分支/空壳/TODO，避免无实现
+    # 接缝被真实走到；在此之前 --task 6 保持 Task3 语义（agent_run 接缝为
+    # None，真实走到即 TaskSeamError，绝不伪造成功）。
     if args.task in (TASK7, TASK8):
         if not args.coding_batch_id or not args.visual_batch_id:
             raise SystemExit(
@@ -329,7 +353,7 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
 
 
 def _invoke(args: argparse.Namespace, resume: bool) -> int:
-    deps, _payload_obj, feishu = _production_deps(args)
+    deps, payload_obj, feishu = _production_deps(args)
     # 锁内适配（计划 L487；Task7 首次容器内真跑实证）：langgraph 0.2.28 的
     # invoke/stream 均不接受 recursion_limit 关键字（TypeError），只能放进
     # config（Pregel 在 config 内读取），两分支都不得再以 kwarg 传入。
@@ -349,9 +373,7 @@ def _invoke(args: argparse.Namespace, resume: bool) -> int:
                         final = graph.invoke(None, config=config)
                     else:
                         final = graph.invoke(
-                            initial_state(thread_id=args.thread,
-                                          track=args.track,
-                                          question=args.question or ""),
+                            _initial_state(args, payload_obj),
                             config=config)
                 except _CLOSURE_EXC as exc:
                     # L-2：不重发任何卡片——从最后一个超步检查点取状态，归一为
@@ -369,8 +391,7 @@ def _invoke(args: argparse.Namespace, resume: bool) -> int:
         feishu.close()
 
     if closure_exc is not None:
-        base = initial_state(thread_id=args.thread, track=args.track,
-                             question=args.question or "")
+        base = _initial_state(args, payload_obj)
         state = {**base, **(closure_state or {})}
         stage = classify_failure_stage(state)
         node_hint = f"（异常时待执行节点：{closure_next}）" if closure_next else ""
