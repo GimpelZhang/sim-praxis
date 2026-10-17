@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -38,6 +39,10 @@ ASCENT = "ascent"
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _RELPATH_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_./-]*$")
+
+# Task6 入场 LOW-6：groups 是 track2 summary.json 的三臂形（正常/结冰名义/
+# 结冰+DR），不是 gait_rungs._group_stats 形；生产与夹具实样都恰为这三臂。
+_GROUPS_ARMS = ("normal", "ice_nominal", "ice_dr")
 
 
 class V1IndexError(RuntimeError):
@@ -59,6 +64,94 @@ def sha256_text(text: str) -> str:
 
 def v1_index_path() -> Path:
     return phase2_root() / "v1_index.json"
+
+
+def _finite_number(value: Any, where: str) -> float:
+    """非 bool 有限实数校验（数值口径同 feishu_gateway.cards._finite_number：
+    bool 先挡——True/False 是 int 子类；再限 int/float；math.isfinite 拒
+    NaN/Inf）。本地保留副本而非 import：cards 随 feishu_gateway 包 __init__
+    会拉起 lark client，分类模块须保持纯函数、零运行时依赖。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise V1IndexCorrupt(
+            f"{where} 必须是实数（bool 不认），收到 {type(value).__name__}")
+    f = float(value)
+    if not math.isfinite(f):
+        raise V1IndexCorrupt(f"{where} 必须是有限值（NaN/Inf 不认），收到 {value!r}")
+    return f
+
+
+def _finite_list(value: Any, where: str, length: int) -> None:
+    """定长有限实数数组（summary.json 滑移/峰速组形态）。"""
+    if not isinstance(value, list):
+        raise V1IndexCorrupt(
+            f"{where} 必须是 {length} 元素数组，收到 {type(value).__name__}")
+    if len(value) != length:
+        raise V1IndexCorrupt(
+            f"{where} 长度必须恰为 {length}，收到 {len(value)}")
+    for j, x in enumerate(value):
+        _finite_number(x, f"{where}[{j}]")
+
+
+def _validate_groups(v1_metrics: dict, where: str) -> None:
+    """严格校验 v1_metrics.groups 的 summary.json 形（Task6 入场 LOW-6）。
+
+    实样：tests/milestone2/fixtures/v1_summary_q1.json 与生产
+    $SIMPRAXIS_PHASE2_ROOT/v1_index.json（同源）。臂集合必须恰为
+    normal/ice_nominal/ice_dr（缺臂/多臂皆损坏）；每臂标量 n/n_fell 为
+    非 bool 整数，success_rate/tilt_max_deg_max 为非 bool 有限数，
+    slip_dist_m_mean 恰 2 元素、slip_vmax_postpush_mps_max 恰 1 元素、
+    mu_per_seed 长度恰为 n。臂内额外键（如生产实样的 fall_frames）不校验、
+    不拒绝——本闸只钉参与分类/对质的字段形态。
+    """
+    groups = v1_metrics.get("groups")
+    gwhere = f"{where}.v1_metrics.groups"
+    if not isinstance(groups, dict):
+        raise V1IndexCorrupt(f"{gwhere} 必须是对象（summary.json 三臂形）")
+    keys = set(groups)
+    arms = set(_GROUPS_ARMS)
+    if keys != arms:
+        raise V1IndexCorrupt(
+            f"{gwhere} 臂集合必须恰为 {sorted(arms)}："
+            f"缺 {sorted(arms - keys)}，多余 {sorted(keys - arms)}")
+    for arm in _GROUPS_ARMS:
+        g = groups[arm]
+        awhere = f"{gwhere}.{arm}"
+        if not isinstance(g, dict):
+            raise V1IndexCorrupt(f"{awhere} 必须是对象")
+        n = g.get("n")
+        if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+            raise V1IndexCorrupt(
+                f"{awhere}.n 必须是 ≥1 的非 bool 整数，收到 {n!r}")
+        n_fell = g.get("n_fell")
+        if not isinstance(n_fell, int) or isinstance(n_fell, bool) \
+                or not 0 <= n_fell <= n:
+            raise V1IndexCorrupt(
+                f"{awhere}.n_fell 必须是 0≤x≤n（={n}）的非 bool 整数，"
+                f"收到 {n_fell!r}")
+        sr = _finite_number(g.get("success_rate"), f"{awhere}.success_rate")
+        if not 0 <= sr <= 1:
+            raise V1IndexCorrupt(
+                f"{awhere}.success_rate 必须在 [0,1]，收到 {sr!r}")
+        tilt = _finite_number(g.get("tilt_max_deg_max"),
+                              f"{awhere}.tilt_max_deg_max")
+        if tilt < 0:
+            raise V1IndexCorrupt(
+                f"{awhere}.tilt_max_deg_max 必须 ≥0，收到 {tilt!r}")
+        _finite_list(g.get("slip_dist_m_mean"),
+                     f"{awhere}.slip_dist_m_mean", 2)
+        _finite_list(g.get("slip_vmax_postpush_mps_max"),
+                     f"{awhere}.slip_vmax_postpush_mps_max", 1)
+        mu = g.get("mu_per_seed")
+        if not isinstance(mu, list):
+            raise V1IndexCorrupt(
+                f"{awhere}.mu_per_seed 必须是 {n} 元素数组，"
+                f"收到 {type(mu).__name__}")
+        if len(mu) != n:
+            raise V1IndexCorrupt(
+                f"{awhere}.mu_per_seed 长度必须恰为 n（={n}），收到 {len(mu)}")
+        for j, x in enumerate(mu):
+            _finite_number(x, f"{awhere}.mu_per_seed[{j}]")
 
 
 def _validate_entry(entry: Any, idx: int) -> None:
@@ -101,6 +194,8 @@ def _validate_entry(entry: Any, idx: int) -> None:
         raise V1IndexCorrupt(f"{where}.dr_envelope 必须是对象")
     if not isinstance(entry["v1_metrics"], dict):
         raise V1IndexCorrupt(f"{where}.v1_metrics 必须是对象")
+    # Task6 入场 LOW-6：groups 是 V1 数值对质的唯一来源，形态/类型严格钉死。
+    _validate_groups(entry["v1_metrics"], where)
 
 
 def load_v1_index(path: "str | Path | None" = None) -> dict:
@@ -125,8 +220,25 @@ def load_v1_index(path: "str | Path | None" = None) -> dict:
     entries = data.get("entries")
     if not isinstance(entries, list):
         raise V1IndexCorrupt(f"{p}: entries 必须是数组")
+    # Task6 入场 LOW-4：跨条目去重——同一冻结题（track, question_sha256）
+    # 或同一 thread_id 登记两条即损坏（classify 命中哪条将不确定）。
+    # 单条校验在前：此处读取的字段类型/非空都已被 _validate_entry 钉死。
+    seen_questions: dict[tuple[str, str], int] = {}
+    seen_threads: dict[str, int] = {}
     for i, entry in enumerate(entries):
         _validate_entry(entry, i)
+        qkey = (entry["track"], entry["question_sha256"])
+        if qkey in seen_questions:
+            raise V1IndexCorrupt(
+                f"{p}: entries[{seen_questions[qkey]}] 与 entries[{i}] "
+                f"重复登记同一题（track, question_sha256）={qkey}")
+        seen_questions[qkey] = i
+        if entry["thread_id"] in seen_threads:
+            j = seen_threads[entry["thread_id"]]
+            raise V1IndexCorrupt(
+                f"{p}: entries[{j}] 与 entries[{i}] 重复登记同一 "
+                f"thread_id={entry['thread_id']!r}")
+        seen_threads[entry["thread_id"]] = i
     return data
 
 

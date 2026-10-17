@@ -625,6 +625,152 @@ def test_ascent_proposals_claims_schema():
         ascent=False, field_hint="standard")
 
 
+# ---------------------------------------------------------------------------
+# Task6 入场 LOW-4：跨条目去重（同题 / 同 thread_id 登记两条即损坏）
+# ---------------------------------------------------------------------------
+
+def _write_index(tmp_path: Path, index: dict) -> Path:
+    p = tmp_path / "v1_index.json"
+    p.write_text(json.dumps(index, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_v1_index_duplicate_question_sha_rejected(tmp_path):
+    index, _ = _build_fixture_index(tmp_path / "a")
+    second = copy.deepcopy(index["entries"][0])
+    second["thread_id"] = "t8-other-20261017a"  # 同题不同 thread 仍不许两条
+    index["entries"].append(second)
+    p = _write_index(tmp_path, index)
+    with pytest.raises(V1IndexCorrupt) as ei:
+        load_v1_index(p)
+    msg = str(ei.value)
+    assert "entries[0]" in msg and "entries[1]" in msg
+    assert "重复登记同一题" in msg
+
+
+def test_v1_index_duplicate_thread_id_rejected(tmp_path):
+    index, _ = _build_fixture_index(tmp_path / "a")
+    other_q = "另一道完全不同的、合法登记的 track2 题面"
+    second = copy.deepcopy(index["entries"][0])
+    second["question"] = other_q
+    second["question_sha256"] = sha256_text(other_q)
+    index["entries"].append(second)  # thread_id 与首条相同
+    p = _write_index(tmp_path, index)
+    with pytest.raises(V1IndexCorrupt) as ei:
+        load_v1_index(p)
+    msg = str(ei.value)
+    assert "entries[0]" in msg and "entries[1]" in msg
+    assert "重复登记同一" in msg and THREAD_ID in msg
+
+
+# ---------------------------------------------------------------------------
+# Task6 入场 LOW-6：v1_metrics.groups 的 summary.json 形态严格校验
+# ---------------------------------------------------------------------------
+
+def _groups_index(tmp_path: Path) -> tuple[Path, dict]:
+    index, _ = _build_fixture_index(tmp_path)
+    return _write_index(tmp_path, index), index
+
+
+def _groups_of(index: dict) -> dict:
+    return index["entries"][0]["v1_metrics"]["groups"]
+
+
+def test_groups_valid_summary_shape_loads(tmp_path):
+    # 夹具实样（三臂、定长向量）原样通过
+    p, _ = _groups_index(tmp_path)
+    loaded = load_v1_index(p)
+    assert set(loaded["entries"][0]["v1_metrics"]["groups"]) == \
+        {"normal", "ice_nominal", "ice_dr"}
+    # 生产实样每臂多一个 fall_frames 臂内杂项键：闸只钉对质字段，不拒臂内余键
+    index2, _ = _build_fixture_index(tmp_path / "prodshape")
+    for arm in ("normal", "ice_nominal", "ice_dr"):
+        _groups_of(index2)[arm]["fall_frames"] = [62, 93, 254]
+    p2 = _write_index(tmp_path / "prodshape", index2)
+    assert load_v1_index(p2)["entries"][0]["thread_id"] == THREAD_ID
+
+
+@pytest.mark.parametrize("case_id,mutate,fragments", [
+    ("groups_missing", lambda g, vm: vm.pop("groups"), ("groups", "对象")),
+    ("groups_not_object", lambda g, vm: vm.update(groups=[]), ("groups", "对象")),
+    ("arm_missing", lambda g, vm: g.pop("ice_dr"),
+     ("ice_dr", "缺")),
+    ("arm_extra", lambda g, vm: g.update(ice_extra=copy.deepcopy(g["normal"])),
+     ("ice_extra", "多余")),
+    ("arm_not_object", lambda g, vm: g.update(normal=[]),
+     ("groups.normal", "对象")),
+    ("n_bool", lambda g, vm: g["normal"].update(n=True),
+     ("normal.n", "整数")),
+    ("n_zero", lambda g, vm: g["normal"].update(n=0),
+     ("normal.n", "≥1")),
+    ("n_float", lambda g, vm: g["normal"].update(n=3.0),
+     ("normal.n", "整数")),
+    ("n_string", lambda g, vm: g["normal"].update(n="3"),
+     ("normal.n", "整数")),
+    ("n_fell_bool", lambda g, vm: g["ice_nominal"].update(n_fell=True),
+     ("ice_nominal.n_fell",)),
+    ("n_fell_gt_n", lambda g, vm: g["normal"].update(n_fell=4),
+     ("normal.n_fell", "0≤x≤n")),
+    ("n_fell_negative", lambda g, vm: g["normal"].update(n_fell=-1),
+     ("normal.n_fell",)),
+    ("success_rate_bool", lambda g, vm: g["normal"].update(success_rate=True),
+     ("normal.success_rate",)),
+    ("success_rate_over_one", lambda g, vm: g["normal"].update(success_rate=1.01),
+     ("normal.success_rate", "[0,1]")),
+    ("success_rate_nan", lambda g, vm: g["normal"].update(
+        success_rate=float("nan")), ("normal.success_rate",)),
+    ("success_rate_inf", lambda g, vm: g["normal"].update(
+        success_rate=float("inf")), ("normal.success_rate",)),
+    ("tilt_bool", lambda g, vm: g["ice_dr"].update(tilt_max_deg_max=True),
+     ("ice_dr.tilt_max_deg_max",)),
+    ("tilt_negative", lambda g, vm: g["ice_dr"].update(tilt_max_deg_max=-0.5),
+     ("ice_dr.tilt_max_deg_max", "≥0")),
+    ("tilt_nan", lambda g, vm: g["ice_dr"].update(
+        tilt_max_deg_max=float("nan")), ("ice_dr.tilt_max_deg_max",)),
+    ("slip_dist_too_short",
+     lambda g, vm: g["normal"].update(slip_dist_m_mean=[0.1]),
+     ("normal.slip_dist_m_mean", "长度必须恰为 2")),
+    ("slip_dist_too_long",
+     lambda g, vm: g["normal"].update(slip_dist_m_mean=[0.1, 0.2, 0.3]),
+     ("normal.slip_dist_m_mean", "长度必须恰为 2")),
+    ("slip_dist_nan_element",
+     lambda g, vm: g["normal"].update(
+         slip_dist_m_mean=[0.1, float("nan")]),
+     ("normal.slip_dist_m_mean[1]",)),
+    ("slip_dist_bool_element",
+     lambda g, vm: g["normal"].update(slip_dist_m_mean=[0.1, True]),
+     ("normal.slip_dist_m_mean[1]",)),
+    ("vmax_wrong_length",
+     lambda g, vm: g["ice_nominal"].update(
+         slip_vmax_postpush_mps_max=[5.6, 1.2]),
+     ("ice_nominal.slip_vmax_postpush_mps_max", "长度必须恰为 1")),
+    ("vmax_string_element",
+     lambda g, vm: g["ice_nominal"].update(
+         slip_vmax_postpush_mps_max=["5.6"]),
+     ("ice_nominal.slip_vmax_postpush_mps_max[0]",)),
+    ("mu_length_mismatch",
+     lambda g, vm: g["ice_dr"].update(mu_per_seed=[0.1, 0.2]),
+     ("ice_dr.mu_per_seed", "n（=3）")),
+    ("mu_bool_element",
+     lambda g, vm: g["ice_dr"].update(mu_per_seed=[0.1, 0.2, False]),
+     ("ice_dr.mu_per_seed[2]",)),
+    ("mu_inf_element",
+     lambda g, vm: g["ice_dr"].update(
+         mu_per_seed=[0.1, 0.2, float("inf")]),
+     ("ice_dr.mu_per_seed[2]",)),
+])
+def test_groups_corrupt_shapes_fail_closed(tmp_path, case_id, mutate, fragments):
+    base, _ = _build_fixture_index(tmp_path / "base")
+    vm = base["entries"][0]["v1_metrics"]
+    mutate(_groups_of(base), vm)
+    p = _write_index(tmp_path / "base", base)
+    with pytest.raises(V1IndexCorrupt) as ei:
+        load_v1_index(p)
+    msg = str(ei.value)
+    for frag in fragments:
+        assert frag in msg, (case_id, frag, msg)
+
+
 def test_standard_messages_byte_freeze():
     """standard 路径消息逐字节冻结（golden 夹具），且不含任何 ascent 片段。
 

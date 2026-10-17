@@ -51,6 +51,51 @@ def main(argv: "list[str] | None" = None) -> int:
         return 2
 
     payload = get_input(args.track, args.index)
+
+    # 锁内适配（Phase 2 Task6 入场）：计划 L553 骨架第 2 步写的是
+    # legacy direction.cli，但 Task2 已把 classify 做成图节点且 ascent Gate1
+    # 卡/Diff 请求器只在图缝接线；旧入口放行会用标准 Gate1 卡白烧 macro。
+    # 故在任何 ModelGateway/VectorEngine/飞书构造之前加闸（退出码 6）：
+    # 缺 V1 档案（V1IndexMissing，新克隆/CI 常态）→ 放行原 standard 流程；
+    # 档案损坏/命中路径校验失败 → fail-closed；命中冻结 V1 档案的升阶题 →
+    # 唯一图入口。--no-gate 红印路径同样不放行（保持升阶单入口）。
+    from orchestrator.graph.ascent import (
+        V1IndexCorrupt, V1IndexMissing, classify_run, load_v1_index)
+    from orchestrator.judge.ascent_thresholds import AscentThresholdError
+    try:
+        v1_index = load_v1_index()
+    except V1IndexMissing:
+        v1_index = None
+    except V1IndexCorrupt as exc:
+        print(f"ERROR: V1 冻结档案索引损坏，禁止静默降级（exit 6）：{exc}",
+              file=sys.stderr)
+        return 6
+    if v1_index is not None:
+        try:
+            verdict = classify_run(payload, v1_index)
+        except (V1IndexCorrupt, AscentThresholdError) as exc:
+            # 命中题面的 sha 对质失败或 dr_envelope 与登记基线漂移：
+            # 档案不可信，与图节点 node_classify 同语义 fail-closed。
+            print(f"ERROR: V1 冻结档案校验失败，禁止静默降级（exit 6）：{exc}",
+                  file=sys.stderr)
+            return 6
+        if verdict["run_mode"] == "ascent":
+            print(
+                "ERROR: 本题命中冻结 V1 档案（RSI 升阶题 / ascent），legacy "
+                "direction CLI 只支持 standard Gate1；升阶 Gate1 假设卡与 "
+                "Gate2 双媒体 Diff 仅接在 LangGraph 图入口，在此放行会用标准 "
+                "Gate1 卡白烧 macro（exit 6）。请改走图入口：\n"
+                "  python -m orchestrator.graph.cli run --task 6 \\\n"
+                f"    --thread {args.thread} --track {args.track} "
+                f"--index {args.index} \\\n"
+                f"    --batch-id {args.batch_id} "
+                "--coding-batch-id <T6 coding 批次> "
+                "--visual-batch-id <T6 visual 批次>\n"
+                "图内顺序：classify→ascent Gate1 假设卡→真人批准→"
+                "agent_run→evaluate→双媒体 Diff Gate2。",
+                file=sys.stderr)
+            return 6
+
     # Task3（§6.3）：账本挂在网关上；task/batch 归属经 billing_context 透传，
     # 缺上下文的付费调用在 BillingGate fail-closed（禁止裸跑烧预算）。
     gateway = ModelGateway(ledger=QuotaLedger())
