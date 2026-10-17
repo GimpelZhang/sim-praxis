@@ -10,6 +10,14 @@
   $SIMPRAXIS_PHASE1_ROOT（宿主侧证据）或 $SIMPRAXIS_RUN_DIR（Task7/8 真实
   rollout 产物），由 LearningStore.relativize_evidence 统一换算与越界校验。
 - kill -9 resume 幂等由 LearningStore 的确定性主键保证（同结案重放先删后写）。
+
+Task5 追加（ascent 升阶结案，standard 路径逐字节不变）：
+- accept 且 state.run_mode=="ascent" 时，从 state.evolution_sources 读四份
+  来源件（V1/V2 summary + Gate1/Gate2 真人意见件，契约见
+  orchestrator.phase2.chronicle）渲染五段式演化志，落 phase2 证据根
+  evolutions/，并向独立的 phase2_learnings 表写一行（EvolutionStore）；
+- 顺序=先渲染落 md → phase1 行 → phase2 行，来源缺失在写库前 fail-loud；
+  failure 结案不进入该分支，phase2 表永不写失败行（失败只进 phase1）。
 """
 from __future__ import annotations
 
@@ -22,10 +30,20 @@ from memory_flywheel.phase1.learning_store import (
     GATE_FAILURE_GATE2,
     LearningStore,
 )
+from memory_flywheel.phase2.evolution_store import EvolutionStore
+from orchestrator.phase2 import chronicle
 
 from .nodes import GraphStateError
 
 Seam = Callable[[dict], dict]
+
+# ascent accept 时，state["evolution_sources"] 必填的四来源件路径 + 轮次
+# （Task6 出生节点负责写入该 state 通道并落 simpraxis.gate_opinion.v1 意见件；
+# Task5 只锁定接缝契约：缺块/缺件即 fail-loud，不代笔、不渲染空段）。
+_EVOLUTION_SOURCE_KEYS = (
+    "v1_summary_path", "v2_summary_path",
+    "gate1_opinion_path", "gate2_opinion_path", "evolution_round",
+)
 
 _FAILURE_GATE_BY_STAGE = {
     "agent_run": GATE_FAILURE_AGENT,
@@ -170,11 +188,101 @@ def _failure_entry(state: dict, ctx: dict, store: LearningStore) -> dict[str, An
     )
 
 
-def make_learning_seam(store: "LearningStore | None" = None) -> Seam:
+def _ascent_evolution(state: dict, accept_kwargs: dict[str, Any],
+                      evolution_store: EvolutionStore) -> dict[str, Any]:
+    """Task5：ascent accept 追加通路——五段式演化志 + phase2_learnings 行。
+
+    顺序刻意为「先渲染落 md，再由外层写 phase1，最后写 phase2」：来源件
+    缺/坏时在任何写库前 fail-loud（ChronicleError 归一 GraphStateError）；
+    failure 结案根本不进本函数，phase2 表永不写失败行。md 落 phase2 证据根
+    evolutions/（0700/0600 原子写），其 relpath 即 phase2 行 evidence_relpath。
+    返回 add_evolution 所需参数；md 与 relpath 同时返回供外层做返回注记。
+    """
+    archive = state.get("v1_archive")
+    if not isinstance(archive, dict) or not archive.get("thread_id"):
+        raise GraphStateError(
+            "ascent 演化回写缺 state.v1_archive.thread_id（V1 父运行锚点）")
+    parent_run_id = str(archive["thread_id"]).strip()
+    sources_block = state.get("evolution_sources")
+    if not isinstance(sources_block, dict):
+        raise GraphStateError(
+            "ascent 结案缺 state.evolution_sources（四来源件+轮次）；"
+            "Task6 出生节点负责填充，缺块不代笔、不渲染空演化志")
+    missing = [k for k in _EVOLUTION_SOURCE_KEYS if not sources_block.get(k)]
+    if missing:
+        raise GraphStateError(
+            f"ascent evolution_sources 缺必填键：{missing}")
+    evolution_round = sources_block["evolution_round"]
+    if isinstance(evolution_round, bool) or not isinstance(evolution_round, int) \
+            or evolution_round < 1:
+        raise GraphStateError(
+            "evolution_sources.evolution_round 必须是 >=1 的整数，收到 "
+            f"{evolution_round!r}")
+    try:
+        sources = chronicle.load_evolution_sources(
+            v1_summary_path=sources_block["v1_summary_path"],
+            v2_summary_path=sources_block["v2_summary_path"],
+            gate1_opinion_path=sources_block["gate1_opinion_path"],
+            gate2_opinion_path=sources_block["gate2_opinion_path"])
+        md = chronicle.render_evolution_changelog(
+            v1_summary=sources["v1_summary"],
+            v2_summary=sources["v2_summary"],
+            gate1_opinion=sources["gate1_opinion"],
+            gate2_opinion=sources["gate2_opinion"],
+            parent_run_id=parent_run_id,
+            evolution_round=evolution_round,
+            # 用 Gate2 裁决时间做生成时间：kill-9 resume 同参重放必须渲染出
+            # 逐字节相同的 md（phase2 确定性主键含 text），墙钟时间会破坏幂等。
+            generated_at=sources["gate2_opinion"]["ts_iso"])
+    except chronicle.ChronicleError as exc:
+        raise GraphStateError(f"演化志渲染被拒：{exc}") from exc
+
+    v2_run_id = sources["v2_summary"]["run_id"].strip()
+    if v2_run_id != state["thread_id"]:
+        # 落盘前对质：避免线程/summary 错配时在证据根留下孤儿演化志。
+        raise GraphStateError(
+            f"v2_summary.run_id={v2_run_id!r} 与当前线程 "
+            f"{state['thread_id']!r} 不一致（V2 结案必须同运行对质）")
+    filename = chronicle.evolution_filename(
+        parent_run_id=parent_run_id, v2_run_id=v2_run_id,
+        evolution_round=evolution_round)
+    try:
+        relpath = evolution_store.persist_chronicle(filename, md)
+    except (OSError, ValueError) as exc:
+        raise GraphStateError(f"演化志落盘被拒：{exc}") from exc
+
+    ratio = sources_block.get("pareto_gain_ratio")
+    return {
+        "add_kwargs": dict(
+            run_id=v2_run_id,
+            track=state["track"],
+            rung=accept_kwargs["rung"],
+            sim_engine=accept_kwargs["sim_engine"],
+            gate_source=GATE_ACCEPTED,
+            evidence_relpath=relpath,
+            evolution_round=evolution_round,
+            parent_run_id=parent_run_id,
+            text=md,
+            pareto_gain_ratio=ratio,
+        ),
+        "relpath": relpath,
+        "evolution_round": evolution_round,
+        "parent_run_id": parent_run_id,
+    }
+
+
+def make_learning_seam(store: "LearningStore | None" = None,
+                       evolution_store: "EvolutionStore | None" = None) -> Seam:
     """生产装配：``GraphDeps(persist=make_learning_seam(LearningStore()))``。
 
     节点经 state["_learning"] 告知结案语境（该键只在调用时临时拼入，不进
     LangGraph 检查点）；缺省按事件流推断（直接单测时用）。
+
+    Task5：kind=="accept" 且 state.run_mode=="ascent" 时，在标准 phase1
+    回写之外追加五段式演化志（落 phase2 证据根 evolutions/）与
+    phase2_learnings 独立表一行；standard 路径逐字节不变，failure 路径
+    永远不触达演化志/phase2 表。evolution_store 缺省在首次 ascent 结案时
+    才构造（standard 单测/生产路径零副作用）。
     """
     store = store or LearningStore()
 
@@ -186,8 +294,14 @@ def make_learning_seam(store: "LearningStore | None" = None) -> Seam:
                 ev.get("type") == "gate2_accepted"
                 for ev in state.get("events", [])) else "failure"
         r4_mode: "str | None" = None
+        ascent_plan: "dict[str, Any] | None" = None
+        evo_store = evolution_store   # 仅 ascent 分支惰性构造，standard 零副作用
         if kind == "accept":
             kwargs, r4_mode = _accept_entry(state, store)
+            if state.get("run_mode") == "ascent":
+                # 先渲染/落 md（任何来源缺失在此抛，phase1/phase2 均未写）。
+                evo_store = evo_store or EvolutionStore()
+                ascent_plan = _ascent_evolution(state, kwargs, evo_store)
         elif kind == "failure":
             if "stage" not in ctx or "reason" not in ctx or "evidence" not in ctx:
                 raise GraphStateError("failure 学习回写缺 stage/reason/evidence")
@@ -195,6 +309,20 @@ def make_learning_seam(store: "LearningStore | None" = None) -> Seam:
         else:
             raise GraphStateError(f"未知 _learning.kind：{kind!r}")
         row = store.add_learning(**kwargs)
+        if ascent_plan is not None:
+            try:
+                evo_row = evo_store.add_evolution(  # type: ignore[union-attr]
+                    **ascent_plan["add_kwargs"])
+            except ValueError as exc:
+                raise GraphStateError(f"phase2_learnings 写入被拒：{exc}") from exc
+            if isinstance(row, dict):
+                row["evolution"] = {
+                    "table": evo_row["table"],
+                    "id": evo_row["id"],
+                    "evidence_relpath": ascent_plan["relpath"],
+                    "evolution_round": ascent_plan["evolution_round"],
+                    "parent_run_id": ascent_plan["parent_run_id"],
+                }
         # L-5：learning_store 12 列 schema 冻结，非 active 的 Rung4 封顶 3 已落库；
         # mode 信息只在返回摘要上做注记，供接缝/调用方可见，不写表。
         if r4_mode is not None and isinstance(row, dict):
