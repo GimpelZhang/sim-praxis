@@ -1,0 +1,82 @@
+{
+  "_fixture": "simpraxis.task6.v1_contrast_q1",
+  "_note": "Phase2 Task6 前置测试夹具，2026-10-17 一次性离线只读捕获；禁止手工编辑。来源冻结 V1 workdir（字面路径）：/mnt/artifacts/simpraxis/runs/phase1/task8_track2/q1_genesis/run_t8-genesis-20261016a_1。值为该目录冻结 telemetry（9 份 arm_seed.json + CSV + summary.json）经 evaluate_batch 三级（schema/rules/组统计）独立重算的产物：groups 为 _group_stats 形状（n/n_fell/组均值标量等），contrast 为其 contrast_block 输出。Q1 反向结论（0.824 < 预注册界 2.0，contradiction_control_not_robust）是硬规则 7 红线，任何清洗/改判须先过用户。",
+  "captured_on": "2026-10-17",
+  "source_workdir": "/mnt/artifacts/simpraxis/runs/phase1/task8_track2/q1_genesis/run_t8-genesis-20261016a_1",
+  "captured_by": "/mnt/venvs/simpraxis/bin/python -c \"import json;from orchestrator.judge.gait_rungs import evaluate_batch;r=evaluate_batch('/mnt/artifacts/simpraxis/runs/phase1/task8_track2/q1_genesis/run_t8-genesis-20261016a_1');assert r['ok'] is True, r.get('schema_errors');print(json.dumps({'groups':r['groups'],'contrast':r['contrast']},ensure_ascii=False,indent=1))\"",
+  "groups": {
+    "normal": {
+      "arm": "normal",
+      "n": 3,
+      "success_rate": 0.3333,
+      "n_fell": 2,
+      "fall_frames": [
+        null,
+        231,
+        254
+      ],
+      "mu_per_seed": [
+        0.7,
+        0.7,
+        0.7
+      ],
+      "postpush_vmax_max_mps": 7.21,
+      "postpush_vmax_mean_mps": 4.828,
+      "slip_dist_mean_m": 0.1424,
+      "tilt_max_deg_max": 169.96
+    },
+    "ice_nominal": {
+      "arm": "ice_nominal",
+      "n": 3,
+      "success_rate": 0.0,
+      "n_fell": 3,
+      "fall_frames": [
+        257,
+        261,
+        264
+      ],
+      "mu_per_seed": [
+        0.05,
+        0.05,
+        0.05
+      ],
+      "postpush_vmax_max_mps": 5.644,
+      "postpush_vmax_mean_mps": 3.98,
+      "slip_dist_mean_m": 0.1834,
+      "tilt_max_deg_max": 157.42
+    },
+    "ice_dr": {
+      "arm": "ice_dr",
+      "n": 3,
+      "success_rate": 0.0,
+      "n_fell": 3,
+      "fall_frames": [
+        62,
+        93,
+        254
+      ],
+      "mu_per_seed": [
+        0.0897,
+        0.1125,
+        0.3385
+      ],
+      "postpush_vmax_max_mps": 19.198,
+      "postpush_vmax_mean_mps": 13.119,
+      "slip_dist_mean_m": 0.4364,
+      "tilt_max_deg_max": 139.36
+    }
+  },
+  "contrast": {
+    "control_stands": false,
+    "ice_over_normal_postpush_ratio": 0.824,
+    "preregistered_ratio": 2.0,
+    "ordered_slip": false,
+    "dr_vs_nominal": {
+      "fewer_falls": false,
+      "lower_postpush_slip": false,
+      "direction": "worsened"
+    },
+    "hypothesis_status": "contradiction_control_not_robust",
+    "l571_note": "矛盾/不可分辨即结论：不调参到好看，outcome 与 mechanism 分列，Gate2 真人裁决。"
+  }
+}
