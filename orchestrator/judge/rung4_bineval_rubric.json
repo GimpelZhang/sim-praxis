@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "stage": "visual_rollout",
+  "scope": "task4_bineval_5q",
+  "answer_set": ["yes", "no"],
+  "frame_layout": "contact-window 六帧拼图（10 fps 抽帧、短边 512，接触时刻前后窗口单张 JPEG，见 orchestrator/judge/frames.py）。",
+  "instruction": "只根据拼图中的视频帧回答；逐题二选一作答，禁止推测帧外信息。看不清楚或无法判定时必须按缺陷方向作答（该题答 no）并视为缺陷检出；禁止弃权，禁止输出任何解释文本或置信度标记；模型自报的自信程度（如「我很确定」）一律不计分。严格只输出一个 JSON 对象（不要解释、不要 markdown 围栏），恰含 q1..q5 五个键，值只能是字符串 yes 或 no：{\"q1\":\"yes\",\"q2\":\"yes\",\"q3\":\"yes\",\"q4\":\"yes\",\"q5\":\"yes\"}。",
+  "track_goals": {
+    "gait": "人形行走到目标标记并在末帧保持平衡（到位且未摔倒）",
+    "libero": "物体被推送/放置到目标标记位置（到位）",
+    "fluid": "倾倒出的粒子进入杯中（入杯）"
+  },
+  "track_slots": ["gait", "libero", "fluid"],
+  "questions": [
+    {"id": "q1",
+     "text": "接触时序与可见接触力表现是否一致（无隔空受力）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q2",
+     "text": "运动全程是否无穿模/粒子穿透刚体边界？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q3",
+     "text": "物体（或人体）在受力后的位移方向是否与物理预期一致？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q4",
+     "text": "任务目的是否达成（到位/入杯/保持平衡，按 track 目标槽位化）？",
+     "good_answer": "yes",
+     "defect_if": "no"},
+    {"id": "q5",
+     "text": "视频是否无异常跳变（瞬移、帧序错乱、物体凭空出现/消失）？",
+     "good_answer": "yes",
+     "defect_if": "no"}
+  ],
+  "low_confidence_flag": null,
+  "scoring": {
+    "q4_slot_source": "track 槽位由调用方按枚举 track_slots 三选一注入 prompt（track_goals 文案），不接受模型自由文本槽位",
+    "defect_answer": "五题统一 good_answer=yes / defect_if=no；任一题答 no 即该 clip 被检出缺陷",
+    "agreement_rate": "5 题中模型回答与合成标签一致数 / 5（机判置信度唯一来源）",
+    "active_gate": "逐片 agreement_rate>=0.7 且已知缺陷片召回率=100% 才允许写 active 标定件；否则 mode=record_only + 失败报告，禁止调标签/换片/改阈值翻案",
+    "note": "BinEval 5 题通道与 Phase1 6q 通道并行独立；Rung4 永不单独放行，rules/VLM 分歧、低一致、VLM 错误/超时一律升级人工（D7/D8 fail-closed）。"
+  }
+}

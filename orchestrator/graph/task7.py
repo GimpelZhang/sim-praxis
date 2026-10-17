@@ -36,6 +36,9 @@ from orchestrator.judge.collage import (
     extract_frames_mp4,
     select_frame_indices,
 )
+# Task4：frames 管线与老 collage 并行（不替换，老拼图继续作 Gate2 证据）。
+# 只挂命令生成契约（executed=False），宿主机/接缝绝不执行 ffmpeg。
+from orchestrator.judge.frames import contact_window_plan
 from orchestrator.judge.rung4 import Rung4Judge, Rung4Result, combine_vector
 from orchestrator.judge.rungs import evaluate_rollout
 from orchestrator.solutions import SolutionError, resolve_solution
@@ -326,6 +329,12 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
         atomic_write_bytes(collage_png, build_collage_png(chosen, labels))
         image_b64 = collage_b64(chosen, labels)
 
+        # Task4：frames 管线与老 collage 并行（不替换；老拼图继续作 Gate2
+        # 证据）。接触时刻秒值由后续容器侧 runner 经 ffprobe 供给，接缝此处
+        # 只挂命令串与产物路径契约（executed=False），绝不执行 ffmpeg。
+        frame_plan = contact_window_plan(
+            video, Path(video).parent, stem="rung4_contact_window")
+
         # L-1：Rung4 实呼级重放缓存（0700 点目录，证据包不收录），key 按
         # task7_rung4_{run_id}，kill-9 后整节点重放零二次付费。
         call_cache = CallReplay(phase1_root() / ".call_cache")
@@ -343,6 +352,8 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
         combined = combine_vector(result, r4)
         r4_dict = r4.as_dict()
         metrics["provenance"] = "file:telemetry_uri+video:rung4_collage"
+        # Task4：frames 管线命令契约（并行通道，未执行，不影响老证据链）。
+        metrics["frame_pipeline_v2"] = frame_plan
         metrics["rungs"]["rung4"] = r4_dict
         metrics["rung4"] = r4_dict
         metrics["vector"] = combined["vector"]

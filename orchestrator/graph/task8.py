@@ -44,6 +44,9 @@ from orchestrator.judge.collage import (
     extract_frames_mp4,
     select_frame_indices,
 )
+# Task4：frames 管线与老 collage 并行（不替换，老拼图继续作 Gate2 证据）。
+# 只挂命令生成契约（executed=False），宿主机/接缝绝不执行 ffmpeg。
+from orchestrator.judge.frames import contact_window_plan
 from orchestrator.judge.gait_calibrate import (
     gait_calibration_file,
     load_gait_rubric,
@@ -438,6 +441,11 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
             # S-6：原子写 0600 收口 fsutil。
             atomic_write_bytes(collage_png, build_collage_png(chosen, labels))
             image_b64 = collage_b64(chosen, labels)
+            # Task4：frames 管线并行契约（分屏无单一接触，contact=None）；
+            # 只挂命令串与产物路径（executed=False），绝不执行 ffmpeg。
+            frame_plan = contact_window_plan(
+                str(workdir / name), workdir,
+                stem=f"rung4_contact_window_{key}")
 
             ev_gateway = _VisualEvidenceGateway(
                 gateway, thread=thread_id, run_id=run_id,
@@ -453,7 +461,8 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
             if r4.raw_text_ref is None and ev_gateway.req_ref is not None:
                 r4 = dataclasses.replace(r4, raw_text_ref=ev_gateway.req_ref)
             split_results.append({"split": name, "result": r4,
-                                  "collage_png": str(collage_png)})
+                                  "collage_png": str(collage_png),
+                                  "frame_pipeline_v2": frame_plan})
 
         r4_agg = _aggregate_rung4(split_results)
         active = r4_agg["mode"] == "active"

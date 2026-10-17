@@ -9,15 +9,32 @@
   漏检 → record_only，Gate2 卡片照显但不参与任何自动逻辑（L527）。
 - 规则/VLM 分歧（D8）：Rung1–3 否决但 VLM 全绿，或规则全过但 VLM 报缺陷，
   以规则为准并在结果顶部标 disagreement，由人裁决。
+
+Task4 并行新增 BinEval 5 题通道（BinEvalJudge，见同文件下半部），不改本
+6q 通道任何语义：标定件唯一来源
+$SIMPRAXIS_PHASE2_ROOT/task4_judge/calibration_bineval.json；缺件/非 active
+时该通道零影响（不发网、不升级、字节级不回归 Phase1 行为）。active 下
+rules XOR VLM、active 件证据不达标（含 agreement<0.7）、VLM 错误/超时一律
+escalate_human fail-closed——绝不静默降级 record_only（计划 L471-473）。
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
+
+from .bineval import (
+    AGREEMENT_ACTIVE_THRESHOLD,
+    BinEvalParseError,
+    active_evidence_valid,
+    bineval_calibration_status,
+    build_prompt as build_bineval_prompt,
+    load_bineval_rubric,
+    parse_bineval_answers,
+)
 
 _RUBRIC_PATH = Path(__file__).with_name("rung4_rubric.json")
 
@@ -196,4 +213,150 @@ def combine_vector(rules: dict, rung4: "Rung4Result | dict | None") -> dict:
                or (r4_active and (r4 or {}).get("status") == "vlm_error"))}
     if (r4 or {}).get("disagreement"):
         out["banner"] = "规则/VLM 分歧：以 Rung1–3 规则为准，由人裁决（D8）"
+    return out
+
+
+# ===========================================================================
+# Task4 BinEval 5 题通道（与 6q 通道并行；D7 active 翻转，fail-closed）
+# ===========================================================================
+
+# status 取值：
+#   uncalibrated             缺标定件：不发网、零影响
+#   record_only              非 active 件：照实呼留痕，意见不进自动逻辑
+#   bad_active_calibration   active 件证据不达标（含 agreement<0.7）：升级人工
+#   vlm_error                active 件在但 VLM 调用/解析失败/超时：升级人工
+#   ok                       正常 5 题作答
+BINEVAL_STATUS_UNCALIBRATED = "uncalibrated"
+BINEVAL_STATUS_RECORD_ONLY = MODE_RECORD_ONLY
+BINEVAL_STATUS_BAD_ACTIVE_CALIBRATION = "bad_active_calibration"
+BINEVAL_STATUS_VLM_ERROR = "vlm_error"
+BINEVAL_STATUS_OK = "ok"
+
+
+@dataclass
+class BinEvalResult:
+    status: str
+    mode: str
+    track: "str | None" = None
+    answers: "dict[str, str] | None" = None
+    vlm_pass: "bool | None" = None
+    rules_pass: "bool | None" = None
+    disagreement: "str | None" = None
+    reasons: list[str] = field(default_factory=list)
+    escalate_human: bool = False
+    raw_text_ref: "str | None" = None
+
+    def as_dict(self) -> dict:
+        return {"status": self.status, "mode": self.mode, "track": self.track,
+                "answers": self.answers, "vlm_pass": self.vlm_pass,
+                "rules_pass": self.rules_pass,
+                "disagreement": self.disagreement, "reasons": self.reasons,
+                "escalate_human": self.escalate_human,
+                "raw_text_ref": self.raw_text_ref}
+
+
+class BinEvalJudge:
+    """BinEval 5 题视觉判定。gateway 仅需提供 call_visual（stage 硬绑）。
+
+    mode 唯一来源 = calibration_bineval.json：
+    - 缺件（uncalibrated）：零实呼、零升级，与 Phase1 行为字节级一致；
+    - record_only：照实呼留痕，但分歧/升级标志强制清空（同 6q 口径）；
+    - active 且证据复检通过：rules XOR VLM / VLM 错误超时 → 强制升级；
+    - active 但证据不达标（min_agreement<0.7、召回≠100%、片数不足）：
+      不静默降级，直接 bad_active_calibration + 升级人工（fail-closed）。
+    """
+
+    def __init__(self, gateway, *, rubric: "dict | None" = None,
+                 calibration_file: "Path | None" = None):
+        self.gateway = gateway
+        self.rubric = rubric or load_bineval_rubric()
+        self._calibration_file = calibration_file
+
+    def prompt_for(self, track: str) -> str:
+        return build_bineval_prompt(self.rubric, track)
+
+    def ask(self, image_b64: str, track: str, *, max_tokens: int = 512,
+            timeout: int = 120) -> tuple[str, dict]:
+        raw, _usage = self.gateway.call_visual(
+            self.prompt_for(track), image_b64,
+            max_tokens=max_tokens, timeout=timeout)
+        return raw, parse_bineval_answers(raw)
+
+    def judge(self, image_b64: str, rules_pass: "bool | None", track: str,
+              *, raw_text_ref: "str | None" = None,
+              max_tokens: int = 512, timeout: int = 120) -> BinEvalResult:
+        cal = bineval_calibration_status(self._calibration_file)
+        mode = cal["mode"]
+        if mode == MODE_UNCALIBRATED:
+            return BinEvalResult(
+                status=BINEVAL_STATUS_UNCALIBRATED, mode=mode, track=track,
+                rules_pass=rules_pass, raw_text_ref=raw_text_ref)
+
+        active = mode == MODE_ACTIVE
+        if active and not active_evidence_valid(cal):
+            # active 件在但证据不达标（含逐片 agreement<0.7、召回≠100%、
+            # 片数不足）：不允许静默退回 record_only，升级人工核查。
+            return BinEvalResult(
+                status=BINEVAL_STATUS_BAD_ACTIVE_CALIBRATION, mode=mode,
+                track=track, rules_pass=rules_pass, escalate_human=True,
+                reasons=[
+                    "active 标定件证据不达标（要求 "
+                    f"min_agreement>={AGREEMENT_ACTIVE_THRESHOLD:g}、"
+                    "defect_recall=1.0、片数>=10）："
+                    f"min_agreement={cal.get('min_agreement')!r}, "
+                    f"defect_recall={cal.get('defect_recall')!r}, "
+                    f"n_clips={cal.get('n_clips')!r}"],
+                raw_text_ref=raw_text_ref)
+
+        try:
+            raw, answers = self.ask(image_b64, track,
+                                    max_tokens=max_tokens, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - 视觉故障不得变伪造通过
+            reasons = [f"VLM 调用失败/超时：{type(exc).__name__}"]
+            return BinEvalResult(
+                status=BINEVAL_STATUS_VLM_ERROR, mode=mode, track=track,
+                rules_pass=rules_pass,
+                # active 件在但视觉坏掉 = 升级人工；record_only 仅留痕不升级。
+                escalate_human=active,
+                reasons=reasons if active else [],
+                raw_text_ref=raw_text_ref)
+
+        vlm_pass = all(answers[qid] == "yes" for qid in answers)
+        disagreement: "str | None" = None
+        if active:
+            if rules_pass is True and not vlm_pass:
+                disagreement = "rules_pass_vlm_defects"
+            elif rules_pass is False and vlm_pass:
+                disagreement = "rules_fail_vlm_clean"
+        escalate = active and disagreement is not None
+        return BinEvalResult(
+            status=BINEVAL_STATUS_OK, mode=mode, track=track, answers=answers,
+            vlm_pass=vlm_pass, rules_pass=rules_pass,
+            disagreement=disagreement if active else None,
+            escalate_human=escalate,
+            reasons=[f"规则/VLM 分歧：{disagreement}"] if escalate else [],
+            raw_text_ref=raw_text_ref)
+
+
+def bineval_gate_verdict(rules_pass: "bool | None",
+                         result: "BinEvalResult | dict | None") -> dict:
+    """Gate2 自动通过裁决（BinEval 通道）。
+
+    规则不过本身即升级；active BinEval 升级态同样禁止自动通过。
+    result=None / uncalibrated / record_only 零影响——裁决只看规则。
+    """
+    r = result.as_dict() if isinstance(result, BinEvalResult) else \
+        (result or {})
+    escalate = bool(not rules_pass or r.get("escalate_human"))
+    out = {"rules_pass": bool(rules_pass),
+           "bineval_status": r.get("status"),
+           "bineval_mode": r.get("mode"),
+           "escalate_human": escalate,
+           "auto_release": bool(rules_pass) and not escalate}
+    if r.get("disagreement"):
+        out["banner"] = "规则/VLM 分歧（BinEval）：以规则为准，由人裁决（D8）"
+    if r.get("status") == BINEVAL_STATUS_BAD_ACTIVE_CALIBRATION:
+        out["banner"] = "BinEval active 标定件证据不达标，升级人工核查（D7）"
+    if r.get("status") == BINEVAL_STATUS_VLM_ERROR and r.get("escalate_human"):
+        out["banner"] = "BinEval 视觉判定故障（active），升级人工（fail-closed）"
     return out

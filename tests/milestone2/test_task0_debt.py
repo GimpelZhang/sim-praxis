@@ -658,8 +658,10 @@ CALL_CACHE_ALLOWLIST = {
     ("orchestrator/agent_runner/runner.py", 421),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
-    ("orchestrator/graph/task7.py", 331),
-    ("orchestrator/graph/task8.py", 428),
+    # Task4：frames.contact_window_plan 并行接缝注入纯位移
+    # （task7 331→340、task8 428→431），无新增 CallReplay 落点。
+    ("orchestrator/graph/task7.py", 340),
+    ("orchestrator/graph/task8.py", 431),
     # Phase 2 Task1：S-5 有意关闭——macro 方向步加调用级重放
     # （key macro_{thread}_r{round}_a{attempt}，同一 phase1 .call_cache）。
     # Phase 2 Task2：ascent_claims 校验+批判段注入纯位移（422→506），落点不变。
