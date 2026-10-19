@@ -248,11 +248,18 @@ class PendingStore:
         open_chat_id: "str | None" = None,
         media_message_id_v1: "str | None" = None,
         media_message_id_v2: "str | None" = None,
-    ) -> None:
+    ) -> "int | None":
         """消息发送成功后回填（同样只 COALESCE，不覆盖）。
 
         Task3：media_message_id_v1/v2 是双媒体 Diff Gate2 的分列回填；
         标准 Gate2 的老单列 media_message_id 语义不变。
+
+        R-LOW-3 返回影响行数，供调用方做孤儿留痕：
+        - None：本次未给任何填充列，未尝试回填（不构成发送事件）；
+        - int：UPDATE 实际匹配的行数。1 = PENDING 占位行正常回填
+          （COALESCE 全 no-op 也算 1——行仍存活）；0 = 行不存在或已非
+          PENDING（已被他方裁定/归档）——传入的消息 id 对应一条**刚发出的
+          孤儿**媒体/卡片，调用方必须 warning 留痕以便运维召回。
         """
         sets, vals = [], []
         params: dict[str, Optional[str]] = {
@@ -266,13 +273,14 @@ class PendingStore:
             if params[col] is not None:
                 sets.append(f"{col} = COALESCE({col}, :{col})")
         if not sets:
-            return
+            return None
         sql = (
             "UPDATE pending_gates SET " + ", ".join(sets)
             + " WHERE thread_id = :thread_id AND gate = :gate AND status = 'PENDING'"
         )
         params.update({"thread_id": thread_id, "gate": gate})
-        self._conn.execute(sql, params)
+        cur = self._conn.execute(sql, params)
+        return int(cur.rowcount)
 
     def get_pending(self, thread_id: str, gate: int) -> "dict[str, Any] | None":
         cur = self._conn.execute(

@@ -930,6 +930,50 @@ class FeishuGateway:
                               gate, nth, exc_info=True)
             return False
 
+    # ---------- R-LOW-3：发送窗状态复查 + 孤儿回填留痕 ----------
+
+    def _attach_ids_or_warn(
+        self, thread_id: str, gate: int, *, sent_kind: str,
+        **cols: "str | None",
+    ) -> "int | None":
+        """回填消息 id；回填 0 行说明占位行已终结——刚发出的是孤儿，warning 留痕。
+
+        返回 store.attach_message_ids 原值：None=本次未传填充列（未尝试回填）；
+        1=PENDING 占位行正常回填（COALESCE 全 no-op 也算 1，行仍存活）；
+        0=行不存在或已非 PENDING——sent_kind 已实际发出但 id 无处落账（孤儿
+        媒体/孤儿卡），日志带 thread/gate/所发 ids 供运维召回。发送与回填之间
+        天然有秒级竞态窗，本告警只做 best-effort recall，不保证强一致。
+        """
+        n = self.store.attach_message_ids(thread_id, gate, **cols)
+        if n == 0:
+            ids = {k: v for k, v in cols.items() if v is not None}
+            self._log.warning(
+                "Gate%s 占位行已终结但 %s 已发出（孤儿，回填 0 行）"
+                "thread=%s gate=%s ids=%s",
+                gate, sent_kind, thread_id, gate, ids)
+        return n
+
+    def _fresh_pending_or_abort(
+        self, thread_id: str, gate: int, *, phase: str, orphan_hint: str
+    ) -> dict:
+        """发送序列内两个副作用之间的 fresh 状态复查（best-effort 闭合秒级窗）。
+
+        行仍 PENDING：返回 fresh 行；行消失或已被他方终结：先 warning（与观察窗
+        gone 路径同形）再 raise RuntimeError——未发的件不再发送，此前已发的件
+        靠 _attach_ids_or_warn 的 0 行孤儿告警留痕。
+        """
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING":
+            return row
+        status = row["status"] if row else None
+        self._log.warning(
+            "Gate%s %s前 fresh 复查：占位行已终结（status=%s），未发件不发；"
+            "此前已发消息可能为孤儿，见回填 0 行告警 thread=%s",
+            gate, phase, status, thread_id)
+        raise RuntimeError(
+            f"Gate{gate} 占位行在{phase}前已终结（status={status}），未发件不发；"
+            f"{orphan_hint}，请走 resume 读终态 thread={thread_id}")
+
     # ---------- 对外主入口 ----------
 
     def request_gate1_approval(
@@ -962,8 +1006,10 @@ class FeishuGateway:
                 open_chat_id=sent["chat_id"],
                 task_title=task_title)
             # 极端竞态：upsert 前行已存在但无 message_id，attach 再保底回填一次
-            self.store.attach_message_ids(
-                thread_id, gate, card_message_id=sent["message_id"],
+            # （R-LOW-3：0 行=卡片刚发出行即终结，走孤儿告警留痕）
+            self._attach_ids_or_warn(
+                thread_id, gate, sent_kind="Gate1 卡片",
+                card_message_id=sent["message_id"],
                 open_chat_id=sent["chat_id"])
             self._log.info("Gate1 卡片已发出 thread=%s schema=%s",
                            thread_id, sent["schema"])
@@ -1070,6 +1116,11 @@ class FeishuGateway:
                 # 接管，拒绝补发孤儿媒体/孤儿卡，与 claim 损失 gone 分支同语义。
                 fresh = self.store.get_pending(thread_id, gate)
                 if fresh is None or fresh["status"] != "PENDING":
+                    # R-LOW-3 NIT：raise 前补 warning（与观察窗 gone 路径同形）。
+                    self._log.warning(
+                        "Gate%s 首次发送前 fresh 复查：占位行已终结（status=%s），"
+                        "拒绝发送孤儿媒体/孤儿卡 thread=%s",
+                        gate, fresh["status"] if fresh else None, thread_id)
                     raise RuntimeError(
                         "Gate2 占位行在首次发送前已终结（status="
                         f"{fresh['status'] if fresh else None}），疑似他方已裁决；"
@@ -1099,9 +1150,12 @@ class FeishuGateway:
                     ladder_step = vr["ladder_step"]
                     # H-4：视频送达后立刻回填 media_message_id——即便随后发卡失败/
                     # 进程崩溃，重挂分支也只补卡片、绝不重复推视频。
+                    # R-LOW-3：翻转落在秒级上传窗内时回填 0 行，封装告警留痕，
+                    # 下方卡片前复查随即 raise，卡片不发。
                     if media_message_id is not None:
-                        self.store.attach_message_ids(
-                            thread_id, gate, media_message_id=media_message_id)
+                        self._attach_ids_or_warn(
+                            thread_id, gate, sent_kind="Gate2 视频",
+                            media_message_id=media_message_id)
                     trim_note = self._build_trim_note(trim, ladder_step)
                     if trim_note:
                         video_detail += f"｜{trim_note}"
@@ -1109,6 +1163,20 @@ class FeishuGateway:
                         video_detail += "（且未提供 intranet_url，仅能查看证据目录原片）"
                 else:
                     trim_note = self._build_trim_note(trim, None)
+                # R-LOW-3：卡片发送（序列里最后一个副作用）之前再做一次 fresh
+                # 复查，闭合秒级上传窗内的翻转——翻转发生在视频 send/attach 之后
+                # 时视频列已落账（非孤儿）；发生在视频上传窗内时上面的 attach 0
+                # 行已告警，此处 raise 保证卡片不发（含 H-4 reattach_media 只补卡
+                # 路径：不重发视频但发卡前同样过此复查）。
+                if reattach_media:
+                    orphan_hint = ("复用的历史视频本次未重发（若其早已成孤儿，"
+                                   "见视频发送当时的 0 行回填告警）")
+                elif video_path:
+                    orphan_hint = "视频可能已在上传窗内发出（孤儿，见 0 行回填告警）"
+                else:
+                    orphan_hint = "本次无媒体在途，卡片未发"
+                self._fresh_pending_or_abort(
+                    thread_id, gate, phase="卡片发送", orphan_hint=orphan_hint)
                 url = intranet_url
                 sent = self._send_interactive(
                     self.owner_open_id,
@@ -1126,10 +1194,18 @@ class FeishuGateway:
                 # 已先回填一次，这里回填 card_message_id/open_chat_id（全部
                 # COALESCE，重复调用幂等；若发卡抛异常，占位+视频 id 保留，
                 # 下次走重挂分支只补卡片，绝不重推视频）。
-                self.store.attach_message_ids(
-                    thread_id, gate, card_message_id=sent["message_id"],
+                # R-LOW-3：回填 0 行=卡片在发送秒级窗内变成孤儿，封装已告警；
+                # 占位行既已终结，fail-loud 交 resume 读终态，不再进入等待。
+                attached = self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate2 卡片",
+                    card_message_id=sent["message_id"],
                     media_message_id=media_message_id,
                     open_chat_id=sent["chat_id"])
+                if attached == 0:
+                    raise RuntimeError(
+                        "Gate2 卡片刚发出但占位行已终结（孤儿卡片，回填 0 行，"
+                        "已告警留痕），请走 resume 读终态 "
+                        f"thread={thread_id}")
                 self._log.info(
                     "Gate2 卡片已发出 thread=%s schema=%s video=%s step=%s",
                     thread_id, sent["schema"], video_detail, ladder_step)
@@ -1173,8 +1249,11 @@ class FeishuGateway:
         media_id = vr["media_message_id"]
         if media_id is not None:
             # H-4：送达即刻单列回填——即便随后崩在第二列/卡片，接管方也只补缺件。
-            self.store.attach_message_ids(
-                thread_id, 2, **{f"media_message_id_{column}": media_id})
+            # R-LOW-3：回填 0 行（行列在秒级上传窗内被他方终结）走孤儿告警留痕。
+            self._attach_ids_or_warn(
+                thread_id, 2,
+                sent_kind=f"Gate2(diff) {column.upper()} 列视频",
+                **{f"media_message_id_{column}": media_id})
         return media_id, bool(vr["video_fallback"]), vr["detail"], vr["ladder_step"]
 
     def request_gate2_diff_approval(
@@ -1249,6 +1328,11 @@ class FeishuGateway:
                 # fail-loud，零标签零视频零卡片，不回填任何 *_message_id_v1/v2。
                 fresh = self.store.get_pending(thread_id, gate)
                 if fresh is None or fresh["status"] != "PENDING":
+                    # R-LOW-3 NIT：raise 前补 warning（与观察窗 gone 路径同形）。
+                    self._log.warning(
+                        "Gate%s(diff) 首次发送前 fresh 复查：占位行已终结"
+                        "（status=%s），拒绝发送孤儿媒体/孤儿卡 thread=%s",
+                        gate, fresh["status"] if fresh else None, thread_id)
                     raise RuntimeError(
                         "Gate2(diff) 占位行在首次发送前已终结（status="
                         f"{fresh['status'] if fresh else None}），疑似他方已裁决；"
@@ -1262,6 +1346,12 @@ class FeishuGateway:
                     thread_id, "v1", self._DIFF_LABEL_V1, v1_existing,
                     v1_video, trim, duration_ms=duration_ms,
                     cover_png=cover_png)
+                # R-LOW-3：V2 标签/视频发送前 fresh 复查。翻转落在 V1 上传窗内
+                # 时，V1 的 attach 0 行已告警（v1 列保持 NULL），此处 raise 保证
+                # V2 标签/视频与卡片不发。
+                self._fresh_pending_or_abort(
+                    thread_id, gate, phase="V2 媒体发送",
+                    orphan_hint="V1 列视频可能已在上传窗内发出（孤儿，见 0 行回填告警）")
                 v2_id, fb2, detail2, step2 = self._send_diff_column(
                     thread_id, "v2", self._DIFF_LABEL_V2, v2_existing,
                     v2_video, trim, duration_ms=duration_ms,
@@ -1269,6 +1359,11 @@ class FeishuGateway:
                 video_fallback = fb1 or fb2
                 # 卡片注记以 V2 本次视频的实际阶梯为准（复用列 step=None）。
                 trim_note = self._build_trim_note(trim, step2)
+                # R-LOW-3：卡片发送前最后一次 fresh 复查；翻转落在 V2 上传窗内
+                # 时两列 attach 0 行已告警，此处保证卡片不发。
+                self._fresh_pending_or_abort(
+                    thread_id, gate, phase="卡片发送",
+                    orphan_hint="V1/V2 视频可能已在上传窗内发出（孤儿，见 0 行回填告警）")
                 sent = self._send_interactive(
                     self.owner_open_id,
                     build_gate2_card_diff(task_title, metrics_diff,
@@ -1283,10 +1378,18 @@ class FeishuGateway:
                                              trim_note=trim_note),
                     form_required=True,
                 )
-                self.store.attach_message_ids(
-                    thread_id, gate, card_message_id=sent["message_id"],
+                # R-LOW-3：回填 0 行=卡片在发送秒级窗内变成孤儿，封装已告警；
+                # fail-loud 交 resume 读终态，不再进入等待。
+                attached = self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate2(diff) 卡片",
+                    card_message_id=sent["message_id"],
                     open_chat_id=sent["chat_id"],
                     media_message_id_v1=v1_id, media_message_id_v2=v2_id)
+                if attached == 0:
+                    raise RuntimeError(
+                        "Gate2(diff) 卡片刚发出但占位行已终结（孤儿卡片，回填 0 行，"
+                        "已告警留痕），请走 resume 读终态 "
+                        f"thread={thread_id}")
                 self._log.info(
                     "Gate2(diff) 卡片已发出 thread=%s schema=%s v1=%s v2=%s",
                     thread_id, sent["schema"], detail1, detail2)

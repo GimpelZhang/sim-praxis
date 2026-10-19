@@ -272,7 +272,12 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # （grep -rn '\.claim_pending(\|\.upsert_pending(' orchestrator scripts
     # memory_flywheel，排除 tests/）仍只有 client.py 三处 +
     # probes/probe_c_form.py:115 + scripts/milestone1/q2_human_gate.py:484。
-    "orchestrator/feishu_gateway/client.py": {959, 1043, 1220},
+    # R-LOW-3（2026-10-19）发送序列内 fresh 复查 + attach 0 行孤儿告警：
+    # 新增 _attach_ids_or_warn/_fresh_pending_or_abort 两私有方法（attach 走
+    # UPDATE 不进本白名单），纯位移：959→1003（upsert）、1043→1089
+    # （标准 Gate2 claim）、1220→1299（Diff Gate2 claim）；grep 对账同上，
+    # 无新增 .claim_pending/.upsert_pending 调用。
+    "orchestrator/feishu_gateway/client.py": {1003, 1089, 1299},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）

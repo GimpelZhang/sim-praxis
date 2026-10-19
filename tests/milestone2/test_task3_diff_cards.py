@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from pathlib import Path
@@ -786,6 +787,168 @@ def test_rlow2_fresh_reread_before_first_send_aborts_both_requestors(
     assert row["media_message_id"] is None
     assert row["media_message_id_v1"] is None
     assert row["media_message_id_v2"] is None
+
+
+# ---------- 4d. R-LOW-3：发送序列内状态复查 + attach 0 行孤儿留痕 ----------
+# R-LOW-2 的 fresh 闸只闸住首个副作用前；对手在秒级上传窗内翻转时，已拿到
+# Feishu 消息 id 的媒体/卡片会变孤儿。修法（best-effort recall，不保证强
+# 一致）：序列内每个剩余副作用前再 fresh 复查，未发的不发；attach_message_ids
+# 返回影响行数，0 行（占位行已终结）经 _attach_ids_or_warn 打孤儿告警，
+# 卡片后的最后一次回填 0 行直接 fail-loud。logger propagate=False，caplog
+# 在 call 阶段对 fixture 期已存在的非传播 logger 挂 handler（pytest 9
+# catching_logs 行为），故所有断言经 gw fixture 捕获。
+
+
+def _flip_cli(gw, thread, gate=2):
+    return gw.store.mark_decided(thread, gate, decision="approve", source="cli")
+
+
+def _flip_inside_video(gw, pushes, thread, *, flip_paths):
+    """假 send_video_native：正常记账推送，flip_paths 中的路径在返回前翻转状态。"""
+
+    def fake_video(video_path, *, duration_ms=None, cover_png=None, trim=None):
+        mid = f"om_media_{video_path}"
+        gw._calls.append({"kind": "video", "message_id": mid,
+                          "payload": {"video_path": video_path},
+                          "content_raw": None})
+        pushes.append(video_path)
+        if video_path in flip_paths:
+            # 模拟秒级上传窗：Feishu 已发、id 已拿到，他方同期 CLI 落裁决
+            assert _flip_cli(gw, thread)
+        return {"ok": True, "video_fallback": False, "ladder_step": 2,
+                "media_message_id": mid, "media_shape": "file_key",
+                "detail": f"原生视频发送成功:{video_path}", "attempts": []}
+
+    gw.send_video_native = fake_video
+
+
+def _install_flip_card(gw, thread, *, card_id="om_card_flip"):
+    """假 _send_interactive：翻转状态但不记账 interactive 推送（卡未实际落飞书）。
+
+    生产随后 attach 0 行检测到行已终结，打卡片孤儿告警并 fail-loud。
+    """
+
+    def flip_then_no_push(receive_id, card1, card2, *, form_required=False):
+        assert _flip_cli(gw, thread)
+        return {"message_id": card_id, "chat_id": CHAT, "schema": "2.0"}
+
+    gw._send_interactive = flip_then_no_push
+
+
+def test_rlow3_standard_flip_during_video_upload_orphans_video(gw, caplog):
+    # (a) 标准 Gate2：翻转落在视频上传窗内——视频恰发 1 次、卡片 0、抛错；
+    # 视频 attach 0 行留孤儿告警，media 列保持 NULL（孤儿语义必须断言）。
+    thread = "th-rlow3-vup"
+    caplog.set_level(logging.WARNING)
+    pushes: list[str] = []
+    _flip_inside_video(gw, pushes, thread, flip_paths={"std.mp4"})
+    with pytest.raises(RuntimeError, match="孤儿"):
+        gw.request_gate2_approval(
+            thread, "任务", {"pose_error": "0.02"}, "std.mp4", max_wait=1)
+    assert pushes == ["std.mp4"]
+    assert _kinds(gw._calls) == ["video"]  # 卡片未发
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == "DECIDED" and row["source"] == "cli"
+    # 0 行回填：刚发出的视频 id 无处落账，四列如实保持 NULL
+    assert row["media_message_id"] is None
+    assert row["card_message_id"] is None and row["open_chat_id"] is None
+    # 孤儿告警必须带 thread/gate 与所发 id，供运维召回
+    assert "孤儿，回填 0 行" in caplog.text
+    assert thread in caplog.text and "om_media_std.mp4" in caplog.text
+    assert "Gate2 视频" in caplog.text
+
+
+def test_rlow3_standard_flip_after_video_attach_before_card(gw, caplog):
+    # (b) 标准 Gate2：视频正常返回且 attach 成功后、卡片发送前翻转——卡 0、
+    # raise；media 列有值（非孤儿），只允许出现卡片孤儿告警。
+    # 时序注记：翻转点在假 _send_interactive 入口（生产卡片前复查之后）。
+    # 若翻转提前到视频 attach 之前（见上一测），media 列会是 NULL 且出现
+    # 「Gate2 视频」孤儿告警；两种时序由 attach 与翻转的先后决定。
+    thread = "th-rlow3-vok"
+    caplog.set_level(logging.WARNING)
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+    _install_flip_card(gw, thread, card_id="om_card_flip_std")
+    with pytest.raises(RuntimeError, match="孤儿卡片"):
+        gw.request_gate2_approval(
+            thread, "任务", {"pose_error": "0.02"}, "std.mp4", max_wait=1)
+    assert pushes == ["std.mp4"]
+    assert _kinds(gw._calls) == ["video"]  # 假卡不记账，卡片实际 0
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == "DECIDED"
+    assert row["media_message_id"] == "om_media_std.mp4"  # 翻转前已回填
+    assert row["card_message_id"] is None
+    assert "Gate2 卡片" in caplog.text and "om_card_flip_std" in caplog.text
+    assert "Gate2 视频" not in caplog.text  # 视频不是孤儿
+
+
+def test_rlow3_diff_flip_between_v1_and_v2(gw, caplog):
+    # (c) Diff Gate2：翻转落在 V1 上传窗（V1/V2 之间被复查发现）——
+    # V1 视频 1、其标签 1；V2 标签/视频 0、卡 0；V1 attach 0 行留痕，
+    # 三个未发件相关列（v2/card）与 v1 列本身全部 NULL。
+    thread = "th-rlow3-dv1"
+    caplog.set_level(logging.WARNING)
+    pushes: list[str] = []
+    _flip_inside_video(gw, pushes, thread, flip_paths={"v1.mp4"})
+    with pytest.raises(RuntimeError, match="V2 媒体发送前已终结"):
+        gw.request_gate2_diff_approval(
+            thread, "任务", "v1.mp4", "v2.mp4",
+            _diff_rows(), "non_dominated", max_wait=1)
+    assert pushes == ["v1.mp4"]
+    # ①标签 + ①视频已发；②标签与②视频、卡片均未发
+    assert _kinds(gw._calls) == ["text", "video"]
+    assert _texts(gw._calls) == [gw._DIFF_LABEL_V1]
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == "DECIDED" and row["source"] == "cli"
+    assert row["media_message_id_v1"] is None  # attach 0 行，V1 是孤儿
+    assert row["media_message_id_v2"] is None and row["card_message_id"] is None
+    assert row["media_message_id"] is None  # 老单列恒不被 diff 路径写
+    assert "Gate2(diff) V1 列视频" in caplog.text
+    assert "om_media_v1.mp4" in caplog.text and thread in caplog.text
+
+
+def test_rlow3_diff_flip_after_v2_before_card(gw, caplog):
+    # (d) Diff Gate2：两列视频都正常送达回填后、卡片前翻转——两视频各 1、
+    # 卡 0、raise；v1/v2 列有值（非孤儿），只有卡片孤儿告警。
+    thread = "th-rlow3-dv2"
+    caplog.set_level(logging.WARNING)
+    pushes: list[str] = []
+    _install_video(gw, pushes, gw._calls)
+    _install_flip_card(gw, thread, card_id="om_card_flip_diff")
+    with pytest.raises(RuntimeError, match="孤儿卡片"):
+        gw.request_gate2_diff_approval(
+            thread, "任务", "v1.mp4", "v2.mp4",
+            _diff_rows(), "non_dominated", max_wait=1)
+    assert pushes == ["v1.mp4", "v2.mp4"]
+    assert _kinds(gw._calls) == ["text", "video", "text", "video"]
+    assert _texts(gw._calls) == [gw._DIFF_LABEL_V1, gw._DIFF_LABEL_V2]
+    row = gw.store.get_pending(thread, 2)
+    assert row["status"] == "DECIDED"
+    assert row["media_message_id_v1"] == "om_media_v1.mp4"
+    assert row["media_message_id_v2"] == "om_media_v2.mp4"
+    assert row["card_message_id"] is None
+    assert "Gate2(diff) 卡片" in caplog.text
+    assert "V1 列视频" not in caplog.text and "V2 列视频" not in caplog.text
+
+
+def test_rlow3_store_attach_rowcount_semantics(tmp_path):
+    # store 层：1=PENDING 正常回填（含纯 COALESCE no-op 仍算 1）；
+    # 0=行已终结（不抛、不写，刚发出的即孤儿，由调用方告警）；
+    # None=无填充列，本次未尝试回填。
+    store = PendingStore(tmp_path / "state" / "pending.db")
+    t, g = "th-rlow3-store", 2
+    assert store.claim_pending(t, g, task_title="t") is True
+    n = store.attach_message_ids(t, g, media_message_id="om_m1")
+    assert n == 1
+    assert store.get_pending(t, g)["media_message_id"] == "om_m1"
+    # 行存活时重复 COALESCE 回填（全 no-op）仍是 1，不得误报孤儿
+    assert store.attach_message_ids(t, g, media_message_id="om_m1") == 1
+    assert store.mark_decided(t, g, decision="approve", source="cli") is True
+    assert store.attach_message_ids(t, g, card_message_id="om_late") == 0
+    row = store.get_pending(t, g)
+    assert row["status"] == "DECIDED" and row["card_message_id"] is None
+    assert store.attach_message_ids(t, g) is None
+    store.close()
 
 
 # ---------- 5. LLM 字段 markdown 注入 ----------
