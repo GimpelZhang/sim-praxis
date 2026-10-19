@@ -7,6 +7,10 @@
   SIMPRAXIS_ALLOW_PAID=1 $PY -m pytest tests/milestone2 -q \\
       -m paid -k bineval_calibration
 
+B2 补测（B1 批次 2026-10-17 供应侧端点级 HTTP200 空体 12/12 全败、零有效
+答案封档后）须前置 SIMPRAXIS_T4_BATCH_ID=T4-B2-visual；同片/同标签/同阈值/
+同 prompt，禁止借换批次名换片/改标签/改阈值/改 prompt（硬规则 7）。
+
 每片 1 次 visual_rollout（12 片 = 12 次，批次批准 14）；经
 ModelGateway.call_visual 唯一入口，ledger 逐次记账（失败也占 seq）。
 机判 fail-closed：逐片 agreement≥0.7 且缺陷片召回 100% 才写 active；
@@ -44,7 +48,9 @@ from orchestrator.judge.bineval import (
 
 pytestmark = pytest.mark.paid
 
-BATCH_ID = "T4-B1-visual"
+# 批次 ID：默认 T4-B1-visual（B1 transport void 封档后口径不变）；通道恢复后
+# B2 同条件补测用 SIMPRAXIS_T4_BATCH_ID=T4-B2-visual，默认仍为 B1。
+BATCH_ID = os.environ.get("SIMPRAXIS_T4_BATCH_ID", "T4-B1-visual")
 CAL_TASK = 4
 CAL_STAGE = "visual_rollout"
 CAL_TIMEOUT_S = 300
@@ -53,7 +59,7 @@ CAL_TIMEOUT_S = 300
 def test_bineval_calibration_paid_batch():
     # 双守卫：paid marker（-m 过滤）+ 首行显式环境变量（误触防护，零触网）。
     if os.environ.get("SIMPRAXIS_ALLOW_PAID") != "1":
-        pytest.skip("paid：BinEval 标定真实触网计费，需书面批准批次 T4-B1-visual "
+        pytest.skip(f"paid：BinEval 标定真实触网计费，需书面批准批次 {BATCH_ID} "
                     "并显式 SIMPRAXIS_ALLOW_PAID=1")
 
     approval = load_approval(BATCH_ID)
