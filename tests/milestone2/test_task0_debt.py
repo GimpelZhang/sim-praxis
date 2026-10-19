@@ -266,7 +266,13 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # QA-2（2026-10-17）插入观察窗常量/方法与两请求器三态裁决，纯位移：
     # 877→947（upsert）、955→1031（标准 Gate2 claim）、1107→1197（Diff claim）；
     # _claim_loss_action 内只有 get_pending 读，无新增写闸门（AST 全仓扫描对账）。
-    "orchestrator/feishu_gateway/client.py": {947, 1031, 1197},
+    # R-LOW-2（2026-10-19，commit 1c6a2af）双活裁定窗状态翻转即放弃接管 +
+    # 发送前 fresh 重读，纯位移：947→959（upsert）、1031→1043（标准 Gate2 claim）、
+    # 1197→1220（Diff Gate2 claim）；无新增写闸门——AST 全仓扫描
+    # （grep -rn '\.claim_pending(\|\.upsert_pending(' orchestrator scripts
+    # memory_flywheel，排除 tests/）仍只有 client.py 三处 +
+    # probes/probe_c_form.py:115 + scripts/milestone1/q2_human_gate.py:484。
+    "orchestrator/feishu_gateway/client.py": {959, 1043, 1220},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
