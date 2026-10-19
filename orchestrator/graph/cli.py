@@ -52,6 +52,7 @@ from orchestrator.graph.state import graph_db_path, phase1_root
 from orchestrator.graph.topology import export_svg, export_text
 
 RECURSION_LIMIT = 25  # 契约 L487
+TASK6 = 6             # Task6 ascent V1→V2 升阶（ascent 模式；run 级 coding cap 3）
 TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 stage 批次）
 TASK8 = 8             # Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）
 
@@ -186,7 +187,9 @@ def compute_gate2_trim(task: int, state: dict,
             upper = max(0.0, source_duration_s - GATE2_TRIM_SECONDS)
             trim_start = min(
                 max(contact_moment_s - GATE2_TRIM_SECONDS / 2.0, 0.0), upper)
-    elif task == TASK8:
+    elif task in (TASK6, TASK8):
+        # Task6/8 都是 batch 分屏（V2 两张 + V1 冻结两张），无单一接触时刻，
+        # contact_moment_s=None、从头截；时长优先 ffprobe，其次 rec。
         source_duration_s = _ffprobe_duration_s(rec.get("video_path"))
         if source_duration_s is None and _is_pos_num(rec.get("duration_ms")):
             source_duration_s = float(rec["duration_ms"]) / 1000.0
@@ -272,12 +275,27 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     feishu = gateway_from_env()
 
     def gate1_seam(state: dict) -> dict:
+        if args.task == TASK6:
+            # Task6 ascent：升阶假设卡（V1 冻结指标摘要）；批准后接缝落
+            # gate1_opinion.v1 与部分 evolution_sources（No Fake Approval：
+            # 仍阻塞等真人，任何分支无硬编码 approve）。
+            from orchestrator.graph import task6 as task6_mod
+            return task6_mod.make_gate1_seam(
+                feishu, thread, title)(state)
         return feishu.request_gate1_approval(
             thread, title, state["proposals"])
 
     def gate2_seam(state: dict) -> dict:
         runs = state.get("agent_runs", [])
         rec = runs[-1] if runs else {}
+        if args.task == TASK6:
+            # Task6 ascent：V1/V2 四媒体严格顺序 Diff + 恰好一张 Δ 卡；
+            # 批准后接缝落 gate2_opinion.v1 并补齐 evolution_sources 五键。
+            from orchestrator.graph import task6 as task6_mod
+            return task6_mod.make_gate2_seam(
+                feishu, thread, title,
+                trim_for=lambda st, r: compute_gate2_trim(TASK6, st, r)
+            )(state)
         # Task7 真人 Gate2 打回（2026-10-15）：卡片须自解释任务/问题/视频。
         # 仅 Task7 真实 rollout 有场景叙事；其余任务退回纯指标卡。
         explanation = None
@@ -302,20 +320,15 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     # Task6：学习回写走同库独立新表 phase1_learnings（mpnet 768 复用，0 付费）
     learning = make_learning_seam(learning_store)
 
-    # Task7 Track1 / Task8 Track2：注入真实 agent_run（容器/子进程实跑场景
-    # 脚本，coding 批次）与真实 evaluate（Rung1–3 文件判定 + Rung4 视频实呼，
-    # visual 批次）。三 stage 凭据相互独立：direction 走外层 billing_context
-    # （macro 批次），coding/visual 在各自接缝内开自己的 billing_context
-    # （task=7/8）；其余任务保持 Task3 语义（接缝为 None，真实走到即
-    # TaskSeamError / file_backed）。
+    # Task6 ascent / Task7 Track1 / Task8 Track2：注入真实 agent_run
+    # （容器/子进程实跑场景脚本，coding 批次）与真实 evaluate（Rung1–3 文件
+    # 判定 + Rung4 视频实呼，visual 批次）。三 stage 凭据相互独立：direction
+    # 走外层 billing_context（macro 批次），coding/visual 在各自接缝内开自己
+    # 的 billing_context（task=6/7/8）；其余任务保持 Task3 语义（接缝为 None，
+    # 真实走到即 TaskSeamError / file_backed）。
     agent_run_seam_impl = None
     evaluate_seam_impl = None
-    # 锁内适配（Phase 2 Task2）：计划 L410 提及「--task 6 走 task6 接缝工厂」。
-    # Task6 实跑工厂由 Task6 自身任务交付（含 ascent run 的 RunSpec 构造与
-    # max_coding_rounds=3），本任务不预留 task6 分支/空壳/TODO，避免无实现
-    # 接缝被真实走到；在此之前 --task 6 保持 Task3 语义（agent_run 接缝为
-    # None，真实走到即 TaskSeamError，绝不伪造成功）。
-    if args.task in (TASK7, TASK8):
+    if args.task in (TASK6, TASK7, TASK8):
         if not args.coding_batch_id or not args.visual_batch_id:
             raise SystemExit(
                 f"Task{args.task} 必须同时提供 --coding-batch-id 与 "
@@ -327,6 +340,14 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             # Task8 spec 跑 batch 子命令（三臂×3 种子聚合产物）；evaluate 走
             # gait_rungs 三级文件判定 + 两张分屏的步态 Rung4。
             from orchestrator.graph.task8 import (
+                make_evaluate_seam, make_spec_factory,
+            )
+        elif args.task == TASK6:
+            # Task6 ascent：V2 入口 genesis_humanoid_dr_v2.py 出生时不在
+            # workdir（引擎仓永不携带），由 runner coding_debug（run 级 cap 3）
+            # 在付费 workdir 新文件补丁出生；evaluate 委托 task8 加严 profile
+            # 且 visual_active_only（record_only 下零视觉实呼）。
+            from orchestrator.graph.task6 import (
                 make_evaluate_seam, make_spec_factory,
             )
         else:
@@ -444,12 +465,12 @@ def main(argv: "list[str] | None" = None) -> int:
         p.add_argument("--batch-id", required=True, dest="batch_id",
                        help="direction/macro_ideation 批次凭据")
         p.add_argument("--task", type=int, default=2,
-                       help="计费任务号（Task2 方向=2，Task7 Track1=7，"
-                            "Task8 Track2=8）")
+                       help="计费任务号（Task2 方向=2，Task6 ascent=6，"
+                            "Task7 Track1=7，Task8 Track2=8）")
         p.add_argument("--coding-batch-id", dest="coding_batch_id", default=None,
-                       help="coding_debug 批次凭据（task=7/8 必填）")
+                       help="coding_debug 批次凭据（task=6/7/8 必填）")
         p.add_argument("--visual-batch-id", dest="visual_batch_id", default=None,
-                       help="visual_rollout 批次凭据（task=7/8 必填）")
+                       help="visual_rollout 批次凭据（task=6/7/8 必填）")
         p.add_argument("--task-title", default=None)
 
     p_run = sub.add_parser("run", help="首次运行（gate 处阻塞等真人）")

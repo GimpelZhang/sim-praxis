@@ -17,7 +17,7 @@ import csv
 import json
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .gait_thresholds import (
     ARMS,
@@ -62,6 +62,55 @@ CSV_REQUIRED_FIELDS = (
     "run_id", "fell", "fall_frame", "torso_z_min",
     "slip_vmax_R_mps", "slip_vmax_L_mps",
 )
+
+# Task6 ascent 可选加严 profile 的七键（消费侧键集钉死，缺/多键 fail-closed）。
+# 只覆盖重算一致性公差与接触/滑移数值界；FALL_Z_M/FALL_TILT_DEG/
+# PUSH_FORCE_N/PUSH_DUR_S/CONTRAST_RATIO 等物理与预注册锚点不进 profile，
+# 任何调用方都改不了（contrast_block 与跌倒判定恒走 gait_thresholds 常量）。
+# None = 默认常量（Task8 行为逐字节不变）；加严值唯一来源
+# orchestrator.judge.ascent_thresholds.tight_profile()。
+PROFILE_KEYS = (
+    "slip_dist_rel_tol", "vmax_abs_tol", "tilt_max_abs_tol_deg",
+    "contact_force_n", "slip_v_max_mps",
+    "contact_force_max_n", "contact_force_max_n_dr",
+)
+
+
+def resolve_threshold_profile(
+        profile: "Mapping[str, float] | None") -> dict[str, float]:
+    """归一化加严 profile：None→gait_thresholds 默认常量（Task8 口径）。
+
+    映射必须恰含 PROFILE_KEYS 七键、值为正有限实数（bool 不认），否则
+    ValueError——加严口径是科学判定的一部分，禁止半张表静默走默认。
+    """
+    if profile is None:
+        return {
+            "slip_dist_rel_tol": SLIP_DIST_REL_TOL,
+            "vmax_abs_tol": VMAX_ABS_TOL,
+            "tilt_max_abs_tol_deg": TILT_MAX_ABS_TOL_DEG,
+            "contact_force_n": CONTACT_FORCE_N,
+            "slip_v_max_mps": SLIP_V_MAX_MPS,
+            "contact_force_max_n": CONTACT_FORCE_MAX_N,
+            "contact_force_max_n_dr": CONTACT_FORCE_MAX_N_DR,
+        }
+    if not isinstance(profile, Mapping):
+        raise ValueError(
+            f"threshold profile 必须是映射或 None，收到 {type(profile).__name__}")
+    if set(profile) != set(PROFILE_KEYS):
+        missing = sorted(set(PROFILE_KEYS) - set(profile))
+        extra = sorted(set(profile) - set(PROFILE_KEYS))
+        raise ValueError(
+            f"threshold profile 键集必须恰为 {list(PROFILE_KEYS)}："
+            f"缺 {missing}，多余 {extra}")
+    out: dict[str, float] = {}
+    for key in PROFILE_KEYS:
+        v = profile[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)) \
+                or not math.isfinite(float(v)) or float(v) <= 0:
+            raise ValueError(
+                f"threshold profile[{key!r}] 必须是正有限实数，收到 {v!r}")
+        out[key] = float(v)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +227,15 @@ def validate_telemetry_structure(data: Any, run_id: str) -> list[str]:
 # 从 series 独立重算（不信 outcomes）
 # ---------------------------------------------------------------------------
 
-def recompute_run(data: dict) -> dict:
-    """只消费 series + params，重算成败/滑移/极值/推力窗响应。"""
+def recompute_run(data: dict, *,
+                  profile: "Mapping[str, float] | None" = None) -> dict:
+    """只消费 series + params，重算成败/滑移/极值/推力窗响应。
+
+    profile 仅替换滑移积分的接触力门（contact_force_n）；跌倒判定恒用锚点
+    FALL_Z_M/FALL_TILT_DEG，推力窗恒读 params（锚点不进 profile）。
+    """
+    prof = resolve_threshold_profile(profile)
+    contact_force_n = prof["contact_force_n"]
     s = data["series"]
     params = data["params"]
     t = s["t"]
@@ -200,7 +256,7 @@ def recompute_run(data: dict) -> dict:
         # 的范数（恒 ≥0），故对真实 telemetry 数值结论零变化；abs 只把文档
         # 口径（Σ|v_xy|·dt）落实成代码，防止带符号 slip 被正负抵消（L-13）。
         slip_dist = sum(abs(v) * dt for f, v in zip(force, slip)
-                        if f > CONTACT_FORCE_N)
+                        if f > contact_force_n)
         # 推后方窗与生产脚本/标定件 v2 共用 POSTPUSH_WINDOW_S（L-8）。
         in_win = [v for tt, v in zip(t, slip)
                   if push_t <= tt < push_t + POSTPUSH_WINDOW_S]
@@ -209,7 +265,7 @@ def recompute_run(data: dict) -> dict:
             "slip_vmax_mps": round(max(slip), 3),
             "slip_vmax_postpush_mps": round(max(in_win), 3),
             "contact_force_peak_N": round(max(force), 2),
-            "contact_frames": sum(1 for f in force if f > CONTACT_FORCE_N),
+            "contact_frames": sum(1 for f in force if f > contact_force_n),
         }
     return {
         "fell": fall_frame is not None,
@@ -299,13 +355,15 @@ def _close(a: float, b: float, rel: float, abs_tol: float) -> bool:
     return abs(a - b) <= max(abs_tol, rel * max(abs(a), abs(b)))
 
 
-def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict]) -> dict:
+def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict], *,
+                profile: "Mapping[str, float] | None" = None) -> dict:
+    prof = resolve_threshold_profile(profile)
     diffs: list[dict] = []
     # L-3：缺列在 load_batch 已转 schema 错误短路；这里 row.get 只是第二道
     # 防线，保证直接调用 rung2_check 也不会抛裸 KeyError。
     csv_by_id = {r.get("run_id"): r for r in csv_rows if r.get("run_id")}
     for run_id, data in telemetries.items():
-        rec = recompute_run(data)
+        rec = recompute_run(data, profile=prof)
         o = data["outcomes"]
         d: dict[str, Any] = {"run_id": run_id}
         if rec["fell"] != bool(o["fell"]):
@@ -320,12 +378,13 @@ def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict]) -> dict:
         # 直接 round(raw,2) 可差末位一单位（TILT_MAX_ABS_TOL_DEG 溯源见阈值文件）。
         # 浮点回读余量：123.81-123.8=0.010000000000005，ε 取 1e-9°
         if abs(rec["tilt_max_deg"] - float(o.get("tilt_max_deg"))) > \
-                TILT_MAX_ABS_TOL_DEG + 1e-9:
+                prof["tilt_max_abs_tol_deg"] + 1e-9:
             d["tilt_max_deg"] = {"recomputed": rec["tilt_max_deg"],
                                  "declared": o.get("tilt_max_deg")}
         for foot in ("R", "L"):
             rf, of = rec["feet"][foot], o["slip_dist_m"][foot]
-            if not _close(rf["slip_dist_m"], float(of), SLIP_DIST_REL_TOL, 0.005):
+            if not _close(rf["slip_dist_m"], float(of),
+                          prof["slip_dist_rel_tol"], 0.005):
                 d[f"slip_dist_{foot}"] = {
                     "recomputed": rf["slip_dist_m"], "declared": float(of)}
             # 峰速口径差：outcomes 从未取整序列取 max 再 round(3)，重算基于
@@ -334,7 +393,7 @@ def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict]) -> dict:
                                  ("slip_v_max_postpush_mps",
                                   "slip_vmax_postpush_mps")):
                 if not _close(float(rf[key_r]), float(o[key_o][foot]),
-                              0.0, VMAX_ABS_TOL):
+                              0.0, prof["vmax_abs_tol"]):
                     d[f"{key_o}_{foot}"] = {
                         "recomputed": rf[key_r],
                         "declared": o[key_o][foot]}
@@ -381,8 +440,8 @@ def rung2_check(telemetries: dict[str, dict], csv_rows: list[dict]) -> dict:
     return {"pass": not diffs, "checks": {
         "recomputed_from_series": True,
         "fall_criterion": f"z<{FALL_Z_M}m or tilt>{FALL_TILT_DEG}°",
-        "slip_integration": f"Σ|v_xy|·{DT_FRAME:g}s while contact_force>{CONTACT_FORCE_N}N",
-        "slip_dist_rel_tol": SLIP_DIST_REL_TOL,
+        "slip_integration": f"Σ|v_xy|·{DT_FRAME:g}s while contact_force>{prof['contact_force_n']}N",
+        "slip_dist_rel_tol": prof["slip_dist_rel_tol"],
         "csv_cross_checked": True,
         "disagreements": diffs,
     }}
@@ -396,30 +455,34 @@ def _csv_blank(v: str) -> bool:
 # Rung3：物理界 + 扰动交付 + 时间轴
 # ---------------------------------------------------------------------------
 
-def rung3_check(telemetries: dict[str, dict]) -> tuple[dict, dict[str, dict]]:
+def rung3_check(telemetries: dict[str, dict], *,
+                profile: "Mapping[str, float] | None" = None
+                ) -> tuple[dict, dict[str, dict]]:
+    prof = resolve_threshold_profile(profile)
     violations: list[str] = []
     recomputed: dict[str, dict] = {}
     for run_id, data in telemetries.items():
         s = data["series"]
-        rec = recompute_run(data)
+        rec = recompute_run(data, profile=prof)
         recomputed[run_id] = rec
         # ice_dr 的 Kp 包络到 1e6（名义 ×90），冲击力界按 DR 包络单独推导。
-        force_bound = (CONTACT_FORCE_MAX_N_DR
+        force_bound = (prof["contact_force_max_n_dr"]
                        if data["params"]["arm"] == "ice_dr"
-                       else CONTACT_FORCE_MAX_N)
+                       else prof["contact_force_max_n"])
         for foot in ("R", "L"):
             vmax = max(s[f"slip_v_{foot}"])
             fmax = max(s[f"contact_force_{foot}"])
             if min(s[f"slip_v_{foot}"]) < -1e-6:
                 violations.append(f"{run_id}: slip_v_{foot} 出现负值")
-            if vmax > SLIP_V_MAX_MPS:
-                violations.append(f"{run_id}: slip_v_{foot}={vmax} > {SLIP_V_MAX_MPS}")
+            if vmax > prof["slip_v_max_mps"]:
+                violations.append(f"{run_id}: slip_v_{foot}={vmax} > {prof['slip_v_max_mps']}")
             if min(s[f"contact_force_{foot}"]) < -1e-6:
                 violations.append(f"{run_id}: contact_force_{foot} 出现负值")
             if fmax > force_bound:
                 violations.append(
                     f"{run_id}: force_{foot}={fmax} > {force_bound}"
-                    + ("（DR Kp 包络界）" if force_bound == CONTACT_FORCE_MAX_N_DR
+                    + ("（DR Kp 包络界）"
+                       if force_bound == prof["contact_force_max_n_dr"]
                        else ""))
         if max(s["tilt_deg"]) > 180.0 + 1e-6 or min(s["tilt_deg"]) < -1e-6:
             violations.append(f"{run_id}: tilt 越出 [0,180]°")
@@ -435,8 +498,8 @@ def rung3_check(telemetries: dict[str, dict]) -> tuple[dict, dict[str, dict]]:
             violations.append(
                 f"{run_id}: 扰动参数 {rec['push_n']}N×{rec['push_dur']}s ≠ 35N×0.2s")
     checks = {
-        "slip_v_bound_mps": SLIP_V_MAX_MPS,
-        "contact_force_bound_N": CONTACT_FORCE_MAX_N,
+        "slip_v_bound_mps": prof["slip_v_max_mps"],
+        "contact_force_bound_N": prof["contact_force_max_n"],
         "timeline_regular_dt_s": DT_FRAME,
         "disturbance": "35N×0.2s 躯干 +x 外力（标定 v2 选定窗口）",
         "violations": violations,
@@ -546,8 +609,15 @@ def load_batch(workdir: str | Path) -> tuple[dict[str, dict], list[dict],
     return telemetries, rows, summary, errs
 
 
-def evaluate_batch(workdir: str | Path) -> dict:
-    """三级向量 + 组对照。rules_pass 仅代表证据可信度。"""
+def evaluate_batch(workdir: str | Path, *,
+                   profile: "Mapping[str, float] | None" = None) -> dict:
+    """三级向量 + 组对照。rules_pass 仅代表证据可信度。
+
+    profile=None 走 gait_thresholds 默认常量（Task8 口径，逐字节不变）；
+    Task6 ascent V2 传 ascent_thresholds.tight_profile() 加严重算。锚点
+    （FALL_Z_M/FALL_TILT_DEG/35N/CONTRAST_RATIO）不随 profile 改变。
+    """
+    prof = resolve_threshold_profile(profile)
     wd = Path(workdir)
     schema_errors: list[str] = []
     telemetries, csv_rows, summary, load_errs = load_batch(wd)
@@ -567,8 +637,8 @@ def evaluate_batch(workdir: str | Path) -> dict:
                 "provenance": f"file:{wd}/summary.json+telemetry/*.json+csv"}
 
     r1, _ = rung1_check(wd, telemetries, seeds)
-    r2 = rung2_check(telemetries, csv_rows)
-    r3, recomputed = rung3_check(telemetries)
+    r2 = rung2_check(telemetries, csv_rows, profile=prof)
+    r3, recomputed = rung3_check(telemetries, profile=prof)
     groups = {a: _group_stats(a, seeds, telemetries, recomputed) for a in ARMS}
     contrast = contrast_block(groups)
     passed = r1["pass"] and r2["pass"] and r3["pass"]

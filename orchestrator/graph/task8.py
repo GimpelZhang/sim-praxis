@@ -25,7 +25,7 @@ import json
 import os
 from importlib import metadata as importlib_metadata
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from orchestrator.agent_runner.runner import RunSpec
 from orchestrator.common.callcache import CallReplay, request_fingerprint
@@ -58,7 +58,13 @@ from orchestrator.judge.gait_thresholds import (
     FALL_Z_M,
     MIN_SEEDS,
 )
-from orchestrator.judge.rung4 import Rung4Judge
+from orchestrator.judge.rung4 import (
+    MODE_ACTIVE,
+    MODE_RECORD_ONLY,
+    MODE_UNCALIBRATED,
+    Rung4Judge,
+    calibration_status,
+)
 from orchestrator.solutions import SolutionError, resolve_solution
 
 TASK = 8
@@ -392,8 +398,37 @@ def _aggregate_rung4(split_results: list[dict]) -> dict:
     }
 
 
-def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
-    """evaluate 节点接缝：只读 batch 真实产物；缺 CSV/分屏即协议违规。"""
+def _zero_call_rung4(mode: str) -> dict:
+    """零视觉实呼的 Rung4 聚合（与 _aggregate_rung4 同形，splits/items 全空）。
+
+    Task6（visual_active_only）：没有用户签字的 active 标定（Task4 终裁
+    record_only，2026-10-19 用户签收；B3 不得自授 active）时，连帧都不抽、
+    拼图不写、CallReplay 不构造，gateway.call_visual 全链路不可达。mode
+    原样透传（record_only/uncalibrated），learning 据 mode 把 rung 封到 3。
+    """
+    status = (MODE_UNCALIBRATED if mode == MODE_UNCALIBRATED
+              else MODE_RECORD_ONLY)
+    return {
+        "status": status, "mode": mode, "items": [],
+        "n_defects": 0, "n_items": 0,
+        "low_confidence": False, "disagreement": None,
+        "raw_text_ref": None, "splits": [],
+        # 显式零实呼戳记：出生测试与 chronicle 据此断言视觉通道未触达。
+        "zero_visual_calls": True,
+    }
+
+
+def make_evaluate_seam(gateway, visual_batch: str, thread_id: str, *,
+                       threshold_profile: "Mapping[str, float] | None" = None,
+                       visual_active_only: bool = False):
+    """evaluate 节点接缝：只读 batch 真实产物；缺 CSV/分屏即协议违规。
+
+    Task6 两个加参（纯加法，Task8 默认调用逐字节不变）：
+    - threshold_profile：gait_rungs 阈值 profile；None 走 Task8 默认常量，
+      Task6 V2 传 ascent_thresholds.tight_profile() 加严重算；
+    - visual_active_only：True 时标定 mode != "active" 即零视觉实呼
+      （Task4 record_only 终裁：禁止 Task6 自行发 Rung4 调用）。
+    """
     def seam(state: dict) -> dict:
         uri = state.get("telemetry_uri")
         if not uri:
@@ -403,7 +438,7 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
             raise GraphStateError(f"task8 evaluate：summary 不存在：{uri}")
         workdir = summary.parent
 
-        result = evaluate_batch(workdir)
+        result = evaluate_batch(workdir, profile=threshold_profile)
         # L-6：telemetry/CSV 结构错误必须在任何 Rung4 实呼之前熔断（未标定
         # 模式虽不发网，也不得继续装配）；同时避免下面 result["vector"] 等键
         # 在 evaluate_batch 短路返回（无 vector）上抛裸 KeyError。
@@ -426,45 +461,55 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
         run_idx = len(runs)
         run_id = f"{thread_id}-r{run_idx}"
 
-        # L-1：两张分屏各有稳定 key（task8_rung4_{run_id}_{split}），共用
-        # 一个 0700 点目录缓存；kill-9 后整节点重放零二次付费。
-        call_cache = CallReplay(phase1_root() / ".call_cache")
-        rubric = load_gait_rubric()
+        # Task6 active-only 视觉闸：标定状态必须在任何抽帧/拼图/CallReplay
+        # 构造之前读取。visual_active_only 且 mode != "active"（Task4 终裁
+        # record_only，未获用户签字 active；B3 不得自授）时，整块视觉流程
+        # 跳过——call_visual 在本接缝内不可达，零实呼零证据写。
+        visual_mode = (calibration_status(gait_calibration_file())["mode"]
+                       if visual_active_only else MODE_ACTIVE)
+        skip_visual = visual_active_only and visual_mode != MODE_ACTIVE
         split_results: list[dict] = []
-        for key, name in SPLITS:
-            frames = extract_frames_mp4(str(workdir / name))
-            # 分屏无单一「接触帧」：contact_index=None → 以片中段为中心六槽。
-            idx = select_frame_indices(len(frames), None)
-            labels = [f"frame {i:03d}" for i in idx]
-            chosen = [frames[i] for i in idx]
-            collage_png = workdir / f"rung4_collage_{key}.png"
-            # S-6：原子写 0600 收口 fsutil。
-            atomic_write_bytes(collage_png, build_collage_png(chosen, labels))
-            image_b64 = collage_b64(chosen, labels)
-            # Task4：frames 管线并行契约（分屏无单一接触，contact=None）；
-            # 只挂命令串与产物路径（executed=False），绝不执行 ffmpeg。
-            frame_plan = contact_window_plan(
-                str(workdir / name), workdir,
-                stem=f"rung4_contact_window_{key}")
+        if not skip_visual:
+            # L-1：两张分屏各有稳定 key（task8_rung4_{run_id}_{split}），共用
+            # 一个 0700 点目录缓存；kill-9 后整节点重放零二次付费。
+            call_cache = CallReplay(phase1_root() / ".call_cache")
+            rubric = load_gait_rubric()
+            for key, name in SPLITS:
+                frames = extract_frames_mp4(str(workdir / name))
+                # 分屏无单一「接触帧」：contact_index=None → 以片中段为中心六槽。
+                idx = select_frame_indices(len(frames), None)
+                labels = [f"frame {i:03d}" for i in idx]
+                chosen = [frames[i] for i in idx]
+                collage_png = workdir / f"rung4_collage_{key}.png"
+                # S-6：原子写 0600 收口 fsutil。
+                atomic_write_bytes(collage_png, build_collage_png(chosen, labels))
+                image_b64 = collage_b64(chosen, labels)
+                # Task4：frames 管线并行契约（分屏无单一接触，contact=None）；
+                # 只挂命令串与产物路径（executed=False），绝不执行 ffmpeg。
+                frame_plan = contact_window_plan(
+                    str(workdir / name), workdir,
+                    stem=f"rung4_contact_window_{key}")
 
-            ev_gateway = _VisualEvidenceGateway(
-                gateway, thread=thread_id, run_id=run_id,
-                batch_id=visual_batch, split_key=key,
-                collage_path=str(collage_png), cache=call_cache,
-                cache_key=f"task8_rung4_{run_id}_{key}")
-            judge = Rung4Judge(
-                ev_gateway, rubric=rubric,
-                calibration_file=gait_calibration_file())
-            # 未标定 → judge 内部零实呼；record_only 照实呼、卡片照显但分歧
-            # 标志强制清空；active 才进自动升级逻辑。
-            r4 = judge.judge(image_b64, bool(result.get("rules_pass")))
-            if r4.raw_text_ref is None and ev_gateway.req_ref is not None:
-                r4 = dataclasses.replace(r4, raw_text_ref=ev_gateway.req_ref)
-            split_results.append({"split": name, "result": r4,
-                                  "collage_png": str(collage_png),
-                                  "frame_pipeline_v2": frame_plan})
+                ev_gateway = _VisualEvidenceGateway(
+                    gateway, thread=thread_id, run_id=run_id,
+                    batch_id=visual_batch, split_key=key,
+                    collage_path=str(collage_png), cache=call_cache,
+                    cache_key=f"task8_rung4_{run_id}_{key}")
+                judge = Rung4Judge(
+                    ev_gateway, rubric=rubric,
+                    calibration_file=gait_calibration_file())
+                # 未标定 → judge 内部零实呼；record_only 照实呼、卡片照显但分歧
+                # 标志强制清空；active 才进自动升级逻辑。
+                r4 = judge.judge(image_b64, bool(result.get("rules_pass")))
+                if r4.raw_text_ref is None and ev_gateway.req_ref is not None:
+                    r4 = dataclasses.replace(r4, raw_text_ref=ev_gateway.req_ref)
+                split_results.append({"split": name, "result": r4,
+                                      "collage_png": str(collage_png),
+                                      "frame_pipeline_v2": frame_plan})
 
-        r4_agg = _aggregate_rung4(split_results)
+            r4_agg = _aggregate_rung4(split_results)
+        else:
+            r4_agg = _zero_call_rung4(visual_mode)
         active = r4_agg["mode"] == "active"
         escalate = bool(
             not result.get("rules_pass")

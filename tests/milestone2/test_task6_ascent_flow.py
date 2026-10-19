@@ -32,23 +32,62 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import subprocess
 from pathlib import Path
 
+import pytest
+
+from orchestrator.feishu_gateway import client as client_mod
 from orchestrator.feishu_gateway.client import (
+    FeishuGateway,
     select_gate1_card_view,
     select_gate2_requestor,
 )
+from orchestrator.graph import task6 as task6_mod
+from orchestrator.graph import task8
 from orchestrator.graph.ascent import (
     ASCENT,
     STANDARD,
+    V1_INDEX_SCHEMA,
     build_ascent_messages,
     classify_run,
     load_v1_index,
 )
-from orchestrator.graph.nodes import GraphDeps, initial_state, node_classify
+from orchestrator.graph.nodes import (
+    GraphDeps,
+    GraphStateError,
+    initial_state,
+    node_classify,
+)
 from orchestrator.graph.task8 import SPLITS
 from orchestrator.judge.gait_rungs import contrast_block
+from orchestrator.judge.pareto import METRIC_DIRECTIONS
+from orchestrator.phase2 import chronicle
+from orchestrator.solutions import resolve_solution
+from tests.milestone1.test_task8_seam import (
+    FIXTURE_SOLUTIONS_ROOT,
+    FakeVisualGateway,
+    _calibration_v2,
+    _gait_raw,
+    build_synthetic_batch,
+)
 from tests.milestone2.test_task2_ascent import _build_fixture_index  # 同款构造
+from tests.milestone2.test_task3_diff_cards import (
+    APP_ID,
+    APP_SECRET,
+    OWNER,
+    _install_video,
+    _kinds,
+    _run_in_thread,
+    _texts,
+    _wait_pending_card,
+    make_fake_post,
+)
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_TS_ISO_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{4})$")
 
 FIX = Path(__file__).parent / "fixtures"
 CONTRAST_FIXTURE = FIX / "v1_contrast_q1.json"
@@ -166,7 +205,7 @@ def test_q1_contradiction_not_overwritten(tmp_path):
 # 3. Gate2 双媒体 Diff 接线（可前置半：选择器 + 双 split 路径解析对质）
 # ---------------------------------------------------------------------------
 
-def test_gate2_diff_card_wired_task6(tmp_path):
+def test_gate2_diff_card_wired_task6(tmp_path, monkeypatch):
     # 选择器：ascent 形态 → 升阶卡/双媒体 Diff；其余一律标准请求器
     assert select_gate1_card_view({"run_mode": ASCENT}) == "ascent"
     for state in ({}, None, {"run_mode": STANDARD}):
@@ -196,3 +235,413 @@ def test_gate2_diff_card_wired_task6(tmp_path):
     # 锁内适配留痕：V1 双 split 的 concat 冻结与 V2 推送在 Task6 task6.py
     # 工厂出生；附录 A 的 run 级 3 轮 cap 与 V2 track script 遥测契约两测
     # 同样随 Task6——此处不实现、不打桩。
+
+    # ==================================================================
+    # 生产接线半（随 Task6 出生）：真 FeishuGateway(start_ws=False)+假 HTTP
+    # 走完 Gate1 ascent 卡（真人批准）→ 真 task6 evaluate（record_only 下
+    # 零视觉实呼）→ Gate2 四媒体严格顺序 + 恰好一张 Δ 卡（真人批准），
+    # 四来源件随后通过生产 chronicle 校验。全程 0 联网/0 付费。
+    # ==================================================================
+    calls: list[dict] = []
+    pushes: list[str] = []
+    monkeypatch.setattr(client_mod.requests, "post", make_fake_post(calls))
+    # 夹具 V1 split 是 10 字节占位：生产锁定字节表本测清空（sha256 仍逐件
+    # 对质，路径仍只许 host_workdir+登记 relpath）。
+    monkeypatch.setattr(task6_mod, "LOCKED_V1_SPLIT_SIZES", {})
+
+    # Task4 终裁 record_only（2026-10-19 用户签收）：task8 接缝读 active 闸
+    # 必须发生在任何抽帧之前。
+    cal_dir = tmp_path / "phase1" / "task8_track2_judge"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "calibration_gait.json").write_text(
+        json.dumps({"mode": "record_only"}), encoding="utf-8")
+    monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+
+    # V2 真 batch（三臂×3 籽全存活；两张真 mp4 split 由步态合成仪器产出）。
+    v2_wd = tmp_path / "v2batch"
+    build_synthetic_batch(v2_wd, falls={})
+    (v2_wd / task6_mod.VRAM_NAME).write_text(
+        json.dumps({task6_mod.VRAM_KEY: 18.42}), encoding="utf-8")
+    innovation = {
+        "control_law": "V2 阻抗律：u=-Kp(θ−θ*)−Kd·θ̇，Kp/Kd 按臂分级",
+        "dr_distribution": {"mu": "loguniform[0.04,0.45]",
+                            "Kp": "loguniform[8000,900000]",
+                            "Kd": "loguniform[12,180]"},
+        "eliminated_assumptions": ["名义 μ=0.05 单点即代表冰面"],
+    }
+    (v2_wd / task6_mod.INNOVATION_NAME).write_text(
+        json.dumps(innovation, ensure_ascii=False), encoding="utf-8")
+
+    sdir = task6_mod.sources_dir(T6_THREAD)
+    # 夹具 V1 档案的 9 份 telemetry 是桩件（不能真重算）；生产 V1 真重算由
+    # test_v2_track_script_telemetry_contract 另走真 batch 覆盖。本 half 的
+    # V1 增强 summary 用 2026-10-17 离线捕获的 Q1 groups/contrast 替身
+    # materialize——0.824<2.0/contradiction_control_not_robust 原样进入来源件。
+    q1 = json.loads(CONTRAST_FIXTURE.read_text(encoding="utf-8"))
+    v1_vector = task6_mod._pareto_vector(q1["groups"], 9.0, 20.0)
+
+    def _fake_materialize(thread_id, v1_archive):
+        assert thread_id == T6_THREAD
+        assert v1_archive["thread_id"] == V1_THREAD
+        doc = task6_mod._augmented_summary(
+            run_id=V1_THREAD, groups=q1["groups"],
+            pareto_metrics=v1_vector, contrast=q1["contrast"])
+        return doc, task6_mod._write_json(sdir / "v1_summary.json", doc)
+
+    monkeypatch.setattr(task6_mod, "materialize_v1_summary",
+                        _fake_materialize)
+
+    proposals = [{
+        "name": "V2 阻抗分级 + DR 应力端外扩",
+        "sim_engine": "genesis",
+        "first_principles": "低摩擦下以阻抗稳定替代高增益踩冰",
+        "expected_artifacts": ["三臂×3 籽 batch", "两张对照分屏"],
+        "ascent_claims": [{
+            "metric": "success_rate", "direction": 1,
+            "task": "ice_nominal/ice_dr 各 3 籽", "target": 1.0,
+            "epsilon": 0.0}],
+    }]
+    arc = loaded["entries"][0]
+    state0 = {
+        "thread_id": T6_THREAD, "v1_archive": arc, "proposals": proposals,
+        "chosen": proposals[0], "agent_runs": [], "events": [],
+        "gate1_rejects": 0,
+    }
+
+    # ---- 真 task6 evaluate 接缝：record_only 必须零视觉实呼 ----
+    visual = FakeVisualGateway(_gait_raw())
+    eval_seam = task6_mod.make_evaluate_seam(
+        visual, "T6-B2-visual", T6_THREAD)
+    metrics = eval_seam({
+        **state0,
+        "telemetry_uri": str(v2_wd / "summary.json"),
+        "agent_runs": [{"run_idx": 1, "status": "ok"}],
+    })
+    assert visual.visual_calls == []
+    r4 = metrics["rungs"]["rung4"]
+    assert r4["zero_visual_calls"] is True and r4["mode"] == "record_only"
+    asc = metrics["ascent"]
+    assert asc["parent_run_id"] == V1_THREAD
+    assert [r["metric"] for r in asc["metrics_diff"]] == list(METRIC_DIRECTIONS)
+    assert asc["pareto_verdict"] in (
+        "v2_dominates", "non_dominated", "dominated_by_v1")
+
+    # ---- 真飞书网关（假 HTTP）：Gate1 ascent 卡 → 真人批准 ----
+    gw = FeishuGateway(
+        APP_ID, APP_SECRET, OWNER,
+        db_path=tmp_path / "state" / "pending_gates.db",
+        evidence_dir=tmp_path / "task6_feishu",
+        run_dir=str(tmp_path / "runs"), start_ws=False)
+    _install_video(gw, pushes, calls)
+
+    def _approve(t, box, gate, notes):
+        _wait_pending_card(gw, T6_THREAD, gate=gate)
+        gw.store.mark_decided(
+            T6_THREAD, gate, decision="approve", source="cli",
+            human_notes=notes)
+        gw._set_event(T6_THREAD, gate)
+        t.join(5)
+        assert not t.is_alive(), f"Gate{gate} 接缝线程未退出"
+        assert box.get("decision") == "approve"
+
+    g1 = task6_mod.make_gate1_seam(gw, T6_THREAD, "Task6 ascent 出生测试")
+    t1, box1 = _run_in_thread(lambda: g1(state0))
+    _approve(t1, box1, 1, "真人批准：V2 只改控制器/DR，RL 不动，按六指标对质")
+    partial = box1["evolution_sources"]
+    assert partial["evolution_round"] == 1
+    g1_opinion = json.loads(
+        Path(partial["gate1_opinion_path"]).read_text(encoding="utf-8"))
+    assert g1_opinion == {**g1_opinion, "schema": chronicle.GATE_OPINION_SCHEMA,
+                          "gate": "gate1", "decision": "approve",
+                          "source": "cli"}
+    assert _TS_ISO_RE.fullmatch(g1_opinion["ts_iso"])
+    assert Path(partial["v1_summary_path"]).is_file()
+
+    # ---- Gate2：四媒体严格顺序 → 恰好一张 Δ 卡 → 真人批准 ----
+    n_before = len(calls)
+    rec = {"duration_ms": 8000,
+           "cover_png": str(v2_wd / "cover.png"),
+           "video_path": str(v2_wd / SPLIT_RELS[0])}
+    state2 = {**state0, "metrics": metrics, "agent_runs": [rec],
+              "evolution_sources": partial, "gate2_rejects": 0}
+    g2 = task6_mod.make_gate2_seam(
+        gw, T6_THREAD, "Task6 ascent 出生测试",
+        trim_for=lambda st, r: None)
+    t2, box2 = _run_in_thread(lambda: g2(state2))
+    _approve(t2, box2, 2, "真人最终裁决：四媒体与六指标 Δ 表对质通过")
+
+    tail = _kinds(calls)[n_before:]
+    assert tail == ["text", "video", "text", "video",
+                    "text", "video", "text", "video", "interactive"], tail
+    assert _texts(calls)[-4:] == [
+        FeishuGateway._DIFF4_LABEL_V1A, FeishuGateway._DIFF4_LABEL_V1B,
+        FeishuGateway._DIFF4_LABEL_V2A, FeishuGateway._DIFF4_LABEL_V2B]
+    # 推送路径顺序：V1 split1 → V1 split2 → V2 split1 → V2 split2
+    assert pushes == [str(workdir / SPLIT_RELS[0]),
+                      str(workdir / SPLIT_RELS[1]),
+                      str(v2_wd / SPLIT_RELS[0]),
+                      str(v2_wd / SPLIT_RELS[1])]
+    row = gw.store.get_pending(T6_THREAD, 2)
+    for col in ("v1a", "v1b", "v2a", "v2b"):
+        assert row[f"media_message_id_{col}"], f"{col} 列未回填媒体 id"
+        assert row[f"media_message_id_{col}"].startswith("om_media_")
+    block = box2["evolution_sources"]
+    assert set(block) == {"v1_summary_path", "v2_summary_path",
+                          "gate1_opinion_path", "gate2_opinion_path",
+                          "evolution_round"}
+    assert block["evolution_round"] == 1
+    assert block["v2_summary_path"] == asc["v2_summary_path"]
+    g2_opinion = json.loads(
+        Path(block["gate2_opinion_path"]).read_text(encoding="utf-8"))
+    assert g2_opinion["gate"] == "gate2" and _TS_ISO_RE.fullmatch(
+        g2_opinion["ts_iso"])
+
+    # ---- 四来源件过生产 chronicle 全量校验（含 Q1 矛盾原样保留）----
+    sources = chronicle.load_evolution_sources(
+        v1_summary_path=partial["v1_summary_path"],
+        v2_summary_path=asc["v2_summary_path"],
+        gate1_opinion_path=partial["gate1_opinion_path"],
+        gate2_opinion_path=block["gate2_opinion_path"])
+    assert sources["v1_summary"]["run_id"] == V1_THREAD
+    assert sources["v2_summary"]["run_id"] == T6_THREAD
+    assert sources["v2_summary"]["parent_run_id"] == V1_THREAD
+    assert sources["v1_summary"]["contrast"][
+        "hypothesis_status"] == "contradiction_control_not_robust"
+    assert sources["v1_summary"]["contrast"][
+        "ice_over_normal_postpush_ratio"] == 0.824
+    gw.close()
+
+
+# ---------------------------------------------------------------------------
+# 4. run 级 coding cap=3：工厂出生时 V2 入口不存在，全局 5 轮一字不动
+# ---------------------------------------------------------------------------
+
+def test_run_level_coding_cap_3(tmp_path, monkeypatch):
+    from orchestrator.agent_runner import runner as runner_mod
+
+    monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT",
+                       str(FIXTURE_SOLUTIONS_ROOT))
+    cal_src = tmp_path / "cal_src.json"
+    cal_src.write_text(json.dumps(_calibration_v2()), encoding="utf-8")
+    monkeypatch.setattr(task8, "CALIBRATION_SOURCE", cal_src)
+
+    # 全局上限仍是 5（Task6 只在 RunSpec 上 run 级收窄，runner 零改动）。
+    assert runner_mod.MAX_CODING_ROUNDS == 5
+
+    state = {
+        "chosen": {"sim_engine": "genesis", "name": "V2 阻抗+DR"},
+        "v1_archive": {"thread_id": V1_THREAD,
+                       "host_workdir": str(tmp_path / "v1arch")},
+        "agent_runs": [], "events": [], "gate1_rejects": 0,
+        "proposals": []}
+    factory = task6_mod.make_spec_factory(T6_THREAD, "T6-B1-coding")
+    spec = factory(state)
+
+    assert spec.max_coding_rounds == task6_mod.RUN_CODING_CAP == 3
+    assert runner_mod.MAX_CODING_ROUNDS == 5
+    assert spec.billing_task == 6 and spec.batch_id == "T6-B1-coding"
+    assert spec.run_timeout_s == 2400
+    assert spec.workdir.parent == task6_mod.phase2_runs_root() / "task6_ascent"
+    v2_target = Path(spec.cmd[1])
+    assert v2_target.name == task6_mod.V2_ENTRYPOINT
+    # 出生时 V2 入口不在 workdir：引擎层/resolver 只 stage 冻结 V1 基线。
+    assert not v2_target.exists()
+    v1_target = spec.workdir / "genesis_humanoid_dr.py"
+    assert v1_target.is_file()
+    manifest = resolve_solution(
+        task8.ENGINE_SCENARIOS["genesis"]["solution_id"])
+    assert v1_target.read_bytes() == (
+        manifest.solution_dir / "genesis_humanoid_dr.py").read_bytes()
+    assert spec.cmd[0] == task8.VENV_PY
+    assert spec.cmd[2:] == ["batch", "--out-dir", str(spec.workdir),
+                            "--seeds", "3",
+                            "--calibration-json",
+                            str(spec.workdir / task8.CALIBRATION_NAME)]
+    assert spec.env_extra["PYOPENGL_PLATFORM"] == "egl"
+
+    # runner 新文件补丁力学（coding_debug 唯一出生路径）：空文件 old=""
+    # 恰好 1 命中，V2 脚本在付费 workdir 内出生。
+    born = runner_mod._apply_structured_patch(spec.workdir, {
+        "path": task6_mod.V2_ENTRYPOINT, "old": "",
+        "new": "#!/usr/bin/env python\n# V2 born via coding_debug\n"})
+    assert Path(born).name == task6_mod.V2_ENTRYPOINT and v2_target.is_file()
+
+    # Gate2 打回再跑：全新 run 目录，补丁不继承，V2 重新 absent。
+    spec2 = factory({**state, "agent_runs": [{"run_idx": 1}],
+                     "events": [{"type": "gate2_rejected",
+                                 "human_notes": "DR 应力端再外扩"}]})
+    assert spec2.run_idx == 2
+    assert spec2.max_coding_rounds == 3
+    assert spec2.workdir != spec.workdir
+    assert not Path(spec2.cmd[1]).exists()
+    assert spec2.gate2_notes == "DR 应力端再外扩"
+
+    # 守卫：非 genesis / 缺 v1_archive 都 fail-closed，绝不退化成普通 task8。
+    with pytest.raises(GraphStateError, match="ascent"):
+        factory({**state, "v1_archive": None})
+    with pytest.raises(GraphStateError, match="sim_engine"):
+        factory({**state, "chosen": {"sim_engine": "mujoco"}})
+
+
+# ---------------------------------------------------------------------------
+# 5. V2 track script 遥测契约：增强 V2 summary（真重算）过 telemetry.v1 +
+#    chronicle；引擎仓永不携带 genesis_humanoid_dr_v2.py
+# ---------------------------------------------------------------------------
+
+def test_v2_track_script_telemetry_contract(tmp_path, monkeypatch):
+    # record_only 标定（视觉零实呼；本测焦点是遥测/契约不是 Rung4）。
+    cal_dir = tmp_path / "phase1" / "task8_track2_judge"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "calibration_gait.json").write_text(
+        json.dumps({"mode": "record_only"}), encoding="utf-8")
+    monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+
+    # 冻结 V1：真 batch（独立重算口径，默认 profile），arc 只带白名单字段。
+    v1_wd = tmp_path / "v1batch"
+    build_synthetic_batch(v1_wd)
+    arc = {
+        "schema": V1_INDEX_SCHEMA, "track": "track2",
+        "thread_id": V1_THREAD, "host_workdir": str(v1_wd),
+        "files": [{"relpath": rel, "sha256": _sha256_file(v1_wd / rel)}
+                  for rel in SPLIT_RELS],
+        "v1_metrics": {},
+    }
+    sdir = task6_mod.sources_dir(T6_THREAD)
+    (sdir / f"v1_{task6_mod.VRAM_NAME}").write_text(
+        json.dumps({task6_mod.VRAM_KEY: 20.0}), encoding="utf-8")
+
+    # V2：真 batch（tight profile 下三臂×3 籽全存活）+ 两份随批机产扩展件。
+    v2_wd = tmp_path / "v2batch"
+    build_synthetic_batch(v2_wd, falls={})
+    (v2_wd / task6_mod.VRAM_NAME).write_text(
+        json.dumps({task6_mod.VRAM_KEY: 18.42}), encoding="utf-8")
+    innovation = {
+        "control_law": "u=-Kp(θ−θ*)−Kd·θ̇（Kp/Kd 臂分级，RL 策略端不动）",
+        "dr_distribution": {"mu": "loguniform[0.04,0.45]",
+                            "Kp": "loguniform[8000,9000]"},
+    }
+    (v2_wd / task6_mod.INNOVATION_NAME).write_text(
+        json.dumps(innovation, ensure_ascii=False), encoding="utf-8")
+
+    visual = FakeVisualGateway(_gait_raw())
+    seam = task6_mod.make_evaluate_seam(visual, "T6-B2-visual", T6_THREAD)
+    metrics = seam({
+        "thread_id": T6_THREAD, "v1_archive": arc,
+        "telemetry_uri": str(v2_wd / "summary.json"),
+        "agent_runs": [{"run_idx": 1, "status": "ok"}], "events": []})
+
+    # 视觉通道零触达（record_only + active-only）。
+    assert visual.visual_calls == []
+    assert metrics["rungs"]["rung4"]["zero_visual_calls"] is True
+
+    v2_doc = json.loads(Path(asc_path := metrics["ascent"][
+        "v2_summary_path"]).read_text(encoding="utf-8"))
+    v1_doc = json.loads(Path(metrics["ascent"][
+        "v1_summary_path"]).read_text(encoding="utf-8"))
+
+    # 增强 V2 summary：telemetry.v1 schema、恰三臂×3 籽、run_id/parent 钉死。
+    assert v2_doc["schema"] == "simpraxis.task8.track2.telemetry.v1"
+    assert set(v2_doc["groups"]) == {"normal", "ice_nominal", "ice_dr"}
+    assert len(list((v2_wd / "telemetry").glob("*.json"))) == 9
+    for arm, g in v2_doc["groups"].items():
+        assert g["n"] == 3 and g["n_fell"] == 0 and g["success_rate"] == 1.0
+    assert v2_doc["run_id"] == T6_THREAD
+    assert v2_doc["parent_run_id"] == V1_THREAD == v1_doc["run_id"]
+    assert "parent_run_id" not in v1_doc and "innovation" not in v1_doc
+    # Pareto 六指标恰六项、皆 finite；solve_wallclock 取 9 行 CSV 均值。
+    assert set(v2_doc["pareto_metrics"]) == set(METRIC_DIRECTIONS)
+    assert v2_doc["pareto_metrics"]["solve_wallclock_s"] == pytest.approx(12.3)
+    assert v2_doc["pareto_metrics"]["vram_peak_gb"] == pytest.approx(18.42)
+    # innovation 必须是随批机产件原文（接缝不代笔）。
+    assert v2_doc["innovation"] == innovation
+
+    # 四来源件过生产 chronicle（意见件用测试夹具意见，summary 是生产产物）。
+    def _opinion(gate):
+        return {"schema": chronicle.GATE_OPINION_SCHEMA, "gate": gate,
+                "decision": "approve",
+                "human_notes": f"测试夹具意见：{gate} 批准",
+                "source": "cli", "ts_iso": "2026-10-19T01:02:03Z"}
+
+    g1p = sdir / "fix_gate1_opinion.json"
+    g2p = sdir / "fix_gate2_opinion.json"
+    g1p.write_text(json.dumps(_opinion("gate1")), encoding="utf-8")
+    g2p.write_text(json.dumps(_opinion("gate2")), encoding="utf-8")
+    loaded_sources = chronicle.load_evolution_sources(
+        v1_summary_path=metrics["ascent"]["v1_summary_path"],
+        v2_summary_path=asc_path, gate1_opinion_path=g1p,
+        gate2_opinion_path=g2p)
+    assert loaded_sources["v2_summary"]["groups"]["ice_dr"]["n"] == 3
+
+    # 三层分离铁律：引擎仓（git 跟踪面）永不携带 V2 解题脚本。
+    ls = subprocess.run(["git", "-C", str(_REPO_ROOT), "ls-files"],
+                        capture_output=True, text=True, check=True)
+    tracked = ls.stdout.split()
+    assert not [p for p in tracked
+                if Path(p).name == task6_mod.V2_ENTRYPOINT]
+    grep = subprocess.run(
+        ["git", "-C", str(_REPO_ROOT), "grep", "-l", "-z", "--",
+         "genesis_humanoid_dr_v2"],
+        capture_output=True, text=True)
+    mentioned = [p for p in grep.stdout.split("\0") if p]
+    # 只允许引擎代码/测试按名引用（契约/缺件断言）；脚本本体已被上面的
+    # ls-files 名字断言钉死（任何跟踪路径都不得叫这个文件名）。
+    assert all(p.startswith(("orchestrator/", "tests/"))
+               for p in mentioned), mentioned
+
+
+# ---------------------------------------------------------------------------
+# 6. ascent 索引：V2 链入条目（evolution_of）父链校验 + 同题豁免 + 分类跳过
+# ---------------------------------------------------------------------------
+
+def test_v2_linked_entries_parent_chain(tmp_path):
+    """evolution_of/evolution_round 加法：父必须在、题面可复用、thread 仍唯一。"""
+    index, _ = _build_fixture_index(tmp_path / "chain")
+    parent = index["entries"][0]
+    v2_entry = dict(parent)
+    v2_entry.update({
+        "thread_id": "t6-genesis-ascent-20261017a",
+        "host_workdir": str(tmp_path / "chain" / "run_v2_1"),
+        "evolution_of": V1_THREAD, "evolution_round": 1,
+    })
+    index["entries"].append(v2_entry)
+    p = tmp_path / "chain" / "v1_index.json"
+    p.write_text(json.dumps(index, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+    loaded = load_v1_index(p)  # 同题复用不触发重复登记
+    # 分类器只对未链入的冻结档案命中：V2 行被跳过，仍归并到父档案。
+    result = classify_run(
+        {"track": "track2", "question": parent["question"]}, loaded)
+    assert result["run_mode"] == ASCENT
+    assert result["v1_archive"]["thread_id"] == V1_THREAD
+
+    # 悬空父链 → 损坏
+    bad = json.loads(p.read_text(encoding="utf-8"))
+    bad["entries"][1]["evolution_of"] = "no-such-parent"
+    bp = tmp_path / "chain" / "bad_dangling.json"
+    bp.write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(Exception, match="evolution_of"):
+        load_v1_index(bp)
+
+    # thread_id 重复（两条链档共用新 thread；父仍存在）仍损坏
+    dup = json.loads(p.read_text(encoding="utf-8"))
+    other_link = dict(dup["entries"][1])
+    other_link["host_workdir"] = str(tmp_path / "chain" / "run_v2_1b")
+    dup["entries"].append(other_link)
+    dp = tmp_path / "chain" / "dup_thread.json"
+    dp.write_text(json.dumps(dup), encoding="utf-8")
+    with pytest.raises(Exception, match="thread_id"):
+        load_v1_index(dp)
+
+    # 成对缺失/轮次非正/自指 → 损坏
+    for mutate, match in (
+        (lambda e: e.pop("evolution_round"), "成对"),
+        (lambda e: e.__setitem__("evolution_round", 0), "evolution_round"),
+        (lambda e: e.__setitem__("evolution_of",
+                                 "t6-genesis-ascent-20261017a"), "自身"),
+    ):
+        broken = json.loads(p.read_text(encoding="utf-8"))
+        mutate(broken["entries"][1])
+        qp = tmp_path / "chain" / "broken.json"
+        qp.write_text(json.dumps(broken), encoding="utf-8")
+        with pytest.raises(Exception, match=match):
+            load_v1_index(qp)

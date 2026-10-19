@@ -1344,14 +1344,20 @@ def test_28_schema_migration_from_user_version_0(tmp_path):
     raw.close()
 
     s = PendingStore(db)
-    # Task3：v0 老库一次性增量到 user_version=2（v1 提醒三列 + 双媒体两列）。
-    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    # Task3：v0 老库一次性增量（v1 提醒三列 + 双媒体两列）；Task6 再增量到
+    # user_version=3（四媒体 v1a/v1b/v2a/v2b 四列），同提交对账原 ==2 断言。
+    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     cols = {r[1] for r in s._conn.execute("PRAGMA table_info(pending_gates);")}
     hcols = {r[1] for r in s._conn.execute(
         "PRAGMA table_info(pending_gates_history);")}
     assert {"reminder_count", "last_reminder_at", "task_title"} <= cols
     assert {"media_message_id_v1", "media_message_id_v2"} <= cols
     assert {"media_message_id_v1", "media_message_id_v2"} <= hcols
+    # Task6：四媒体四列在活表与历史表同生
+    assert {"media_message_id_v1a", "media_message_id_v1b",
+            "media_message_id_v2a", "media_message_id_v2b"} <= cols
+    assert {"media_message_id_v1a", "media_message_id_v1b",
+            "media_message_id_v2a", "media_message_id_v2b"} <= hcols
     # 原 13 列顺序/名字未动
     assert list(cols)  # sanity
     row = s.get_pending("oldrow", 1)

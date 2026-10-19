@@ -18,6 +18,10 @@ schema 演进（H-1/H-6，2026-10-16）：对**已存在的生产库**纯增量�
     两列（Gate2 双媒体 Diff 卡：V1 历史视频/V2 本次视频各最多推一次，
     崩溃重挂只补缺失件）；老行回填 NULL，原单列 media_message_id 保留不动，
     标准 Gate2 路径继续只写该列。
+  - user_version 2→3（Phase 2 Task6）：两表再各追加
+    media_message_id_v1a / v1b / v2a / v2b 四列（ascent 四媒体 Diff 卡：
+    V1 split1 → V1 split2 → V2 split1 → V2 split2 严格顺序各最多推一次，
+    崩溃重挂只补缺失件）；Task3 两列与标准单列均不写不碰。
 """
 from __future__ import annotations
 
@@ -84,19 +88,26 @@ CREATE TABLE IF NOT EXISTS inbound_messages(
 """
 
 # 当前 schema 版本（PRAGMA user_version）。每个版本只做纯增量 ALTER/CREATE。
-_USER_VERSION = 2
+_USER_VERSION = 3
 
 _HISTORY_COLS = (
     "thread_id, gate, status, choice, decision, human_notes, source, "
     "card_message_id, media_message_id, open_chat_id, operator_open_id, "
-    "created_at, decided_at, media_message_id_v1, media_message_id_v2"
+    "created_at, decided_at, media_message_id_v1, media_message_id_v2, "
+    "media_message_id_v1a, media_message_id_v1b, "
+    "media_message_id_v2a, media_message_id_v2b"
 )
 
 # PENDING 行允许被回填的消息列（只允许 NULL -> 非 NULL，禁止覆盖，重启重挂用）
 # Task3：media_message_id_v1/v2 为双媒体 Diff Gate2 的两列送达记账；
 # 老单列 media_message_id 保留给标准 Gate2，两条路径互不写对方的列。
+# Task6：v1a/v1b/v2a/v2b 为 ascent 四媒体 Gate2 的分列送达记账
+# （V1 split1 → V1 split2 → V2 split1 → V2 split2，严格顺序），与 Task3
+# 两列互不写对方。
 _FILLABLE = ("card_message_id", "media_message_id", "open_chat_id",
-             "media_message_id_v1", "media_message_id_v2")
+             "media_message_id_v1", "media_message_id_v2",
+             "media_message_id_v1a", "media_message_id_v1b",
+             "media_message_id_v2a", "media_message_id_v2b")
 
 # purge_thread_like 的 LIKE 逃逸符（与 probes/probe_c_form.py 历史裸 DELETE 同款）
 _LIKE_ESCAPE = "\\"
@@ -185,6 +196,18 @@ class PendingStore:
                 "ALTER TABLE pending_gates_history "
                 "ADD COLUMN media_message_id_v2 TEXT"
             )
+        if version < 3:
+            # Phase 2 Task6：ascent Gate2 四媒体（V1/V2 各两张分屏）的四列
+            # 送达消息 id。全部可空（元数据级 ALTER 不重写既有行）；主表与
+            # history 同步加列，归档 INSERT...SELECT 的列单保持一致。
+            for col in ("media_message_id_v1a", "media_message_id_v1b",
+                        "media_message_id_v2a", "media_message_id_v2b"):
+                self._conn.execute(
+                    f"ALTER TABLE pending_gates ADD COLUMN {col} TEXT"
+                )
+                self._conn.execute(
+                    f"ALTER TABLE pending_gates_history ADD COLUMN {col} TEXT"
+                )
         self._conn.execute(f"PRAGMA user_version = {_USER_VERSION};")
 
     def close(self) -> None:
@@ -248,11 +271,17 @@ class PendingStore:
         open_chat_id: "str | None" = None,
         media_message_id_v1: "str | None" = None,
         media_message_id_v2: "str | None" = None,
+        media_message_id_v1a: "str | None" = None,
+        media_message_id_v1b: "str | None" = None,
+        media_message_id_v2a: "str | None" = None,
+        media_message_id_v2b: "str | None" = None,
     ) -> "int | None":
         """消息发送成功后回填（同样只 COALESCE，不覆盖）。
 
         Task3：media_message_id_v1/v2 是双媒体 Diff Gate2 的分列回填；
-        标准 Gate2 的老单列 media_message_id 语义不变。
+        标准 Gate2 的老单列 media_message_id 语义不变。Task6：
+        media_message_id_v1a/v1b/v2a/v2b 是 ascent 四媒体 Gate2 的分列回填，
+        与 Task3 两列互不复用。
 
         R-LOW-3 返回影响行数，供调用方做孤儿留痕：
         - None：本次未给任何填充列，未尝试回填（不构成发送事件）；
@@ -268,6 +297,10 @@ class PendingStore:
             "open_chat_id": open_chat_id,
             "media_message_id_v1": media_message_id_v1,
             "media_message_id_v2": media_message_id_v2,
+            "media_message_id_v1a": media_message_id_v1a,
+            "media_message_id_v1b": media_message_id_v1b,
+            "media_message_id_v2a": media_message_id_v2a,
+            "media_message_id_v2b": media_message_id_v2b,
         }
         for col in _FILLABLE:
             if params[col] is not None:

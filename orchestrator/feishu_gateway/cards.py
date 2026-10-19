@@ -1092,6 +1092,158 @@ def build_gate2_card_diff(
     }
 
 
+# ---------------- Phase 2 Task6：ascent Gate1 1.0 降级卡 ----------------
+
+def build_gate1_card_ascent_v1(
+    task_title: str,
+    proposals: list[dict[str, Any]],
+    v1_summary: "str | None" = None,
+    feedback_required: bool = True,
+) -> dict:
+    """Gate1 升阶假设卡的 1.0 降级形态（2.0 被接口拒绝时发送，控件仍可操作）。
+
+    内容与 build_gate1_card_ascent 同一组 markdown 块（任务目标 + V1 冻结指标
+    摘要 + ascent_claims 对照表），仅容器换 1.0 elements、表单换 _gate1_form_1；
+    按钮 value 协议不变，parse_card_event 无需区分。
+    """
+    elements: list[dict] = [
+        {"tag": "markdown", "content": md}
+        for md in _ascent_intro_md(task_title, v1_summary)
+    ]
+    if not feedback_required:
+        elements.append({"tag": "markdown",
+                         "content": "_本轮反馈意见为选填（测试模式）_"})
+    for idx, p in enumerate(proposals):
+        elements.append({"tag": "markdown",
+                         "content": _ascent_proposal_md(idx, p)})
+        elements.append(_gate1_form_1(idx))
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "blue",
+                   "title": {"tag": "plain_text",
+                             "content": "【SimPraxis】Gate 1：升阶研究方案审批（V1→V2）"}},
+        "elements": elements,
+    }
+
+
+# ---------------- Phase 2 Task6：四媒体 Diff Gate2（V1/V2 各两张 split） ----------------
+
+# 四条视频的发送顺序钉死（V1 split1 → V1 split2 → V2 split1 → V2 split2）；
+# 标签/卡内指引必须与 client._DIFF4_* 同序同名（由 task6 出生测试对质）。
+_DIFF4_INTRO = (
+    "请严格按发送顺序对照上方四条视频：**① V1 历史视频 A**（冻结档案 "
+    "split1：normal vs ice_nominal）、**② V1 历史视频 B**（冻结档案 split2："
+    "ice_nominal vs ice_dr）、**③ V2 本次视频 A**（候选实证 split1：normal "
+    "vs ice_nominal）、**④ V2 本次视频 B**（候选实证 split2：ice_nominal "
+    "vs ice_dr），逐行核对下表。"
+)
+
+
+def _gate2_diff4_md(
+    task_title: str,
+    metrics_diff: list[tuple[str, float, float]],
+    verdict: str,
+    *,
+    video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
+) -> str:
+    """四媒体 Gate2 卡正文：与双媒体卡同一张六指标 Δ 表/同一 Pareto 口径，
+    仅视频指引改为四条；Task3 双媒体文案在 _gate2_diff_md 中一字不动。"""
+    lines = [f"**任务目标**：{md_escape(task_title)}"]
+    if trim_note:
+        lines.append(trim_note)
+    explain_md = _explanation_md(explanation)
+    if explain_md:
+        lines += [explain_md, "---"]
+    lines += [
+        _DIFF4_INTRO,
+        "",
+        "| 指标 | V1（冻结档案） | V2（本次） | Δ（V2−V1） | 方向 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for metric, v1, v2 in metrics_diff:
+        delta = v2 - v1
+        lines.append(
+            f"| `{metric}` {_METRIC_LABELS[metric]} | {_fmt_num(v1)} "
+            f"| {_fmt_num(v2)} | {delta:+.6g} "
+            f"| {_diff_arrow(metric, v1, v2)} |")
+    lines += [
+        "",
+        _PARETO_VERDICT_TEXT[verdict],
+        "机判仅作参考，绝不代决；是否接受由你做**人类最终裁决**（二选一）。"
+        "方向列按各指标改善方向与 Pareto 同一 ε 容差判定"
+        "（↑ 带外改善 / ↓ 带外劣化 / ≈ 容差内持平）。",
+    ]
+    if video_fallback:
+        lines += ["",
+                  "⚠️ 至少一条原生视频上传失败已降级（video_fallback=true），"
+                  "请通过证据目录查看原片后再裁决。"]
+    return "\n".join(lines)
+
+
+def build_gate2_card_diff4_v2(
+    task_title: str,
+    metrics_diff: list[dict[str, Any]],
+    pareto_verdict: "str | dict[str, Any]",
+    *,
+    video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
+) -> dict:
+    """Task6 Gate2 四媒体 Diff 卡（schema 2.0）：V1/V2 各两张 split + Δ 表。
+
+    metrics_diff 仍为 Pareto 六指标各行（聚合到 batch 级；split 只承载视觉
+    对质），校验/裁决控件与双媒体卡完全同协议。
+    """
+    rows = _normalize_diff_rows(metrics_diff)
+    verdict = _normalize_pareto_verdict(pareto_verdict)
+    body = [_div_lark_md(_gate2_diff4_md(
+        task_title, rows, verdict, video_fallback=video_fallback,
+        explanation=explanation, trim_note=trim_note))]
+    body.append(_div_lark_md("**人类最终裁决（二选一；机判不代决）**"))
+    body.append(_gate2_form_2(video_fallback))
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "wide_screen_mode": True},
+        "header": _v2_header("green",
+                             "【SimPraxis】Gate 2：V1→V2 四视频 Diff 验收"),
+        "body": {"elements": body},
+    }
+
+
+def build_gate2_card_diff4(
+    task_title: str,
+    metrics_diff: list[dict[str, Any]],
+    pareto_verdict: "str | dict[str, Any]",
+    *,
+    video_fallback: bool = False,
+    explanation: "dict[str, str] | None" = None,
+    trim_note: "str | None" = None,
+) -> dict:
+    """Task6 四媒体 Diff 卡 1.0 形态（2.0 被拒时降级，裁决控件仍可操作）。"""
+    rows = _normalize_diff_rows(metrics_diff)
+    verdict = _normalize_pareto_verdict(pareto_verdict)
+    form = _gate2_form_1()
+    if video_fallback:
+        for btn in form["elements"][1]["actions"]:
+            btn["value"] = dict(btn["value"], video_fallback=True)
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": {"template": "green",
+                   "title": {"tag": "plain_text",
+                             "content": "【SimPraxis】Gate 2：V1→V2 四视频 Diff 验收"}},
+        "elements": [
+            {"tag": "markdown", "content": _gate2_diff4_md(
+                task_title, rows, verdict, video_fallback=video_fallback,
+                explanation=explanation, trim_note=trim_note)},
+            {"tag": "markdown",
+             "content": "**人类最终裁决（二选一；机判不代决）**"},
+            form,
+        ],
+    }
+
+
 # ---------------- 等待提醒卡片（8h/16h，仅提醒绝不代决） ----------------
 
 def _reminder_body(gate: int, nth: int, waited_hours: int,

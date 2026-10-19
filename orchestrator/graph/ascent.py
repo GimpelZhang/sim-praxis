@@ -196,6 +196,45 @@ def _validate_entry(entry: Any, idx: int) -> None:
         raise V1IndexCorrupt(f"{where}.v1_metrics 必须是对象")
     # Task6 入场 LOW-6：groups 是 V1 数值对质的唯一来源，形态/类型严格钉死。
     _validate_groups(entry["v1_metrics"], where)
+    _validate_evolution_link(entry, where)
+
+
+def _is_linked_v2(entry: Any) -> bool:
+    """V2 链入条目（带 evolution_of）：题面去重豁免、分类器跳过。
+
+    classify_run 是接收任意 index dict 的纯函数，故以非空字符串判定而非
+    信任加载器；正式校验在 ``_validate_evolution_link``（成对、类型、≥1）。
+    """
+    return isinstance(entry, dict) and isinstance(entry.get("evolution_of"), str) \
+        and bool(entry["evolution_of"].strip())
+
+
+def _validate_evolution_link(entry: dict, where: str) -> None:
+    """Task6：V2 链入字段 evolution_of/evolution_round（加法、成对、fail-closed）。
+
+    V2 条目是 Gate2 批准后的链档（父=已登记冻结档案 thread_id），与 V1 条目
+    同形（同样登记 files/dr_envelope/v1_metrics——V2 batch 的 summary.json
+    沿用 batch_summary.v1 形）；差异仅在：题面允许多轮复用（加载器对其豁免
+    同题去重）、分类器永不拿它当冻结档案触发新 ascent。父 thread 不存在即
+    索引损坏（禁止悬空链）；轮次必须是非 bool 正整数。
+    """
+    has_link = "evolution_of" in entry
+    has_round = "evolution_round" in entry
+    if has_link != has_round:
+        raise V1IndexCorrupt(
+            f"{where}.evolution_of/evolution_round 必须成对出现（V2 链档）")
+    if not has_link:
+        return
+    parent = entry["evolution_of"]
+    if not isinstance(parent, str) or not parent.strip():
+        raise V1IndexCorrupt(
+            f"{where}.evolution_of 必须是非空 thread_id 字符串")
+    if parent == entry["thread_id"]:
+        raise V1IndexCorrupt(f"{where}.evolution_of 不得指向自身（{parent!r}）")
+    rnd = entry["evolution_round"]
+    if isinstance(rnd, bool) or not isinstance(rnd, int) or rnd < 1:
+        raise V1IndexCorrupt(
+            f"{where}.evolution_round 必须是 ≥1 的非 bool 整数，收到 {rnd!r}")
 
 
 def load_v1_index(path: "str | Path | None" = None) -> dict:
@@ -225,20 +264,32 @@ def load_v1_index(path: "str | Path | None" = None) -> dict:
     # 单条校验在前：此处读取的字段类型/非空都已被 _validate_entry 钉死。
     seen_questions: dict[tuple[str, str], int] = {}
     seen_threads: dict[str, int] = {}
+    linked: list[tuple[int, str, str]] = []
     for i, entry in enumerate(entries):
         _validate_entry(entry, i)
-        qkey = (entry["track"], entry["question_sha256"])
-        if qkey in seen_questions:
-            raise V1IndexCorrupt(
-                f"{p}: entries[{seen_questions[qkey]}] 与 entries[{i}] "
-                f"重复登记同一题（track, question_sha256）={qkey}")
-        seen_questions[qkey] = i
+        # thread_id 对所有条目（V1 冻结档案/V2 链档）唯一：重复即命中不确定。
         if entry["thread_id"] in seen_threads:
             j = seen_threads[entry["thread_id"]]
             raise V1IndexCorrupt(
                 f"{p}: entries[{j}] 与 entries[{i}] 重复登记同一 "
                 f"thread_id={entry['thread_id']!r}")
         seen_threads[entry["thread_id"]] = i
+        if _is_linked_v2(entry):
+            # Task6：V2 链档复用父题题面是正常的（同一冻结题的多轮升阶），
+            # 豁免同题去重；悬空父链在全表校验阶段 fail-closed。
+            linked.append((i, entry["thread_id"], entry["evolution_of"]))
+            continue
+        qkey = (entry["track"], entry["question_sha256"])
+        if qkey in seen_questions:
+            raise V1IndexCorrupt(
+                f"{p}: entries[{seen_questions[qkey]}] 与 entries[{i}] "
+                f"重复登记同一题（track, question_sha256）={qkey}")
+        seen_questions[qkey] = i
+    for i, thread_id, parent in linked:
+        if parent not in seen_threads:
+            raise V1IndexCorrupt(
+                f"{p}: entries[{i}]（thread_id={thread_id!r}）的 evolution_of="
+                f"{parent!r} 未登记任何条目：禁止悬空 V2 链档")
     return data
 
 
@@ -283,6 +334,9 @@ def classify_run(payload: "dict | None", index: "dict | None") -> dict:
         return _empty_classification()
     for i, entry in enumerate(index["entries"]):
         if not isinstance(entry, dict) or entry.get("track") != "track2":
+            continue
+        # Task6：V2 链档（evolution_of）永不作为冻结档案触发新一轮 ascent。
+        if _is_linked_v2(entry):
             continue
         if entry.get("question") != question:
             continue

@@ -33,6 +33,9 @@ class SimPraxisState(TypedDict, total=False):
     v1_archive: "dict | None"  # ascent 命中时的 V1 档案白名单副本
     ascent_targets: dict       # 加严项与因子（standard 为 {}）
     pareto_verdict: "dict | None"  # evaluate 后回填（Task4 接线）
+    # Phase 2 Task6：ascent 演化志四来源件路径块（Gate1 批准写部分块、
+    # Gate2 批准补齐五键；仅 dict 加法透传，reject/hard-failure 路径不写）。
+    evolution_sources: dict
     events: Annotated[list, operator.add]
 
 

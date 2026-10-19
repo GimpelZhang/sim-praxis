@@ -196,8 +196,14 @@ def node_gate1(state: SimPraxisState, deps: GraphDeps) -> dict:
         except (IndexError, TypeError, ValueError) as exc:
             raise GraphStateError(
                 f"Gate1 choice={idx!r} 越界（proposals={len(proposals)}）") from exc
-        return {"chosen": chosen,
-                "events": [_ev("gate1_approved", choice=int(idx))]}
+        update = {"chosen": chosen,
+                  "events": [_ev("gate1_approved", choice=int(idx))]}
+        # Task6 ascent：Gate1 接缝批准时带回 evolution_sources 部分块
+        # （轮次/V1 summary/Gate1 意见件路径）；dict 以外类型一律不透传。
+        sources = decision.get("evolution_sources")
+        if isinstance(sources, dict):
+            update["evolution_sources"] = sources
+        return update
     rejects = int(state.get("gate1_rejects", 0)) + 1
     notes = (decision.get("human_notes") or "").strip()
     if not notes:
@@ -276,7 +282,13 @@ def node_gate2(state: SimPraxisState, deps: GraphDeps) -> dict:
     if verdict not in _VALID_VERDICTS:
         raise GraphStateError(f"Gate2 决策值非法：{verdict!r}（决策字典：{decision}）")
     if verdict == GATE_APPROVE:
-        return {"events": [_ev("gate2_accepted")]}
+        update = {"events": [_ev("gate2_accepted")]}
+        # Task6 ascent：Gate2 接缝批准时把五键全块写回 state（learning
+        # 演化志消费）；其余任务/非 dict 载荷不透传，行为逐字节不变。
+        sources = decision.get("evolution_sources")
+        if isinstance(sources, dict):
+            update["evolution_sources"] = sources
+        return update
     rejects = int(state.get("gate2_rejects", 0)) + 1
     notes = (decision.get("human_notes") or "").strip()
     if not notes:

@@ -28,9 +28,13 @@ from .cards import (
     NOT_OWNER_TOAST,
     REJECT_EMPTY_TOAST,
     build_gate1_card,
+    build_gate1_card_ascent,
+    build_gate1_card_ascent_v1,
     build_gate1_card_v2,
     build_gate2_card,
     build_gate2_card_diff,
+    build_gate2_card_diff4,
+    build_gate2_card_diff4_v2,
     build_gate2_card_diff_v2,
     build_gate2_card_v2,
     build_reminder_card,
@@ -791,10 +795,12 @@ class FeishuGateway:
                            gate, thread_id)
         return archived
 
-    # claim 冲突裁决观察的四个消息列（标准列 + 双媒体两列 + 卡片列）。
+    # claim 冲突裁决观察的消息列（标准列 + 双媒体两列 + Task6 四媒体四列 + 卡片列）。
     _CLAIM_OBSERVE_COLUMNS = (
         "card_message_id", "media_message_id",
-        "media_message_id_v1", "media_message_id_v2")
+        "media_message_id_v1", "media_message_id_v2",
+        "media_message_id_v1a", "media_message_id_v1b",
+        "media_message_id_v2a", "media_message_id_v2b")
 
     @classmethod
     def _claim_snapshot(cls, row: dict) -> tuple:
@@ -1393,6 +1399,204 @@ class FeishuGateway:
                 self._log.info(
                     "Gate2(diff) 卡片已发出 thread=%s schema=%s v1=%s v2=%s",
                     thread_id, sent["schema"], detail1, detail2)
+        self._event_for(thread_id, gate)
+        return self._await_decision(thread_id, gate, max_wait=max_wait)
+
+    # ---------- Phase 2 Task6：ascent Gate1 升阶假设卡 ----------
+
+    def request_gate1_ascent_approval(
+        self,
+        thread_id: str,
+        task_title: str,
+        proposals: list[dict[str, Any]],
+        v1_summary: "str | None" = None,
+        *,
+        max_wait: "float | None" = None,
+    ) -> dict:
+        """Task6 ascent Gate1：升阶假设卡（V1 冻结指标 + ascent_claims 对照）。
+
+        等待/重挂/claim 语义与标准 Gate1 完全一致（upsert 占位、不重发、打回
+        归档重开），仅卡片内容换成 build_gate1_card_ascent。No Fake Approval：
+        本方法阻塞等待真人点击，任何分支都没有硬编码 approve。
+        """
+        gate = 1
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
+            # 重启重挂：PENDING 行且卡已发，不重发（与标准 Gate1 同）。
+            self._log.info(
+                "Gate1(ascent) 重启重挂 thread=%s message_id=%s（不重发卡片）",
+                thread_id, row["card_message_id"])
+        else:
+            # Task7 D10：上一轮打回先归档，保证新卡片新点击。
+            self._reopen_round(thread_id, gate)
+            sent = self._send_interactive(
+                self.owner_open_id,
+                build_gate1_card_ascent_v1(task_title, proposals, v1_summary),
+                build_gate1_card_ascent(task_title, proposals, v1_summary),
+                form_required=True,
+            )
+            self.store.upsert_pending(
+                thread_id, gate,
+                card_message_id=sent["message_id"],
+                open_chat_id=sent["chat_id"],
+                task_title=task_title)
+            # 极端竞态保底回填（R-LOW-3：0 行=卡片刚发出行即终结，孤儿告警）。
+            self._attach_ids_or_warn(
+                thread_id, gate, sent_kind="Gate1(ascent) 卡片",
+                card_message_id=sent["message_id"],
+                open_chat_id=sent["chat_id"])
+            self._log.info("Gate1(ascent) 卡片已发出 thread=%s schema=%s",
+                           thread_id, sent["schema"])
+        self._event_for(thread_id, gate)
+        return self._await_decision(thread_id, gate, max_wait=max_wait)
+
+    # ---------- Phase 2 Task6：四媒体 Diff Gate2（V1/V2 各两 split） ----------
+
+    # 列标签行只在本次实际推送该列视频时发送，从不落 store（重挂不重发标签）。
+    # 顺序钉死：V1 split1 → V1 split2 → V2 split1 → V2 split2；与
+    # cards._DIFF4_INTRO 同序同名（task6 出生测试对质）。
+    _DIFF4_LABEL_V1A = "① V1 历史视频 A（冻结档案 split1：normal vs ice_nominal）"
+    _DIFF4_LABEL_V1B = "② V1 历史视频 B（冻结档案 split2：ice_nominal vs ice_dr）"
+    _DIFF4_LABEL_V2A = "③ V2 本次视频 A（候选实证 split1：normal vs ice_nominal）"
+    _DIFF4_LABEL_V2B = "④ V2 本次视频 B（候选实证 split2：ice_nominal vs ice_dr）"
+
+    def request_gate2_diff4_approval(
+        self,
+        thread_id: str,
+        task_title: str,
+        v1a_video: str,
+        v1b_video: str,
+        v2a_video: str,
+        v2b_video: str,
+        metrics_diff: list[dict[str, Any]],
+        pareto_verdict: "str | dict[str, Any]",
+        *,
+        duration_ms: "int | None" = None,
+        cover_png: "str | None" = None,
+        trim: "dict | None" = None,
+        explanation: "dict[str, str] | None" = None,
+        max_wait: "float | None" = None,
+    ) -> dict:
+        """Task6 四媒体 Diff Gate2：V1/V2 各两张 split 严格顺序推送 + 一张 Δ 卡。
+
+        顺序（claim 占位，LOW-6 崩溃接管，R-LOW-3 每副作用间 fresh 复查）：
+        claim → ①标签+V1 split1（回填 v1a）→ ②标签+V1 split2（回填 v1b）
+        → ③标签+V2 split1（回填 v2a）→ ④标签+V2 split2（回填 v2b）→ Diff 卡
+        → 阻塞等待人类最终裁决。任一已送达列不重发、标签不重发；缺路径且无
+        已送达 id 即 fail-closed（禁止用少媒体冒充四媒体看板）。claim 冲突的
+        wait/take/gone 三分与双媒体路径同构（观察列含本路径四列）。
+        metrics_diff/pareto_verdict 在任何副作用之前先过卡片构造校验（纯函数）。
+        """
+        gate = 2
+        trim = validate_trim(trim)
+        # 预检：非法 Δ 行/裁决值在占位与推送之前抛错（构造为纯函数，零副作用）。
+        build_gate2_card_diff4_v2(task_title, metrics_diff, pareto_verdict,
+                                  explanation=explanation)
+        columns = (
+            ("v1a", self._DIFF4_LABEL_V1A, v1a_video, "V1 split1 媒体发送"),
+            ("v1b", self._DIFF4_LABEL_V1B, v1b_video, "V1 split2 媒体发送"),
+            ("v2a", self._DIFF4_LABEL_V2A, v2a_video, "V2 split1 媒体发送"),
+            ("v2b", self._DIFF4_LABEL_V2B, v2b_video, "V2 split2 媒体发送"),
+        )
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
+            self._log.info(
+                "Gate2(diff4) 重启重挂 thread=%s message_id=%s（不重发卡片）",
+                thread_id, row["card_message_id"])
+        else:
+            self._reopen_round(thread_id, gate)
+            claimed = self.store.claim_pending(thread_id, gate,
+                                                task_title=task_title)
+            other_card_ready = False
+            if not claimed:
+                existing = self.store.get_pending(thread_id, gate)
+                if existing is not None and existing["status"] == "PENDING" \
+                        and existing["card_message_id"]:
+                    other_card_ready = True
+                    self._log.warning(
+                        "Gate2(diff4) 占位已被他方持有且卡片已发，本次不重复推视频 "
+                        "thread=%s card=%s", thread_id,
+                        existing["card_message_id"])
+                else:
+                    # QA-2 MEDIUM：无 card 的 claim 失败三分裁决（观察列含 v1a/b、
+                    # v2a/b：任一已回填=部分送达的崩溃现场，立即接管缺啥补啥）。
+                    claim_action = self._claim_loss_action(thread_id, gate)
+                    if claim_action == "gone":
+                        raise RuntimeError(
+                            "Gate2(diff4) 占位行在 claim 后消失，疑似他方已裁决"
+                            "归档；拒绝发送孤儿媒体/孤儿卡，请走 resume 读终态 "
+                            f"thread={thread_id}")
+                    if claim_action == "wait":
+                        other_card_ready = True
+            if not other_card_ready:
+                # R-LOW-2：首个副作用前 fresh 重读（claim/观察快照之后的 TOCTOU）。
+                fresh = self.store.get_pending(thread_id, gate)
+                if fresh is None or fresh["status"] != "PENDING":
+                    self._log.warning(
+                        "Gate%s(diff4) 首次发送前 fresh 复查：占位行已终结"
+                        "（status=%s），拒绝发送孤儿媒体/孤儿卡 thread=%s",
+                        gate, fresh["status"] if fresh else None, thread_id)
+                    raise RuntimeError(
+                        "Gate2(diff4) 占位行在首次发送前已终结（status="
+                        f"{fresh['status'] if fresh else None}），疑似他方已裁决；"
+                        "拒绝发送孤儿媒体/孤儿卡，请走 resume 读终态 "
+                        f"thread={thread_id}")
+                stale = None if claimed else fresh
+                sent_cols: dict[str, "str | None"] = {}
+                video_fallback = False
+                last_step = None
+                details: list[str] = []
+                for column, label, video_path, phase in columns:
+                    # R-LOW-3：每列标签/视频（一个发送序列）前都 fresh 复查，
+                    # 闭合上一列上传窗内的状态翻转。
+                    self._fresh_pending_or_abort(
+                        thread_id, gate, phase=phase,
+                        orphan_hint="此前列视频可能已在上传窗内发出（孤儿，见 0 行回填告警）")
+                    existing_id = stale[column] if stale else None
+                    cid, fb, detail, step = self._send_diff_column(
+                        thread_id, column, label, existing_id,
+                        video_path, trim, duration_ms=duration_ms,
+                        cover_png=cover_png)
+                    sent_cols[column] = cid
+                    video_fallback = video_fallback or fb
+                    if step is not None:
+                        last_step = step
+                    details.append(f"{column}={detail}")
+                trim_note = self._build_trim_note(trim, last_step)
+                # 卡片（序列最后一个副作用）前最后一次 fresh 复查。
+                self._fresh_pending_or_abort(
+                    thread_id, gate, phase="卡片发送",
+                    orphan_hint="四列视频可能已在上传窗内发出（孤儿，见 0 行回填告警）")
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate2_card_diff4(task_title, metrics_diff,
+                                           pareto_verdict,
+                                           video_fallback=video_fallback,
+                                           explanation=explanation,
+                                           trim_note=trim_note),
+                    build_gate2_card_diff4_v2(task_title, metrics_diff,
+                                              pareto_verdict,
+                                              video_fallback=video_fallback,
+                                              explanation=explanation,
+                                              trim_note=trim_note),
+                    form_required=True,
+                )
+                attached = self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate2(diff4) 卡片",
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"],
+                    media_message_id_v1a=sent_cols["v1a"],
+                    media_message_id_v1b=sent_cols["v1b"],
+                    media_message_id_v2a=sent_cols["v2a"],
+                    media_message_id_v2b=sent_cols["v2b"])
+                if attached == 0:
+                    raise RuntimeError(
+                        "Gate2(diff4) 卡片刚发出但占位行已终结（孤儿卡片，回填 0 行，"
+                        "已告警留痕），请走 resume 读终态 "
+                        f"thread={thread_id}")
+                self._log.info(
+                    "Gate2(diff4) 卡片已发出 thread=%s schema=%s %s",
+                    thread_id, sent["schema"], " ".join(details))
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 

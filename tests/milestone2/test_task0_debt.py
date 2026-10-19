@@ -277,7 +277,14 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # UPDATE 不进本白名单），纯位移：959→1003（upsert）、1043→1089
     # （标准 Gate2 claim）、1220→1299（Diff Gate2 claim）；grep 对账同上，
     # 无新增 .claim_pending/.upsert_pending 调用。
-    "orchestrator/feishu_gateway/client.py": {1003, 1089, 1299},
+    # Task6（2026-10-19，同一原子提交）：ascent 接缝新增两个合法发送闸门——
+    # request_gate1_ascent_approval 的 upsert（1438）与
+    # request_gate2_diff4_approval 的 claim（1508，H-4 占位协议的第三发送
+    # 闸门：四媒体严格顺序 + 一张 diff4 卡）；import 加行使老三处纯位移：
+    # 1003→1009（标准 Gate1 upsert）、1089→1095（标准 Gate2 claim）、
+    # 1299→1305（Task3 Diff claim）。attach 仍走 UPDATE 不进本白名单。
+    "orchestrator/feishu_gateway/client.py": {
+        1009, 1095, 1305, 1438, 1508},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
@@ -671,8 +678,10 @@ CALL_CACHE_ALLOWLIST = {
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
     # （task7 331→340、task8 428→431），无新增 CallReplay 落点。
+    # Task6：make_evaluate_seam 加参 + active-only 视觉闸插入，skip 分支不
+    # 构造 CallReplay，落点仍为唯一一处（431→475 纯位移），无第五落点。
     ("orchestrator/graph/task7.py", 340),
-    ("orchestrator/graph/task8.py", 431),
+    ("orchestrator/graph/task8.py", 475),
     # Phase 2 Task1：S-5 有意关闭——macro 方向步加调用级重放
     # （key macro_{thread}_r{round}_a{attempt}，同一 phase1 .call_cache）。
     # Phase 2 Task2：ascent_claims 校验+批判段注入纯位移（422→506），落点不变。

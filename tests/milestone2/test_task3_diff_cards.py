@@ -1142,10 +1142,18 @@ def test_migration_v0_db_upgrades_to_v2(tmp_path):
     raw.close()
 
     s = PendingStore(db)
-    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    # Task6：v0 老库一次性增量到 user_version=3（v1 提醒三列 + Task3 双媒体两列
+    # + Task6 四媒体四列）；Task3 原断言 ==2 随 bump 同提交对账为 ==3（非放水：
+    # 下列两列/四列子集断言全部保留并外扩）。
+    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     cols = _cols(s._conn, "pending_gates")
     assert {"media_message_id_v1", "media_message_id_v2"} <= cols
     assert {"media_message_id_v1", "media_message_id_v2"} <= _cols(
+        s._conn, "pending_gates_history")
+    assert {"media_message_id_v1a", "media_message_id_v1b",
+            "media_message_id_v2a", "media_message_id_v2b"} <= cols
+    assert {"media_message_id_v1a", "media_message_id_v1b",
+            "media_message_id_v2a", "media_message_id_v2b"} <= _cols(
         s._conn, "pending_gates_history")
     row = s.get_pending("v0row", 2)
     # 老行新两列 NULL；老单列 media_message_id 原样保留
@@ -1188,7 +1196,8 @@ def test_migration_v1_db_upgrades_to_v2(tmp_path):
     raw.close()
 
     s = PendingStore(db)
-    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    # Task6：v1 老库增量到 3（原 ==2 随 schema bump 同提交对账）。
+    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     row = s.get_pending("v1row", 1)
     assert row["reminder_count"] == 1 and row["task_title"] == "v1 任务"
     assert row["media_message_id_v1"] is None
@@ -1205,17 +1214,24 @@ def test_migration_v1_db_upgrades_to_v2(tmp_path):
     assert hist[0] is None and hist[1] is None
     assert hist[2] == "om_v1card"
     s.close()
-    # 再次打开停在 v2，不重复 ALTER
+    # 再次打开停在 v3，不重复 ALTER
     s2 = PendingStore(db)
-    assert s2._conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    assert s2._conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     s2.close()
 
 
 def test_fresh_db_at_version_two_with_columns(tmp_path):
     s = PendingStore(tmp_path / "fresh.db")
-    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 2
+    # Task6：新库直接 user_version=3，Task3 两列与 Task6 四列同生（原名保留）。
+    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 3
     assert {"media_message_id_v1", "media_message_id_v2"} <= _cols(
         s._conn, "pending_gates")
+    assert {"media_message_id_v1a", "media_message_id_v1b",
+            "media_message_id_v2a", "media_message_id_v2b"} <= _cols(
+        s._conn, "pending_gates")
+    assert {"media_message_id_v1a", "media_message_id_v1b",
+            "media_message_id_v2a", "media_message_id_v2b"} <= _cols(
+        s._conn, "pending_gates_history")
     s.close()
 
 

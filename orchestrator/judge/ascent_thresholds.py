@@ -169,3 +169,22 @@ def build_targets(dr_envelope: "Mapping | None") -> dict:
             "Kd_loguniform": list(kd),
         },
     }
+
+
+def tight_profile() -> "dict[str, float]":
+    """gait_rungs 加严 profile（键集由 gait_rungs.PROFILE_KEYS 钉死）。
+
+    Task6 V2 batch 以本 profile 独立重算 Rung1–3（V1 档案仍用默认 profile
+    在 V1 阈值下重算；两组数字口径分离，Pareto 只比六项汇总值）。锚点
+    （FALL_Z_M/FALL_TILT_DEG/35N×0.2s/CONTRAST_RATIO）不是 profile 键，
+    消费侧恒走 gait_thresholds 常量，任何加严都改不了它们。
+    """
+    return {
+        "slip_dist_rel_tol": SLIP_DIST_REL_TOL_TIGHT,
+        "vmax_abs_tol": VMAX_ABS_TOL_TIGHT,
+        "tilt_max_abs_tol_deg": TILT_MAX_ABS_TOL_DEG_TIGHT,
+        "contact_force_n": CONTACT_FORCE_N_TIGHT,
+        "slip_v_max_mps": SLIP_V_MAX_MPS_TIGHT,
+        "contact_force_max_n": CONTACT_FORCE_MAX_N_TIGHT,
+        "contact_force_max_n_dr": CONTACT_FORCE_MAX_N_DR_TIGHT,
+    }
