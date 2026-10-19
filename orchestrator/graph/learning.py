@@ -234,6 +234,13 @@ def _ascent_evolution(state: dict, accept_kwargs: dict[str, Any],
             # 用 Gate2 裁决时间做生成时间：kill-9 resume 同参重放必须渲染出
             # 逐字节相同的 md（phase2 确定性主键含 text），墙钟时间会破坏幂等。
             generated_at=sources["gate2_opinion"]["ts_iso"])
+        # nit-3（评审）：文件名校验并入渲染同一 try——非法 slug 抛的
+        # ChronicleError(ValueError) 必须与渲染失败同口径归一 GraphStateError，
+        # 不得从接缝裸逃逸。
+        filename = chronicle.evolution_filename(
+            parent_run_id=parent_run_id,
+            v2_run_id=sources["v2_summary"]["run_id"].strip(),
+            evolution_round=evolution_round)
     except chronicle.ChronicleError as exc:
         raise GraphStateError(f"演化志渲染被拒：{exc}") from exc
 
@@ -243,9 +250,6 @@ def _ascent_evolution(state: dict, accept_kwargs: dict[str, Any],
         raise GraphStateError(
             f"v2_summary.run_id={v2_run_id!r} 与当前线程 "
             f"{state['thread_id']!r} 不一致（V2 结案必须同运行对质）")
-    filename = chronicle.evolution_filename(
-        parent_run_id=parent_run_id, v2_run_id=v2_run_id,
-        evolution_round=evolution_round)
     try:
         relpath = evolution_store.persist_chronicle(filename, md)
     except (OSError, ValueError) as exc:

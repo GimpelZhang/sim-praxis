@@ -16,7 +16,9 @@
   track summary 同契约），chronicle 要求其上的机产扩展块
   ``pareto_metrics``（恰六指标 finite），V2 另要求 ``innovation`` 块；
 - Gate 意见件 schema = ``simpraxis.gate_opinion.v1``，decision 必须是
-  ``"approve"``（与 pending_gates.db 生产词表一致）；其 human_notes 是
+  ``"approve"``（与 pending_gates.db 生产词表一致）；source 必须在生产词表
+  card_form/p2p_text/cli 内（对齐 feishu_gateway/store.py mark_decided
+  白名单），ts_iso 必须是带 Z 或 ±HHMM 后缀的 ISO-8601；其 human_notes 是
   LLM/真人可控文本，入 md 前按卡片 md_escape
   同口径中性化（orchestrator/phase2 与 feishu_gateway 分属不同 lane，不跨
   lane import 卡片模块，口径在本模块内对齐并有测试钉死），并以引用块照录、
@@ -60,6 +62,11 @@ _PITFALLS = "SECTION_PITFALLS"
 _SECTION_TOKENS = (_MOTIVATION, _V1_LIMITS, _V2_INNOVATION, _METRICS, _PITFALLS)
 _TITLE_TOKENS = ("EVOLUTION_ROUND", "V2_RUN_ID", "PARENT_RUN_ID", "GENERATED_AT")
 
+# M1（评审 minor）：三臂常量必须与 orchestrator/graph/ascent.py::_GROUPS_ARMS
+# 逐字一致（LOW-6 加载器与演化志 groups 校验同严）。两处刻意各自保留副本：
+# 依赖方向是 graph→phase2（graph/learning.py import 本模块），chronicle 反向
+# import graph.ascent 会成环；改臂名必须两处同改，由两侧 exact-set 测试钉死。
+_GROUPS_ARMS = ("normal", "ice_nominal", "ice_dr")
 _ARM_LABELS = {
     "normal": "正常地面",
     "ice_nominal": "结冰名义",
@@ -85,6 +92,18 @@ _OL_RE = re.compile(r"(?m)^(?P<num>\d+)(?P<dot>\. )")
 # 四反引号围栏是本模块的最高安全围栏；内容自身出现即拒，防围栏突破。
 _QUAD_BACKTICK_RE = re.compile(r"`{4,}")
 _SLUG_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# M2（评审 minor）：Gate 意见件 source 生产词表，逐字对齐
+# feishu_gateway/store.py mark_decided 白名单（store.py:320；表结构注释
+# store.py:39 同表）。同样不跨 lane import feishu_gateway（chronicle 零 lark
+# 运行时依赖），本地副本由测试逐值钉死，改词表必须两处同改。
+_GATE_OPINION_SOURCES = ("card_form", "p2p_text", "cli")
+# ts_iso 收生产真实两种写法：Phase 2 新行严格 Z（common/clock.py
+# utc_now_iso_z，如 2026-10-17T12:28:06Z）与 Gate 事件的 ±HHMM 偏移
+# （graph/nodes.py _ev 的 strftime %z，如 2026-10-17T20:28:06+0800）；
+# 不收无 T/空格变体、冒号偏移或小数秒。
+_TS_ISO_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{4})$")
 
 
 class ChronicleError(ValueError):
@@ -180,25 +199,46 @@ def _validate_pareto_metrics(block: Any, where: str) -> dict[str, float]:
 
 
 def _validate_groups(groups: Any, where: str) -> dict[str, dict]:
+    """严格三臂形校验，口径与 graph/ascent.py::_validate_groups 对齐（M1）。
+
+    臂集合必须恰为 normal/ice_nominal/ice_dr（缺臂/多臂皆损坏）；每臂
+    n 为 ≥1 非 bool 整数，n_fell 为 0≤x≤n 非 bool 整数，success_rate 为
+    [0,1] 内非 bool finite 数，tilt_max_deg_max 若非空必须 ≥0 finite。
+    臂内额外键不校验、不拒绝（与 LOW-6 加载器同一口径）。
+    """
+    gwhere = f"{where}.groups"
     if not isinstance(groups, dict) or not groups:
-        raise ChronicleSourceError(f"{where} 缺非空 groups 对照臂块")
-    for arm, g in groups.items():
+        raise ChronicleSourceError(f"{gwhere} 缺非空对照臂块（summary.json 三臂形）")
+    keys = set(groups)
+    arms = set(_GROUPS_ARMS)
+    if keys != arms:
+        raise ChronicleSourceError(
+            f"{gwhere} 臂集合必须恰为 {sorted(arms)}："
+            f"缺 {sorted(arms - keys)}，多余 {sorted(keys - arms)}")
+    for arm in _GROUPS_ARMS:
+        g = groups[arm]
+        awhere = f"{gwhere}.{arm}"
         if not isinstance(g, dict):
-            raise ChronicleSourceError(f"{where}.groups[{arm}] 必须是对象")
-        for key in ("n", "n_fell"):
-            v = g.get(key)
-            if isinstance(v, bool) or not isinstance(v, int):
-                raise ChronicleSourceError(
-                    f"{where}.groups[{arm}].{key} 必须是整数，收到 {v!r}")
+            raise ChronicleSourceError(f"{awhere} 必须是对象")
+        n = g.get("n")
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
+            raise ChronicleSourceError(
+                f"{awhere}.n 必须是 ≥1 的非 bool 整数，收到 {n!r}")
+        n_fell = g.get("n_fell")
+        if isinstance(n_fell, bool) or not isinstance(n_fell, int) \
+                or not 0 <= n_fell <= n:
+            raise ChronicleSourceError(
+                f"{awhere}.n_fell 必须是 0≤x≤n（={n}）的非 bool 整数，"
+                f"收到 {n_fell!r}")
         sr = g.get("success_rate")
-        if not _is_real_num(sr):
+        if not _is_real_num(sr) or not 0 <= sr <= 1:
             raise ChronicleSourceError(
-                f"{where}.groups[{arm}].success_rate 必须是 finite 实数，"
-                f"收到 {sr!r}")
+                f"{awhere}.success_rate 必须是 [0,1] 内 finite 实数"
+                f"（bool/NaN/Inf 拒），收到 {sr!r}")
         tilt = g.get("tilt_max_deg_max")
-        if tilt is not None and not _is_real_num(tilt):
+        if tilt is not None and (not _is_real_num(tilt) or tilt < 0):
             raise ChronicleSourceError(
-                f"{where}.groups[{arm}].tilt_max_deg_max 若非空必须 finite，"
+                f"{awhere}.tilt_max_deg_max 若非空必须是 ≥0 finite，"
                 f"收到 {tilt!r}")
     return groups
 
@@ -261,6 +301,20 @@ def _validate_opinion(data: dict, gate: str) -> dict:
         if not isinstance(value, str) or not value.strip():
             raise ChronicleSourceError(
                 f"{where}.{key} 必须是非空字符串（空真人意见不得代笔）")
+    # M2：source 只认生产词表（pending_gates 行 mark_decided 白名单），
+    # 含注入载荷/换行的伪渠道名直接拒。
+    source = data["source"]
+    if source not in _GATE_OPINION_SOURCES:
+        raise ChronicleSourceError(
+            f"{where}.source 必须是生产词表 {list(_GATE_OPINION_SOURCES)} 成员"
+            f"（对齐 feishu_gateway/store.py mark_decided），收到 {source!r}")
+    # M2：ts_iso 必须是生产真实写法（Z 或 ±HHMM），不收自由文本/伪造时间。
+    ts_iso = data["ts_iso"]
+    if not _TS_ISO_RE.match(ts_iso):
+        raise ChronicleSourceError(
+            f"{where}.ts_iso 必须是 ISO-8601 且带 Z 或 ±HHMM 后缀"
+            f"（如 2026-10-17T12:28:06Z / 2026-10-17T20:28:06+0800），"
+            f"收到 {ts_iso!r}")
     return data
 
 

@@ -22,6 +22,7 @@ from orchestrator.judge.bineval import (
     ANSWER_YES,
     BinEvalParseError,
     QUESTION_IDS,
+    active_evidence_valid,
     agreement_rate,
     build_calibration_doc,
     build_prompt,
@@ -240,6 +241,17 @@ def test_calibration_requires_at_least_one_defect_clip(tmp_path):
     summary = evaluate_clips_dir(d)
     assert summary["n_defect_clips"] == 0
     assert summary["can_active"] is False      # 无缺陷片无法验证召回
+
+
+# nit-B（评审）：active 证据两阈值 bool 拒收，口径与 n_clips 一致
+# （True==1/1.0 会冒充达标），恰好一个参数化测试覆盖两参数 × True/False。
+@pytest.mark.parametrize("field", ["min_agreement", "defect_recall"])
+@pytest.mark.parametrize("flag", [True, False])
+def test_active_evidence_rejects_bool_thresholds(field, flag):
+    cal = {"mode": MODE_ACTIVE, "n_clips": 12,
+           "min_agreement": 1.0, "defect_recall": 1.0}
+    cal[field] = flag
+    assert active_evidence_valid(cal) is False
 
 
 # --------------------------------------------------------------------------

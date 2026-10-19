@@ -155,9 +155,10 @@ def _v2_summary() -> dict:
 
 
 def _opinion(gate: str, notes: str) -> dict:
+    # source 必须是生产词表成员（feishu_gateway/store.py mark_decided 白名单）。
     return {"schema": "simpraxis.gate_opinion.v1", "gate": gate,
             "decision": "approve", "human_notes": notes,
-            "source": "feishu_card_form", "ts_iso": GATE_TS}
+            "source": "card_form", "ts_iso": GATE_TS}
 
 
 def _write_sources(tmp_path: Path, *, gate2_notes: "str | None" = None) -> dict:
@@ -487,6 +488,83 @@ def test_chronicle_five_sections_traceable(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 3b. 评审 M1/M2：groups exact-3 臂与 LOW-6 同严 + opinion source/ts_iso 词表
+# ---------------------------------------------------------------------------
+
+def test_chronicle_groups_exact_three_arms_same_strict_as_low6(tmp_path):
+    """M1：chronicle groups 校验与 ascent LOW-6 加载器同严——缺臂/多臂/
+    数值越界/bool/NaN 一律 fail-loud，错误消息点名缺/多臂。"""
+    src = _write_sources(tmp_path)
+
+    def reject_v1(mutate, match):
+        v1 = _v1_summary()
+        mutate(v1)
+        with pytest.raises(chronicle.ChronicleSourceError, match=match):
+            chronicle.render_evolution_changelog(
+                v1_summary=v1, v2_summary=src["v2"],
+                gate1_opinion=src["g1"], gate2_opinion=src["g2"],
+                parent_run_id=V1_RUN, evolution_round=1)
+
+    # 缺臂：消息点名所缺臂
+    reject_v1(lambda d: d["groups"].pop("ice_dr"), r"缺.*ice_dr")
+    # 神秘第四臂：消息点名多余臂
+    def _add_mystery(d):
+        d["groups"]["mystery_arm"] = dict(d["groups"]["normal"])
+    reject_v1(_add_mystery, r"多余.*mystery_arm")
+    # 三臂齐全但数值界/类型坏（与 ascent 同口径）
+    reject_v1(lambda d: d["groups"]["normal"].__setitem__("n_fell", 4),
+              "n_fell")
+    reject_v1(lambda d: d["groups"]["normal"].__setitem__("n", True),
+              r"\.n 必须")
+    reject_v1(
+        lambda d: d["groups"]["ice_nominal"].__setitem__(
+            "success_rate", float("nan")),
+        "success_rate")
+
+
+def test_chronicle_opinion_source_ts_iso_strict(tmp_path):
+    """M2：source 必须是生产词表成员，ts_iso 必须是带 Z/±HHMM 的 ISO-8601；
+    每个生产 source 枚举值与 ±HHMM 偏移时间戳均合法照录。"""
+    src = _write_sources(tmp_path)
+
+    def reject(gate, **over):
+        opinion = _opinion(gate, "真人意见原文")
+        opinion.update(over)
+        kw = dict(v1_summary=src["v1"], v2_summary=src["v2"],
+                  gate1_opinion=src["g1"], gate2_opinion=src["g2"],
+                  parent_run_id=V1_RUN, evolution_round=1)
+        kw["gate1_opinion" if gate == "gate1" else "gate2_opinion"] = opinion
+        with pytest.raises(chronicle.ChronicleSourceError):
+            chronicle.render_evolution_changelog(**kw)
+
+    reject("gate1", ts_iso="not-a-time")
+    reject("gate1", source="**bold** [x](http://evil.example)")
+    reject("gate2", source="card_form\n")
+    reject("gate2", ts_iso="2026-10-17 12:28:06Z")   # 空格替 T：不收
+    reject("gate1", ts_iso="2026-10-17T12:28:06")    # 无时区后缀：不收
+
+    # 生产词表每个枚举值合法（出处：feishu_gateway/store.py mark_decided）
+    for source in ("card_form", "p2p_text", "cli"):
+        opinion = _opinion("gate1", "批准升阶")
+        opinion["source"] = source
+        md = chronicle.render_evolution_changelog(
+            v1_summary=src["v1"], v2_summary=src["v2"],
+            gate1_opinion=opinion, gate2_opinion=src["g2"],
+            parent_run_id=V1_RUN, evolution_round=1)
+        assert f"渠道 {source}。" in md
+
+    # ±HHMM 偏移（graph/nodes.py _ev 的 strftime %z 生产写法）合法并照录
+    offset = _opinion("gate2", "同意结案")
+    offset["ts_iso"] = "2026-10-17T20:28:06+0800"
+    md = chronicle.render_evolution_changelog(
+        v1_summary=src["v1"], v2_summary=src["v2"],
+        gate1_opinion=src["g1"], gate2_opinion=offset,
+        parent_run_id=V1_RUN, evolution_round=1,
+        generated_at=offset["ts_iso"])
+    assert "2026-10-17T20:28:06+0800" in md
+
+
+# ---------------------------------------------------------------------------
 # 4. 断网语义召回（本地 mpnet，新表可召回，老表不污染）
 # ---------------------------------------------------------------------------
 
@@ -695,6 +773,41 @@ def test_ascent_seam_chronicle_and_phase2(tmp_path):
     with pytest.raises(GraphStateError, match="v1_archive"):
         seam(no_arc)
     assert p1.count() == 1 and p2.count() == 1
+
+
+# ---------------------------------------------------------------------------
+# 接缝回归 7b：nit-3 非法 slug 的 ChronicleError 经接缝归一 GraphStateError
+# ---------------------------------------------------------------------------
+
+def test_ascent_seam_bad_slug_raises_graph_state_error(tmp_path):
+    """evolution_filename 的 ChronicleError(ValueError) 不得从接缝裸逃逸：
+    非法父运行 id 必须归一 GraphStateError，且在任何写库/落盘之前失败。"""
+    p1, p2, p2_root = _new_stores(tmp_path)
+    src = _write_sources(tmp_path)
+    bad_v1 = _v1_summary()
+    bad_v1["run_id"] = "../x"        # 渲染对质通过，文件名 C4 slug 校验必拒
+    Path(src["v1_path"]).write_text(
+        json.dumps(bad_v1, ensure_ascii=False, indent=2), encoding="utf-8")
+    state = _accept_state(tmp_path, run_mode="ascent", thread=V2_RUN)
+    state["track"] = "track2"
+    state["chosen"] = {"sim_engine": "genesis"}
+    state["v1_archive"] = {"thread_id": "../x",
+                           "host_workdir": str(tmp_path / "v1work")}
+    state["evolution_sources"] = {
+        "v1_summary_path": str(src["v1_path"]),
+        "v2_summary_path": str(src["v2_path"]),
+        "gate1_opinion_path": str(src["g1_path"]),
+        "gate2_opinion_path": str(src["g2_path"]),
+        "evolution_round": 1,
+    }
+    seam = make_learning_seam(store=p1, evolution_store=p2)
+
+    with pytest.raises(GraphStateError, match="演化志渲染被拒"):
+        seam(state)
+    # 失败在写库/落盘之前：两表零行、evolutions 目录不出生
+    assert p1.count() == 0 and p2.count() == 0
+    assert p2.table_exists() is False
+    assert not (p2_root / "evolutions").exists()
 
 
 # ---------------------------------------------------------------------------

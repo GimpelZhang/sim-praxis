@@ -166,11 +166,18 @@ def active_evidence_valid(cal: dict) -> bool:
     if cal.get("mode") != "active":
         return False
     n = cal.get("n_clips")
+    # nit-B（评审）：min_agreement/defect_recall 与 n 同口径 bool 先拒
+    # （True==1/1.0 会冒充达标阈值），再做数值类型与阈值校验。
+    min_agreement = cal.get("min_agreement")
+    defect_recall = cal.get("defect_recall")
     return (isinstance(n, int) and not isinstance(n, bool)
             and n >= MIN_CALIBRATION_CLIPS
-            and isinstance(cal.get("min_agreement"), (int, float))
-            and float(cal["min_agreement"]) >= AGREEMENT_ACTIVE_THRESHOLD
-            and cal.get("defect_recall") == DEFECT_RECALL_REQUIRED)
+            and not isinstance(min_agreement, bool)
+            and isinstance(min_agreement, (int, float))
+            and float(min_agreement) >= AGREEMENT_ACTIVE_THRESHOLD
+            and not isinstance(defect_recall, bool)
+            and isinstance(defect_recall, (int, float))
+            and float(defect_recall) == DEFECT_RECALL_REQUIRED)
 
 
 # ---------------- 标定目录评估（机判，0 付费） ------------------------------

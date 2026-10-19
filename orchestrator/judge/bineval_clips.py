@@ -19,7 +19,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import random
 from pathlib import Path
 
 from orchestrator.common.fsutil import (
@@ -279,8 +278,8 @@ def render_clip(track: str, variant: str, seed: int = DEFAULT_SEED):
     from PIL import Image
     if (track, variant) not in CATALOG:
         raise ValueError(f"未知 clip：track={track} variant={variant}")
-    # 仅用于确定性消费预留；当前注入全部由帧号决定（与 clips.py 同口径）。
-    random.Random(seed + hash((track, variant)) % 100000)
+    # 注入全部由帧号决定（与 clips.py 同口径）；seed 仅经 prepare 清单留痕，
+    # 不参与渲染（nit-A：原 random.Random(...) 对象创建后即丢弃，已删死代码）。
     frames = [Image.new("RGB", (W, H), (245, 245, 248))
               for _ in range(N_FRAMES)]
     # 共用地面线（三个场景都在地面/杯底高度表达接触）。
