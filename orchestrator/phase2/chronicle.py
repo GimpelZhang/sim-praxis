@@ -65,7 +65,8 @@ _TITLE_TOKENS = ("EVOLUTION_ROUND", "V2_RUN_ID", "PARENT_RUN_ID", "GENERATED_AT"
 # M1（评审 minor）：三臂常量必须与 orchestrator/graph/ascent.py::_GROUPS_ARMS
 # 逐字一致（LOW-6 加载器与演化志 groups 校验同严）。两处刻意各自保留副本：
 # 依赖方向是 graph→phase2（graph/learning.py import 本模块），chronicle 反向
-# import graph.ascent 会成环；改臂名必须两处同改，由两侧 exact-set 测试钉死。
+# import graph.ascent 会成环；改臂名必须两处同改，由 test_task5_evolution
+# 的跨 lane 常量等值断言钉死。
 _GROUPS_ARMS = ("normal", "ice_nominal", "ice_dr")
 _ARM_LABELS = {
     "normal": "正常地面",
@@ -310,7 +311,7 @@ def _validate_opinion(data: dict, gate: str) -> dict:
             f"（对齐 feishu_gateway/store.py mark_decided），收到 {source!r}")
     # M2：ts_iso 必须是生产真实写法（Z 或 ±HHMM），不收自由文本/伪造时间。
     ts_iso = data["ts_iso"]
-    if not _TS_ISO_RE.match(ts_iso):
+    if not _TS_ISO_RE.fullmatch(ts_iso):
         raise ChronicleSourceError(
             f"{where}.ts_iso 必须是 ISO-8601 且带 Z 或 ±HHMM 后缀"
             f"（如 2026-10-17T12:28:06Z / 2026-10-17T20:28:06+0800），"

@@ -44,6 +44,7 @@ from memory_flywheel.phase2.evolution_store import (
     EvolutionSchemaError,
     EvolutionStore,
 )
+from orchestrator.graph import ascent
 from orchestrator.graph.learning import make_learning_seam
 from orchestrator.graph.nodes import GraphStateError
 from orchestrator.phase2 import chronicle
@@ -494,6 +495,7 @@ def test_chronicle_five_sections_traceable(tmp_path):
 def test_chronicle_groups_exact_three_arms_same_strict_as_low6(tmp_path):
     """M1：chronicle groups 校验与 ascent LOW-6 加载器同严——缺臂/多臂/
     数值越界/bool/NaN 一律 fail-loud，错误消息点名缺/多臂。"""
+    assert chronicle._GROUPS_ARMS == ascent._GROUPS_ARMS  # 两本地副本漂移必红（chronicle 不能 import ascent 会成环，跨 lane 一致性由测试钉死）
     src = _write_sources(tmp_path)
 
     def reject_v1(mutate, match):
@@ -542,6 +544,7 @@ def test_chronicle_opinion_source_ts_iso_strict(tmp_path):
     reject("gate2", source="card_form\n")
     reject("gate2", ts_iso="2026-10-17 12:28:06Z")   # 空格替 T：不收
     reject("gate1", ts_iso="2026-10-17T12:28:06")    # 无时区后缀：不收
+    reject("gate2", ts_iso="2026-10-17T12:28:06Z\n")  # 尾随换行必拒（match 的 $ 放行，fullmatch 拒）
 
     # 生产词表每个枚举值合法（出处：feishu_gateway/store.py mark_decided）
     for source in ("card_form", "p2p_text", "cli"):
