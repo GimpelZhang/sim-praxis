@@ -271,8 +271,11 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             v1_archive=v1_archive, ascent_targets=ascent_targets)
 
     # 飞书长连接网关：只在真正需要时构造（topology 不需要）
+    # M2：Task6 卡片批准强制真人原文（空批准只 toast 不落决策），防
+    # DECIDED 已落而 opinion 接缝空 notes fail-loud 楔死真人 Gate；其余
+    # 任务网关行为逐字节不变（flag 默认 False）。
     from orchestrator.feishu_gateway.client import gateway_from_env
-    feishu = gateway_from_env()
+    feishu = gateway_from_env(require_approval_notes=(args.task == TASK6))
 
     def gate1_seam(state: dict) -> dict:
         if args.task == TASK6:

@@ -409,6 +409,24 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
 
         v1_doc, v1_path = materialize_v1_summary(thread_id, arc)
 
+        # M1 锁内适配（计划 L415-423：Pareto 六指标两侧必须同定义重算，
+        # ε=5%；「加严的是验收严苛度」，不重定义 Pareto 指标）：tight
+        # profile 的 contact_force_n=1.6N 会进入 recompute_run 的滑移积分
+        # 门（FALL/35N 锚点不随 profile 变）。冻结 V1 9 条 telemetry
+        # 实测 5/9 run 的滑移被改写（normal 0.1424→0.1427、
+        # ice_nominal 0.1834→0.1835），若 V2 用 tight groups、V1 用默认
+        # 口径，slip_dist_mean_m 跨版本不可比且系统性抬高 V2。故同一
+        # v2_wd 再跑一次默认 profile（2.0N 门，与 V1 同口径），V2 Pareto
+        # 向量与 v2_summary.groups/contrast 一律取默认结果；tight 结果
+        # 只保留在 metrics.rungs/rules_pass 与下方加严证据段，升阶验收
+        # 仍按加严。两结果都必须 schema 干净。
+        default_result = evaluate_batch(v2_wd, profile=None)
+        if default_result.get("schema_errors"):
+            raise GraphStateError(
+                "Task6 V2 batch 默认口径重算 schema 失败（Pareto 同口径"
+                "硬要求，禁止回退加严口径）："
+                + "；".join(map(str, default_result["schema_errors"][:10])))
+
         _, v2_rows, v2_summary, load_errs = load_batch(v2_wd)
         if load_errs:
             raise GraphStateError(
@@ -417,16 +435,17 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
         v2_seeds = int(v2_summary["seeds"])
         v2_vram = _vram_gb(v2_wd / VRAM_NAME)
         v2_vector = _pareto_vector(
-            metrics["groups"], _csv_sim_wall_mean(v2_rows, v2_seeds), v2_vram)
+            default_result["groups"],
+            _csv_sim_wall_mean(v2_rows, v2_seeds), v2_vram)
         # 顺序敏感：第一参数必须是冻结 V1（容差带锚定 V1），禁止反序。
         verdict = pareto_verdict(v1_doc["pareto_metrics"], v2_vector)
 
         innovation = _load_innovation(v2_wd)
         v2_doc = _augmented_summary(
             run_id=thread_id,
-            groups=metrics["groups"],
+            groups=default_result["groups"],
             pareto_metrics=v2_vector,
-            contrast=metrics.get("contrast") or {},
+            contrast=default_result.get("contrast") or {},
             parent_run_id=str(arc["thread_id"]),
             innovation=innovation)
         v2_path = _write_json(sdir / "v2_summary.json", v2_doc)
@@ -443,6 +462,14 @@ def make_evaluate_seam(gateway, visual_batch: str, thread_id: str):
             "v2_summary_path": str(v2_path),
             "v1_pareto_metrics": v1_doc["pareto_metrics"],
             "v2_pareto_metrics": dict(v2_vector),
+            # 加严证据段（M1）：升阶验收按 tight profile；Pareto 按默认口径。
+            "tight_acceptance": {
+                "profile": "ascent_tight",
+                "rules_pass": bool(metrics.get("rules_pass")),
+                "rungs_pass": {
+                    r: bool(metrics["rungs"][r].get("pass"))
+                    for r in ("rung1", "rung2", "rung3")},
+            },
         }
         return task8._json_safe(metrics)
 
@@ -498,18 +525,47 @@ def _sha256_file(path: Path) -> str:
 
 
 def resolve_v1_splits(v1_archive: dict) -> list[Path]:
-    """两张 V1 split：只许 host_workdir + 登记 relpath，sha/锁定字节双对质。"""
+    """两张 V1 split：只许 host_workdir + 登记 relpath，sha/锁定字节双对质。
+
+    N1 锁内适配：实际核验路径一律取档案登记的 relpath（允许子目录登记，
+    如 splits/x.mp4），禁止退回 wd/<basename>——否则根目录同名替身（即使
+    字节相同）会顶替登记件通过对质。绝对路径/.. 分段/符号链接解析后逃逸
+    host_workdir 一律 fail-closed。
+    """
     wd = Path(v1_archive["host_workdir"])
-    files = {f["relpath"]: f for f in v1_archive.get("files", [])
-             if isinstance(f, dict)}
+    wd_resolved = wd.resolve()
+    files = [f for f in v1_archive.get("files", []) if isinstance(f, dict)]
     out: list[Path] = []
     for _, name in SPLITS:
-        rec = files.get(name)
-        if rec is None or not isinstance(rec.get("sha256"), str):
+        # 先按登记 relpath 精确匹配；再按 basename 兜底子目录登记，
+        # 多义（两个登记件同 basename）fail-closed。
+        exact = [f for f in files if f.get("relpath") == name]
+        rec = exact[0] if len(exact) == 1 else None
+        if rec is None:
+            base_hits = [f for f in files
+                         if isinstance(f.get("relpath"), str)
+                         and Path(f["relpath"]).name == name]
+            if len(base_hits) > 1:
+                raise GraphStateError(
+                    f"Task6 V1 档案 split 登记多义：{name} 有 "
+                    f"{[f['relpath'] for f in base_hits]}（禁止猜选）")
+            rec = base_hits[0] if base_hits else None
+        if rec is None or not isinstance(rec.get("sha256"), str) \
+                or not isinstance(rec.get("relpath"), str) \
+                or not rec["relpath"]:
             raise GraphStateError(
                 f"Task6 V1 档案未登记 split：{name}（禁止用档案外视频对质）")
-        p = wd / name
-        if ".." in p.parts or not p.is_file():
+        rel_path = Path(rec["relpath"])
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            raise GraphStateError(
+                "Task6 V1 split 登记 relpath 非法（绝对路径/.. 越界）："
+                f"{rec['relpath']}")
+        p = wd / rel_path
+        try:
+            contained = p.resolve().is_relative_to(wd_resolved)
+        except OSError:
+            contained = False
+        if not contained or not p.is_file():
             raise GraphStateError(f"Task6 V1 split 不存在或越界：{p}")
         locked = LOCKED_V1_SPLIT_SIZES.get(name)
         size = p.stat().st_size

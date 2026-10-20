@@ -283,8 +283,15 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 闸门：四媒体严格顺序 + 一张 diff4 卡）；import 加行使老三处纯位移：
     # 1003→1009（标准 Gate1 upsert）、1089→1095（标准 Gate2 claim）、
     # 1299→1305（Task3 Diff claim）。attach 仍走 UPDATE 不进本白名单。
+    # Task6 M2（2026-10-20，同一原子提交）：__init__ 加 require_approval_notes
+    # 关键字（+2 行）、import 加 APPROVAL_EMPTY_TOAST（+1）、_handle_card 在
+    # 打回空意见分支后插入批准空意见拦截分支（注释+分支共 +19 行），五处写
+    # 闸门全部纯位移 +22：1009→1031（标准 Gate1 upsert）、1095→1117（标准
+    # Gate2 claim）、1305→1327（Task3 Diff claim）、1438→1460（Task6 ascent
+    # Gate1 upsert）、1508→1530（Task6 diff4 Gate2 claim）。新分支只 toast
+    # 不落库（mark_decided 不可达），grep 对账无新增写闸门。
     "orchestrator/feishu_gateway/client.py": {
-        1009, 1095, 1305, 1438, 1508},
+        1031, 1117, 1327, 1460, 1530},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）

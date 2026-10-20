@@ -30,6 +30,7 @@ task6.py 工厂与 V2 track 脚本是 Task6 出生件，出生前可锁定的 3 
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import re
@@ -61,15 +62,23 @@ from orchestrator.graph.nodes import (
     node_classify,
 )
 from orchestrator.graph.task8 import SPLITS
-from orchestrator.judge.gait_rungs import contrast_block
+from orchestrator.judge.ascent_thresholds import tight_profile
+from orchestrator.judge.gait_rungs import (
+    contrast_block,
+    evaluate_batch,
+    recompute_run,
+)
 from orchestrator.judge.pareto import METRIC_DIRECTIONS
 from orchestrator.phase2 import chronicle
 from orchestrator.solutions import resolve_solution
 from tests.milestone1.test_task8_seam import (
+    CSV_FIELDS,
     FIXTURE_SOLUTIONS_ROOT,
     FakeVisualGateway,
     _calibration_v2,
+    _csv_row,
     _gait_raw,
+    _outcomes_from,
     build_synthetic_batch,
 )
 from tests.milestone2.test_task2_ascent import _build_fixture_index  # 同款构造
@@ -645,3 +654,225 @@ def test_v2_linked_entries_parent_chain(tmp_path):
         qp.write_text(json.dumps(broken), encoding="utf-8")
         with pytest.raises(Exception, match=match):
             load_v1_index(qp)
+
+
+# ---------------------------------------------------------------------------
+# 7. M1（冷验必修）：V2 Pareto/groups/contrast 走默认口径，tight 只管验收
+# ---------------------------------------------------------------------------
+
+def _rewrite_force_gap_batch(wd: Path) -> None:
+    """9 份 telemetry 的 200..239 帧改成 1.8N 接触力 + 0.005m/s 滑移块。
+
+    力值落在 (1.6, 2.0]N：默认 2.0N 滑移积分门排除这 40 帧、tight 1.6N 门
+    计入——复刻 lead 在冻结 V1 9 条 telemetry 上实测 5/9 滑移被改写
+    （normal 0.1424→0.1427、ice_nominal 0.1834→0.1835）的口径分叉。
+    outcomes/CSV 按生产引擎同口径（默认 profile）重算，故默认 evaluate 全
+    干净、tight rung2 的 contact_frames 精确对质必失败（验收仍按加严）。
+    """
+    rows = []
+    for arm in ("normal", "ice_nominal", "ice_dr"):
+        for seed in range(3):
+            run_id = f"{arm}_s{seed}"
+            tp = wd / "telemetry" / f"{run_id}.json"
+            data = json.loads(tp.read_text(encoding="utf-8"))
+            series = data["series"]
+            for i in range(200, 240):
+                series["contact_force_R"][i] = 1.8
+                series["contact_force_L"][i] = 1.8
+                series["slip_v_R"][i] = 0.005
+                series["slip_v_L"][i] = 0.005
+            rec = recompute_run(data, profile=None)
+            data["outcomes"] = _outcomes_from(rec)
+            tp.write_text(json.dumps(data), encoding="utf-8")
+            rows.append(_csv_row(run_id, arm, seed, data, rec))
+    with open(wd / task8.CSV_NAME, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def test_m1_v2_pareto_default_caliber_tight_only_acceptance(
+        tmp_path, monkeypatch):
+    """计划 L415-423：Pareto 两侧同定义（ε=5%）；加严的只是验收严苛度。
+
+    (a) V2 Pareto 向量与 v2_summary.groups/contrast == 同一 workdir 默认
+        profile 重算值，且与 tight groups 值数值不同；
+    (b) rungs/rules_pass/加严证据段仍按 tight 口径（含 contact_frames 分歧）；
+    (c) V1 侧恒默认口径（tight 重算值不同也不得入 v1_summary）。
+    """
+    # record_only 标定（视觉零实呼；本测焦点是口径不是 Rung4）。
+    cal_dir = tmp_path / "phase1" / "task8_track2_judge"
+    cal_dir.mkdir(parents=True)
+    (cal_dir / "calibration_gait.json").write_text(
+        json.dumps({"mode": "record_only"}), encoding="utf-8")
+    monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
+
+    v1_wd = tmp_path / "v1batch"
+    build_synthetic_batch(v1_wd, falls={})
+    _rewrite_force_gap_batch(v1_wd)
+    v2_wd = tmp_path / "v2batch"
+    build_synthetic_batch(v2_wd, falls={})
+    _rewrite_force_gap_batch(v2_wd)
+
+    # 独立双口径基线：先证明夹具确实判别 1.6/2.0 两道力门。
+    default_v2 = evaluate_batch(v2_wd, profile=None)
+    tight_v2 = evaluate_batch(v2_wd, profile=tight_profile())
+    assert not default_v2["schema_errors"]
+    assert not tight_v2["schema_errors"]
+    slip = "slip_dist_mean_m"
+    assert default_v2["groups"]["normal"][slip] \
+        != tight_v2["groups"]["normal"][slip]
+    assert default_v2["rung2"]["pass"] is True
+    assert tight_v2["rung2"]["pass"] is False
+    disagreements = tight_v2["rung2"]["checks"]["disagreements"]
+    assert any(any(k.startswith("contact_frames") for k in d)
+               for d in disagreements)
+    default_v1 = evaluate_batch(v1_wd, profile=None)
+    tight_v1 = evaluate_batch(v1_wd, profile=tight_profile())
+    assert task6_mod._arm_mean(default_v1["groups"], slip) \
+        != task6_mod._arm_mean(tight_v1["groups"], slip)
+
+    arc = {
+        "schema": V1_INDEX_SCHEMA, "track": "track2",
+        "thread_id": V1_THREAD, "host_workdir": str(v1_wd),
+        "files": [{"relpath": rel, "sha256": _sha256_file(v1_wd / rel)}
+                  for rel in SPLIT_RELS],
+        "v1_metrics": {},
+    }
+    sdir = task6_mod.sources_dir(T6_THREAD)
+    (sdir / f"v1_{task6_mod.VRAM_NAME}").write_text(
+        json.dumps({task6_mod.VRAM_KEY: 20.0}), encoding="utf-8")
+    (v2_wd / task6_mod.VRAM_NAME).write_text(
+        json.dumps({task6_mod.VRAM_KEY: 18.42}), encoding="utf-8")
+    (v2_wd / task6_mod.INNOVATION_NAME).write_text(json.dumps({
+        "control_law": "u=-Kp(θ−θ*)−Kd·θ̇（臂分级，RL 策略端不动）",
+        "dr_distribution": {"mu": "loguniform[0.04,0.45]"},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    visual = FakeVisualGateway(_gait_raw())
+    metrics = task6_mod.make_evaluate_seam(
+        visual, "T6-M1-visual", T6_THREAD)({
+            "thread_id": T6_THREAD, "v1_archive": arc,
+            "telemetry_uri": str(v2_wd / "summary.json"),
+            "agent_runs": [{"run_idx": 1, "status": "ok"}], "events": []})
+    assert visual.visual_calls == []
+
+    asc = metrics["ascent"]
+    v2_doc = json.loads(Path(asc["v2_summary_path"]).read_text(encoding="utf-8"))
+    v1_doc = json.loads(Path(asc["v1_summary_path"]).read_text(encoding="utf-8"))
+
+    # (a) V2 Pareto/groups/contrast 与 V1 同口径（默认 2.0N 门）。
+    assert v2_doc["groups"] == default_v2["groups"]
+    assert v2_doc["contrast"] == default_v2["contrast"]
+    assert metrics["groups"] == tight_v2["groups"]
+    assert metrics["contrast"] == tight_v2["contrast"]
+    expect_v2_vector = task6_mod._pareto_vector(
+        default_v2["groups"], 12.3, 18.42)
+    for m_name, val in expect_v2_vector.items():
+        assert v2_doc["pareto_metrics"][m_name] == pytest.approx(val)
+    tight_slip = task6_mod._arm_mean(tight_v2["groups"], slip)
+    assert v2_doc["pareto_metrics"][slip] != tight_slip
+    assert asc["v2_pareto_metrics"][slip] == \
+        pytest.approx(v2_doc["pareto_metrics"][slip])
+
+    # (b) 升阶验收仍 tight：rules_pass/三级判定与独立 tight 复算等值。
+    assert metrics["rules_pass"] is False
+    assert metrics["rules_pass"] == tight_v2["rules_pass"]
+    for rung in ("rung1", "rung2", "rung3"):
+        assert metrics["rungs"][rung]["pass"] == tight_v2[rung]["pass"]
+    assert asc["tight_acceptance"] == {
+        "profile": "ascent_tight",
+        "rules_pass": False,
+        "rungs_pass": {r: bool(tight_v2[r]["pass"])
+                       for r in ("rung1", "rung2", "rung3")},
+    }
+    assert metrics["auto_release"] is False
+    assert metrics["escalate_human"] is True
+
+    # (c) V1 恒默认口径；tight 数字不得溯及冻结档案。
+    assert v1_doc["groups"] == default_v1["groups"]
+    assert v1_doc["contrast"] == default_v1["contrast"]
+    v1_slip = task6_mod._pareto_vector(
+        default_v1["groups"], 12.3, 20.0)[slip]
+    assert v1_doc["pareto_metrics"][slip] == pytest.approx(v1_slip)
+    assert v1_doc["pareto_metrics"][slip] != \
+        task6_mod._arm_mean(tight_v1["groups"], slip)
+
+    # 两侧同定义：同内容 batch 的滑移 Δ 行 v1==v2（旧实现此处是 tight vs
+    # 默认的伪 Δ）。
+    slip_row = next(r for r in asc["metrics_diff"] if r["metric"] == slip)
+    assert slip_row["v1"] == pytest.approx(slip_row["v2"])
+
+
+# ---------------------------------------------------------------------------
+# 8. N1（冷验必修）：V1 split 核验路径以登记 relpath 为准（含越界拒绝）
+# ---------------------------------------------------------------------------
+
+def test_n1_resolve_v1_splits_registered_relpath_with_root_decoy(
+        tmp_path, monkeypatch):
+    """登记 relpath=splits/x.mp4 + 根目录同名同字节替身：必须只验登记件。"""
+    monkeypatch.setattr(task6_mod, "LOCKED_V1_SPLIT_SIZES", {})
+    wd = tmp_path / "v1frozen"
+    build_synthetic_batch(wd, falls={})
+    (wd / "splits").mkdir()
+    rels: dict[str, str] = {}
+    for _, name in SPLITS:
+        (wd / name).replace(wd / "splits" / name)
+        # 根目录同名同字节替身（lead 变异：旧实现 wd/name 会误验替身）。
+        (wd / name).write_bytes((wd / "splits" / name).read_bytes())
+        rels[name] = f"splits/{name}"
+
+    # 生产档案的登记 sha 在核验期间固定不变（禁止按磁盘现状重算）。
+    arc = {"host_workdir": str(wd), "files": [
+        {"relpath": rels[n], "sha256": _sha256_file(wd / rels[n])}
+        for _, n in SPLITS]}
+
+    paths = task6_mod.resolve_v1_splits(arc)
+    assert paths == [wd / rels[n] for _, n in SPLITS]
+
+    # 根替身全部调包成垃圾字节：仍通过（证明核验读的是登记 relpath；
+    # 旧实现此刻必在根文件 sha 对质上失败）。
+    for _, name in SPLITS:
+        (wd / name).write_bytes(b"root-decoy-garbage")
+    task6_mod.resolve_v1_splits(arc)
+
+    # 登记件（子目录）被改：固定登记 sha 对质必须 fail-loud。
+    p0 = wd / rels[SPLITS[0][1]]
+    p0.write_bytes(p0.read_bytes() + b"x")
+    with pytest.raises(GraphStateError, match="sha256"):
+        task6_mod.resolve_v1_splits(arc)
+
+
+def test_n1_resolve_v1_splits_rejects_illegal_relpaths(tmp_path, monkeypatch):
+    """绝对路径/.. 分段/symlink 逃逸/多义登记/缺登记一律 fail-closed。"""
+    monkeypatch.setattr(task6_mod, "LOCKED_V1_SPLIT_SIZES", {})
+    wd = tmp_path / "v1frozen"
+    build_synthetic_batch(wd, falls={})
+    name0, name1 = SPLITS[0][1], SPLITS[1][1]
+    good1 = {"relpath": name1, "sha256": _sha256_file(wd / name1)}
+
+    def _resolve(rec0):
+        return task6_mod.resolve_v1_splits(
+            {"host_workdir": str(wd), "files": [rec0, good1]})
+
+    # 绝对/.. 记录的 basename 与登记 split 同名：先过格式闸 fail-closed，
+    # 轮不到文件/sha 核验（防止绝对路径 join 逃逸 host_workdir）。
+    with pytest.raises(GraphStateError, match="非法"):
+        _resolve({"relpath": f"/tmp/{name0}", "sha256": "x"})
+    with pytest.raises(GraphStateError, match="非法"):
+        _resolve({"relpath": f"../{name0}", "sha256": "x"})
+    with pytest.raises(GraphStateError, match="多义"):
+        task6_mod.resolve_v1_splits({"host_workdir": str(wd), "files": [
+            {"relpath": f"a/{name0}", "sha256": "x"},
+            {"relpath": f"b/{name0}", "sha256": "y"}, good1]})
+    with pytest.raises(GraphStateError, match="未登记"):
+        task6_mod.resolve_v1_splits(
+            {"host_workdir": str(wd), "files": [good1]})
+
+    # symlink 逃逸：目标在 host_workdir 外且 sha 登记正确，仍必须拒绝。
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"\x00\x00\x00esc")
+    (wd / name0).unlink()
+    (wd / name0).symlink_to(outside)
+    with pytest.raises(GraphStateError, match="越界"):
+        _resolve({"relpath": name0, "sha256": _sha256_file(outside)})

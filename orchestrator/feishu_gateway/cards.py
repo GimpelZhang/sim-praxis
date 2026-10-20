@@ -30,6 +30,11 @@ from orchestrator.judge.pareto import (
 
 FEEDBACK_PLACEHOLDER = "打回时必填：具体意见（会原样带回方案重做）"
 REJECT_EMPTY_TOAST = {"type": "error", "content": "打回必须填写意见"}
+# Task6 M2：ascent Gate1/Gate2 批准必须带真人原文（演化志 opinion fail-loud
+# 硬要求）；require_approval_notes=True 时空批准与空打回同等待遇——只 toast、
+# 不落决策、行保持 PENDING，避免「空批准落 DECIDED 后 opinion 永久抛错」楔死。
+APPROVAL_EMPTY_TOAST = {"type": "error",
+                        "content": "批准也必须填写意见（演化志需真人原文）"}
 NOT_OWNER_TOAST = {"type": "error", "content": "非审批人操作，已拒绝"}
 # H-8：卡片按钮 value.gate 与落库行 gate 不一致时的拒绝 toast。
 GATE_MISMATCH_TOAST = {"type": "error",

@@ -174,6 +174,8 @@ def test_01_empty_feedback_reject_blocked(gw):
 # ---------- ② card_form approve 落库并唤醒 ----------
 
 def test_02_card_form_approve_persists_and_sets_event(gw):
+    # M2：默认构造 flag 关——空批准照旧落 DECIDED（Task7/8 路径逐字节不变）。
+    assert gw.require_approval_notes is False
     gw.store.upsert_pending("t2", 1, card_message_id="om_card_2",
                             open_chat_id=CHAT)
     ev = gw._event_for("t2", 1)
@@ -193,6 +195,87 @@ def test_02_card_form_approve_persists_and_sets_event(gw):
         feedback="晚到的意见", message_id="om_card_2"))
     assert resp_again.toast.type == "info"
     assert gw.store.get_pending("t2", 1)["decision"] == "approve"
+
+
+# ---------- M2：Task6 批准必填真人原文（opt-in；默认关，Task7/8 不变） ----------
+
+def test_m2_empty_approval_blocked_when_required(tmp_path, monkeypatch):
+    """flag 开：空批准与空打回同构——只 toast、不落决策、行保 PENDING。
+
+    防的是真人 Gate 楔死：空 approve 一旦落 DECIDED，Task6 opinion 接缝
+    以空 human_notes fail-loud 永久抛错，resume 无法恢复（决策不可改写）。
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(client_mod.requests, "post", make_fake_post(calls))
+    seen: list[dict] = []
+    gw = FeishuGateway(
+        APP_ID, APP_SECRET, OWNER,
+        db_path=tmp_path / "state" / "pending_gates.db",
+        evidence_dir=tmp_path / "task1_feishu",
+        run_dir=str(tmp_path / "runs"), start_ws=False,
+        on_card_action=seen.append, require_approval_notes=True)
+    try:
+        assert gw.require_approval_notes is True
+        gw.store.upsert_pending("t-m2", 1, card_message_id="om_card_m2",
+                                open_chat_id=CHAT)
+        ev = gw._event_for("t-m2", 1)
+        # 纯空白与空串都拦截；Event 不置位、无任何交互卡片重发。
+        for fb in ("   ", ""):
+            resp = gw._handle_card(card_event(
+                {"gate": 1, "decision": "approve", "choice": 1},
+                feedback=fb, message_id="om_card_m2"))
+            assert resp.toast.type == "error"
+            assert resp.toast.content == "批准也必须填写意见（演化志需真人原文）"
+            row = gw.store.get_pending("t-m2", 1)
+            assert row["status"] == "PENDING" and row["decision"] is None
+            assert not ev.is_set()
+        assert not [c for c in calls if c["kind"] == "interactive"]
+        # info 回调如实标记：未落库 + 专门 reason（Task6 监控据此计数）。
+        assert seen and all(i["decided"] is False for i in seen)
+        assert seen[-1]["reason"] == "empty_approval_feedback"
+        assert seen[-1]["thread_id"] == "t-m2" and seen[-1]["gate"] == 1
+
+        # Gate2 同 flag 同等待遇（批准空意见同样楔死 gate2 opinion 接缝）。
+        gw.store.upsert_pending("t-m2", 2, card_message_id="om_card_m2g2",
+                                open_chat_id=CHAT)
+        resp_g2 = gw._handle_card(card_event(
+            {"gate": 2, "decision": "approve"}, feedback="",
+            message_id="om_card_m2g2"))
+        assert resp_g2.toast.content == "批准也必须填写意见（演化志需真人原文）"
+        assert gw.store.get_pending("t-m2", 2)["status"] == "PENDING"
+
+        # 带真人原文 → 正常落 DECIDED、置 Event（同一张卡可继续点）。
+        resp_ok = gw._handle_card(card_event(
+            {"gate": 1, "decision": "approve", "choice": 1},
+            feedback="真人批准：演化志动机段原文", message_id="om_card_m2"))
+        assert resp_ok.toast.type == "success"
+        row = gw.store.get_pending("t-m2", 1)
+        assert row["status"] == "DECIDED" and row["decision"] == "approve"
+        assert row["human_notes"] == "真人批准：演化志动机段原文"
+        assert ev.is_set()
+    finally:
+        gw.close()
+
+
+def test_m2_get_gateway_forwards_flag(tmp_path, monkeypatch):
+    """工厂透传：缺省 False、显式 True 到构造属性（cli 按 task==6 打开）。"""
+    monkeypatch.setattr(client_mod.requests, "post", make_fake_post([]))
+    base = {
+        "app_id": APP_ID, "app_secret": APP_SECRET, "owner_open_id": OWNER,
+        "start_ws": False, "db_path": str(tmp_path / "a.db"),
+        "evidence_dir": str(tmp_path / "ev"), "run_dir": str(tmp_path / "r"),
+    }
+    g = client_mod.get_gateway(dict(base))
+    try:
+        assert g.require_approval_notes is False
+    finally:
+        g.close()
+    g2 = client_mod.get_gateway({**base, "require_approval_notes": True,
+                                 "db_path": str(tmp_path / "b.db")})
+    try:
+        assert g2.require_approval_notes is True
+    finally:
+        g2.close()
 
 
 # ---------- ③ P2P 文本（H-1）：回复定位 / 窗内合并 / 窗外忽略 /

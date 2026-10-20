@@ -24,6 +24,7 @@ from typing import Any, Callable
 import requests
 
 from .cards import (
+    APPROVAL_EMPTY_TOAST,
     GATE_MISMATCH_TOAST,
     NOT_OWNER_TOAST,
     REJECT_EMPTY_TOAST,
@@ -112,6 +113,7 @@ class FeishuGateway:
         start_ws: bool = True,
         on_p2p_text: "Callable[[dict], None] | None" = None,
         on_card_action: "Callable[[dict], None] | None" = None,
+        require_approval_notes: bool = False,
     ) -> None:
         self.app_id = app_id
         self._app_secret = app_secret
@@ -128,6 +130,9 @@ class FeishuGateway:
                                                  "/mnt/artifacts/simpraxis/runs")
         self._on_p2p_text = on_p2p_text
         self._on_card_action = on_card_action
+        # M2：Task6 生产图显式打开——卡片空批准一律 toast 拒绝、不落决策；
+        # 默认 False 保证 Task7/8 既有路径逐字节不变。
+        self.require_approval_notes = bool(require_approval_notes)
 
         self._token: "str | None" = None
         self._token_expire_at = 0.0
@@ -587,6 +592,23 @@ class FeishuGateway:
                 if self._on_card_action:
                     self._on_card_action(dict(info))
                 return self._toast(REJECT_EMPTY_TOAST)
+
+            # M2（Task6 专用，默认关）：批准同样强制真人原文。否则空批准会
+            # 先落 DECIDED 再被 Task6 opinion 接缝以空 notes fail-loud 抛错，
+            # 决策已持久化、意见件永不写入，resume 永久复现同一异常——真人
+            # Gate1/Gate2 被楔死。此处与打回空意见同构：只 toast、不落库，
+            # 行保持 PENDING；p2p/cli 来源仍由接缝 fail-loud 兜底。
+            if self.require_approval_notes and decision == "approve" \
+                    and not (feedback or "").strip():
+                info.update({"toast": APPROVAL_EMPTY_TOAST, "decided": False,
+                             "reason": "empty_approval_feedback",
+                             "thread_id": row["thread_id"], "gate": gate})
+                self._log.warning(
+                    "gate=%s 批准意见为空（require_approval_notes），已拒绝落库",
+                    gate)
+                if self._on_card_action:
+                    self._on_card_action(dict(info))
+                return self._toast(APPROVAL_EMPTY_TOAST)
 
             choice_val = int(choice) if choice is not None else None
             ok = self.store.mark_decided(
@@ -1623,6 +1645,7 @@ def get_gateway(app_ctx: dict[str, Any]) -> FeishuGateway:
         start_ws=app_ctx.get("start_ws", True),
         on_p2p_text=app_ctx.get("on_p2p_text"),
         on_card_action=app_ctx.get("on_card_action"),
+        require_approval_notes=app_ctx.get("require_approval_notes", False),
     )
 
 
