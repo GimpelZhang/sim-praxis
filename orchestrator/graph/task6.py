@@ -199,9 +199,11 @@ def make_spec_factory(thread_id: str, coding_batch: str,
         env_extra.update(scenario["env"])
 
         # VRAM sidecar 由 wrapper 设备级采样落 workdir/vram_peak.json（两侧
-        # 同包裹、同设备口径；V2 脚本不自报显存）。wrapper 让子进程独立成组
-        # 并转发 SIGTERM/SIGINT：runner 超时（capture_output 包裹）杀 wrapper
-        # 时整组回收，不留孤儿 Genesis 进程继续占 GPU；wrapper 透传子进程 rc。
+        # 同包裹、同设备口径；V2 脚本不自报显存）。双重防孤儿：可捕获的
+        # SIGTERM/SIGINT 由 wrapper killpg 转发整组；runner 超时对 wrapper 发
+        # 不可捕获的 SIGKILL 时，孙进程 preexec 的 PR_SET_PDEATHSIG 由内核
+        # 兜底 SIGKILL，不留孤儿 Genesis 进程继续占 GPU/污染后续批次采样；
+        # wrapper 透传子进程 rc。
         return RunSpec(
             thread_id=thread_id,
             workdir=workdir,

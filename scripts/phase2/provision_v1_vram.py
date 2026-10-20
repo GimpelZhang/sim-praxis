@@ -14,7 +14,9 @@ $SIMPRAXIS_SOLUTIONS_ROOT，经 resolver 逐件 sha256/C4 校验后 stage）：
   2. 复用 task8 的选窗标定件 stage 与 versions.txt 口径、task6 工厂 genesis
      场景的同一 env_extra（HOME/HF/GS_ENABLE_ZEROCOPY/PYOPENGL_PLATFORM…）；
   3. gpu_sampler 包裹 V1 batch（宿主 /mnt/venvs python + EGL，非 docker），
-     stdout/stderr 实时透传，超时 2400s（SIGTERM 先经 wrapper 转发整组）；
+     stdout/stderr 实时透传，超时 2400s（SIGTERM 经 wrapper killpg 整组转发，
+     30s 宽限后只对 wrapper 直接 SIGKILL——batch 孙进程靠 wrapper preexec 的
+     PR_SET_PDEATHSIG 由内核兜底 SIGKILL，孤儿链闭合，硬规则 5）；
   4. rc!=0 保留全部产物、不安装 sidecar；rc=0 校验 sidecar 契约后以 0600
      原子拷到 evolution_sources（同内容幂等、内容不同需 --force）。
 
@@ -31,7 +33,6 @@ import json
 import math
 import os
 import shutil
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -212,17 +213,18 @@ def run_replay(thread_id: str, force: bool,
     try:
         rc = proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        # SIGTERM 给 wrapper：其 handler 转发整组（冻结 V1 + 子进程），不留孤儿。
-        print(f"[provision] 回放超过 {timeout_s}s，SIGTERM 整组回收",
+        # SIGTERM 给 wrapper（本进程的同组直接子进程；独立成组的是 batch
+        # 孙进程）：wrapper handler killpg 整组优雅转发，不留孤儿。
+        print(f"[provision] 回放超过 {timeout_s}s，SIGTERM 经 wrapper 整组回收",
               file=sys.stderr, flush=True)
         proc.terminate()
         try:
             rc = proc.wait(timeout=SIGTERM_GRACE_S)
         except subprocess.TimeoutExpired:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            # 宽限后仍不死：只对 wrapper 直接发 SIGKILL（wrapper 与本工具同
+            # 进程组，killpg 会自杀；wrapper 内 batch 孙进程独立成组，靠其
+            # preexec 的 PR_SET_PDEATHSIG 被内核 SIGKILL，孤儿链同样闭合）。
+            proc.kill()
             rc = proc.wait()
         rc = rc if rc != 0 else 124
 

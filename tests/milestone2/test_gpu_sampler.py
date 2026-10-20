@@ -215,6 +215,122 @@ def test_missing_child_exit127(tmp_path, fake_nvml):
 
 
 # ---------------------------------------------------------------------------
+# g2) PR_SET_PDEATHSIG preexec 工厂：fake libc 函数级断言（不真杀父进程）
+# ---------------------------------------------------------------------------
+
+class _PreExecExit(Exception):
+    """替身 os._exit：记录退出码、绝不真退测试解释器。"""
+
+
+class FakeLibc:
+    """记录 prctl 调用参数/次序；可配置返回码或抛错。"""
+
+    def __init__(self, *, prctl_rc=0, prctl_error=None):
+        self.calls: list[tuple] = []
+        self._prctl_rc = prctl_rc
+        self._prctl_error = prctl_error
+
+    def prctl(self, *args):
+        self.calls.append(("prctl", args))
+        if self._prctl_error is not None:
+            raise self._prctl_error
+        return self._prctl_rc
+
+
+def _run_preexec(libc, *, ppid=4242, setsid_error=None):
+    """在测试进程内直接跑 preexec 闭包（注入 getppid/setsid/_exit，不 fork）。"""
+    order: list[str] = []
+
+    def _getppid():
+        order.append("getppid")
+        return ppid
+
+    def _setsid():
+        order.append("setsid")
+        if setsid_error is not None:
+            raise setsid_error
+
+    exited: list[int] = []
+
+    def _exit(code):
+        order.append(f"exit:{code}")
+        exited.append(code)
+        raise _PreExecExit(code)
+
+    fn = gpu_sampler.make_preexec_fn(
+        libc, _getppid=_getppid, _setsid=_setsid, _exit=_exit)
+    return fn, order, exited, libc.calls
+
+
+def test_preexec_prctl_then_ppid_then_setsid_order_and_args():
+    fn, order, exited, prctl_calls = _run_preexec(FakeLibc())
+    fn()
+    # PR_SET_PDEATHSIG=1, SIGKILL=9；次序 prctl → ppid 复查 → setsid。
+    assert prctl_calls == [
+        ("prctl", (gpu_sampler.PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0))]
+    assert gpu_sampler.PR_SET_PDEATHSIG == 1 and signal.SIGKILL == 9
+    assert order == ["getppid", "setsid"]
+    assert exited == []
+
+
+def test_preexec_prctl_nonzero_rc_exits_127_no_setsid():
+    fn, order, exited, _ = _run_preexec(FakeLibc(prctl_rc=-1))
+    with pytest.raises(_PreExecExit):
+        fn()
+    assert exited == [127] and order == ["exit:127"]  # ppid/setsid 均未触达
+
+
+def test_preexec_prctl_raises_exits_127_no_setsid():
+    fn, order, exited, calls = _run_preexec(
+        FakeLibc(prctl_error=OSError("prctl denied")))
+    with pytest.raises(_PreExecExit):
+        fn()
+    assert exited == [127] and order == ["exit:127"]
+    assert [name for name, _ in calls] == ["prctl"]
+
+
+def test_preexec_parent_already_dead_ppid1_exits_127():
+    # 经典竞态：prctl 成功但父已死、子将被 init 收养，PDEATHSIG 不再触发。
+    fn, order, exited, _ = _run_preexec(FakeLibc(), ppid=1)
+    with pytest.raises(_PreExecExit):
+        fn()
+    assert exited == [127] and order == ["getppid", "exit:127"]
+
+
+def test_preexec_setsid_raises_exits_127():
+    fn, order, exited, _ = _run_preexec(
+        FakeLibc(), setsid_error=OSError("setsid denied"))
+    with pytest.raises(_PreExecExit):
+        fn()
+    assert exited == [127] and order == ["getppid", "setsid", "exit:127"]
+
+
+# ---------------------------------------------------------------------------
+# g3) Popen 接线：preexec_fn 在场（工厂闭包），不与 start_new_session 并用
+# ---------------------------------------------------------------------------
+
+def test_popen_uses_preexec_fn_not_start_new_session(
+        tmp_path, fake_nvml, monkeypatch):
+    fake_nvml([14 * _MB, _GB])
+    seen: dict = {}
+    real_popen = gpu_sampler.subprocess.Popen
+
+    def _spying_popen(args, **kwargs):
+        seen["args"] = list(args)
+        seen["kwargs"] = dict(kwargs)
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(gpu_sampler.subprocess, "Popen", _spying_popen)
+    sidecar = tmp_path / "vram_peak.json"
+    rc = _run(sidecar, "import time; time.sleep(0.15)")
+    assert rc == 0
+    kwargs = seen["kwargs"]
+    assert callable(kwargs["preexec_fn"])
+    assert not kwargs.get("start_new_session", False)  # 成组归 preexec setsid
+    assert json.loads(sidecar.read_text())["vram_peak_gb"] > 0
+
+
+# ---------------------------------------------------------------------------
 # g) 信号转发：处理函数级单测（不真发信号给进程组，避免 flaky）
 # ---------------------------------------------------------------------------
 

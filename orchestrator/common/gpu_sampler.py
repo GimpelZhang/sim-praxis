@@ -16,12 +16,19 @@ wrapper、同一台机器、同一个设备口径**，两侧峰值可比；冻�
   - **自包含**：只依赖 stdlib + pynvml，绝不 import 本仓任何包。runner 的
     cwd=付费 workdir，本文件以绝对路径启动，不依赖 cwd/sys.path。
   - 先 nvmlInit/开设备，失败退出 3：绝不启动子进程、绝不写 sidecar。
-  - 子进程以 start_new_session=True 独立进程组启动；SIGTERM/SIGINT 转发到
-    整个进程组，runner 超时杀 wrapper 时不留孤儿子进程继续占 GPU。
+  - 子进程在 preexec_fn 中先 ``prctl(PR_SET_PDEATHSIG, SIGKILL)`` 再
+    ``setsid()`` 独立成组（双重保险）：
+    1) 显式 SIGTERM/SIGINT：wrapper 装了 handler，killpg 到整组优雅转发，
+       子进程同信号终态（128+signum）由 wrapper 透传；
+    2) wrapper 自身被 **SIGKILL**（runner subprocess.run(timeout=) 超时即
+       此路径，SIGKILL 不可捕获、handler 不执行）或崩溃：内核据
+       PR_SET_PDEATHSIG 直接向 batch 孙进程发 SIGKILL——孙进程不被 init
+       收养孤儿化、不继续占 GPU（硬规则 5）、不污染后续批次的设备级峰值。
   - 子进程无论何种 rc 结束，只要峰值是正有限实数就原子写 0600 sidecar，
     wrapper 以子进程 rc 退出（被信号杀折算 128+signum）；峰值非法不写
     sidecar、退出 4（fail-closed，task6 接缝缺件即 GraphStateError）。
-  - Popen 失败（入口不存在，如 V2 出生前首跑）退出 127、不写 sidecar。
+  - Popen 失败（入口不存在，如 V2 出生前首跑）退出 127、不写 sidecar；
+    preexec 子侧 prctl/setsid 失败同样 127（异常不得跨 fork 回父进程）。
 
 CLI：
   gpu_sampler.py --sidecar <path> [--interval 0.5] -- <child argv...>
@@ -29,6 +36,7 @@ CLI：
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
@@ -91,12 +99,48 @@ def _atomic_write_0600(path: Path, payload: bytes) -> None:
 # ---------------------------------------------------------------------------
 
 def _forward_signal(proc: subprocess.Popen, signum: int) -> None:
-    """把信号转发给子进程整个进程组（start_new_session 建立的独立 pgrp）。"""
+    """把信号转发给子进程整个进程组（preexec setsid 建立的独立 pgrp）。"""
     try:
         os.killpg(proc.pid, signum)
     except ProcessLookupError:
         # 子进程已退出：主流程的 wait 立刻收尾，无需再杀。
         pass
+
+
+# PR_SET_PDEATHSIG（linux/prctl.h）：父进程死亡时内核向本子进程发指定信号。
+PR_SET_PDEATHSIG = 1
+
+
+def make_preexec_fn(libc=None, *, _getppid=os.getppid, _setsid=os.setsid,
+                    _exit=os._exit):
+    """构造 fork 后 exec 前在**子进程侧**运行的 preexec 闭包。
+
+    顺序固定：先 ``prctl(PR_SET_PDEATHSIG, SIGKILL)`` 绑定父死信号，再复查
+    PPID（经典竞态：prctl 前父可能已死，子被 init 收养后 PDEATHSIG 永不
+    触发），最后 ``setsid()`` 独立成组供 wrapper 的 killpg 转发。任何一步
+    失败都在子侧 ``_exit(127)``——异常不得跨 fork 回父进程。依赖以参数
+    注入，便于 hermetic 单测（生产默认值即真实 libc/getppid/setsid/_exit）。
+    """
+    if libc is None:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+
+    def _preexec() -> None:
+        try:
+            rc = int(libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0))
+        except BaseException:
+            _exit(127)
+            return
+        # rc!=0（libc 未按 errno 抛错的情形）或父已死被 init 收养：不能带着
+        # 失效的孤儿兜底去 exec batch。
+        if rc != 0 or _getppid() == 1:
+            _exit(127)
+            return
+        try:
+            _setsid()
+        except BaseException:
+            _exit(127)
+
+    return _preexec
 
 
 class _SampleSink:
@@ -188,9 +232,12 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         # 不指定 cwd/env：继承父进程（runner 已设 cwd=workdir、env_extra）；
         # stdout/stderr 继承父 fd，runner 的 capture_output 管道自然捕获。
-        # start_new_session：独立进程组，信号按组转发，防孤儿占 GPU。
+        # preexec 内 prctl(PDEATHSIG, SIGKILL)+setsid（不与 start_new_session
+        # 并用，成组由 preexec 的 setsid 完成）：可捕获信号走 handler killpg
+        # 优雅转发；wrapper 被 SIGKILL（runner 超时路径）时内核兜底杀孙进程。
         try:
-            proc = subprocess.Popen(child_args, start_new_session=True)
+            proc = subprocess.Popen(
+                child_args, preexec_fn=make_preexec_fn())
         except FileNotFoundError as exc:
             print(f"gpu_sampler: 被包裹命令不存在：{exc}", file=sys.stderr)
             return EXIT_NOT_FOUND
