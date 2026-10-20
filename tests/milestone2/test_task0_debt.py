@@ -740,3 +740,27 @@ def test_quota_pause_v2_schema_freeze(tmp_path, monkeypatch):
     written = json.loads((tmp_path / "gwstate/quota_pause.json").read_text())
     assert tuple(written) == QUOTA_PAUSE_SCHEMA_V2_KEYS
     assert written["schema_version"] == 2 and written["scope"] == "task"
+
+
+# ---------- Task6 单任务硬顶自批提顶（§6.3，2026-10-16 用户自主授权） ----------
+
+def test_task6_hard_cap_raised_16_to_24_phase2_globals_unchanged():
+    """Task6 2026-10-20 触顶（16/16，task_hard_cap）后依 Phase_2_Plan_detailed.md
+    §6.3 自批 16→24（授权依据：2026-10-16 用户预算自主授权）；本用例钉死
+    提顶值、Phase 2 覆盖 Phase 1 的并集语义，以及全局 60/80 双门未被牵动。0 联网。
+    """
+    from orchestrator.gateway.quota_ledger import (
+        HARD_CAP,
+        NORMAL_BUDGET,
+        PHASE2_TASK_CAPS,
+        TASK_HARD_CAPS,
+    )
+
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 24, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 新顶 24；task=4 仍为 Phase 2 的 24
+    # （覆盖 Phase 1 的 8）。
+    assert TASK_HARD_CAPS[6] == 24
+    assert TASK_HARD_CAPS[4] == 24
+    # 顺带钉死全局双门：常态 60 / 硬顶 80，本次提顶不动全局门。
+    assert NORMAL_BUDGET == 60
+    assert HARD_CAP == 80

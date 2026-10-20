@@ -79,7 +79,9 @@ LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # Phase 2 task 集（§6.2/§6.5 估算初始值）：Task4 标定占 task=4 账套，编号沿用
 # Stage 账套避免新增（Phase 2 限 24，覆盖 Phase 1 的 8）。
-PHASE2_TASK_CAPS = {4: 24, 6: 16, 7: 16, 8: 16}
+# Task6 2026-10-20 因 thinking 失控诊断 + V2 出生实呼触顶（task_used=16/16，
+# reason=task_hard_cap），依 §6.3 自批 16→24（2026-10-16 用户预算自主授权）。
+PHASE2_TASK_CAPS = {4: 24, 6: 24, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/80 双门不变）。
 TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
