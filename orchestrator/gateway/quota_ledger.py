@@ -81,7 +81,11 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # Stage 账套避免新增（Phase 2 限 24，覆盖 Phase 1 的 8）。
 # Task6 2026-10-20 因 thinking 失控诊断 + V2 出生实呼触顶（task_used=16/16，
 # reason=task_hard_cap），依 §6.3 自批 16→24（2026-10-16 用户预算自主授权）。
-PHASE2_TASK_CAPS = {4: 24, 6: 24, 7: 16, 8: 16}
+# Task6 2026-10-20 晚拆块出生生产首验再触顶（task_used=24/24，seq48 块0 实呼
+# 成功但冗长产出吃满 16384 output 被截断，round2 preflight 暂停），依同授权
+# 自批 24→40；全局 60/80 双门不动（此刻全局已用 48/80），模型 ID 不动
+# （提交见同日 chunked 接缝后）。
+PHASE2_TASK_CAPS = {4: 24, 6: 40, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/80 双门不变）。
 TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
