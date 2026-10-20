@@ -16,19 +16,26 @@ wrapper、同一台机器、同一个设备口径**，两侧峰值可比；冻�
   - **自包含**：只依赖 stdlib + pynvml，绝不 import 本仓任何包。runner 的
     cwd=付费 workdir，本文件以绝对路径启动，不依赖 cwd/sys.path。
   - 先 nvmlInit/开设备，失败退出 3：绝不启动子进程、绝不写 sidecar。
-  - 子进程在 preexec_fn 中先 ``prctl(PR_SET_PDEATHSIG, SIGKILL)`` 再
-    ``setsid()`` 独立成组（双重保险）：
-    1) 显式 SIGTERM/SIGINT：wrapper 装了 handler，killpg 到整组优雅转发，
-       子进程同信号终态（128+signum）由 wrapper 透传；
+  - **两级 PR_SET_PDEATHSIG 全链兜底**（复审 M1 补 wrapper 级）：
+    宿主（graph runner / provision_v1_vram 进程）死→内核直杀 wrapper
+    （wrapper 启动时父侧 arm，本提交新增）→wrapper 死亡再触发孙进程
+    preexec 内的同款 arm→内核直杀 batch 孙进程。任何一级被 SIGKILL/崩溃
+    都不留孤儿、不继续占 GPU（硬规则 5）、不污染后续批次的设备级峰值。
+    wrapper **有意不 setsid 自己**：它留在宿主进程组里，显式 SIGTERM/SIGINT
+    才经 handler 的 killpg 整组转发、provision 超时路径也才能直接 proc.kill
+    到 wrapper；独立成组的只有孙进程（preexec 内 setsid）。
+    1) 显式 SIGTERM/SIGINT：wrapper 装了 handler，killpg 到孙进程整组优雅
+       转发，子进程同信号终态（128+signum）由 wrapper 透传；
     2) wrapper 自身被 **SIGKILL**（runner subprocess.run(timeout=) 超时即
-       此路径，SIGKILL 不可捕获、handler 不执行）或崩溃：内核据
-       PR_SET_PDEATHSIG 直接向 batch 孙进程发 SIGKILL——孙进程不被 init
-       收养孤儿化、不继续占 GPU（硬规则 5）、不污染后续批次的设备级峰值。
+       此路径，SIGKILL 不可捕获、handler 不执行）或宿主崩溃：见上两级
+       PDEATHSIG 级联，孙进程在毫秒级窗口内被内核回收。
   - 子进程无论何种 rc 结束，只要峰值是正有限实数就原子写 0600 sidecar，
     wrapper 以子进程 rc 退出（被信号杀折算 128+signum）；峰值非法不写
     sidecar、退出 4（fail-closed，task6 接缝缺件即 GraphStateError）。
   - Popen 失败（入口不存在，如 V2 出生前首跑）退出 127、不写 sidecar；
-    preexec 子侧 prctl/setsid 失败同样 127（异常不得跨 fork 回父进程）。
+    preexec 子侧 prctl/setsid 失败同样 127（异常不得跨 fork 回父进程）；
+    wrapper 父侧 arm（prctl 失败/父已死被 init 收养）也退出 127，且位置
+    先于 nvmlInit/Popen：失败时无仪器、无子进程、无 sidecar 需清理。
 
 CLI：
   gpu_sampler.py --sidecar <path> [--interval 0.5] -- <child argv...>
@@ -143,6 +150,32 @@ def make_preexec_fn(libc=None, *, _getppid=os.getppid, _setsid=os.setsid,
     return _preexec
 
 
+def arm_parent_death_signal(libc=None, *, _getppid=os.getppid):
+    """**wrapper 父侧** arm：宿主死亡时内核向本 wrapper 发 SIGKILL（复审 M1）。
+
+    wrapper 进程由宿主（graph runner 的 subprocess.run / provision_v1_vram）
+    直接拉起。子侧 preexec 只闭环了「wrapper 死→孙死」，若宿主被 SIGKILL
+    而 wrapper 被 init 收养，wrapper 与挂死的 batch 会一起孤儿化、连
+    BATCH_TIMEOUT_S 执法者也同归于尽。本函数在 wrapper main() 早期（先于
+    nvmlInit/Popen）给自己 ``prctl(PR_SET_PDEATHSIG, SIGKILL)``，形成
+    宿主死→wrapper 死→（孙进程 preexec arm）孙死 的全链。
+
+    wrapper **有意不 setsid**：必须留在宿主进程组，handler killpg 转发与
+    provision 的直接 proc.kill 才成立。经典竞态同样复查：prctl 前父可能已
+    死、本进程已被 init 收养（PDEATHSIG 永不触发）。任何失败以
+    ``SystemExit(127)`` 收场——此时仪器未启、子进程未生、无 sidecar。
+    依赖注入同 make_preexec_fn，便于 hermetic 单测（生产默认真 libc）。
+    """
+    if libc is None:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    try:
+        rc = int(libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0))
+    except BaseException:
+        raise SystemExit(EXIT_NOT_FOUND)
+    if rc != 0 or _getppid() == 1:
+        raise SystemExit(EXIT_NOT_FOUND)
+
+
 class _SampleSink:
     """daemon 采样线程与主线程之间的最小共享态。"""
 
@@ -210,6 +243,20 @@ def main(argv: "list[str] | None" = None) -> int:
         return EXIT_USAGE
 
     sidecar = Path(args.sidecar)
+
+    # 复审 M1：wrapper 自身相对**宿主**（runner/provision）先 arm
+    # PR_SET_PDEATHSIG，再启任何仪器/子进程。宿主被 SIGKILL 或崩溃时内核
+    # 直杀 wrapper，孙进程再经 preexec 的同款 arm 级联回收（宿主死→wrapper
+    # 死→孙死，全链无孤儿，硬规则 5）。wrapper 有意不 setsid（留宿主组以
+    # 支持 killpg 转发与直接 proc.kill）。失败即 127：此时无 nvml、无子
+    # 进程、无 sidecar 需要清理。
+    try:
+        arm_parent_death_signal()
+    except SystemExit as exc:
+        print(f"gpu_sampler: wrapper 父侧 PDEATHSIG arm 失败（prctl 失败或宿主"
+              f"已死被 init 收养），退出 {exc.code}：未启动仪器/子进程",
+              file=sys.stderr)
+        raise
 
     # 延迟导入：先确认仪器可用，再启动任何子进程。测试以 sys.modules 注入
     # 假 pynvml（全 hermetic、禁真 GPU）。

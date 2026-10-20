@@ -9,12 +9,17 @@
   d) ``--`` 后空 argv：退出 2；
   e) sidecar 文件模式严格 0600；
   f) 设备读数全 0 / NaN：退出 4 且不写 sidecar；
-  g) SIGTERM/SIGINT 转发：处理函数级单测（不真发进程组信号，避免 flaky）。
+  g) SIGTERM/SIGINT 转发：处理函数级单测（不真发进程组信号，避免 flaky）；
+  g1/g2) 子侧 preexec：PR_SET_PDEATHSIG 参数/次序与四类失败 127；
+  g3) Popen 接线：preexec_fn 在场、不与 start_new_session 并用；
+  g4) wrapper 父侧 arm（复审 M1）：参数/三类失败 SystemExit 127、main 内
+      arm 严格先于 Popen、失败时 nvml 未启无子进程无 sidecar。
 """
 from __future__ import annotations
 
 import json
 import math
+import os
 import signal
 import sys
 import types
@@ -25,6 +30,23 @@ from orchestrator.common import gpu_sampler
 
 _MB = 1024 ** 2
 _GB = 1024 ** 3
+
+# 真实 arm 函数的模块级捕获：下面的 autouse 夹具会替换模块 seam（main() 在
+# pytest 进程内直接调用，绝不能真 prctl——pytest 父壳一死测试解释器会被内核
+# 杀掉），单测则经此引用直接验证真实实现。
+_REAL_ARM = gpu_sampler.arm_parent_death_signal
+
+
+@pytest.fixture(autouse=True)
+def _neutralize_real_parent_arm(monkeypatch):
+    """中和 main() 内的 wrapper 父侧 arm：默认替身只记录、不执行系统调用。"""
+    calls: list[tuple] = []
+
+    def _fake_arm(libc=None, *, _getppid=None):
+        calls.append(("arm", libc is not None))
+
+    monkeypatch.setattr(gpu_sampler, "arm_parent_death_signal", _fake_arm)
+    return calls
 
 
 class _FakeMem:
@@ -328,6 +350,88 @@ def test_popen_uses_preexec_fn_not_start_new_session(
     assert callable(kwargs["preexec_fn"])
     assert not kwargs.get("start_new_session", False)  # 成组归 preexec setsid
     assert json.loads(sidecar.read_text())["vram_peak_gb"] > 0
+
+
+# ---------------------------------------------------------------------------
+# g4) wrapper 父侧 arm（复审 M1）：宿主死→wrapper 死→孙死 全链第一环
+# ---------------------------------------------------------------------------
+
+def test_parent_arm_success_prctl_args():
+    libc = FakeLibc()
+    _REAL_ARM(libc, _getppid=lambda: 4242)
+    # PR_SET_PDEATHSIG=1, SIGKILL=9, 其余三参为 0（与子侧 preexec 同款）。
+    assert libc.calls == [
+        ("prctl", (gpu_sampler.PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0))]
+
+
+def test_parent_arm_prctl_nonzero_rc_exits_127():
+    with pytest.raises(SystemExit) as exc:
+        _REAL_ARM(FakeLibc(prctl_rc=-1), _getppid=lambda: 4242)
+    assert exc.value.code == gpu_sampler.EXIT_NOT_FOUND == 127
+
+
+def test_parent_arm_prctl_raises_exits_127():
+    with pytest.raises(SystemExit) as exc:
+        _REAL_ARM(FakeLibc(prctl_error=OSError("prctl denied")),
+                  _getppid=lambda: 4242)
+    assert exc.value.code == 127
+
+
+def test_parent_arm_parent_already_dead_ppid1_exits_127():
+    # 经典竞态：prctl 成功但宿主已死、wrapper 将被 init 收养，PDEATHSIG 失效。
+    libc = FakeLibc()
+    with pytest.raises(SystemExit) as exc:
+        _REAL_ARM(libc, _getppid=lambda: 1)
+    assert exc.value.code == 127
+    # 只触达 prctl 一个系统调用 seam；函数本身无网络/Popen 能力。
+    assert [name for name, _ in libc.calls] == ["prctl"]
+
+
+def test_main_arms_parent_death_signal_before_popen(
+        tmp_path, fake_nvml, _neutralize_real_parent_arm, monkeypatch):
+    order: list[str] = []
+
+    def _arm(libc=None, *, _getppid=None):
+        order.append("arm")
+
+    monkeypatch.setattr(gpu_sampler, "arm_parent_death_signal", _arm)
+    fake_nvml([14 * _MB, _GB])
+    real_popen = gpu_sampler.subprocess.Popen
+
+    def _spying_popen(args, **kwargs):
+        order.append("popen")
+        return real_popen(args, **kwargs)
+
+    monkeypatch.setattr(gpu_sampler.subprocess, "Popen", _spying_popen)
+    sidecar = tmp_path / "vram_peak.json"
+    rc = _run(sidecar, "import time; time.sleep(0.15)")
+    assert rc == 0
+    # wrapper 父侧 arm 严格先于子进程 Popen（失败时绝不能已启动 batch）。
+    assert "arm" in order and "popen" in order
+    assert order.index("arm") < order.index("popen")
+    assert json.loads(sidecar.read_text())["vram_peak_gb"] > 0
+
+
+def test_main_parent_arm_failure_exits127_before_nvml_popen_sidecar(
+        tmp_path, fake_nvml, _neutralize_real_parent_arm, monkeypatch):
+    def _boom(libc=None, *, _getppid=None):
+        raise SystemExit(gpu_sampler.EXIT_NOT_FOUND)
+
+    monkeypatch.setattr(gpu_sampler, "arm_parent_death_signal", _boom)
+    fake = fake_nvml([14 * _MB, _GB])
+
+    def _no_popen(*a, **k):
+        raise AssertionError("父侧 arm 失败后禁止启动子进程")
+
+    monkeypatch.setattr(gpu_sampler.subprocess, "Popen", _no_popen)
+    sidecar = tmp_path / "vram_peak.json"
+    # SystemExit 不在 main() 内被吞：生产经 __main__ 顶层转为进程退出码 127。
+    with pytest.raises(SystemExit) as exc:
+        _run(sidecar, "import time; time.sleep(1)")
+    assert exc.value.code == gpu_sampler.EXIT_NOT_FOUND == 127
+    assert not sidecar.exists()
+    # arm 位置先于 nvmlInit：仪器未初始化、子进程未启动。
+    assert fake.inited is False
 
 
 # ---------------------------------------------------------------------------
