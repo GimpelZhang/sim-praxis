@@ -451,7 +451,21 @@ def test_run_level_coding_cap_3(tmp_path, monkeypatch):
     assert spec.billing_task == 6 and spec.batch_id == "T6-B1-coding"
     assert spec.run_timeout_s == 2400
     assert spec.workdir.parent == task6_mod.phase2_runs_root() / "task6_ascent"
-    v2_target = Path(spec.cmd[1])
+    # 同法 VRAM wrapper 前缀：[VENV_PY, <repo 绝对 gpu_sampler.py>,
+    # --sidecar, workdir/vram_peak.json, --, <原 V2 batch cmd 9 项>]。
+    # wrapper 必须是仓库内现有文件（runner cwd=workdir，以绝对路径启动）。
+    sampler = Path(spec.cmd[1])
+    assert spec.cmd[0] == task8.VENV_PY
+    assert sampler == task6_mod.GPU_SAMPLER
+    assert sampler.is_absolute() and sampler.is_file()
+    assert sampler == (task6_mod.REPO_ROOT
+                       / "orchestrator" / "common" / "gpu_sampler.py")
+    assert spec.cmd[2:4] == [
+        "--sidecar", str(spec.workdir / task6_mod.VRAM_NAME)]
+    assert spec.cmd[4] == "--"
+    child_cmd = spec.cmd[5:]
+    assert len(child_cmd) == 9
+    v2_target = Path(child_cmd[1])
     assert v2_target.name == task6_mod.V2_ENTRYPOINT
     # 出生时 V2 入口不在 workdir：引擎层/resolver 只 stage 冻结 V1 基线。
     assert not v2_target.exists()
@@ -461,11 +475,11 @@ def test_run_level_coding_cap_3(tmp_path, monkeypatch):
         task8.ENGINE_SCENARIOS["genesis"]["solution_id"])
     assert v1_target.read_bytes() == (
         manifest.solution_dir / "genesis_humanoid_dr.py").read_bytes()
-    assert spec.cmd[0] == task8.VENV_PY
-    assert spec.cmd[2:] == ["batch", "--out-dir", str(spec.workdir),
-                            "--seeds", "3",
-                            "--calibration-json",
-                            str(spec.workdir / task8.CALIBRATION_NAME)]
+    # `--` 后恰为原 V2 cmd 9 参数序列（一字不增删，仅前置 wrapper）。
+    assert child_cmd == [task8.VENV_PY, str(v2_target), "batch",
+                         "--out-dir", str(spec.workdir),
+                         "--seeds", "3", "--calibration-json",
+                         str(spec.workdir / task8.CALIBRATION_NAME)]
     assert spec.env_extra["PYOPENGL_PLATFORM"] == "egl"
 
     # runner 新文件补丁力学（coding_debug 唯一出生路径）：空文件 old=""
@@ -482,7 +496,10 @@ def test_run_level_coding_cap_3(tmp_path, monkeypatch):
     assert spec2.run_idx == 2
     assert spec2.max_coding_rounds == 3
     assert spec2.workdir != spec.workdir
-    assert not Path(spec2.cmd[1]).exists()
+    # 新 run 同样包 wrapper；`--` 后的 V2 入口仍 absent（补丁不继承）。
+    assert Path(spec2.cmd[1]) == task6_mod.GPU_SAMPLER
+    assert spec2.cmd[4] == "--" and len(spec2.cmd[5:]) == 9
+    assert not Path(spec2.cmd[spec2.cmd.index("--") + 2]).exists()
     assert spec2.gate2_notes == "DR 应力端再外扩"
 
     # 守卫：非 genesis / 缺 v1_archive 都 fail-closed，绝不退化成普通 task8。

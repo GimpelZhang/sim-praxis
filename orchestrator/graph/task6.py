@@ -34,9 +34,11 @@
   个组级指标按 normal/ice_nominal/ice_dr 三臂**算术均值**汇总到 batch 标量；
 - solve_wallclock_s 取 9 行 CSV ``sim_wall_s`` 算术均值（缺列/空值/非有限
   fail-closed，绝不伪造）；
-- vram_peak_gb 取显式 sidecar（V2=batch workdir/vram_peak.json，由出生的
-  V2 脚本随批写出；V1=本线程 evolution_sources 目录下操作员预置的
-  v1_vram_peak.json），缺失即 GraphStateError，绝不编造、不拿别的量顶替。
+- vram_peak_gb 取显式 sidecar（V2=batch workdir/vram_peak.json，由同法
+  gpu_sampler wrapper 设备级采样随批落盘，不信 V2 脚本自报；V1=本线程
+  evolution_sources 目录下 scripts/phase2/provision_v1_vram.py 以同一 wrapper
+  预置的 v1_vram_peak.json，冻结 V1 本体零仪器化），缺失即 GraphStateError，
+  绝不编造、不拿别的量顶替。
 """
 from __future__ import annotations
 
@@ -73,6 +75,13 @@ from orchestrator.solutions import SolutionError, resolve_solution
 
 TASK = 6
 
+# 同法 VRAM 仪器（锁内适配：计划只规定 sidecar 契约，未规定仪器形态）：
+# V2 batch 与 V1 冻结回放（scripts/phase2/provision_v1_vram.py）由同一
+# wrapper 设备级 pynvml 轮询，verdict 只信设备实测、不信脚本自报；冻结 V1
+# 本体零仪器化。runner cwd=workdir，wrapper 以绝对路径启动且自包含。
+REPO_ROOT = Path(__file__).resolve().parents[2]
+GPU_SAMPLER = REPO_ROOT / "orchestrator" / "common" / "gpu_sampler.py"
+
 # 计划 L193：ascent run 的 coding_debug 上限 run 级收窄到 3（全局
 # MAX_CODING_ROUNDS=5 不动；runner 零改动，只消费 RunSpec.max_coding_rounds）。
 RUN_CODING_CAP = 3
@@ -82,8 +91,9 @@ RUN_CODING_CAP = 3
 # 由出生测试 test_v2_track_script_telemetry_contract 以 git ls-files 钉死。
 V2_ENTRYPOINT = "genesis_humanoid_dr_v2.py"
 
-# V2 batch 随批机产扩展件（与 summary.json/CSV 同一信任边界：不信脚本
-# outcomes，但这些是结构化交付件，缺件 fail-closed，接缝不代笔）。
+# V2 batch 随批扩展件（与 summary.json/CSV 同一信任边界：缺件 fail-closed，
+# 接缝不代笔）。innovation.json 是脚本随批机产结构化交付件；vram_peak.json
+# 由 gpu_sampler wrapper 设备级采样写出（不信脚本自报，见 GPU_SAMPLER）。
 INNOVATION_NAME = "innovation.json"
 VRAM_NAME = "vram_peak.json"
 VRAM_KEY = "vram_peak_gb"
@@ -188,10 +198,16 @@ def make_spec_factory(thread_id: str, coding_batch: str,
         }
         env_extra.update(scenario["env"])
 
+        # VRAM sidecar 由 wrapper 设备级采样落 workdir/vram_peak.json（两侧
+        # 同包裹、同设备口径；V2 脚本不自报显存）。wrapper 让子进程独立成组
+        # 并转发 SIGTERM/SIGINT：runner 超时（capture_output 包裹）杀 wrapper
+        # 时整组回收，不留孤儿 Genesis 进程继续占 GPU；wrapper 透传子进程 rc。
         return RunSpec(
             thread_id=thread_id,
             workdir=workdir,
-            cmd=[VENV_PY, str(v2_target), "batch",
+            cmd=[VENV_PY, str(GPU_SAMPLER),
+                 "--sidecar", str(workdir / VRAM_NAME), "--",
+                 VENV_PY, str(v2_target), "batch",
                  "--out-dir", str(workdir),
                  "--seeds", str(SEEDS),
                  "--calibration-json", str(cal)],
