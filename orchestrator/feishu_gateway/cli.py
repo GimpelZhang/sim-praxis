@@ -20,7 +20,18 @@ from .store import PendingStore, default_db_path
 
 
 def _ask_decision(gate: int, choice_default: int) -> dict:
-    """stdin 交互：y/n；reject 意见非空否则重问。返回落库参数。"""
+    """stdin 交互：y/n；批准/打回意见均非空否则重问。返回落库参数。
+
+    minor-1（reviewer 裁定，首个付费 Task6 run 前必修；锁内适配：全任务
+    break-glass 工具统一强化，非 Task6 专用分叉）：批准也必须留真人原文。
+    空批准会先以 source="cli" 落 DECIDED（决策行不可改写），随后 Task6
+    _opinion_payload 对空 human_notes fail-loud 永久抛错——Gate 楔死，
+    Gate2 位置时付费 V2 batch 已花完且不可恢复；Task7/8 紧急裁决同样
+    需要真人原文。行为变化面仅本交互式 --cli decide 工具：卡片通道与
+    生产图一字不动（M2 flag 语义不变，Task7/8 卡片空批准照旧允许）。
+    EOF 时 input() 抛 EOFError：mark_decided 不可达，进程非零、行保
+    PENDING。
+    """
     while True:
         ans = input("请输入决策（y=批准，n=打回并提出意见）[y/n]：").strip().lower()
         if ans in ("y", "n"):
@@ -28,13 +39,20 @@ def _ask_decision(gate: int, choice_default: int) -> dict:
         print("只能输入 y 或 n，请重试。")
     if ans == "y":
         choice = choice_default if gate == 1 else None
-        return {"decision": "approve", "choice": choice, "human_notes": ""}
+        decision = "approve"
+        prompt = "请输入批准意见（必填，会原样进入审批记录/演化志，空输入将重问）：\n> "
+        empty_hint = "批准也必须填写意见。"
+    else:
+        choice = None
+        decision = "reject_with_comments"
+        prompt = "请输入打回意见（必填，会原样带回重做，空输入将重问）：\n> "
+        empty_hint = "打回必须填写意见。"
     while True:
-        note = input("请输入打回意见（必填，会原样带回重做，空输入将重问）：\n> ").strip()
+        note = input(prompt).strip()
         if note:
-            return {"decision": "reject_with_comments", "choice": None,
+            return {"decision": decision, "choice": choice,
                     "human_notes": note}
-        print("打回必须填写意见。")
+        print(empty_hint)
 
 
 def _cmd_decide(args: argparse.Namespace) -> int:

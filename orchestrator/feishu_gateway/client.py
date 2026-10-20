@@ -131,8 +131,8 @@ class FeishuGateway:
         self._on_p2p_text = on_p2p_text
         self._on_card_action = on_card_action
         # M2：Task6 生产图显式打开——卡片空批准一律 toast 拒绝、不落决策；
-        # 默认 False 保证 Task7/8 既有路径逐字节不变。
-        self.require_approval_notes = bool(require_approval_notes)
+        # 默认 False 保 Task7/8 逐字节不变。nit-1：严格 is True 归一（堵 "false"/1 等真值非 bool 误开启）。
+        self.require_approval_notes = require_approval_notes is True
 
         self._token: "str | None" = None
         self._token_expire_at = 0.0

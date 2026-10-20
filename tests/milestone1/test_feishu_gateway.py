@@ -276,6 +276,16 @@ def test_m2_get_gateway_forwards_flag(tmp_path, monkeypatch):
         assert g2.require_approval_notes is True
     finally:
         g2.close()
+    # nit-1：严格归一（is True）——真值非 bool（字符串 "false"、数字 1）
+    # 不得被误当开启，堵 env/配置层字符串传参陷阱；现存调用方只传 bool
+    # 字面量，行为不变。
+    for i, bad in enumerate(("false", "true", 1, 2, "1")):
+        gx = client_mod.get_gateway({**base, "require_approval_notes": bad,
+                                     "db_path": str(tmp_path / f"bad_{i}.db")})
+        try:
+            assert gx.require_approval_notes is False
+        finally:
+            gx.close()
 
 
 # ---------- ③ P2P 文本（H-1）：回复定位 / 窗内合并 / 窗外忽略 /
