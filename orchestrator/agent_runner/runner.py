@@ -51,6 +51,8 @@ TEMPERATURE = 0.1
 DEFAULT_CODING_TIMEOUT_S = 120
 CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（机器校验，短于即整轮失败）
 CHUNK_MIN_ASSEMBLED_CHARS = 12000   # 4 块拼接总长下限，防模型逃单块/碎块
+CHUNK_MAX_CODE_CHARS = 24000  # 单块 code 硬上限（seq48：冗长产出吃满 16384 output 被截断）
+# 16384 output token 还要容纳 JSON 结构与转义，24000 字符约留足余量；超长即整轮失败。
 TB_TAIL_CHARS = 4096           # traceback 尾部 ≤4KB
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096
@@ -424,6 +426,10 @@ def _extract_chunk(raw: str, *, target: str, index: int, total: int) -> str:
     if len(code) < CHUNK_MIN_CODE_CHARS:
         raise ChunkBirthError(
             f"块 {index} code 长度 {len(code)} < {CHUNK_MIN_CODE_CHARS} chars")
+    if len(code) > CHUNK_MAX_CODE_CHARS:
+        raise ChunkBirthError(
+            f"块 {index} code 长度 {len(code)} > {CHUNK_MAX_CODE_CHARS} chars"
+            "（输出预算超限；精简注释、禁止复述合同/骨架/提案）")
     return code
 
 
@@ -539,6 +545,9 @@ def _chunk_section(ctx: "ChunkPromptContext") -> str:
         f"total 必须是 {n}；",
         "- code 只含本块 Python 原文：无 markdown 围栏、无解释；非空且"
         f"不少于 {CHUNK_MIN_CODE_CHARS} 字符；",
+        f"- code 最长不超过 {CHUNK_MAX_CODE_CHARS} 字符（含注释；16384 output "
+        "token 还要容纳 JSON 结构与转义）；超限必然在闭合前被截断、整轮失败。"
+        "注释精简，禁止复述合同/提案/骨架原文。",
         f"- 全部 {n} 块拼接后须为完整可运行文件（总长不少于 "
         f"{CHUNK_MIN_ASSEMBLED_CHARS} 字符），块边界不得重叠。",
         "",

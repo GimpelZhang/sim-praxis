@@ -683,7 +683,10 @@ CALL_CACHE_ALLOWLIST = {
     # Task6 拆块出生（seq42-47 锁内适配，用户 2026-10-20 裁决）：ChunkSpec/
     # ChunkPromptContext/RunSpec 新字段 + 逐块校验/渲染模块级代码插入后纯位移
     # （421→632）；拆块路径复用同一 _replay_cache 构造点，无新增落点。
-    ("orchestrator/agent_runner/runner.py", 632),
+    # seq48 生产首验块0 冗长截断：CHUNK_MAX_CODE_CHARS 常量+机器校验+合同
+    # 提示注入（+7），复审 NIT 超长 raise 折行（再 +1）后纯位移（632→641，
+    # +8 行全在构造点之前），仍无新增落点。
+    ("orchestrator/agent_runner/runner.py", 641),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移

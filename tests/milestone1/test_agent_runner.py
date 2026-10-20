@@ -29,6 +29,7 @@ from orchestrator.agent_runner import (
     agent_run_seam,
 )
 from orchestrator.agent_runner.runner import (
+    CHUNK_MAX_CODE_CHARS,
     CHUNK_MIN_ASSEMBLED_CHARS,
     CHUNK_MIN_CODE_CHARS,
     DEFAULT_CODING_TIMEOUT_S,
@@ -598,6 +599,7 @@ def test_08_chunk_section_render_index_and_prior():
     assert '"index":0' in u0 and "index 必须是 0" in u0
     assert "total 必须是 4" in u0
     assert str(CHUNK_MIN_CODE_CHARS) in u0
+    assert str(CHUNK_MAX_CODE_CHARS) in u0
     assert str(CHUNK_MIN_ASSEMBLED_CHARS) in u0
 
     prior = "PRIOR0\nPRIOR1\n"
@@ -657,6 +659,12 @@ def test_10_extract_chunk_machine_checks():
     expect(_chunk_envelope(good, 1, path="evil.py"), 1, "path 不符")
     expect(_chunk_envelope(good, 2, total=3), 2, "total 不符")
     expect(_chunk_envelope("x = 1\n", 0), 0, "code 长度")
+    too_long = "x = 1\n" + "#" * (CHUNK_MAX_CODE_CHARS + 1 - len("x = 1\n"))
+    assert len(too_long) == CHUNK_MAX_CODE_CHARS + 1
+    with pytest.raises(ChunkBirthError, match="code 长度") as excinfo:
+        _extract_chunk(_chunk_envelope(too_long, 0),
+                       target=_CHUNK_TARGET, index=0, total=4)
+    assert ">" in str(excinfo.value)
     expect(_chunk_envelope("```python\n" + good, 0), 0, "markdown 围栏")
     expect("not json at all {", 0, "非合法 JSON")
     # bool index（json true）必须按类型拒绝（bool-is-int 坑）
