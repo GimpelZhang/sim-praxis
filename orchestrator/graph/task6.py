@@ -39,6 +39,17 @@
   evolution_sources 目录下 scripts/phase2/provision_v1_vram.py 以同一 wrapper
   预置的 v1_vram_peak.json，冻结 V1 本体零仪器化），缺失即 GraphStateError，
   绝不编造、不拿别的量顶替。
+
+锁内适配（计划 v1.2 外；seq42-47 能力矩阵 + 用户 2026-10-20 14:1xZ 裁决
+「拆块交付（改引擎流程）」）：seq43/45/46/47 实证三模型在
+Anthropic-Messages shim 上对「单次出生 600-900 行 V2」同形失败（唯一
+thinking block 吃满 16384 output、0 text），而小任务可收敛。故 V2 出生轮
+的 coding 调用改为 4 次顺序 JSON 拆块出生（ChunkSpec，n 固定来自规格、
+禁止模型自报），runner 本地逐块校验、拼接后 ast/重名/总长三验，仅以单个
+old="" 补丁经既有 _parse_and_apply 出生；任一坏块整轮失败、无半成品落盘。
+合同/骨架文本常量在 task6_v2_prompts.py（纯描述性契约文本，硬规则 3：引擎
+层不携带可运行解题脚本）。RUN_CODING_CAP=3 不变；非出生修补轮与其他 task
+字节级旧行为。
 """
 from __future__ import annotations
 
@@ -49,12 +60,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from orchestrator.agent_runner.runner import RunSpec
+from orchestrator.agent_runner.runner import ChunkSpec, RunSpec
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.common.runtime_paths import phase2_root, phase2_runs_root
 from orchestrator.graph import task8
 from orchestrator.graph.ascent import render_v1_metrics
 from orchestrator.graph.nodes import GraphStateError
+from orchestrator.graph.task6_v2_prompts import (
+    V2_CHUNK_TITLES,
+    V2_CONTRACT,
+    V2_SKELETON,
+    build_chunk_boundary,
+)
 from orchestrator.graph.task8 import (
     BATCH_TIMEOUT_S,
     CALIBRATION_NAME,
@@ -85,6 +102,15 @@ GPU_SAMPLER = REPO_ROOT / "orchestrator" / "common" / "gpu_sampler.py"
 # 计划 L193：ascent run 的 coding_debug 上限 run 级收窄到 3（全局
 # MAX_CODING_ROUNDS=5 不动；runner 零改动，只消费 RunSpec.max_coding_rounds）。
 RUN_CODING_CAP = 3
+
+# 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+# seq43/45/46/47 实证三模型在 Anthropic-Messages shim 上「单次出生 600-900
+# 行 V2」同形失败——唯一 thinking block 吃满 16384 output、0 text；同款模型
+# 小任务可收敛（macro seq29、seq42 8KB 易任务）。拆 4 个顺序小编排调用后
+# 每块创造量小，16384 输出余量给思考通道；单调用含合同/骨架注入的长流式
+# 响应，网关超时由默认 120s 放宽到 600s（与探针超时口径一致）。
+CODING_MAX_TOKENS_V2 = 16384
+CODING_TIMEOUT_S_V2 = 600
 
 # V2 解题脚本文件名：只允许出生在付费 workdir（runner 新文件补丁）。
 # 引擎仓（tests 合成 fixture 之外）任何位置携带该文件即三层分离违规，
@@ -181,6 +207,32 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             raise GraphStateError(
                 f"Task6 V1 基线入口 stage 后缺失：{staged.entrypoint}")
 
+        # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+        # 仅 V2 出生轮（target 不存在）挂 ChunkSpec；同 run 内出生后的修补轮
+        # 与 Gate2 打回后的**新 run 目录**（target 仍 absent）由 runner/工厂
+        # 各自按磁盘现状选路。chosen 必须是真实提案（state["chosen"] 裸取，
+        # 缺失即 KeyError fail-closed，禁止 {} 静默装配）；骨架 sha 对 staged
+        # V1 入口现算（前 16 位），每轮工厂现算、不写 checkpoint 新字段。
+        chunked = None
+        if not v2_target.exists():
+            chosen_doc = state["chosen"]
+            v1_sha16 = hashlib.sha256(
+                staged.entrypoint.read_bytes()).hexdigest()[:16]
+            skeleton_text = V2_SKELETON.replace("@@SHA@@", v1_sha16)
+            chunked = ChunkSpec(
+                target_path=V2_ENTRYPOINT,
+                chunk_count=4,
+                chunk_titles=V2_CHUNK_TITLES,
+                per_call_sections=(
+                    ("V2 升阶任务合同", V2_CONTRACT),
+                    ("已批准 macro 提案",
+                     json.dumps(chosen_doc, ensure_ascii=False, indent=2)),
+                    ("V1 结构骨架", skeleton_text),
+                ),
+                chunk_boundaries=tuple(
+                    build_chunk_boundary(i) for i in range(len(V2_CHUNK_TITLES))),
+            )
+
         versions = workdir / "versions.txt"
         if not versions.exists():
             atomic_write_text(versions, task8._installed_versions())
@@ -225,6 +277,13 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             cover_relpath=COVER_NAME,
             manifest_relpath=MANIFEST_NAME,
             max_coding_rounds=RUN_CODING_CAP,
+            # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+            # Task6 V2 coding 调用统一 16384 输出余量/600s 超时（出生拆块与出生后
+            # 修补轮同口径）；chunked_birth 仅出生轮非 None，修补轮由 runner 走
+            # 既有单补丁路径。
+            coding_max_tokens=CODING_MAX_TOKENS_V2,
+            coding_timeout_s=CODING_TIMEOUT_S_V2,
+            chunked_birth=chunked,
         )
 
     return factory

@@ -680,7 +680,10 @@ def test_s10_text_block_trust_only_typed_text_blocks():
 CALL_CACHE_ALLOWLIST = {
     # Phase 2 Task2：RunSpec.max_coding_rounds 字段+注释纯位移（417→421），
     # 无新增 CallReplay 落点。
-    ("orchestrator/agent_runner/runner.py", 421),
+    # Task6 拆块出生（seq42-47 锁内适配，用户 2026-10-20 裁决）：ChunkSpec/
+    # ChunkPromptContext/RunSpec 新字段 + 逐块校验/渲染模块级代码插入后纯位移
+    # （421→632）；拆块路径复用同一 _replay_cache 构造点，无新增落点。
+    ("orchestrator/agent_runner/runner.py", 632),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移

@@ -14,11 +14,13 @@
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
 import subprocess
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -43,6 +45,12 @@ TOP_K = 6
 MAX_CODING_ROUNDS = 5          # D10 v1.1：每 run 最多 5 次 coding_debug
 MAX_TOKENS = 8192
 TEMPERATURE = 0.1
+# 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+# Task6 V2 出生拆 4 个顺序小编排调用；网关 call 的 timeout 旧路径隐式吃
+# router 默认 120，现经 RunSpec 显式化（默认 120，行为不变）。
+DEFAULT_CODING_TIMEOUT_S = 120
+CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（机器校验，短于即整轮失败）
+CHUNK_MIN_ASSEMBLED_CHARS = 12000   # 4 块拼接总长下限，防模型逃单块/碎块
 TB_TAIL_CHARS = 4096           # traceback 尾部 ≤4KB
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096
@@ -67,6 +75,68 @@ class CodingLimitError(GatewayPausedError):
 
 class PatchSafetyError(RuntimeError):
     """补丁越界或无法安全应用：拒绝且不重试（计划 L505 ②）。"""
+
+
+class ChunkBirthError(RuntimeError):
+    """拆块出生轮本地校验失败：整轮作废、不半成品落盘，主循环进入下一轮。
+
+    锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+    与 CodingLimitError 同属 RuntimeError 族的「不触网失败信号」——失败发生
+    在本地 JSON/ast 校验，不产生新的网关调用。区别在生命周期：本异常在 run
+    循环内被捕获后，走既有「失败→再执行→下一 coding 轮」机制，仍受
+    RunSpec.max_coding_rounds 约束；它不是 CodingLimitError 那种结案硬停。
+    消息必须含块号与机器原因（下一轮 prompt 的失败反馈段原样带上）。
+    """
+
+
+@dataclass(frozen=True)
+class ChunkSpec:
+    """拆块出生规格。锁内适配（计划 v1.2 外，seq42-47 拆块出生，
+    用户 2026-10-20 裁决）：chunk_count 固定来自工厂（Task6=4），禁止运行时
+    由模型自报块数（防模型逃单块）。
+
+    chunk_boundaries 是工单四字段外的最小增补（同条锁内适配）：runner 在
+    底层（不得反向 import orchestrator.graph），渲染「本块边界/行数预算」
+    所需文本只能经规格从工厂流入，故与 chunk_titles 同形并列，构造即校长度。
+    """
+
+    target_path: str
+    chunk_count: int                                  # Task6=4
+    chunk_titles: tuple[str, ...]                     # 长度=chunk_count
+    per_call_sections: tuple[tuple[str, str], ...]    # 合同/提案/骨架，每 call 都带
+    chunk_boundaries: tuple[str, ...]                 # 每块允许章节+行数预算文案
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target_path, str) or not self.target_path.strip():
+            raise ValueError("ChunkSpec.target_path 必须是非空字符串")
+        if not isinstance(self.chunk_count, int) \
+                or isinstance(self.chunk_count, bool) or self.chunk_count < 1:
+            raise ValueError(f"ChunkSpec.chunk_count 非法：{self.chunk_count!r}")
+        for name in ("chunk_titles", "chunk_boundaries"):
+            val = getattr(self, name)
+            if (not isinstance(val, tuple) or len(val) != self.chunk_count
+                    or not all(isinstance(x, str) and x.strip() for x in val)):
+                raise ValueError(
+                    f"ChunkSpec.{name} 必须是 {self.chunk_count} 个非空字符串")
+        if not isinstance(self.per_call_sections, tuple) \
+                or not all(
+                    isinstance(s, tuple) and len(s) == 2
+                    and all(isinstance(x, str) for x in s)
+                    for s in self.per_call_sections):
+            raise ValueError("ChunkSpec.per_call_sections 必须是 (标题, 正文) 元组")
+
+
+@dataclass(frozen=True)
+class ChunkPromptContext:
+    """单次拆块调用的渲染输入（runner 循环内按块构造，不进任何持久状态）。"""
+
+    index: int
+    total: int
+    target_path: str
+    titles: tuple[str, ...]
+    boundaries: tuple[str, ...]
+    previous_code: str = ""
+    round_feedback: str = ""
 
 
 @dataclass
@@ -94,6 +164,14 @@ class RunSpec:
     # 与 Phase 1 行为逐值一致。Task6 升阶 run 工厂将显式传 3（run 级收窄，
     # 见计划 L193），本任务不改 Task7/8 既有工厂。
     max_coding_rounds: int = MAX_CODING_ROUNDS
+    # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+    # 以下四字段默认值保证 Task7/8 与既有流程字节级旧行为——coding 调用仍
+    # 8192 tokens/120s（120 与 router.call 默认值同值，旧路径只是隐式吃默认），
+    # 无额外 prompt 段、无拆块。Task6 V2 出生轮显式传 16384/600 + ChunkSpec。
+    coding_max_tokens: int = MAX_TOKENS
+    coding_timeout_s: int = DEFAULT_CODING_TIMEOUT_S
+    extra_prompt_sections: tuple[tuple[str, str], ...] = ()
+    chunked_birth: "ChunkSpec | None" = None
 
 
 @dataclass
@@ -309,6 +387,71 @@ def _json_object(raw: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+# 拆块出生：逐块 JSON 机器校验 + 拼接整体校验（锁内适配，见 ChunkSpec）
+# ---------------------------------------------------------------------------
+
+def _extract_chunk(raw: str, *, target: str, index: int, total: int) -> str:
+    """解析单块响应并机器校验；任何不符抛 ChunkBirthError（块号+机器原因）。"""
+    try:
+        obj = _json_object(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise ChunkBirthError(
+            f"块 {index} 返回非合法 JSON：{type(exc).__name__}: "
+            f"{str(exc)[:160]}") from None
+    if not isinstance(obj, dict):
+        raise ChunkBirthError(
+            f"块 {index} 顶层不是 JSON 对象：{type(obj).__name__}")
+    chk = obj.get("chunk")
+    if not isinstance(chk, dict):
+        raise ChunkBirthError(
+            f"块 {index} 缺 chunk 对象（收到 {type(chk).__name__}）")
+    if chk.get("path") != target:
+        raise ChunkBirthError(
+            f"块 {index} path 不符：收到 {chk.get('path')!r}，应为 {target!r}")
+    # bool 是 int 子类，index/total 用 type() is int 严口径（与缓存 usage 同纪律）
+    if type(chk.get("index")) is not int or chk.get("index") != index:
+        raise ChunkBirthError(
+            f"块 {index} index 不符：收到 {chk.get('index')!r}，应为 {index}")
+    if type(chk.get("total")) is not int or chk.get("total") != total:
+        raise ChunkBirthError(
+            f"块 {index} total 不符：收到 {chk.get('total')!r}，应为 {total}")
+    code = chk.get("code")
+    if not isinstance(code, str) or not code:
+        raise ChunkBirthError(f"块 {index} code 必须是非空字符串")
+    if code.strip().startswith("```"):
+        raise ChunkBirthError(
+            f"块 {index} code 去首尾空白后是 markdown 围栏（禁止）")
+    if len(code) < CHUNK_MIN_CODE_CHARS:
+        raise ChunkBirthError(
+            f"块 {index} code 长度 {len(code)} < {CHUNK_MIN_CODE_CHARS} chars")
+    return code
+
+
+def _validate_assembled_chunks(code: str) -> None:
+    """拼接整体校验：ast 可解析、顶层无重复 def/class 名、总长 ≥ 下限。"""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        raise ChunkBirthError(
+            f"拼接源码 ast.parse 失败（行 {exc.lineno} 列 {exc.offset}）："
+            f"{type(exc).__name__}: {str(exc)[:160]}") from None
+    seen: set[str] = set()
+    dups: list[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in seen and node.name not in dups:
+                dups.append(node.name)
+            seen.add(node.name)
+    if dups:
+        raise ChunkBirthError(
+            "拼接源码顶层重复 def/class 名（硬失败）：" + ", ".join(dups))
+    if len(code) < CHUNK_MIN_ASSEMBLED_CHARS:
+        raise ChunkBirthError(
+            f"拼接总长 {len(code)} < {CHUNK_MIN_ASSEMBLED_CHARS} chars"
+            "（防碎块/逃单块）")
+
+
+# ---------------------------------------------------------------------------
 # prompt
 # ---------------------------------------------------------------------------
 
@@ -347,10 +490,70 @@ def _learning_block(learning_hits: "list[dict] | None") -> str:
     return "\n\n".join(lines)
 
 
+def _chunk_section(ctx: "ChunkPromptContext") -> str:
+    """渲染《拆块交付（第 i+1/n 块）》段（锁内适配，见 ChunkSpec 注释）。
+
+    锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+    清单（编号+标题+行数预算/边界）、本块边界、前序块逐字定稿围栏、上一轮
+    机器失败反馈（仅该轮块 0）、严格 chunk JSON 交付格式五部分。
+    """
+    i, n = ctx.index, ctx.total
+    lines = [f"## 拆块交付（第 {i + 1}/{n} 块）", "",
+             f"目标文件分 {n} 块顺序出生，你正在交付第 {i + 1}/{n} 块；"
+             "本次只允许产出这一块。", "",
+             "### 交付块清单（编号、标题、行数预算与边界）"]
+    for j, title in enumerate(ctx.titles):
+        lines.append(f"{j + 1}. 《{title}》")
+        lines.append(ctx.boundaries[j])
+    lines += [
+        "",
+        "### 本块边界（只允许写的章节）",
+        f"你本次只能产出第 {i + 1}/{n} 块《{ctx.titles[i]}》："
+        f"{ctx.boundaries[i]}",
+        "严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。",
+    ]
+    if ctx.previous_code:
+        lines += [
+            "",
+            "### 前序已定稿块（逐字拼接文本，已最终定稿，禁止重复/改动）",
+            f"以下是前 {i} 块拼接后的逐字定稿，你的 code 会被直接拼在其后；"
+            "拼接结果必须是合法 Python：不得重复其中 import/常量/函数，"
+            "不得改动或重排其中任何字符。",
+            "```python",
+            ctx.previous_code,
+            "```",
+        ]
+    if ctx.round_feedback:
+        lines += [
+            "",
+            "### 上一轮拆块交付失败反馈（机器原因，本轮必须避免）",
+            ctx.round_feedback,
+        ]
+    lines += [
+        "",
+        "### 交付格式（严格 JSON）",
+        "只允许输出一个 JSON 对象，JSON 外不得有任何文字、解释或 markdown 围栏：",
+        '{"chunk":{"path":"' + ctx.target_path + '","index":' + str(i)
+        + ',"total":' + str(n) + ',"code":"<本块 Python 原文>"}}',
+        f'- path 必须逐字等于 "{ctx.target_path}"；index 必须是 {i}；'
+        f"total 必须是 {n}；",
+        "- code 只含本块 Python 原文：无 markdown 围栏、无解释；非空且"
+        f"不少于 {CHUNK_MIN_CODE_CHARS} 字符；",
+        f"- 全部 {n} 块拼接后须为完整可运行文件（总长不少于 "
+        f"{CHUNK_MIN_ASSEMBLED_CHARS} 字符），块边界不得重叠。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                     snippets: list[dict], hits: list[dict],
                     cmd: list[str],
-                    learning_hits: "list[dict] | None" = None
+                    learning_hits: "list[dict] | None" = None,
+                    # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户
+                    # 2026-10-20 裁决）：两新参 None/空时输出与旧版逐字一致。
+                    extra_sections: "tuple[tuple[str, str], ...] | None" = None,
+                    chunk_context: "ChunkPromptContext | None" = None,
                     ) -> list[dict[str, str]]:
     system = (
         "你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON："
@@ -373,8 +576,16 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
     if learning_text:
         learning_section = "\n\n## 实战演化避坑（phase1_learnings 真实行，逐字引用）\n" \
             + learning_text
+    # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+    # extra 段位于 notes 之后、失败命令之前；chunk 段紧随其后。两参数为空时
+    # 两个 block 都是 ""，拼接结果与旧模板逐字一致（字符级回归测试锁定）。
+    extra_block = ""
+    if extra_sections:
+        for title, body in extra_sections:
+            extra_block += f"## {title}\n{body}\n\n"
+    chunk_block = _chunk_section(chunk_context) + "\n" if chunk_context else ""
     user = (
-        f"{notes_block}"
+        f"{notes_block}{extra_block}{chunk_block}"
         "## 失败命令\n" + " ".join(cmd) + "\n\n"
         "## traceback / 日志尾部\n" + traceback_tail + "\n\n"
         "## 相关源文件片段（仅限运行工作目录）\n" + snippet_block + "\n\n"
@@ -505,6 +716,9 @@ class AgentRunner:
         timeline: list[dict] = []
         coding_calls = 0
         last_result: Optional[_ExecResult] = None
+        # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+        # 上一拆块轮的机器原因（含块号），原样进下一轮块 0 的失败反馈段。
+        chunk_feedback = ""
 
         while True:
             exec_no = len(timeline) + 1
@@ -528,9 +742,11 @@ class AgentRunner:
 
             # —— 失败路径：coding 调用用尽即结案，结构上不存在多一次调用 ——
             if coding_calls >= spec.max_coding_rounds:
-                return self._fail(root, spec, timeline, last_result,
-                                  reason=f"{spec.max_coding_rounds} 轮 coding_debug "
-                                         f"后仍失败（RunSpec 上限；默认 D10=5）")
+                reason = (f"{spec.max_coding_rounds} 轮 coding_debug "
+                          f"后仍失败（RunSpec 上限；默认 D10=5）")
+                if chunk_feedback:
+                    reason += f"；末次拆块出生机器原因：{chunk_feedback}"
+                return self._fail(root, spec, timeline, last_result, reason=reason)
 
             tail = _tb_tail(result)
             snippets = _collect_snippets(workdir, tail)
@@ -550,7 +766,8 @@ class AgentRunner:
             messages = _build_messages(
                 gate2_notes=spec.gate2_notes, traceback_tail=tail,
                 snippets=snippets, hits=hits, cmd=spec.cmd,
-                learning_hits=learning_hits or None)
+                learning_hits=learning_hits or None,
+                extra_sections=spec.extra_prompt_sections or None)
             # 硬规则1：runner 永不构造 image block（双保险，网关入口亦拒）
             for mm in messages:
                 if not isinstance(mm.get("content"), str):
@@ -559,69 +776,56 @@ class AgentRunner:
             coding_calls += 1
             stem = f"coding_round{coding_calls}"
             model = self.gateway.model_id(STAGE)
-            # L-1 调用级幂等：kill-9 落在实呼返回后、节点返回前，LangGraph
-            # 0.2.28 会整节点重放。稳定 key + 请求指纹命中即复用上次 raw，
-            # 不发网、不进 billing_context、不写 ledger，req/resp 证据不动；
-            # 补丁仍要重放应用（kill 可能落在补丁落盘前）。
-            cache = self._replay_cache(spec)
-            cache_key = (f"coding_{spec.thread_id}_r{spec.run_idx}"
-                         f"_round{coding_calls}")
-            # S-8：指纹并入 stage/model，同 prompt 跨阶段/跨模型不得错配重放。
-            # Task1：prompt JSON 串（sort_keys=True 沿用既有缓存口径）同时是
-            # 采纳遥测 prompt_sha256 的规范串——两 sha 同源可交叉对账。
-            prompt_json = json.dumps(messages, ensure_ascii=False,
-                                     sort_keys=True)
-            fp = request_fingerprint(
-                prompt_json,
-                None,
-                {"max_tokens": MAX_TOKENS, "temperature": TEMPERATURE},
-                stage=STAGE, model=model)
-            cached = cache.get(cache_key, fp) if cache is not None else None
-            if cached is not None:
-                raw = cached["raw"]
-                # Task1：重放不重复记采纳行——首呼已记，节点重放属同一逻辑
-                # 调用，与 0 ledger/0 证据覆盖语义对齐。
-            else:
-                req_ref = self._evidence(root, stem, "req", {
-                    # P2（Task0）：Phase 2 新证据行时间戳统一严格 UTC Z。
-                    "ts_iso": utc_now_iso_z(),
-                    "stage": STAGE, "model": model,
-                    "thread_id": spec.thread_id, "batch_id": spec.batch_id,
-                    "coding_round": coding_calls, "gate2_notes_present":
-                        bool(spec.gate2_notes and spec.gate2_notes.strip()),
-                    "messages": json.loads(redact(json.dumps(
-                        messages, ensure_ascii=False))),
-                })
-                # 锁内适配（计划 L501）：evidence 必须在 billing_context 进入之后
-                # 挂接——该上下文管理器每次创建新 BillingContext，提前 set 会被重置。
-                with billing_context(task=spec.billing_task, batch_id=spec.batch_id,
-                                     thread_id=spec.thread_id):
-                    set_current_evidence(req_ref)
-                    raw, _usage = self.gateway.call(
-                        STAGE, messages, max_tokens=MAX_TOKENS,
-                        temperature=TEMPERATURE)
-                self._evidence(root, stem, "resp",
-                               {"ok": True, "text": redact(raw)})
-                # 成功返回后才入缓存（异常路径不 put，按 miss 安全重付）。
-                usage_ints = self._usage_ints(_usage)
-                if cache is not None and usage_ints is not None:
-                    cache.put(cache_key, kind=STAGE, model=model, raw=raw,
-                              usage=usage_ints, fingerprint=fp)
-                # Task1 采纳遥测（QA-1 M1）：判定点在 call **成功返回后**、
-                # resp 证据写完、cache.put 之后。唯一条件=call 成功返回：
-                # 发网前失败/异常路径 0 采纳行，replay 分支不记；采纳不依赖
-                # 缓存写入（cache 为 None 或 fake 无计量 usage_ints=None 时
-                # 仍记——test_repair_fragments 的成功 fake 即此路径）。崩溃
-                # 只漏记不重记（安全方向）。prompt 文本逐字未改，
-                # prompt_sha256 仍是实际发送串，learning_text 取其在
-                # prompt_json 中的逐字出现形（JSON 转义形）。
-                if self.recall is not None:
-                    for hit in learning_hits:
-                        self.recall.record_adoption(
-                            thread_id=spec.thread_id, site="coding",
-                            learning_id=hit["id"], prompt_text=prompt_json,
-                            learning_text=prompt_embedded_text(
-                                str(hit.get("text", ""))))
+            cs = spec.chunked_birth
+            # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）
+            # run loop 分支：ChunkSpec 仅在目标文件**出生前**的轮次生效；
+            # 同 run 内文件已出生后的修补轮自动回到既有单次补丁路径（规格不
+            # 变，runner 按磁盘现状选路，绝不重复出生已存在文件）。
+            # 已知键漂移（评审 Minor 3，多付不错放）：出生占 round1 的 _chunk<i>
+            # 键，紧接的修补轮用无后缀 round2 键；若 kill-9 后整节点重放，工厂
+            # 见文件已存在→不挂 spec，重放按无后缀键查缓存 miss 会多重付一次，
+            # 但请求指纹含前序补丁串，跨规格绝不错放旧补丁（miss 安全方向）。
+            chunked_birth = cs is not None and not _validate_target(
+                Path(cs.target_path), workdir).is_file()
+            try:
+                if chunked_birth:
+                    codes = self._run_chunked_birth_round(
+                        spec=spec, root=root, model=model,
+                        coding_round=coding_calls, tail=tail, snippets=snippets,
+                        hits=hits, learning_hits=learning_hits,
+                        round_feedback=chunk_feedback)
+                    assembled = "".join(codes)
+                    # 拼接整体 ast/重名/总长机器校验通过后，才合成单个 old=""
+                    # 出生补丁；补丁应用路径一字不改（仍走 _parse_and_apply）。
+                    _validate_assembled_chunks(assembled)
+                    raw = json.dumps(
+                        {"patches": [{"path": cs.target_path, "old": "",
+                                      "new": assembled}]}, ensure_ascii=False)
+                else:
+                    # L-1 调用级幂等：kill-9 落在实呼返回后、节点返回前，
+                    # LangGraph 0.2.28 会整节点重放。稳定 key + 请求指纹命中
+                    # 即复用上次 raw，不发网、不进 billing_context、不写
+                    # ledger，req/resp 证据不动；补丁仍要重放应用。
+                    raw = self._cached_coding_call(
+                        spec=spec, root=root, stem=stem, model=model,
+                        messages=messages, coding_round=coding_calls,
+                        learning_hits=learning_hits,
+                        cache_key=(f"coding_{spec.thread_id}_r{spec.run_idx}"
+                                   f"_round{coding_calls}"),
+                        fp_extra={"max_tokens": spec.coding_max_tokens,
+                                  "temperature": TEMPERATURE},
+                        max_tokens=spec.coding_max_tokens,
+                        timeout=spec.coding_timeout_s)
+            except ChunkBirthError as exc:
+                # 任一块不符 → 整轮失败、不半成品落盘；机器原因进 decision
+                # 证据/时间线/下一轮块 0 反馈段，继续既有失败轮机制
+                # （RUN_CODING_CAP 不变），无任何 patch 应用、无文件出生。
+                self._evidence(root, stem, "decision",
+                               {"applied": [], "rejected": str(exc)})
+                timeline[-1]["coding_round"] = coding_calls
+                timeline[-1]["chunk_birth_rejected"] = str(exc)
+                chunk_feedback = str(exc)
+                continue
             try:
                 applied = _parse_and_apply(workdir, raw)
             except PatchSafetyError as exc:
@@ -635,6 +839,151 @@ class AgentRunner:
                            {"applied": applied, "rejected": None})
             timeline[-1]["coding_round"] = coding_calls
             timeline[-1]["applied"] = applied
+
+    # -- 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）--
+
+    def _cached_coding_call(self, *, spec: RunSpec, root: Path, stem: str,
+                            model: str, messages: list[dict],
+                            coding_round: int, learning_hits: list[dict],
+                            cache_key: str, fp_extra: dict,
+                            max_tokens: int, timeout: int,
+                            req_extra: "dict | None" = None,
+                            resp_payload: "Callable[[str], dict] | None" = None
+                            ) -> str:
+        """单次 coding 网关调用的缓存/证据/计费/采纳遥测收口（单次与拆块共用）。
+
+        命中调用级重放缓存：直接返回 raw，不发网、不进 billing_context、
+        不写 ledger、req/resp 证据不动。未命中：req 证据 → billing_context
+        内 set_current_evidence 后 call（锁内适配 L501：证据必须在上下文进入
+        之后挂接）→ resp 证据 → 成功返回后才入缓存 → 采纳遥测。
+        ``resp_payload`` 为拆块路径的校验器：返回 resp 证据 dict；它在本地
+        校验失败时可自写 reject resp 证据并抛 ChunkBirthError（不 put 缓存，
+        安全方向：重放按 miss 重新计费）。
+        """
+        cache = self._replay_cache(spec)
+        # S-8：指纹并入 stage/model；Task1：prompt JSON 规范串同时是采纳遥测
+        # prompt_sha256 的规范串——两 sha 同源可交叉对账。
+        prompt_json = json.dumps(messages, ensure_ascii=False, sort_keys=True)
+        fp = request_fingerprint(prompt_json, None, fp_extra,
+                                 stage=STAGE, model=model)
+        cached = cache.get(cache_key, fp) if cache is not None else None
+        if cached is not None:
+            # Task1：重放不重复记采纳行——首呼已记，节点重放属同一逻辑调用。
+            return cached["raw"]
+        req_doc = {
+            # P2（Task0）：Phase 2 新证据行时间戳统一严格 UTC Z。
+            "ts_iso": utc_now_iso_z(),
+            "stage": STAGE, "model": model,
+            "thread_id": spec.thread_id, "batch_id": spec.batch_id,
+            "coding_round": coding_round, "gate2_notes_present":
+                bool(spec.gate2_notes and spec.gate2_notes.strip()),
+            "messages": json.loads(redact(json.dumps(
+                messages, ensure_ascii=False))),
+        }
+        if req_extra:
+            req_doc.update(req_extra)
+        req_ref = self._evidence(root, stem, "req", req_doc)
+        # 锁内适配（计划 L501）：evidence 必须在 billing_context 进入之后
+        # 挂接——该上下文管理器每次创建新 BillingContext，提前 set 会被重置。
+        with billing_context(task=spec.billing_task, batch_id=spec.batch_id,
+                             thread_id=spec.thread_id):
+            set_current_evidence(req_ref)
+            raw, _usage = self.gateway.call(
+                STAGE, messages, max_tokens=max_tokens,
+                temperature=TEMPERATURE, timeout=timeout)
+        # Task1 采纳遥测（QA-1 M1）：唯一条件=call 成功返回；replay 不记，
+        # 发网前失败 0 采纳行。必须先于 resp_payload 本地校验——拆块路径上
+        # 网关已成功返回但本块 JSON/ast 校验失败时，采纳语义与旧单次路径
+        # （坏 JSON 响应亦记）保持一致；崩溃只漏记不重记（安全方向）。
+        # 锁内适配评审 Minor 1（2026-10-20 全新 opus reviewer）。
+        if self.recall is not None:
+            for hit in learning_hits:
+                self.recall.record_adoption(
+                    thread_id=spec.thread_id, site="coding",
+                    learning_id=hit["id"], prompt_text=prompt_json,
+                    learning_text=prompt_embedded_text(
+                        str(hit.get("text", ""))))
+        if resp_payload is not None:
+            resp_doc = resp_payload(raw)
+        else:
+            resp_doc = {"ok": True, "text": redact(raw)}
+        self._evidence(root, stem, "resp", resp_doc)
+        # 成功返回后才入缓存（异常路径不 put，按 miss 安全重付）。
+        usage_ints = self._usage_ints(_usage)
+        if cache is not None and usage_ints is not None:
+            cache.put(cache_key, kind=STAGE, model=model, raw=raw,
+                      usage=usage_ints, fingerprint=fp)
+        return raw
+
+    def _chunk_resp_payload(self, root: Path, stem: str, raw: str, *,
+                            target: str, index: int, total: int) -> dict:
+        """拆块 resp 证据构造兼机器校验：成功存元信息+code 全文；失败自写
+        reject resp 证据（raw head/tail 各 400，与探针证据口径一致）后抛。"""
+        try:
+            code = _extract_chunk(raw, target=target, index=index, total=total)
+        except ChunkBirthError as exc:
+            self._evidence(root, stem, "resp", {
+                "ok": False, "chunk_index": index, "chunk_total": total,
+                "parse_rejected": str(exc),
+                "raw_head": redact(raw[:400]), "raw_tail": redact(raw[-400:])})
+            raise
+        return {
+            "ok": True,
+            "chunk": {"path": target, "index": index, "total": total},
+            # code 全文按密钥口径 redact 后落证据；拼接用未脱敏原文。
+            "code": redact(code),
+            "raw_head": redact(raw[:400]), "raw_tail": redact(raw[-400:])}
+
+    def _run_chunked_birth_round(self, *, spec: RunSpec, root: Path,
+                                 model: str, coding_round: int,
+                                 tail: str, snippets: list[dict],
+                                 hits: list[dict], learning_hits: list[dict],
+                                 round_feedback: str) -> list[str]:
+        """一个 coding 轮内顺序完成 n 次出生调用，返回各块原文列表。
+
+        每块：构造带合同/提案/骨架 + chunk_context 的消息（硬规则1逐块文本
+        守卫）→ 幂等键 coding_<t>_r<run>_round<r>_chunk<i>，指纹含
+        chunk_index/total → 调用（max_tokens/timeout 取 RunSpec）→ 逐块
+        JSON 机器校验。任何一块不符即 ChunkBirthError 整轮失败（不继续为
+        后续块付费），由 run() 捕获进入下一轮；全过程不写任何目标文件。
+        """
+        cs = spec.chunked_birth
+        codes: list[str] = []
+        for i in range(cs.chunk_count):
+            ctx = ChunkPromptContext(
+                index=i, total=cs.chunk_count, target_path=cs.target_path,
+                titles=cs.chunk_titles, boundaries=cs.chunk_boundaries,
+                previous_code="".join(codes),
+                round_feedback=round_feedback if i == 0 else "")
+            messages = _build_messages(
+                gate2_notes=spec.gate2_notes, traceback_tail=tail,
+                snippets=snippets, hits=hits, cmd=spec.cmd,
+                learning_hits=learning_hits or None,
+                extra_sections=cs.per_call_sections, chunk_context=ctx)
+            # 硬规则1：逐块消息同样只允许纯文本（网关入口另有递归守卫）。
+            for mm in messages:
+                if not isinstance(mm.get("content"), str):
+                    raise PatchSafetyError("runner 消息出现非文本块（硬规则1）")
+            stem = f"coding_round{coding_round}.chunk{i}"
+            raw = self._cached_coding_call(
+                spec=spec, root=root, stem=stem, model=model,
+                messages=messages, coding_round=coding_round,
+                learning_hits=learning_hits,
+                cache_key=(f"coding_{spec.thread_id}_r{spec.run_idx}"
+                           f"_round{coding_round}_chunk{i}"),
+                fp_extra={"max_tokens": spec.coding_max_tokens,
+                          "temperature": TEMPERATURE,
+                          "chunk_index": i, "chunk_total": cs.chunk_count},
+                max_tokens=spec.coding_max_tokens,
+                timeout=spec.coding_timeout_s,
+                req_extra={"chunk_index": i, "chunk_total": cs.chunk_count},
+                resp_payload=partial(
+                    self._chunk_resp_payload, root, stem,
+                    target=cs.target_path, index=i, total=cs.chunk_count))
+            # 拼接用未脱敏原文（resp 证据内是 redact 后的口径）。
+            codes.append(_extract_chunk(
+                raw, target=cs.target_path, index=i, total=cs.chunk_count))
+        return codes
 
     def _fail(self, root: Path, spec: RunSpec, timeline: list[dict],
               result: Optional[_ExecResult], *, reason: str) -> dict:

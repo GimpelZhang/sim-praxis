@@ -893,3 +893,92 @@ def test_n1_resolve_v1_splits_rejects_illegal_relpaths(tmp_path, monkeypatch):
     (wd / name0).symlink_to(outside)
     with pytest.raises(GraphStateError, match="越界"):
         _resolve({"relpath": name0, "sha256": _sha256_file(outside)})
+
+
+# ---------------------------------------------------------------------------
+# 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
+# 工厂在 V2 出生轮挂 4 块 ChunkSpec（合同/提案/骨架三注入、16384/600），
+# 出生后修补轮 chunked_birth=None。合成 chosen + 合成短 V1 夹具，严禁真实
+# 43KB 方案脚本（硬规则 3）。
+# ---------------------------------------------------------------------------
+
+def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
+    from orchestrator.agent_runner import runner as runner_mod
+    from orchestrator.graph.task6_v2_prompts import V2_CHUNK_TITLES
+
+    monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT",
+                       str(FIXTURE_SOLUTIONS_ROOT))
+    cal_src = tmp_path / "cal_src.json"
+    cal_src.write_text(json.dumps(_calibration_v2()), encoding="utf-8")
+    monkeypatch.setattr(task8, "CALIBRATION_SOURCE", cal_src)
+
+    chosen = {
+        "sim_engine": "genesis",
+        "name": "V2 ζ 条件化阻抗 + Hunt-Crossley 退化升阶",
+        "control_law": (
+            "ζ~logU[0.3,0.9] 先采；Kd=2ζ√(Kp·m_eff) clip[15,2000]；"
+            "Stribeck μs/μk/vs episode 等效"),
+        "physics_degradations": [
+            "Hunt-Crossley Fn=Kδ^1.5(1+c δ̇) 退化为线性 sol Kp/ζ 等效",
+            "关节 armature/damping 无 dof API 时如实记录未施加项"],
+    }
+    state = {
+        "chosen": chosen,
+        "v1_archive": {"thread_id": V1_THREAD,
+                       "host_workdir": str(tmp_path / "v1arch")},
+        "agent_runs": [], "events": [], "gate1_rejects": 0,
+        "proposals": []}
+    factory = task6_mod.make_spec_factory(T6_THREAD, "T6-B1-chunk")
+    spec = factory(state)
+
+    # RunSpec 级 V2 调用口径：16384 输出余量 / 600s 超时；无 RunSpec 级额外段
+    # （合同/提案/骨架只挂在 ChunkSpec 上，单补丁路径永远看不到它们）。
+    assert spec.coding_max_tokens == task6_mod.CODING_MAX_TOKENS_V2 == 16384
+    assert spec.coding_timeout_s == task6_mod.CODING_TIMEOUT_S_V2 == 600
+    assert spec.extra_prompt_sections == ()
+
+    cs = spec.chunked_birth
+    assert isinstance(cs, runner_mod.ChunkSpec)
+    assert cs.target_path == task6_mod.V2_ENTRYPOINT
+    assert cs.chunk_count == 4                      # n 固定，禁止模型自报
+    assert cs.chunk_titles is V2_CHUNK_TITLES or cs.chunk_titles == V2_CHUNK_TITLES
+    assert len(cs.chunk_titles) == 4
+    assert len(cs.chunk_boundaries) == 4
+    assert all("行数预算" in b for b in cs.chunk_boundaries)
+
+    titles = [t for t, _ in cs.per_call_sections]
+    assert titles == ["V2 升阶任务合同", "已批准 macro 提案", "V1 结构骨架"]
+    contract, proposal, skeleton = [b for _, b in cs.per_call_sections]
+    assert task6_mod.V2_ENTRYPOINT in contract
+    # 提案 JSON 必须是 chosen 逐字序列化：ζ/Hunt-Crossley/clip 关键串不得丢。
+    assert json.loads(proposal) == chosen
+    assert "ζ" in proposal and "Hunt-Crossley" in proposal
+    assert "clip[15,2000]" in proposal
+    # 骨架 @@SHA@@ 必须被 staged V1（合成夹具短脚本）sha256 前 16 位替换。
+    staged_v1 = spec.workdir / "genesis_humanoid_dr.py"
+    assert staged_v1.is_file()
+    v1_sha16 = hashlib.sha256(staged_v1.read_bytes()).hexdigest()[:16]
+    assert "@@SHA@@" not in skeleton
+    assert v1_sha16 in skeleton
+
+    # 非出生轮（同 run workdir 内 V2 已出生）：chunked_birth=None；16384/600
+    # 的 RunSpec 级口径保留（出生后的单补丁修补轮同样需要思考余量）。
+    runner_mod._apply_structured_patch(spec.workdir, {
+        "path": task6_mod.V2_ENTRYPOINT, "old": "",
+        "new": "#!/usr/bin/env python\n# synthetic born V2 (fixture)\n"})
+    spec_repair = factory(dict(state))
+    assert spec_repair.workdir == spec.workdir     # run_idx 仍为 1 → 同目录
+    assert spec_repair.chunked_birth is None
+    assert spec_repair.coding_max_tokens == 16384
+    assert spec_repair.coding_timeout_s == 600
+
+    # Gate2 打回后的**新 run 目录**：V2 重新 absent → 重新挂 ChunkSpec。
+    spec_run2 = factory({**state, "agent_runs": [{"run_idx": 1}]})
+    assert spec_run2.workdir != spec.workdir
+    assert isinstance(spec_run2.chunked_birth, runner_mod.ChunkSpec)
+    assert spec_run2.chunked_birth.chunk_count == 4
+
+    # chosen 缺失：engine 映射先 fail-closed（GraphStateError），结构上不可能
+    # 以 {} 静默装配 ChunkSpec（工厂内另以 state["chosen"] 裸取双保险）。
+    with pytest.raises(GraphStateError, match="sim_engine"):
+        factory({k: v for k, v in state.items() if k != "chosen"})
