@@ -20,7 +20,16 @@ stage_models:
     capabilities: [text]
     purpose: "方向探索与可行性调研（Macro Ideation）"
   coding_debug:
-    model_id: glm-5.3-flash         # 响应回显 glm-5-3-flash
+    # 2026-10-20 硬规则 1 两次换供（用户裁决）：glm-5.3-flash →（economy 验收阴性
+    # seq46）→ deepseek-v4.1-flash（macro 阶段同款，task2 已实证可出 text）。
+    # 证据：runs/task6_ascent/coding_model_evidence_matrix.json seq42-47——
+    # glm-5.3-flash 思考不可关（400）、budget_tokens 被忽略，规格注入 prompt 思考吃满
+    # output 预算 0 正文；economy ping 64-token 全绿但任务级 18KB 探针同形（seq46：
+    # 52k 思考吃光 16384、0 text）；非 economy 同款 seq47 仍 51715 字思考/0 text，
+    # 三模型同形直接催生拆块出生引擎接缝（另见 agent_runner chunked birth 提交）。
+    # inventory 20261020-205217 含 260910/261017 两个日期版，
+    # 沿用 macro 的点号别名自动路由（回显 deepseek-v4-1-flash）。
+    model_id: deepseek-v4.1-flash         # 与 macro_ideation 同款别名
     capabilities: [text]
     purpose: "环境适配与代码编写（Coding & Debugging）"
   visual_rollout:
