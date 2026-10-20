@@ -124,6 +124,11 @@ litellm.suppress_debug_info = True
 STAGE_MODELS_PATH = Path(__file__).with_name("stage_models.yaml")
 STAGES = ("macro_ideation", "coding_debug", "visual_rollout")
 VISION_STAGE = "visual_rollout"
+
+# D-8 thinking 接受性诊断（plan L123/L543/L559）：只点名 macro/coding 两个
+# 文本 stage（硬规则1：macro/coding 视觉未测，探针绝不携带 image block）。
+DIAG_THINKING_STAGES = ("macro_ideation", "coding_debug")
+DIAG_THINKING_SCHEMA = "simpraxis.diag_thinking.v1"
 DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/coding"
 ANTHROPIC_VERSION = "2023-06-01"
 PAUSE_FILENAME = "quota_pause.json"
@@ -1047,6 +1052,169 @@ class ModelGateway:
                 attempt += 1
                 continue
             raise NonRetryableError(f"未分类 HTTP {status} stage={stage}：{text}")
+
+    # ---- D-8：thinking 配置块接受性一次性探针（独立于图，生产传输永不传 thinking） ----
+
+    def _post_once(self, stage: str, model_id: str,
+                   content_blocks: list[dict], *, max_tokens: int,
+                   timeout: int = 60,
+                   extra_payload: "dict | None" = None
+                   ) -> tuple[Any, dict, dict]:
+        """一次性直 POST /v1/messages（无退避、无 G-12 空体重试）。
+
+        专供 diag_thinking：接受性本身是被测对象——200/type=message 即使只回
+        thinking 块也代表 shim 接受了配置块，绝不能像 _post_messages 那样把
+        thinking-only 200 当空体重试 5 次（会烧 5 个 seq）。任何 HTTP 响应
+        （含 4xx/5xx/非 message 体）都原样返回给调用方判定；只有连接/超时类
+        异常照抛（无响应即无证据可落，调用方记 ok=false 后再抛）。凭据/URL/
+        headers 与 _post_messages 同一模式。
+        """
+        token, base_url = _creds()
+        url = base_url.rstrip("/") + "/v1/messages"
+        payload: dict[str, Any] = {
+            "model": model_id, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": content_blocks}]}
+        if extra_payload:
+            payload.update(extra_payload)
+        headers = {
+            # 认证头只在这一行出现且永不进日志（redact 过滤器双保险）
+            "Authorization": f"Bearer {token}",
+            "anthropic-version": ANTHROPIC_VERSION,
+            "content-type": "application/json",
+        }
+        post = self._raw_transport or requests.post
+        resp = post(url, headers=headers, json=payload, timeout=timeout)
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001 —— 非 JSON 响应也是证据（status 仍可读）
+            body = {}
+        return resp, body, payload
+
+    def diag_thinking(self, stage: str, *, max_tokens: int = 2048,
+                      budget_tokens: int = 1024, timeout: int = 60) -> dict:
+        """D-8 一次性探针：验证方舟 shim 是否接受 Anthropic 正形 thinking 块。
+
+        镜像 call_visual 计费骨架（早暂停门 → preflight → 出口恰好一行
+        ok=true/false；缺凭据 seq=null blocked；连接异常记 ok=false 后抛出）。
+        与生产路径的两点刻意差异：
+        - payload 经 _post_once 一次性单发并附加
+          ``thinking={"type":"enabled","budget_tokens":...}``；不开 G-12
+          空内容重试（豁免仅限本探针，见 _post_once docstring）；
+        - 收到明确 HTTP 响应但被拒绝（非 200，或 200 非 type=message）**不
+          抛异常**：记一行 ok=false 并返回 accepted=False 记录，让调用脚本落
+          证据、据此刻分支（lead 在 ADAPTATIONS.md 记债，max_tokens 不调）。
+        图/runner 永不调用本方法（生产调用点红线测试锁定仅探针脚本 1 处）。
+        """
+        if stage not in DIAG_THINKING_STAGES:
+            raise ValueError(
+                f"diag_thinking 只接受 {list(DIAG_THINKING_STAGES)}（硬规则1："
+                f"macro/coding 视觉未测，D-8 计划只点名两文本 stage），收到 {stage!r}")
+        for name, val in (("max_tokens", max_tokens),
+                          ("budget_tokens", budget_tokens)):
+            if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
+                raise ValueError(f"{name} 必须是正整数，收到 {val!r}")
+        # Anthropic 规则：启用 thinking 时 max_tokens 必须严格大于 budget_tokens。
+        if max_tokens <= budget_tokens:
+            raise ValueError(
+                f"max_tokens({max_tokens}) 必须严格大于 budget_tokens"
+                f"({budget_tokens})（Anthropic thinking 配置规则）")
+        model_id = self.model_id(stage)
+        if model_id is None:
+            anchor = str(self.entry(stage).get("open_question", ""))
+            raise StageUnresolvedError(stage, anchor)
+        self._early_pause_gate(stage)
+        if self._billing is not None:
+            self._billing.preflight(stage)
+        blocks = [{"type": "text",
+                   "text": "D-8 thinking 接受性诊断探针：请只用一句话回答 "
+                           "1+1 等于几？"}]
+        t0 = time.monotonic()
+        try:
+            resp, body, payload = self._post_once(
+                stage, model_id, blocks, max_tokens=max_tokens, timeout=timeout,
+                extra_payload={"thinking": {
+                    "type": "enabled", "budget_tokens": budget_tokens}})
+        except MissingGatewayCredentialError as exc:
+            self._record_early_blocked(
+                stage, f"missing_gateway_credential: {str(exc)[:200]}")
+            raise
+        except Exception as exc:  # noqa: BLE001 —— 连接类：无 HTTP 证据，记账后抛出
+            if self._billing is not None:
+                self._billing.record(
+                    stage, ok=False, model=model_id,
+                    err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+            raise
+        latency_ms = int((time.monotonic() - t0) * 1000)
+
+        status = int(getattr(resp, "status_code", 0) or 0)
+        btype = body.get("type") if isinstance(body, dict) else None
+        accepted = status == 200 and btype == "message"
+        content = body.get("content") if isinstance(body, dict) else None
+        block_types = ([b.get("type") for b in content
+                        if isinstance(b, dict) and isinstance(b.get("type"), str)]
+                       if isinstance(content, list) else [])
+        texts = ([str(b.get("text", "")) for b in content
+                  if isinstance(b, dict) and b.get("type") == "text"]
+                 if isinstance(content, list) else [])
+        answer_head = (texts[0] if texts else "")[:80]
+        usage_body = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(usage_body, dict):
+            usage_body = {}
+        usage = {
+            "input_tokens": _dict_usage_num(usage_body, "input_tokens"),
+            "output_tokens": _dict_usage_num(usage_body, "output_tokens"),
+            "cache_read_input_tokens": _dict_usage_num(
+                usage_body, "cache_read_input_tokens"),
+            "cache_creation_input_tokens": _dict_usage_num(
+                usage_body, "cache_creation_input_tokens"),
+        }
+        err = None
+        if not accepted:
+            err = redact(" | ".join(p for p in (
+                f"http_status={status}",
+                str(body.get("message", "")) if isinstance(body, dict) else "",
+                _err_field(body, "type"), _err_field(body, "code"),
+                _err_field(body, "message"), getattr(resp, "text", ""))
+                if p))[:300]
+
+        if self._billing is not None:
+            if accepted:
+                self._billing.record(
+                    stage, ok=True, model=model_id,
+                    tokens_in=usage["input_tokens"],
+                    tokens_out=usage["output_tokens"],
+                    tokens_cache_read=usage["cache_read_input_tokens"],
+                    tokens_cache_create=usage["cache_creation_input_tokens"])
+            else:
+                self._billing.record(stage, ok=False, model=model_id, err=err)
+        if accepted:
+            _clear_stale_pause_state()
+        # 证据要带原始响应体，但与网关同口径过一遍 redact（响应体理论上不回显
+        # 认证头；此为密钥正则单一源的双保险），redact 失败不丢其余字段。
+        try:
+            safe_body = json.loads(
+                redact(json.dumps(body, ensure_ascii=False)))
+        except Exception:  # noqa: BLE001
+            safe_body = {}
+        return {
+            "schema": DIAG_THINKING_SCHEMA,
+            "stage": stage,
+            "requested_id": model_id,
+            "echo_model": body.get("model") if isinstance(body, dict) else None,
+            "http_status": status,
+            "type": btype,
+            "latency_ms": latency_ms,
+            # 请求形状只记键名与两个 token 参数：绝不记 URL/认证头/请求文本。
+            "request": {"keys": sorted(payload.keys()),
+                        "max_tokens": max_tokens,
+                        "budget_tokens": budget_tokens},
+            "content_block_types": block_types,
+            "answer_head": answer_head,
+            "usage": usage,
+            "accepted": accepted,
+            "err": err,
+            "body": safe_body,
+        }
 
     def ping_text(self, stage: str, *, max_tokens: int = 8) -> dict:
         model_id = self.model_id(stage)
