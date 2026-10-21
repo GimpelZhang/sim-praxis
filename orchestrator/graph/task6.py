@@ -50,6 +50,18 @@ old="" 补丁经既有 _parse_and_apply 出生；任一坏块整轮失败、无�
 合同/骨架文本常量在 task6_v2_prompts.py（纯描述性契约文本，硬规则 3：引擎
 层不携带可运行解题脚本）。RUN_CODING_CAP=3 不变；非出生修补轮与其他 task
 字节级旧行为。
+
+2026-10-21 run4 锁内适配（用户裁决「接缝加固后 run4」；设计终稿
+.omc/handoffs/task6-sentinel-seam-design.md，两轮 fresh reviewer APPROVE）：
+run1-3 九发出生调用两次完整流非法手写 JSON（22%，失败轴是转义纪律非预算；
+seq87 一次 29769 chars 合法闭合反证「超限必截断」旧经验），seq89 JSON mode
+诊断探针实测服务端默认 thinking 吃满 32768、json_schema tool input 截断成
+137 字符（探针脚本保留为一次性诊断证据、永不接线；模型 ID/thinking 不触碰，
+规则 1）。出生管道改 sentinel 围栏纯文本定界（runner._extract_chunk，协议
+见设计 §2），且 n=4→6 是工厂规格变更（六标题/六边界行预算合计 860，见
+task6_v2_prompts.py 与设计 §3.1；本文件唯一构造点 chunk_count 改 6）。
+32768 输出顶/600s 超时/合同七条/RUN_CODING_CAP=3 全部不变；六标题/六边界/
+800/18000/30000 三窗 run4 起飞前冻结，撞窗不调参、不挪边界（硬规则 7）。
 """
 from __future__ import annotations
 
@@ -116,6 +128,15 @@ RUN_CODING_CAP = 3
 # 16384 非硬墙、shim 接受 32768——但探针在 32768 处仍被截断（线顶 ≥32768，
 # 未探更高；口径同探针 docstring），够不够出生留给生产首验；n=4 与四块行
 # 预算不变。常量 16384→32768。
+#
+# 2026-10-21 run4（设计终稿 task6-sentinel-seam-design.md，用户裁决
+# 「接缝加固后 run4」）：n=4→6 是工厂规格变更而非运行时参数（六块行预算
+# 180/220/130/130/100/100 合计 860，落合同 600-900）；手写 chunk JSON 改
+# sentinel 围栏纯文本（runner 侧 _extract_chunk 解析，本文件只改
+# chunk_count）。seq89 JSON mode 诊断探针结论：默认 thinking 吃满 32768 是
+# 服务端行为，json_schema 通道废弃，本批不传 thinking、不碰模型 ID（规则 1），
+# 32768/600s 常量不动；六标题/六边界/长度窗起飞前冻结，撞窗按预注册结案
+# （硬规则 7），n=7/调窗属 run5 新提案。
 CODING_MAX_TOKENS_V2 = 32768
 CODING_TIMEOUT_S_V2 = 600
 
@@ -228,7 +249,7 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             skeleton_text = V2_SKELETON.replace("@@SHA@@", v1_sha16)
             chunked = ChunkSpec(
                 target_path=V2_ENTRYPOINT,
-                chunk_count=4,
+                chunk_count=6,  # run4 工厂规格 n=4→6（设计 §3，溯源见模块 docstring）
                 chunk_titles=V2_CHUNK_TITLES,
                 per_call_sections=(
                     ("V2 升阶任务合同", V2_CONTRACT),

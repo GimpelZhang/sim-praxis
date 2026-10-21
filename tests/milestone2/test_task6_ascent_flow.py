@@ -896,8 +896,9 @@ def test_n1_resolve_v1_splits_rejects_illegal_relpaths(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
-# 工厂在 V2 出生轮挂 4 块 ChunkSpec（合同/提案/骨架三注入、32768/600），
+# 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决；
+# 2026-10-21 run4 起 sentinel 围栏纯文本定界，n=4→6 工厂规格）：
+# 工厂在 V2 出生轮挂 6 块 ChunkSpec（合同/提案/骨架三注入、32768/600），
 # 出生后修补轮 chunked_birth=None。合成 chosen + 合成短 V1 夹具，严禁真实
 # 43KB 方案脚本（硬规则 3）。
 # ---------------------------------------------------------------------------
@@ -940,10 +941,10 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     cs = spec.chunked_birth
     assert isinstance(cs, runner_mod.ChunkSpec)
     assert cs.target_path == task6_mod.V2_ENTRYPOINT
-    assert cs.chunk_count == 4                      # n 固定，禁止模型自报
+    assert cs.chunk_count == 6                      # n 固定，禁止模型自报（run4 n=6）
     assert cs.chunk_titles is V2_CHUNK_TITLES or cs.chunk_titles == V2_CHUNK_TITLES
-    assert len(cs.chunk_titles) == 4
-    assert len(cs.chunk_boundaries) == 4
+    assert len(cs.chunk_titles) == 6
+    assert len(cs.chunk_boundaries) == 6
     assert all("行数预算" in b for b in cs.chunk_boundaries)
 
     titles = [t for t, _ in cs.per_call_sections]
@@ -959,7 +960,7 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     assert "见合同 7" in skeleton
     assert "--video 给录制器的必须是绝对路径" in skeleton
     # 防回潮：1-6 条编号锚点未乱；七个编号标题按序且恰好七个。
-    assert "1. **严格 JSON" in contract
+    assert "1. **围栏纯文本分块交付" in contract
     assert "6. **禁硬编码结果" in contract
     assert re.findall(r"(?m)^([1-9])\. \*\*", contract) == [
         str(i) for i in range(1, 8)]
@@ -991,7 +992,7 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     spec_run2 = factory({**state, "agent_runs": [{"run_idx": 1}]})
     assert spec_run2.workdir != spec.workdir
     assert isinstance(spec_run2.chunked_birth, runner_mod.ChunkSpec)
-    assert spec_run2.chunked_birth.chunk_count == 4
+    assert spec_run2.chunked_birth.chunk_count == 6
 
     # chosen 缺失：engine 映射先 fail-closed（GraphStateError），结构上不可能
     # 以 {} 静默装配 ChunkSpec（工厂内另以 state["chosen"] 裸取双保险）。

@@ -49,15 +49,44 @@ TEMPERATURE = 0.1
 # Task6 V2 出生拆 4 个顺序小编排调用；网关 call 的 timeout 旧路径隐式吃
 # router 默认 120，现经 RunSpec 显式化（默认 120，行为不变）。
 DEFAULT_CODING_TIMEOUT_S = 120
-CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（机器校验，短于即整轮失败）
-CHUNK_MIN_ASSEMBLED_CHARS = 12000   # 4 块拼接总长下限，防模型逃单块/碎块
-CHUNK_MAX_CODE_CHARS = 26000  # 单块 code 硬上限（超长即整轮失败，溯源见下）
+CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（不变；n=6 边界更碎，800 只拦裸逃）
+CHUNK_MIN_ASSEMBLED_CHARS = 30000   # n=6 拼接总长下限（Python 字符 len(str)，非字节）
+CHUNK_MAX_CODE_CHARS = 18000        # 单块 code 硬上限（run4 26000→18000，溯源见下）
 # 溯源：seq48 首发 24000；2026-10-21 用户选项 A（seq56 探针放行，commit
 # f2f5b44，随输出顶 16384→32768）收紧到 20000；同日晚 run2 三轮拆块出生
 # chunk3 全败于本守卫。跨 run1/run2 该块 5 次尝试：seq62=24661 拒、
 # seq65=18009 过（唯一一次）、run2 三轮 21256/24514/22293 全拒；
 # out token 从未触 32768，守卫是唯一约束；用户裁决回提到 26000
 # （实观察 max 24661（seq62）全纳；32768 output token 容纳 JSON/转义余量仍足）重挂 run3。超长即整轮失败语义不变。
+# 2026-10-21 run4 接缝加固（用户裁决「接缝加固后 run4」；设计终稿
+# .omc/handoffs/task6-sentinel-seam-design.md，两轮 fresh reviewer APPROVE）：
+# run1-3 九发出生调用两次完整流非法 JSON（seq83 char 18604 未转义引号、
+# seq88 char 139 串内裸 LF，九发两中=22%；out token 17143/13450 远未触
+# 32768，失败轴是手写 JSON 转义纪律而非预算），seq87 code 29769 chars 合法
+# 闭合后被本地守卫拒（反证旧 prompt「超限必然在闭合前被截断」经验为假）；
+# JSON mode 诊断探针 seq89（票 T6-B8，exit 11 content_failed_enforcement）
+# 实测服务端默认 thinking 吃满 32768、json_schema tool input 截断成 137
+# 字符，json_schema 通道废弃（探针脚本保留为一次性诊断证据，永不接线），
+# 出生改 sentinel 围栏纯文本定界（见 _extract_chunk；协议见上设计 §2）。
+# n 是工厂规格变更（task6.py ChunkSpec n=4→6，六块行预算合计 860）：n=6
+# 各块观测推算 ≤15k，18000 留 ~20% 余量（n=5 必留 17-18k 整块，余量 <6%）；
+# 拼接下限 30000 挡住 18000+5×800=22000 的逃单块组合。长度一律 Python
+# 字符 len(str)（V1 基线实测 898 行/43324 字节/38669 字符/43.1 字符每行；
+# 字节/字符口径不得混用，禁止写 48.2/43.3k 字符）。六标题/六边界/三窗
+# run4 起飞前冻结，撞窗不调参、不挪边界，n=7/调窗属 run5 新提案（硬规则 7）。
+
+# sentinel 围栏字面值（独占整行；协议规范见上设计 §2.1/§2.2 EBNF）。
+# 七连尖括号（与 git conflict marker 同族）+ 项目专属核记 simpraxis.chunk.v1，
+# Python 代码正文整行自发出现概率≈0；起止不对称（begin 带元数据、end 固定
+# 串）。纯 ASCII、无引号——反斜杠/三引号/裸换行/中文/control 在围栏内都是
+# 普通正文字符，消灭手写 JSON 转义失败轴。就地定义在 runner.py 同信任域，
+# 不新建模块、不改 common/validators.py（其私有字符类不含 ./ 且语义不适用）。
+CHUNK_FENCE_BEGIN = "<<<<<<< simpraxis.chunk.v1"
+CHUNK_FENCE_END = ">>>>>>> simpraxis.chunk.v1.end"
+CHUNK_FENCE_NUCLEUS = "simpraxis.chunk.v1"
+# path 回显白名单（path 真闸仍是与 target 逐字比对；字符类只决定机器原因里
+# 能否安全逐字回显模型给值，防注入下一轮块 0 prompt）；回显判定 fullmatch only（禁 match/search），否则 "evil x.py" 类合法前缀值无锚 fail-open 被回显。
+CHUNK_FENCE_PATH_RE = re.compile(r"[A-Za-z0-9_./-]{1,128}")  # fullmatch only
 TB_TAIL_CHARS = 4096           # traceback 尾部 ≤4KB
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096
@@ -89,7 +118,7 @@ class ChunkBirthError(RuntimeError):
 
     锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
     与 CodingLimitError 同属 RuntimeError 族的「不触网失败信号」——失败发生
-    在本地 JSON/ast 校验，不产生新的网关调用。区别在生命周期：本异常在 run
+    在本地围栏/ast 校验（run4 前为 JSON/ast），不产生新的网关调用。区别在生命周期：本异常在 run
     循环内被捕获后，走既有「失败→再执行→下一 coding 轮」机制，仍受
     RunSpec.max_coding_rounds 约束；它不是 CodingLimitError 那种结案硬停。
     消息必须含块号与机器原因（下一轮 prompt 的失败反馈段原样带上）。
@@ -99,8 +128,10 @@ class ChunkBirthError(RuntimeError):
 @dataclass(frozen=True)
 class ChunkSpec:
     """拆块出生规格。锁内适配（计划 v1.2 外，seq42-47 拆块出生，
-    用户 2026-10-20 裁决）：chunk_count 固定来自工厂（Task6=4），禁止运行时
-    由模型自报块数（防模型逃单块）。
+    用户 2026-10-20 裁决）：chunk_count 固定来自工厂（Task6 run3 前为 4；
+    run4 起 n=6 是工厂规格变更，见 task6.py 与
+    .omc/handoffs/task6-sentinel-seam-design.md §3），禁止运行时由模型自报
+    块数（防模型逃单块）。
 
     chunk_boundaries 是工单四字段外的最小增补（同条锁内适配）：runner 在
     底层（不得反向 import orchestrator.graph），渲染「本块边界/行数预算」
@@ -108,7 +139,7 @@ class ChunkSpec:
     """
 
     target_path: str
-    chunk_count: int                                  # Task6=4
+    chunk_count: int                                  # n 固定来自工厂（Task6 run4 起 6）
     chunk_titles: tuple[str, ...]                     # 长度=chunk_count
     per_call_sections: tuple[tuple[str, str], ...]    # 合同/提案/骨架，每 call 都带
     chunk_boundaries: tuple[str, ...]                 # 每块允许章节+行数预算文案
@@ -394,47 +425,176 @@ def _json_object(raw: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# 拆块出生：逐块 JSON 机器校验 + 拼接整体校验（锁内适配，见 ChunkSpec）
+# 拆块出生：sentinel 围栏纯文本机器校验 + 拼接整体校验
+# （run4 2026-10-21 起替代逐块手写 JSON：run1-3 九发两中非法 JSON（22%），
+# 失败轴是转义纪律而非输出预算；协议见 .omc/handoffs/task6-sentinel-seam-design.md
+# §2。锁内适配，见 ChunkSpec）
 # ---------------------------------------------------------------------------
 
+# begin/end 整行正则（允许行首 [SP TAB]*、行尾仅 [SP TAB]*；段间单空白
+# 仅 ASCII SP/TAB——全角＝/＜/引号包裹值一律不命中→情形 2）。行尾 CR 不放进
+# 正则：扫描已每行剥过恰好一个尾 CR（CRLF 归一），残留第二个 CR 必须不命中
+# （三签 LOW-1）。字段 token 容错捕获（任何非 SP/TAB/CR 字符），合规性由
+# pathv/intv 在策略层判：path 真闸是与 target 逐字比对，字符类只决定机器
+# 原因能否安全回显。
+_FENCE_BEGIN_LINE_RE = re.compile(
+    r"^[ \t]*" + re.escape(CHUNK_FENCE_BEGIN)
+    + r"[ \t]+path=([^ \t\r]+)[ \t]+index=([^ \t\r]+)[ \t]+total=([^ \t\r]+)"
+    + r"[ \t]*$")
+_FENCE_END_LINE_RE = re.compile(
+    r"^[ \t]*" + re.escape(CHUNK_FENCE_END) + r"[ \t]*$")
+# intv："0" | [1-9][0-9]{0,2}——禁前导零/符号；bool 无入口（无 JSON 类型面）。
+_FENCE_INT_RE = re.compile(r"(?:0|[1-9][0-9]{0,2})")
+# 裸控制字符（情形 12）：U+0000-0008、U+000D 残留、U+000B/000C、U+000E-001F；
+# TAB(U+0009) 允许；LF(U+000A) 是行分隔不进判定。
+_FENCE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0d\x0e-\x1f]")
+# 零宽字符（情形 16）：U+200B/200C/200D；U+FEFF 在非首位置（首位置落情形 15）。
+_FENCE_ZEROWIDTH_RE = re.compile(r"[​‌‍﻿]")
+
+
+def _strip_one_trailing_cr(line: str) -> str:
+    """逐行剥至多一个行尾 CR（CRLF 唯一合法 CR 形态；EBNF end of §2.2）。"""
+    return line[:-1] if line.endswith("\r") else line
+
+
+def _scan_fence_lines(raw: str):
+    """纯结构扫描（设计 §2.3 扫描算法步骤 2-3，不含块号策略）。
+
+    禁 str.splitlines()：它对 VT(U+000B)/FF(U+000C)/NEL 的切分语义与本规范
+    不同（矩阵②钉死）；统一 split("\\n")，逐行剥至多一个行尾 CR 后做整行判定。
+    返回 (lines, begins, ends, nucleus, begin_fields)：
+    lines=剥尾 CR 后的行列表；begins/ends/nucleus 为命中行号（0-based）；
+    begin_fields 为 begin 行号→(path,index,total) 原始 token。
+    """
+    lines = [_strip_one_trailing_cr(part) for part in raw.split("\n")]
+    begins: list[int] = []
+    ends: list[int] = []
+    nucleus: list[int] = []
+    begin_fields: dict[int, tuple[str, str, str]] = {}
+    for ln, line in enumerate(lines):
+        m = _FENCE_BEGIN_LINE_RE.match(line)
+        if m:
+            begins.append(ln)
+            begin_fields[ln] = (m.group(1), m.group(2), m.group(3))
+        if _FENCE_END_LINE_RE.match(line):
+            ends.append(ln)
+        if CHUNK_FENCE_NUCLEUS in line:  # 区分大小写；end 行含同核记，计数含之
+            nucleus.append(ln)
+    return lines, begins, ends, nucleus, begin_fields
+
+
 def _extract_chunk(raw: str, *, target: str, index: int, total: int) -> str:
-    """解析单块响应并机器校验；任何不符抛 ChunkBirthError（块号+机器原因）。"""
-    try:
-        obj = _json_object(raw)
-    except (json.JSONDecodeError, ValueError) as exc:
+    """解析单块围栏响应并机器校验；任何不符抛 ChunkBirthError（块 i+机器原因）。
+
+    严格按设计 §2.3 的 5 步扫描算法与 16 形原因表。机器原因总则：只允许
+    计数/行号/字符类/模板固定字面值，严禁摘录任何模型输出原文（防注入下一
+    轮块 0 prompt）；path 仅在过白名单 fullmatch 时逐字回显，index/total
+    仅纯数字 intv 形回显数值。
+    """
+    # 步骤 1：BOM 先判（情形 15）。
+    if raw.startswith("\ufeff"):
         raise ChunkBirthError(
-            f"块 {index} 返回非合法 JSON：{type(exc).__name__}: "
-            f"{str(exc)[:160]}") from None
-    if not isinstance(obj, dict):
+            f"块 {index} 响应以 U+FEFF BOM 开头（模板为 ASCII，禁止 BOM）")
+    # 步骤 2-3：split("\n") + 剥尾 CR + 整行三判定。
+    lines, begins, ends, nucleus, begin_fields = _scan_fence_lines(raw)
+
+    def fmt_ls(seq: list[int]) -> str:
+        return ",".join(str(ln + 1) for ln in seq)  # 行号一律响应相对、1-based
+
+    # 步骤 4：先全局计数再切 body（评审 M1 钉死；双 begin 单 end 必拒）。
+    if not begins:
+        if not nucleus:
+            raise ChunkBirthError(
+                f"块 {index} 缺起始围栏行（0 个 {CHUNK_FENCE_NUCLEUS} 核记行）")
         raise ChunkBirthError(
-            f"块 {index} 顶层不是 JSON 对象：{type(obj).__name__}")
-    chk = obj.get("chunk")
-    if not isinstance(chk, dict):
+            f"块 {index} 起始围栏行不合规（核记行 {len(nucleus)} 行，"
+            "合规 begin 0 行；检查字段顺序/引号/全角字符）")
+    if len(begins) >= 2:  # 情形 3
         raise ChunkBirthError(
-            f"块 {index} 缺 chunk 对象（收到 {type(chk).__name__}）")
-    if chk.get("path") != target:
+            f"块 {index} 起始围栏出现 {len(begins)} 次（需恰好 1 次，"
+            f"行号 {fmt_ls(begins)}）")
+    b_idx = begins[0]
+    ends_after = [ln for ln in ends if ln > b_idx]
+    if not ends_after:  # 情形 4（end 在 begin 之前同样落本形：其后 0 个 end）
         raise ChunkBirthError(
-            f"块 {index} path 不符：收到 {chk.get('path')!r}，应为 {target!r}")
-    # bool 是 int 子类，index/total 用 type() is int 严口径（与缓存 usage 同纪律）
-    if type(chk.get("index")) is not int or chk.get("index") != index:
+            f"块 {index} 缺结束围栏行（begin 行号 {b_idx + 1}，"
+            "其后 0 个 end 行，按输出截断记录）")
+    if len(ends) >= 2:  # 情形 5：全局 end 计数（body 内 end 已含在内）
         raise ChunkBirthError(
-            f"块 {index} index 不符：收到 {chk.get('index')!r}，应为 {index}")
-    if type(chk.get("total")) is not int or chk.get("total") != total:
+            f"块 {index} 结束围栏出现 {len(ends)} 次（需恰好 1 次，"
+            f"行号 {fmt_ls(ends)}）")
+    e_idx = ends_after[0]
+    body_lines = lines[b_idx + 1:e_idx]
+    for off, line in enumerate(body_lines):  # 情形 6
+        if (_FENCE_BEGIN_LINE_RE.match(line) or _FENCE_END_LINE_RE.match(line)
+                or CHUNK_FENCE_NUCLEUS in line):
+            resp_line = b_idx + 1 + off + 1
+            raise ChunkBirthError(
+                f"块 {index} 代码体内第 {resp_line} 行出现围栏核记"
+                "（围栏核记全响应只允许 2 行）")
+    # 步骤 5：围栏外区域走 ASCII 专用空白谓词（禁用 str.strip()——
+    # 它把 U+3000 当空白 fail-open；U+200B 同样在此被拦）。情形 7。
+    bad_before = sum(
+        1 for line in lines[:b_idx] if any(ch not in " \t" for ch in line))
+    bad_after = sum(
+        1 for line in lines[e_idx + 1:] if any(ch not in " \t" for ch in line))
+    if bad_before or bad_after:
         raise ChunkBirthError(
-            f"块 {index} total 不符：收到 {chk.get('total')!r}，应为 {total}")
-    code = chk.get("code")
-    if not isinstance(code, str) or not code:
-        raise ChunkBirthError(f"块 {index} code 必须是非空字符串")
-    if code.strip().startswith("```"):
+            f"块 {index} 围栏外存在非空白正文（起前 {bad_before} 非空行/"
+            f"尾后 {bad_after} 非空行，不摘录内容）")
+    # 字段定序 path→index→total（情形 8/9）。
+    path_v, index_v, total_v = begin_fields[b_idx]
+    if CHUNK_FENCE_PATH_RE.fullmatch(path_v):
+        if path_v != target:
+            raise ChunkBirthError(
+                f"块 {index} path 不符：收到 {path_v}，应为 {target}")
+    else:
         raise ChunkBirthError(
-            f"块 {index} code 去首尾空白后是 markdown 围栏（禁止）")
-    if len(code) < CHUNK_MIN_CODE_CHARS:
+            f"块 {index} path 含非白名单字符（长度 {len(path_v)}，不回显），"
+            f"应为 {target}")
+    for name, v, expected in (("index", index_v, index), ("total", total_v, total)):
+        if not _FENCE_INT_RE.fullmatch(v):
+            raise ChunkBirthError(
+                f"块 {index} {name} 不合规整数字段（不回显），应为 {expected}")
+        if int(v) != expected:
+            raise ChunkBirthError(
+                f"块 {index} {name} 不符：收到 {int(v)}，应为 {expected}")
+    # body 定界（EBNF「取走恰好一个首部 LF / 尾部在 end_line 前恰好剥一个
+    # LF」）：两个剥除都是语法分隔 LF——首部为 begin 行终止 LF、尾部为 end
+    # 行前的分隔 LF，split("\n") 切行时结构性消费，join 后即代码原文，故尾部
+    # 不得再剥（否则吞掉代码自身的末行换行）；仅容忍 begin 后恰好多一空行
+    # （join 首部多出的一个 LF，至多一个，对齐 EBNF 空白容错边界）。
+    code = "\n".join(body_lines)
+    if code.startswith("\n"):
+        code = code[1:]
+    # 情形 16：正文零宽字符（响应相对行号）。围栏行上的零宽已打断整行
+    # 正则，落情形 2/4；此处只可能命中正文行。
+    for off, line in enumerate(body_lines):
+        mw = _FENCE_ZEROWIDTH_RE.search(line)
+        if mw:
+            resp_line = b_idx + 1 + off + 1
+            raise ChunkBirthError(
+                f"块 {index} 第 {resp_line} 行含零宽字符 "
+                f"U+{ord(mw.group(0)):04X}（模板为 ASCII）")
+    # 情形 12：正文裸控制字符（正文相对行号；TAB 允许，CR 只允许行尾 CRLF）。
+    for off, line in enumerate(body_lines):
+        mc = _FENCE_CONTROL_RE.search(line)
+        if mc:
+            raise ChunkBirthError(
+                f"块 {index} code 第 {off + 1} 行含裸控制字符 "
+                f"U+{ord(mc.group(0)):04X}（TAB 允许；CR 只允许行尾 CRLF）")
+    if not code or not code.strip():  # 情形 10
+        raise ChunkBirthError(f"块 {index} code 为空或纯空白")
+    if code.strip().startswith("```"):  # 情形 11（沿用现式判定）
+        raise ChunkBirthError(
+            f"块 {index} code 以 markdown 围栏开头（禁止 markdown 包裹）")
+    if len(code) < CHUNK_MIN_CODE_CHARS:  # 情形 13
         raise ChunkBirthError(
             f"块 {index} code 长度 {len(code)} < {CHUNK_MIN_CODE_CHARS} chars")
     if len(code) > CHUNK_MAX_CODE_CHARS:
         raise ChunkBirthError(
             f"块 {index} code 长度 {len(code)} > {CHUNK_MAX_CODE_CHARS} chars"
-            "（输出预算超限；精简注释、禁止复述合同/骨架/提案）")
+            "（机器窗上限）")
     return code
 
 
@@ -443,9 +603,11 @@ def _validate_assembled_chunks(code: str) -> None:
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
+        # run4：只取异常类型与行/列，不附 str(exc)——其文本含模型源码行，
+        # 会经块 0 反馈段回流下一轮 prompt（设计 §2.3 情形 14/MAJOR-1）。
         raise ChunkBirthError(
             f"拼接源码 ast.parse 失败（行 {exc.lineno} 列 {exc.offset}）："
-            f"{type(exc).__name__}: {str(exc)[:160]}") from None
+            f"{type(exc).__name__}") from None
     seen: set[str] = set()
     dups: list[str] = []
     for node in tree.body:
@@ -454,12 +616,16 @@ def _validate_assembled_chunks(code: str) -> None:
                 dups.append(node.name)
             seen.add(node.name)
     if dups:
+        # run4 三签 MAJOR-1：重名是模型自造 XID 标识符（CJK 合法、可藏整句
+        # 注入），str(exc) 会经块 0 反馈段回流下一轮 prompt（设计 §2.3），
+        # 故只报计数、逐字标识符一律不回显。
         raise ChunkBirthError(
-            "拼接源码顶层重复 def/class 名（硬失败）：" + ", ".join(dups))
+            f"拼接源码顶层重复 def/class 名（硬失败，{len(dups)} 个重名；"
+            "整轮重生时顶层名须唯一，机器原因不回显标识符）")
     if len(code) < CHUNK_MIN_ASSEMBLED_CHARS:
         raise ChunkBirthError(
             f"拼接总长 {len(code)} < {CHUNK_MIN_ASSEMBLED_CHARS} chars"
-            "（防碎块/逃单块）")
+            "（若行数≥600 请核对字符密度后整轮重生）")
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +672,8 @@ def _chunk_section(ctx: "ChunkPromptContext") -> str:
 
     锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
     清单（编号+标题+行数预算/边界）、本块边界、前序块逐字定稿围栏、上一轮
-    机器失败反馈（仅该轮块 0）、严格 chunk JSON 交付格式五部分。
+    机器失败反馈（仅该轮块 0）、交付格式五部分。run4（2026-10-21）起交付格式
+    由严格 chunk JSON 改为 sentinel 围栏纯文本（设计 §5.1），前四部分不变。
     """
     i, n = ctx.index, ctx.total
     lines = [f"## 拆块交付（第 {i + 1}/{n} 块）", "",
@@ -542,17 +709,25 @@ def _chunk_section(ctx: "ChunkPromptContext") -> str:
         ]
     lines += [
         "",
-        "### 交付格式（严格 JSON）",
-        "只允许输出一个 JSON 对象，JSON 外不得有任何文字、解释或 markdown 围栏：",
-        '{"chunk":{"path":"' + ctx.target_path + '","index":' + str(i)
-        + ',"total":' + str(n) + ',"code":"<本块 Python 原文>"}}',
-        f'- path 必须逐字等于 "{ctx.target_path}"；index 必须是 {i}；'
-        f"total 必须是 {n}；",
-        "- code 只含本块 Python 原文：无 markdown 围栏、无解释；非空且"
-        f"不少于 {CHUNK_MIN_CODE_CHARS} 字符；",
-        f"- code 最长不超过 {CHUNK_MAX_CODE_CHARS} 字符（含注释；32768 output "
-        "token 还要容纳 JSON 结构与转义）；超限必然在闭合前被截断、整轮失败。"
-        "注释精简，禁止复述合同/提案/骨架原文。",
+        "### 交付格式（围栏纯文本，禁止 JSON）",
+        "本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；"
+        "反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。"
+        "你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、"
+        "中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；"
+        "字段逐字照抄、顺序固定、ASCII 字符：",
+        f"<<<<<<< simpraxis.chunk.v1 path={ctx.target_path} "
+        f"index={i} total={n}",
+        "<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>",
+        ">>>>>>> simpraxis.chunk.v1.end",
+        f"- path 逐字等于 {ctx.target_path}；index 逐字等于 {i}；"
+        f"total 逐字等于 {n}；三个字段顺序不得调换、不加引号；",
+        "- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；"
+        "代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；",
+        "- 若响应在结束围栏之前结束（例如输出被截断），本机记录为"
+        "「缺结束围栏」，本块机器校验失败；",
+        "- code 只含本块 Python 原文，非空且不少于 "
+        f"{CHUNK_MIN_CODE_CHARS} 字符、不长于 {CHUNK_MAX_CODE_CHARS} 字符"
+        "（本机逐字符计数，超限即机器校验失败）；",
         f"- 全部 {n} 块拼接后须为完整可运行文件（总长不少于 "
         f"{CHUNK_MIN_ASSEMBLED_CHARS} 字符），块边界不得重叠。",
         "",
@@ -808,7 +983,12 @@ class AgentRunner:
                         coding_round=coding_calls, tail=tail, snippets=snippets,
                         hits=hits, learning_hits=learning_hits,
                         round_feedback=chunk_feedback)
-                    assembled = "".join(codes)
+                    # 设计 §2.2 EBNF：begin 行后/end 行前的 LF 是语法分隔符，
+                    # _extract_chunk 逐字保留 body（自然上线形态每块 code 不带
+                    # 尾换行），拼接必须补回恰好一个块间 LF；"".join 会让上块
+                    # 末行与下块首行粘连（IndentationError）。body 自带尾换行时
+                    # 此处多一个空行即模型原文，语义无损。
+                    assembled = "\n".join(codes)
                     # 拼接整体 ast/重名/总长机器校验通过后，才合成单个 old=""
                     # 出生补丁；补丁应用路径一字不改（仍走 _parse_and_apply）。
                     _validate_assembled_chunks(assembled)
@@ -907,8 +1087,8 @@ class AgentRunner:
                 temperature=TEMPERATURE, timeout=timeout)
         # Task1 采纳遥测（QA-1 M1）：唯一条件=call 成功返回；replay 不记，
         # 发网前失败 0 采纳行。必须先于 resp_payload 本地校验——拆块路径上
-        # 网关已成功返回但本块 JSON/ast 校验失败时，采纳语义与旧单次路径
-        # （坏 JSON 响应亦记）保持一致；崩溃只漏记不重记（安全方向）。
+        # 网关已成功返回但本块围栏/ast 本地校验失败时，采纳语义与旧单次路径
+        # （坏响应亦记）保持一致；崩溃只漏记不重记（安全方向）。
         # 锁内适配评审 Minor 1（2026-10-20 全新 opus reviewer）。
         if self.recall is not None:
             for hit in learning_hits:
@@ -958,7 +1138,7 @@ class AgentRunner:
         每块：构造带合同/提案/骨架 + chunk_context 的消息（硬规则1逐块文本
         守卫）→ 幂等键 coding_<t>_r<run>_round<r>_chunk<i>，指纹含
         chunk_index/total → 调用（max_tokens/timeout 取 RunSpec）→ 逐块
-        JSON 机器校验。任何一块不符即 ChunkBirthError 整轮失败（不继续为
+        sentinel 围栏机器校验。任何一块不符即 ChunkBirthError 整轮失败（不继续为
         后续块付费），由 run() 捕获进入下一轮；全过程不写任何目标文件。
         """
         cs = spec.chunked_birth
@@ -967,7 +1147,10 @@ class AgentRunner:
             ctx = ChunkPromptContext(
                 index=i, total=cs.chunk_count, target_path=cs.target_path,
                 titles=cs.chunk_titles, boundaries=cs.chunk_boundaries,
-                previous_code="".join(codes),
+                # 同出生拼接语义（设计 §2.2 EBNF）：end 行前 LF 是分隔符、
+                # 提取器逐字保留 body，前序上下文块间必须补恰好一个 LF，否则
+                # 前序块末行与下一块首行粘连，模型看到被污染的参考码。
+                previous_code="\n".join(codes),
                 round_feedback=round_feedback if i == 0 else "")
             messages = _build_messages(
                 gate2_notes=spec.gate2_notes, traceback_tail=tail,

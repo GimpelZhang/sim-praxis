@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import ast
 import json
 import sqlite3
 from pathlib import Path
@@ -520,19 +521,23 @@ def stat_mode(p: Path) -> int:
 
 # ===========================================================================
 # ⑤ Task6 V2 拆块出生（chunked birth，锁内适配 seq42-47 / 用户 2026-10-20
-#    裁决「拆块交付」）：默认输出字符级快照回归、拆块段渲染、ChunkSpec 校验、
-#    逐块/拼接机器校验、4 块顺序出生端到端、坏块整轮失败无半成品。
+#    裁决「拆块交付」；run4 2026-10-21 起 sentinel 围栏纯文本定界 + n=6，
+#    设计终稿 .omc/handoffs/task6-sentinel-seam-design.md）：默认输出字符级
+#    快照回归、拆块段渲染、ChunkSpec 校验、逐块/拼接机器校验、6 块顺序出生
+#    端到端、坏块整轮失败无半成品、反馈机制零改动。
 #    全部 0 付费：FakeGateway + 全合成 chunk 文本（非解题脚本，硬规则 3）。
-#    [chunked-birth-tests-v1]
+#    [chunked-birth-tests-v2]
 # ===========================================================================
 
 import sys  # noqa: E402 （拆块测试段局部导入，与既有测试函数内 import 同风格）
 
 _CHUNK_TARGET = "v2.py"
-_CHUNK_TITLES = ("头部/合成常量", "场景/合成注入", "控制/合成采集", "batch/合成产物")
+_CHUNK_TITLES = ("头部/合成常量", "场景/合成注入", "步态/合成控制",
+                 "采集/合成判定", "batch/合成数据产物", "媒体/合成产物")
 _CHUNK_BOUNDARIES = tuple(
-    f"第 {i} 块边界（夹具）：约 {180 + 20 * i} 行预算，只允许写本块合成章节。"
-    for i in range(4))
+    "行数预算：约 180 行。"
+    f"第 {i} 块边界（夹具）：只允许写本块合成章节，不得写其他块章节。"
+    for i in range(6))
 
 # 字符级快照：改前 _build_messages 两 case（无意见/有人工意见）的逐字输出，
 # 由一次性 /tmp/task6_capture_baseline.py 在改前模板上捕获（3857 B）。任何对
@@ -585,46 +590,56 @@ def test_07_extra_sections_render_position_order():
     assert p_notes < p_extra < p_fail
 
 
-def test_08_chunk_section_render_index_and_prior():
+def test_08_chunk_section_render_fence_format():
     ctx0 = ChunkPromptContext(
-        0, 4, _CHUNK_TARGET, _CHUNK_TITLES, _CHUNK_BOUNDARIES,
+        0, 6, _CHUNK_TARGET, _CHUNK_TITLES, _CHUNK_BOUNDARIES,
         round_feedback="块 2 path 不符：x")
     u0 = _build_messages(
         gate2_notes=None, chunk_context=ctx0, **_snap_kwargs())[1]["content"]
-    assert "## 拆块交付（第 1/4 块）" in u0
-    assert "1. 《头部/合成常量》" in u0 and "4. 《batch/合成产物》" in u0
-    assert "你本次只能产出第 1/4 块《头部/合成常量》" in u0
+    assert "## 拆块交付（第 1/6 块）" in u0
+    assert "1. 《头部/合成常量》" in u0 and "6. 《媒体/合成产物》" in u0
+    assert "你本次只能产出第 1/6 块《头部/合成常量》" in u0
     assert "### 前序已定稿块" not in u0          # 块 0 无前序
     assert "上一轮拆块交付失败反馈" in u0 and "块 2 path 不符" in u0
-    assert '"index":0' in u0 and "index 必须是 0" in u0
-    assert "total 必须是 4" in u0
+    # run4：围栏字面串与字段逐字口径
+    assert "### 交付格式（围栏纯文本，禁止 JSON）" in u0
+    assert (f"<<<<<<< simpraxis.chunk.v1 path={_CHUNK_TARGET} "
+            "index=0 total=6") in u0
+    assert ">>>>>>> simpraxis.chunk.v1.end" in u0
+    assert "index 逐字等于 0" in u0
+    assert "total 逐字等于 6" in u0
+    assert "「缺结束围栏」" in u0
+    # 旧 JSON 协议文案反向断言
+    assert '"index":0' not in u0
+    assert "index 必须是 0" not in u0
+    assert "严格 JSON" not in u0
     assert str(CHUNK_MIN_CODE_CHARS) in u0
     assert str(CHUNK_MAX_CODE_CHARS) in u0
     assert str(CHUNK_MIN_ASSEMBLED_CHARS) in u0
 
     prior = "PRIOR0\nPRIOR1\n"
-    ctx2 = ChunkPromptContext(
-        2, 4, _CHUNK_TARGET, _CHUNK_TITLES, _CHUNK_BOUNDARIES,
+    ctx5 = ChunkPromptContext(
+        5, 6, _CHUNK_TARGET, _CHUNK_TITLES, _CHUNK_BOUNDARIES,
         previous_code=prior)
-    u2 = _build_messages(
+    u5 = _build_messages(
         gate2_notes=None, extra_sections=(("S", "B"),),
-        chunk_context=ctx2, **_snap_kwargs())[1]["content"]
-    assert "## 拆块交付（第 3/4 块）" in u2
+        chunk_context=ctx5, **_snap_kwargs())[1]["content"]
+    assert "## 拆块交付（第 6/6 块）" in u5
     p_sec, p_chunk, p_fail = (
-        u2.index("## S\nB"), u2.index("## 拆块交付"),
-        u2.index("## 失败命令"))
+        u5.index("## S\nB"), u5.index("## 拆块交付"),
+        u5.index("## 失败命令"))
     assert p_sec < p_chunk < p_fail            # extra 段在 chunk 段之前
-    assert "```python\n" + prior + "\n```" in u2
-    assert "以下是前 2 块拼接后的逐字定稿" in u2
-    assert "上一轮拆块交付失败反馈" not in u2   # 反馈只进每轮块 0
+    assert "```python\n" + prior + "\n```" in u5
+    assert "以下是前 5 块拼接后的逐字定稿" in u5
+    assert "上一轮拆块交付失败反馈" not in u5   # 反馈只进每轮块 0
 
 
 def test_09_chunk_spec_construction_validation():
-    kw = dict(target_path=_CHUNK_TARGET, chunk_count=4,
+    kw = dict(target_path=_CHUNK_TARGET, chunk_count=6,
               chunk_titles=_CHUNK_TITLES,
               per_call_sections=(("a", "b"),),
               chunk_boundaries=_CHUNK_BOUNDARIES)
-    assert ChunkSpec(**kw).chunk_count == 4
+    assert ChunkSpec(**kw).chunk_count == 6
     with pytest.raises(ValueError, match="target_path"):
         ChunkSpec(**{**kw, "target_path": "  "})
     with pytest.raises(ValueError, match="chunk_count"):
@@ -637,40 +652,114 @@ def test_09_chunk_spec_construction_validation():
                      "chunk_boundaries": _CHUNK_BOUNDARIES[:3],
                      "per_call_sections": ("a", "b")})  # 非 (str,str) 元组
     with pytest.raises(ValueError):
-        ChunkSpec(**{**kw, "chunk_titles": _CHUNK_TITLES[:3]})
+        ChunkSpec(**{**kw, "chunk_titles": _CHUNK_TITLES[:5]})
 
 
-def _chunk_envelope(code, index, *, path=_CHUNK_TARGET, total=4,
-                    include_index=True):
-    ch = {"path": path, "total": total, "code": code}
-    if include_index:
-        ch["index"] = index
-    return json.dumps({"chunk": ch}, ensure_ascii=False)
+def _chunk_fence(code, index, *, path=_CHUNK_TARGET, total=6,
+                 pre="", post="", begin=None, omit_end=False):
+    """按 §2.1 拼 sentinel 围栏响应（整体重建，非旧 _chunk_envelope 改名；
+    begin/omit_end 仅供畸形矩阵构造不合规围栏行）。"""
+    head = begin if begin is not None else (
+        f"<<<<<<< simpraxis.chunk.v1 path={path} "
+        f"index={index} total={total}")
+    tail = "" if omit_end else "\n>>>>>>> simpraxis.chunk.v1.end"
+    return f"{pre}{head}\n{code}{tail}{post}"
 
 
-def test_10_extract_chunk_machine_checks():
-    good = "x = 1\n" + "#" * 820
-    assert _extract_chunk(_chunk_envelope(good, 0),
-                          target=_CHUNK_TARGET, index=0, total=4) == good
+def test_10_extract_chunk_fence_machine_checks():
+    good = "x = 1\n" + _fixture_pad("m10", 13)
+    assert CHUNK_MIN_CODE_CHARS <= len(good) <= CHUNK_MAX_CODE_CHARS
+    assert _extract_chunk(_chunk_fence(good, 0),
+                          target=_CHUNK_TARGET, index=0, total=6) == good
+
     def expect(raw, i, needle):
         with pytest.raises(ChunkBirthError, match=needle):
-            _extract_chunk(raw, target=_CHUNK_TARGET, index=i, total=4)
-    expect(_chunk_envelope(good, 0, include_index=False), 0, "index 不符")
-    expect(_chunk_envelope(good, 1, path="evil.py"), 1, "path 不符")
-    expect(_chunk_envelope(good, 2, total=3), 2, "total 不符")
-    expect(_chunk_envelope("x = 1\n", 0), 0, "code 长度")
-    too_long = "x = 1\n" + "#" * (CHUNK_MAX_CODE_CHARS + 1 - len("x = 1\n"))
-    assert len(too_long) == CHUNK_MAX_CODE_CHARS + 1
-    with pytest.raises(ChunkBirthError, match="code 长度") as excinfo:
-        _extract_chunk(_chunk_envelope(too_long, 0),
-                       target=_CHUNK_TARGET, index=0, total=4)
-    assert ">" in str(excinfo.value)
-    expect(_chunk_envelope("```python\n" + good, 0), 0, "markdown 围栏")
-    expect("not json at all {", 0, "非合法 JSON")
-    # bool index（json true）必须按类型拒绝（bool-is-int 坑）
-    raw_bool = json.dumps({"chunk": {"path": _CHUNK_TARGET, "index": True,
-                                     "total": 4, "code": good}})
-    expect(raw_bool, 0, "index 不符")
+            _extract_chunk(raw, target=_CHUNK_TARGET, index=i, total=6)
+
+    # 长度窗边界（本机逐字符计数）
+    assert _extract_chunk(_chunk_fence("#" * 800, 0),
+                          target=_CHUNK_TARGET, index=0, total=6) == "#" * 800
+    expect(_chunk_fence("#" * 799, 0), 0, "code 长度 799 < 800")
+    assert _extract_chunk(_chunk_fence("#" * 18000, 0),
+                          target=_CHUNK_TARGET, index=0, total=6) == "#" * 18000
+    expect(_chunk_fence("#" * 18001, 0), 0,
+           "18001 > 18000 chars（机器窗上限）")
+    # path/index/total 不符
+    expect(_chunk_fence(good, 1, path="evil.py"), 1,
+           "块 1 path 不符：收到 evil.py")
+    expect(_chunk_fence(good, 0, begin=(
+        "<<<<<<< simpraxis.chunk.v1 path='a\"b' index=0 total=6")), 0,
+        "path 含非白名单字符")
+    expect(_chunk_fence(good, 0, begin=(
+        "<<<<<<< simpraxis.chunk.v1 path=" + "a" * 129
+        + " index=0 total=6")), 0, "非白名单字符（长度 129")
+    expect(_chunk_fence(good, 0, total=5), 0, "total 不符：收到 5")
+    expect(_chunk_fence(good, 1), 0, "index 不符：收到 1，应为 0")
+    # 不合规整数字段：负号/前导零/全角，一律不回显
+    for bad in ("-1", "01", "＋1", "１"):
+        expect(_chunk_fence(good, 0, begin=(
+            f"<<<<<<< simpraxis.chunk.v1 path={_CHUNK_TARGET} "
+            f"index={bad} total=6")), 0, "index 不合规整数字段（不回显）")
+    # 短码 / markdown
+    expect(_chunk_fence("x = 1\n", 0), 0, "code 长度")
+    expect(_chunk_fence("```python\n" + good, 0), 0, "markdown 围栏")
+    # 裸控制字符（TAB 允许；CR 只允许行尾 CRLF）
+    expect(_chunk_fence("x = 1\0bad\n" + _fixture_pad("m10", 13), 0),
+           0, r"裸控制字符 U\+0000")
+    expect(_chunk_fence("a = 1\rb\n" + _fixture_pad("m10", 13), 0),
+           0, r"裸控制字符 U\+000D")
+    expect(_chunk_fence("x = 1\v\n" + _fixture_pad("m10", 13), 0),
+           0, r"裸控制字符 U\+000B")
+    # 零宽字符（正文）
+    expect(_chunk_fence("x​ = 1\n" + _fixture_pad("m10", 13), 0),
+           0, r"零宽字符 U\+200B")
+    # 全角漂移：围栏行不合规（只拒，不回显）
+    expect(_chunk_fence(good, 0, begin=(
+        "＜＜＜＜＜＜＜ simpraxis.chunk.v1 path=v2.py index=0 total=6")),
+        0, "起始围栏行不合规")
+    expect(_chunk_fence(good, 0, begin=(
+        "<<<<<<< simpraxis.chunk.v1 path＝v2.py index＝0 total＝6")),
+        0, "起始围栏行不合规")
+    # BOM
+    expect("﻿" + _chunk_fence(good, 0), 0, r"U\+FEFF BOM")
+    # 围栏外正文（起前/尾后），原因不摘录内容
+    expect(_chunk_fence(good, 0, pre="不好意思先寒暄一句\n"), 0,
+           "围栏外存在非空白正文")
+    expect(_chunk_fence(good, 0, post="\n尾后解释文字"), 0,
+           "围栏外存在非空白正文")
+    expect(_chunk_fence(good, 0, pre="　\n"), 0, "围栏外存在非空白正文")
+    expect(_chunk_fence(good, 0, pre="​\n"), 0, "围栏外存在非空白正文")
+    # 多起始/多结束/body 内核记/缺尾
+    b2 = (f"<<<<<<< simpraxis.chunk.v1 path={_CHUNK_TARGET} "
+          "index=0 total=6")
+    expect(b2 + "\n" + _fixture_pad("m10", 13) + "\n" + b2
+           + "\n>>>>>>> simpraxis.chunk.v1.end", 0, "起始围栏出现 2 次")
+    expect(_chunk_fence(good + "\n>>>>>>> simpraxis.chunk.v1.end\ntail", 0),
+           0, "结束围栏出现 2 次")
+    expect(_chunk_fence(
+        "x = 1  # simpraxis.chunk.v1 drift\n" + _fixture_pad("m10", 13), 0),
+        0, "代码体内第 2 行出现围栏核记")
+    expect(_chunk_fence(good, 0, omit_end=True), 0, "缺结束围栏行")
+    # end 在 begin 之前且其后再无 end：拒（情形 4，begin 后 0 个 end）
+    b_head = (f"<<<<<<< simpraxis.chunk.v1 path={_CHUNK_TARGET} "
+              "index=0 total=6")
+    expect(">>>>>>> simpraxis.chunk.v1.end\n" + b_head + "\n" + good, 0,
+           "缺结束围栏行")
+    # 七连 < 但无核记的普通代码行：过；行首 SP/TAB 缩进：过
+    near = "z = a <<<<<<< b\n" + _fixture_pad("m10", 13)
+    assert _extract_chunk(_chunk_fence(near, 0),
+                          target=_CHUNK_TARGET, index=0, total=6) == near
+    crlf = _chunk_fence(good, 0).replace("\n", "\r\n")
+    assert _extract_chunk(crlf, target=_CHUNK_TARGET,
+                          index=0, total=6) == good
+    # 纯空白 body
+    expect(_chunk_fence("   \n\t", 0), 0, "code 为空或纯空白")
+    # 历史 char139 等价形：首行三引号中文 docstring + 裸 LF + 引号反斜杠
+    hist = ('"""合成 docstring。\n他说"启动"：路径 C:\\Users\\test\n'
+            '三引号结束。"""\n' + _fixture_pad("m10", 13))
+    got = _extract_chunk(_chunk_fence(hist, 0),
+                         target=_CHUNK_TARGET, index=0, total=6)
+    assert got == hist and '他说"启动"' in got
 
 
 def test_11_validate_assembled_machine_checks():
@@ -678,24 +767,46 @@ def test_11_validate_assembled_machine_checks():
     _validate_assembled_chunks("".join(codes))       # 合法拼接不抛
     with pytest.raises(ChunkBirthError, match="顶层重复 def/class"):
         _validate_assembled_chunks(
-            codes[0] + codes[1] + codes[1] + codes[3])
+            codes[0] + codes[1] + codes[1] + codes[3] + codes[4] + codes[5])
     with pytest.raises(ChunkBirthError, match="ast.parse 失败"):
-        _validate_assembled_chunks("".join(codes[:3]) + "def broken(:\n")
-    short = "".join(
-        f"def fixture_short_{i}(x):\n    return x + {i}\n"
-        + _fixture_pad(f"s{i}", 34) + "\n" for i in range(4))
-    with pytest.raises(ChunkBirthError, match="拼接总长"):
-        _validate_assembled_chunks(short)
+        _validate_assembled_chunks("".join(codes[:5]) + "def broken(:\n")
+    # ast 原因只含类型+行/列，不附模型源码片段（MAJOR-1）
+    try:
+        _validate_assembled_chunks("".join(codes[:5]) + "def broken(:\n")
+    except ChunkBirthError as exc:
+        msg = str(exc)
+        assert "def broken(" not in msg and "SyntaxError" in msg
+    # 拼接总长边界 29999/30000（字符口径）
+    s29999 = "x = 1\n" + "#" * (29999 - len("x = 1\n"))
+    s30000 = "x = 1\n" + "#" * (30000 - len("x = 1\n"))
+    assert len(s29999) == 29999 and len(s30000) == 30000
+    with pytest.raises(ChunkBirthError, match="拼接总长 29999 < 30000"):
+        _validate_assembled_chunks(s29999)
+    _validate_assembled_chunks(s30000)
+    # 逃单块组合：一块堆满 18000 + 五块 801 桩 = 22005，逐块过、拼接必拒
+    # （设计 §2.4 的 22000=18000+5×800 同形反例；801 桩同样远超 800 下限）
+    big = "#" * 18000
+    small = ["#" * 801 for _ in range(5)]
+    pieces = [big] + small
+    for j, pc in enumerate(pieces):
+        assert _extract_chunk(_chunk_fence(pc, j, total=6),
+                              target=_CHUNK_TARGET, index=j, total=6) == pc
+    assert len("".join(pieces)) == 22005
+    with pytest.raises(ChunkBirthError, match="拼接总长 22005 < 30000"):
+        _validate_assembled_chunks("".join(pieces))
 
 
 def _fixture_pad(tag, lines):
     # 合成填充注释（唯一可搜前缀，防跨块重名误判；非任何解题脚本内容）。
     return "\n".join(
-        f"# 夹具填充 {tag} {k:04d} 合成文本非解题脚本" for k in range(lines))
+        f"# 夹具填充 {tag} {k:04d} 合成文本非解题脚本 " + "z" * 40
+        for k in range(lines))
 
 
 def _happy_chunk_codes():
-    c0 = ("#!/usr/bin/env python\n'''合成夹具 c0：拆块出生端到端，非解题脚本'''\n"
+    """六块合成 happy fixture：每块 800-18000 字符、拼接 ≥30000 且 ast 合法、
+    顶层名唯一。禁止为过测试反向调长度常量（评审 L2）。"""
+    c0 = ("'''合成夹具 c0：拆块出生端到端，非解题脚本'''\n"
           "from __future__ import annotations\nimport json\n"
           "from pathlib import Path\n\nFIXTURE_CONSTANT_A = 1\n\n"
           + _fixture_pad("c0", 120) + "\n")
@@ -704,15 +815,23 @@ def _happy_chunk_codes():
           "    return value + FIXTURE_CONSTANT_A + 1\n\n"
           + _fixture_pad("c1", 120) + "\n")
     c2 = ("def fixture_beta(value):\n"
-          "    # 合成夹具函数 beta\n"
+          "    # 合成夹具函数 beta（步态/控制族占位，非解题脚本）\n"
           "    return value * 2\n\n"
           + _fixture_pad("c2", 120) + "\n")
-    c3 = ("def fixture_main():\n"
+    c3 = ("def fixture_gamma(value):\n"
+          "    # 合成夹具函数 gamma（采集/判定族占位，非解题脚本）\n"
+          "    return max(value, 0)\n\n"
+          + _fixture_pad("c3", 120) + "\n")
+    c4 = ("def fixture_delta(value):\n"
+          "    # 合成夹具函数 delta（数据产物族占位，非解题脚本）\n"
+          "    return {'v': value}\n\n"
+          + _fixture_pad("c4", 120) + "\n")
+    c5 = ("def fixture_main():\n"
           "    Path('telemetry.json').write_text("
           "json.dumps({'_fixture': True}), encoding='utf-8')\n\n\n"
           "if __name__ == '__main__':\n    fixture_main()\n"
-          + _fixture_pad("c3", 120) + "\n")
-    return [c0, c1, c2, c3]
+          + _fixture_pad("c5", 120) + "\n")
+    return [c0, c1, c2, c3, c4, c5]
 
 
 def _chunked_runner(tmp_path, responses, *, thread="t6chunk", cap=3,
@@ -731,7 +850,7 @@ def _chunked_runner(tmp_path, responses, *, thread="t6chunk", cap=3,
         billing_task=6, run_idx=1, max_coding_rounds=cap,
         coding_max_tokens=tokens, coding_timeout_s=timeout,
         chunked_birth=ChunkSpec(
-            target_path=_CHUNK_TARGET, chunk_count=4,
+            target_path=_CHUNK_TARGET, chunk_count=6,
             chunk_titles=_CHUNK_TITLES,
             per_call_sections=(
                 ("V2 升阶任务合同（夹具）",
@@ -743,28 +862,31 @@ def _chunked_runner(tmp_path, responses, *, thread="t6chunk", cap=3,
     return runner, spec, gw, wd, cache
 
 
-def test_12_chunked_birth_four_calls_assemble_and_birth(tmp_path):
+def test_12_chunked_birth_six_calls_assemble_and_birth(tmp_path):
     codes = _happy_chunk_codes()
-    assert [len(c) >= CHUNK_MIN_CODE_CHARS for c in codes] == [True] * 4
+    assert [len(c) >= CHUNK_MIN_CODE_CHARS for c in codes] == [True] * 6
+    assert [len(c) <= CHUNK_MAX_CODE_CHARS for c in codes] == [True] * 6
     assert len("".join(codes)) >= CHUNK_MIN_ASSEMBLED_CHARS
     runner, spec, gw, wd, cache = _chunked_runner(
-        tmp_path, [_chunk_envelope(c, i) for i, c in enumerate(codes)])
+        tmp_path, [_chunk_fence(c, i) for i, c in enumerate(codes)])
     rec = runner.run(spec)
 
     assert rec["status"] == "ok"
     assert rec["coding_round"] == 1 and rec["executions"] == 2
-    assert len(gw.calls) == 4                       # 恰好 4 次顺序调用
+    assert len(gw.calls) == 6                       # 恰好 6 次顺序调用
     assert [c["kw"] for c in gw.calls] == [
-        {"max_tokens": 32768, "temperature": 0.1, "timeout": 600}] * 4
+        {"max_tokens": 32768, "temperature": 0.1, "timeout": 600}] * 6
     target = wd / _CHUNK_TARGET
     assert target.is_file()
-    assert target.read_text(encoding="utf-8") == "".join(codes)
+    # run4：块间补恰好一个 LF（设计 §2.2 EBNF）；happy body 自带尾换行，
+    # 接缝处多一空行即模型原文（见 test_18 自然形态）。
+    assert target.read_text(encoding="utf-8") == "\n".join(codes)
     assert (wd / "telemetry.json").is_file()       # 出生后重跑收敛
 
     for i, call in enumerate(gw.calls):
         user = call["messages"][1]["content"]
-        assert f"## 拆块交付（第 {i + 1}/4 块）" in user
-        assert f"index 必须是 {i}" in user
+        assert f"## 拆块交付（第 {i + 1}/6 块）" in user
+        assert f"index 逐字等于 {i}" in user
         assert "## V2 升阶任务合同（夹具）" in user  # 合同每 call 都带
         assert "已批准 macro 提案（夹具）" in user
         assert "V1 结构骨架（夹具）" in user
@@ -775,29 +897,88 @@ def test_12_chunked_birth_four_calls_assemble_and_birth(tmp_path):
             assert f"以下是前 {i} 块拼接后的逐字定稿" in user
 
     cache_dir = tmp_path / "cache"
-    keys = [f"coding_t6chunk_r1_round1_chunk{i}.json" for i in range(4)]
+    keys = [f"coding_t6chunk_r1_round1_chunk{i}.json" for i in range(6)]
     for name in keys:
         assert (cache_dir / name).is_file()
     assert not (cache_dir / "coding_t6chunk_r1_round1.json").exists()
     sha = [json.loads((cache_dir / n).read_text())["req_sha256"] for n in keys]
-    assert len(set(sha)) == 4                      # 指纹逐块不同（含 chunk_index）
+    assert len(set(sha)) == 6                      # 指纹逐块不同（含 chunk_index）
 
     ev = tmp_path / "ev" / "t6chunk"
-    for i in range(4):
+    for i in range(6):
         req_p = ev / f"coding_round1.chunk{i}.req.json"
         resp_p = ev / f"coding_round1.chunk{i}.resp.json"
         assert req_p.is_file() and resp_p.is_file()
         req = json.loads(req_p.read_text())
-        assert req["chunk_index"] == i and req["chunk_total"] == 4
+        assert req["chunk_index"] == i and req["chunk_total"] == 6
         resp = json.loads(resp_p.read_text())
         assert resp["ok"] is True
         assert resp["chunk"] == {"path": _CHUNK_TARGET, "index": i,
-                                 "total": 4}
+                                 "total": 6}
         assert len(resp["code"]) >= CHUNK_MIN_CODE_CHARS
     decision = json.loads(
         (ev / "coding_round1.decision.json").read_text())
     assert decision["applied"] == [_CHUNK_TARGET] and decision["rejected"] is None
     assert not (wd / "FAILURE.json").exists()
+
+
+def test_18_chunked_birth_natural_body_lf_seams(tmp_path):
+    """阻断回归（设计 §2.2 EBNF）：自然上线形态 body 无尾换行——begin 行后与
+    end 行前的 LF 都是语法分隔符，提取器逐字保留 body，故拼接侧（L980 出生
+    拼接 + L1139 前序上下文）必须在块间补回恰好一个 LF；"".join 会让相邻块
+    行粘连（出生 ast IndentationError；i≥2 模型看到的前序参考码被污染）。
+    本测在旧 "".join 下必红，"\n".join 下绿。"""
+    codes = [c.rstrip("\n") for c in _happy_chunk_codes()]
+    assert all(CHUNK_MIN_CODE_CHARS <= len(c) <= CHUNK_MAX_CODE_CHARS
+               for c in codes)
+    assert len("\n".join(codes)) >= CHUNK_MIN_ASSEMBLED_CHARS
+    # 真实提取器往返：恢复 code 逐字且均不带尾换行（自然形态先钉死）。
+    for i, code in enumerate(codes):
+        got = _extract_chunk(_chunk_fence(code, i), target=_CHUNK_TARGET,
+                             index=i, total=6)
+        assert got == code and not got.endswith("\n")
+
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [_chunk_fence(c, i) for i, c in enumerate(codes)],
+        thread="t6lf", cap=1)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok", rec.get("reason")
+    assert len(gw.calls) == 6
+    born = (wd / _CHUNK_TARGET).read_text(encoding="utf-8")
+    ast.parse(born)                             # 出生内容 ast 通过
+    _validate_assembled_chunks(born)           # 含重名/总长/ast 全闸
+    # 出生文件五处接缝：上块末行 + 恰好一个 LF + 下块首行，粘连子串绝不出现。
+    for k in range(5):
+        last_line = codes[k].rsplit("\n", 1)[-1]
+        first_line = codes[k + 1].split("\n", 1)[0]
+        assert last_line + "\n" + first_line in born
+        assert last_line + first_line not in born
+    # L1139 现场：i≥1 请求里的前序定稿（```python 围栏内）每一处真实块间接缝
+    # 都有 LF、不粘连（真正的 c0|c1 接缝首次出现在 i=2 的请求里；i=1 只有 c0，
+    # 其末行也必须独立成行，不与围栏闭合 ``` 粘连）。
+    for i in range(1, 6):
+        prompt = gw.calls[i]["messages"][1]["content"]
+        assert "\n".join(codes[:i]) in prompt
+        for k in range(i - 1):
+            last_line = codes[k].rsplit("\n", 1)[-1]
+            first_line = codes[k + 1].split("\n", 1)[0]
+            assert last_line + "\n" + first_line in prompt
+            assert last_line + first_line not in prompt
+    assert codes[0].rsplit("\n", 1)[-1] + "\n```" in \
+        gw.calls[1]["messages"][1]["content"]
+
+    # 另一形态：body 自带尾换行（现有 happy 夹具）仍绿——多空行即模型原文。
+    happy = _happy_chunk_codes()
+    runner2, spec2, gw2, wd2, _ = _chunked_runner(
+        tmp_path / "form2",
+        [_chunk_fence(c, i) for i, c in enumerate(happy)],
+        thread="t6lf2", cap=1)
+    rec2 = runner2.run(spec2)
+    assert rec2["status"] == "ok" and len(gw2.calls) == 6
+    born2 = (wd2 / _CHUNK_TARGET).read_text(encoding="utf-8")
+    assert born2 == "\n".join(happy)
+    _validate_assembled_chunks(born2)
 
 
 def test_13_default_path_call_kwargs_8192_120(tmp_path):
@@ -846,7 +1027,7 @@ def _chunked_runner_with(tmp_path, gw, *, thread, wd):
         billing_task=6, run_idx=1, max_coding_rounds=3,
         coding_max_tokens=32768, coding_timeout_s=600,
         chunked_birth=ChunkSpec(
-            target_path=_CHUNK_TARGET, chunk_count=4,
+            target_path=_CHUNK_TARGET, chunk_count=6,
             chunk_titles=_CHUNK_TITLES,
             per_call_sections=(("V2 升阶任务合同（夹具）", "合同夹具"),),
             chunk_boundaries=_CHUNK_BOUNDARIES))
@@ -854,37 +1035,53 @@ def _chunked_runner_with(tmp_path, gw, *, thread, wd):
 
 
 @pytest.mark.parametrize("scenario,calls_expected,needle", [
-    ("missing_index", 1, "块 0 index 不符"),
+    ("missing_index", 1, "起始围栏行不合规"),
     ("bad_path", 2, "块 1 path 不符"),
     ("too_short", 1, "块 0 code 长度"),
-    ("dup_names", 4, "顶层重复 def/class"),
-    ("ast_error", 4, "ast.parse 失败"),
-    ("total_short", 4, "拼接总长"),
+    ("dup_names", 6, "顶层重复 def/class"),
+    ("ast_error", 6, "ast.parse 失败"),
+    ("total_short", 6, "拼接总长"),
+    ("missing_end", 1, "缺结束围栏行"),
+    ("outside_text", 1, "围栏外存在非空白正文"),
+    ("fenced_body_nucleus", 1, "出现围栏核记"),
+    ("fullwidth_drift", 1, "起始围栏行不合规"),
 ])
 def test_15_bad_chunk_fails_whole_round_without_half_file(
         tmp_path, scenario, calls_expected, needle):
     codes = _happy_chunk_codes()
     if scenario == "missing_index":
-        responses = [_chunk_envelope(codes[0], 0, include_index=False)]
+        bad_begin = (f"<<<<<<< simpraxis.chunk.v1 path={_CHUNK_TARGET} "
+                     "total=6")  # 缺 index 字段：begin 正则 0 命中
+        responses = [_chunk_fence(codes[0], 0, begin=bad_begin)]
     elif scenario == "bad_path":
-        responses = [_chunk_envelope(codes[0], 0),
-                     _chunk_envelope(codes[1], 1, path="evil.py")]
+        responses = [_chunk_fence(codes[0], 0),
+                     _chunk_fence(codes[1], 1, path="evil.py")]
     elif scenario == "too_short":
-        responses = [_chunk_envelope("x = 1\n", 0)]
+        responses = [_chunk_fence("x = 1\n", 0)]
     elif scenario == "dup_names":
         dup2 = ("def fixture_alpha(value):\n    return value\n\n"
                 + _fixture_pad("dup", 120) + "\n")
-        responses = [_chunk_envelope(c, i)
+        responses = [_chunk_fence(c, i)
                      for i, c in enumerate([codes[0], codes[1], dup2,
-                                            codes[3]])]
+                                            codes[3], codes[4], codes[5]])]
     elif scenario == "ast_error":
-        bad3 = "def fixture_broken(:\n    pass\n" + _fixture_pad("ast", 120)
-        responses = [_chunk_envelope(c, i)
-                     for i, c in enumerate([*codes[:3], bad3])]
-    else:  # total_short：逐块都过 800，拼接总长 < 12000
-        short = [f"def fixture_short_{i}(x):\n    return x + {i}\n"
-                 + _fixture_pad(f"s{i}", 34) + "\n" for i in range(4)]
-        responses = [_chunk_envelope(c, i) for i, c in enumerate(short)]
+        bad5 = "def fixture_broken(:\n    pass\n" + _fixture_pad("ast", 120)
+        responses = [_chunk_fence(c, i)
+                     for i, c in enumerate([*codes[:5], bad5])]
+    elif scenario == "missing_end":
+        responses = [_chunk_fence(codes[0], 0, omit_end=True)]
+    elif scenario == "outside_text":
+        responses = [_chunk_fence(codes[0], 0, pre="模型寒暄一句\n")]
+    elif scenario == "fenced_body_nucleus":
+        bad = "x = 1\n# simpraxis.chunk.v1\n" + _fixture_pad("nb", 120)
+        responses = [_chunk_fence(bad, 0)]
+    elif scenario == "fullwidth_drift":
+        bad_begin = (f"＜＜＜＜＜＜＜ simpraxis.chunk.v1 path={_CHUNK_TARGET}"
+                     " index=0 total=6")
+        responses = [_chunk_fence(codes[0], 0, begin=bad_begin)]
+    else:  # total_short：六块都过 800，拼接总长 < 30000
+        short = ["#" * 801 for _ in range(6)]
+        responses = [_chunk_fence(c, i) for i, c in enumerate(short)]
 
     runner, spec, gw, wd, _ = _chunked_runner(
         tmp_path, responses, thread="t6bad", cap=1)
@@ -920,16 +1117,45 @@ def test_16_chunk_fingerprint_includes_index_and_keys_safe():
     fp = {i: request_fingerprint(
         "same-prompt", None,
         {"max_tokens": 32768, "temperature": 0.1,
-         "chunk_index": i, "chunk_total": 4},
-        stage="coding_debug", model="fake-model") for i in range(4)}
-    assert len(set(fp.values())) == 4
+         "chunk_index": i, "chunk_total": 6},
+        stage="coding_debug", model="fake-model") for i in range(6)}
+    assert len(set(fp.values())) == 6
     assert request_fingerprint(
         "same-prompt", None,
         {"max_tokens": 32768, "temperature": 0.1,
-         "chunk_index": 1, "chunk_total": 4},
+         "chunk_index": 1, "chunk_total": 6},
         stage="coding_debug", model="fake-model") == fp[1]
     import re
-    for i in range(4):
+    for i in range(6):
         assert re.fullmatch(
             r"[A-Za-z0-9_.-]{1,160}",
             f"coding_t6chunk_r1_round1_chunk{i}")
+
+
+def test_17_feedback_zero_change_only_block0_round2(tmp_path):
+    # 评审 MAJOR-2 + §10.4 终裁：反馈机制零改动。round1 块 3 失败 →
+    # round2 仅块 0 prompt 含机器原因段，块 1-5 不含；缓存键含 round 分量，
+    # 跨轮命中结构上不可能（round2 六块全重付）；ChunkBirthError 无 chunk_index。
+    assert not hasattr(ChunkBirthError, "chunk_index")
+    codes = _happy_chunk_codes()
+    bad_body = "x = 1\n# simpraxis.chunk.v1 drift-line\n" \
+        + _fixture_pad("fb", 120)
+    round1 = [_chunk_fence(codes[0], 0), _chunk_fence(codes[1], 1),
+              _chunk_fence(codes[2], 2), _chunk_fence(bad_body, 3)]
+    round2 = [_chunk_fence(c, i) for i, c in enumerate(codes)]
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, round1 + round2, thread="t6fb", cap=2)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok"
+    assert rec["coding_round"] == 2 and len(gw.calls) == 10
+    feedback_title = "### 上一轮拆块交付失败反馈"
+    # round2 = calls[4:10]
+    u0 = gw.calls[4]["messages"][1]["content"]
+    assert feedback_title in u0 and "出现围栏核记" in u0
+    for call in gw.calls[5:10]:
+        assert feedback_title not in call["messages"][1]["content"]
+    # round1 块 0 无反馈段（首轮无历史）
+    assert feedback_title not in gw.calls[0]["messages"][1]["content"]
+    # round1 失败轮不半成品出生，round2 成功后文件方出生
+    assert (wd / _CHUNK_TARGET).is_file()

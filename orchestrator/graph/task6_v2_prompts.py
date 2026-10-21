@@ -21,6 +21,16 @@ CONTRACT/SKELETON 为准搬入（去掉探针/证据措辞与占位符，仅保�
 （临时 chdir+相对录制路径），用户裁决①，合同追加第 7 条通用产物路径纪律后
 重挂 run2（不改 n=4/32768/20000/行预算）。
 2026-10-21 run2 chunk3 守卫三振（21256/24514/22293>20000，跨 run 1/5）后用户裁决守卫回提 26000 重挂 run3，合同七条/n=4/32768/行预算不变。
+2026-10-21 run4（用户裁决「接缝加固后 run4」；设计终稿
+.omc/handoffs/task6-sentinel-seam-design.md，两轮 fresh reviewer APPROVE）：
+run1-3 九发出生调用两次完整流非法手写 JSON（22%，失败轴是转义纪律非预算），
+交付格式由严格 chunk JSON 改为 sentinel 围栏纯文本（<<<<<<<
+simpraxis.chunk.v1，解析在 runner._extract_chunk，协议见设计 §2）；n=4→6
+是工厂规格变更（六标题/六边界，行预算 180/220/130/130/100/100 合计 860，
+落合同 600-900；现块 2 的 260 行拆 IK/控制与采集/入口两块，现块 3 的 200
+行拆数据族与媒体族两块）。守卫史 20000→26000→18000（n=6 各块推算 ≤15k，
+拼接下限 30000，长度一律 Python 字符口径）；合同第 7 条/32768/600s 不动，
+六标题/六边界/三窗 run4 起飞前冻结（硬规则 7）。
 """
 from __future__ import annotations
 
@@ -35,10 +45,12 @@ V2_CONTRACT = (
 
 你要出生一个**新文件** `genesis_humanoid_dr_v2.py`：Gate2 已验收 V1 的控制器/DR 升阶版。
 
-1. **严格 JSON 分块交付，最终补丁 old 必须是空字符串**：完整 V2 源码
-   600-900 行、不要截断，由 4 个顺序调用分块出生；每次调用只输出该次分配块
-   的 chunk JSON（格式严格按《拆块交付》段），引擎本地按序拼接后以单个
-   old="" 补丁出生文件。不要解释、不要输出 JSON 外文字。
+1. **围栏纯文本分块交付，最终补丁 old 必须是空字符串**：完整 V2 源码
+   600-900 行、不要截断，由 6 个顺序调用分块出生；每次调用只输出该次分配块，
+   格式严格按《拆块交付》段的 <<<<<<< simpraxis.chunk.v1 围栏三段结构
+   （首行为起始围栏、中间为多行 Python 原文、末行为结束围栏；
+   Python 原文零转义，禁止 JSON/markdown 围栏/围栏外文字），引擎本地按序
+   拼接后以单个 old="" 补丁出生文件。
 2. **自包含**：新文件独立可运行。严禁运行时搜索/定位/open 读取/import
    任何既有 V1 文件（genesis_humanoid_dr.py）或历史 run 目录；严禁 os.execv、os.walk、
    glob/rglob 查找、shim/转发重跑。违反整轮作废。
@@ -208,18 +220,23 @@ batch 与产物【壳逐字复用】:
 """
 
 # ---------------------------------------------------------------------------
-# 四块固定划分（n 固定 4，禁止运行时由模型自报块数——防模型逃单块）
+# 六块固定划分（run4 起 n 固定 6，禁止运行时由模型自报块数——防模型逃单块；
+# n=4→6 是工厂规格变更，行预算 180/220/130/130/100/100 合计 860，设计 §3.1）
 # ---------------------------------------------------------------------------
 
 V2_CHUNK_TITLES: tuple[str, ...] = (
-    "头部/常量/V2 参数化与 CLI",
+    "头部/常量/V2 a)-f) 参数化采样与 CLI",
     "rollout 场景与物理注入",
-    "IK/控制器/主循环/遥测/能量审计",
-    "batch 编排与五产物",
+    "IK/capture-point 步态/PD 主循环",
+    "400 帧 9 键采集/跌倒判定/outcomes/energy_audit/rollout 入口",
+    "batch 编排与数据产物",
+    "媒体产物（plots/collage/splits/cover）",
 )
 
 # 每块边界文案（行数预算 + 只允许写的章节）；runner 在 chunk 清单与本块
-# 边界两处原样渲染。键顺序与 V2_CHUNK_TITLES 一一对应。
+# 边界两处原样渲染。键顺序与 V2_CHUNK_TITLES 一一对应。run4 六边界由 n=4
+# 旧边界拆细：旧块 2（260 行）拆为块 2/3，旧块 3（200 行）拆为块 4/5；
+# 块 0/1 沿用旧文案（设计 §3.1「现块 0/1 原样」）。
 _CHUNK_BOUNDARIES: tuple[str, ...] = (
     "行数预算：约 180 行。只允许写的章节：模块 docstring、imports、全部常量；"
     "V2 a)-f) 的 draw_params/RNG 采样（ζ 条件化 Kd 反解 clip[15,2000]、"
@@ -231,15 +248,35 @@ _CHUNK_BOUNDARIES: tuple[str, ...] = (
     "关节与 link 索引、set_friction 双足、set_sol_params(ground+feet)、"
     "settle、35N×0.2s 每子步外力、ice_dr wrench、contacts helper。"
     "不得重复块 0 的 import/常量，不得写 IK/步态/控制器主循环、batch 编排。",
-    "行数预算：约 260 行。只允许写的章节：leg_ik、capture-point 步态全部"
-    "参数、PD 更新、400 帧采集 9 键、跌倒判定、outcomes（slip/contact "
-    "全字段）、energy_audit 块。不得重复块 0/1 的常量、场景 API 与物理注入，"
-    "不得写 argparse 与 batch 编排。",
-    "行数预算：约 200 行。只允许写的章节：batch 编排与五产物——父进程不 "
-    "import genesis、[sys.executable, abspath(__file__), ...] 子进程、"
-    "CSV 35 列 9 行、summary groups 四指标、plots/collage/splits/cover、"
-    "manifest、innovation.json{control_law,dr_distribution}、SUMMARY.md。"
-    "不得重复块 0-2 的采样/场景/控制器代码。",
+    "行数预算：约 130 行。只允许写的章节：leg_ik 逆解、capture-point 步态"
+    "全部参数（捕获点/支撑选脚/相位切换）、PD 更新（ζ 条件化 Kp/Kd 增益映射）、"
+    "control_every 控制主循环（每控制步输出关节力矩）。不得重复块 0/1 的常量、"
+    "场景 API 与物理注入；不得写 400 帧 telemetry 采集、跌倒/outcomes/"
+    "energy_audit（属块 3）与 rollout 入口，不得写 batch 编排与任何产物写盘。",
+    "行数预算：约 130 行。只允许写的章节：400 帧 telemetry 采集（series 9 键"
+    "等长：t/torso_z/torso_x/tilt_deg/vx/contact_force_R/L/slip_v_R/L）、"
+    "跌倒判定（z<0.85 或 tilt>50°）、outcomes 全字段（success/fell/fall_*、"
+    "slip_dist/slip_vmax/contact 全字段、sim_wall_s）、energy_audit 自定义块、"
+    "rollout 单跑入口（--params-json/--telemetry/--video/--label/--dur-s "
+    "分支，telemetry/{run_id}.json 与 .params.json 以输出目录绝对路径写盘）。"
+    "不得重复块 2 的 IK/步态/PD 主循环实现；不得写 batch 父子进程编排、"
+    "CSV/summary/manifest/innovation/SUMMARY 数据产物与 plots/视频媒体产物。",
+    "行数预算：约 100 行。只允许写的章节：batch 编排与数据产物——父进程不 "
+    "import genesis、[sys.executable, abspath(__file__), ...] 九个子进程"
+    "顺序拉起（env GS_ENABLE_ZEROCOPY=0，run_id=f\"{arm}_s{seed}\"）、"
+    "dr_controls_vs_experimental.csv（35 列顺序按骨架、恰好 9 数据行）、"
+    "summary.json（schema/seeds/disturbance/dr_envelope/groups 四指标族）、"
+    "manifest.json、innovation.json{control_law,dr_distribution,"
+    "eliminated_assumptions}、SUMMARY.md、push_window_calibration.json 落盘。"
+    "不得重复块 0-3 的采样/场景/控制器/采集代码；不得写 plots/collage/"
+    "splits/cover 任何媒体产物（属块 5）。",
+    "行数预算：约 100 行。只允许写的章节：媒体产物——plots/contact_forces.png "
+    "与 plots/slip_comparison.png、collage.png（3 臂×6 帧 PIL 标注）、"
+    "split_normal_vs_ice_nominal_s0.mp4 与 split_ice_nominal_vs_ice_dr_s0.mp4 "
+    "（ffmpeg hstack libx264 crf28 yuv420p）、cover.png。"
+    "不得写 telemetry/CSV/summary/manifest/innovation/SUMMARY 等数据产物"
+    "（属块 4），不得重复块 0-3 的采样/场景/控制器/采集代码；"
+    "除 PIL/ffmpeg 壳外不引入新依赖。",
 )
 
 
