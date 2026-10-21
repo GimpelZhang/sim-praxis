@@ -750,15 +750,22 @@ def test_quota_pause_v2_schema_freeze(tmp_path, monkeypatch):
 
 # ---------- Task6 单任务硬顶自批提顶（§6.3，2026-10-16 用户自主授权） ----------
 
-def test_task6_hard_cap_raised_40_to_48_phase2_globals_unchanged():
-    """Task6 局部硬顶三次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
+def test_task6_hard_cap_raised_48_to_56_phase2_globals_unchanged():
+    """Task6 局部硬顶四次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
     Phase_2_Plan_detailed.md §6.3）：16→24（thinking 诊断 seq32-40 触顶，
     commit df1c0a9），24→40（2026-10-20 晚拆块出生生产首验 seq48 后再触顶，
     commit 7a03a05，task_used=24/24），40→48（2026-10-21 凌晨 32k 拆块出生
     seq61-64 后再触顶：seq64 round2 chunk1 成功实呼 14005 out，round2 chunk2
     写 req 后 preflight 拦停于 task_used=40/40，拦停时全局 64/80；重放信封
     最坏 7 seq（seq62 r1 chunk3 网关成功但被长度机器拒绝、未入缓存须重付 1，
-    r2 块2/3 重付 2，r3 四块 4；控制票 T6-B5 8 额）：task6≤47、全局≤71）。
+    r2 块2/3 重付 2，r3 四块 4；控制票 T6-B5 8 额）：task6≤47、全局≤71，
+    commit f918239），48→56（2026-10-21 晚：seq65 run1 出生成功仅重付 1，
+    seq66/67 三轮修复后轮次耗尽 human_failure，用户裁决①重挂 run_idx=2；
+    run2 最坏信封 12 seq——checkpoint 倒带后 run_idx 重算为 1（键名仍是
+    coding_<thread>_r1_round*_chunk*），但 callcache 指纹含消息体，合同第 7
+    条+骨架两注使全部键 miss（安全方向），出生 4 块全付；最坏三轮拆块出生
+    全败 3×4=12（现实：出生 4+至多 2 轮单补丁修复=6）；task6 已用 43 →
+    ≤55/56，全局 67 → ≤79/80；控制票 T6-B6 12 额 beyond_normal）。
     本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集
     语义，以及全局 60/80 双门始终未被牵动。0 联网。
     """
@@ -769,12 +776,12 @@ def test_task6_hard_cap_raised_40_to_48_phase2_globals_unchanged():
         TASK_HARD_CAPS,
     )
 
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 48, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 48；task=4 仍为 24
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 56, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 56；task=4 仍为 24
     # （覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 48
+    assert TASK_HARD_CAPS[6] == 56
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 / 硬顶 80，三次提顶均不动全局门。
+    # 顺带钉死全局双门：常态 60 / 硬顶 80，四次提顶均不动全局门。
     assert NORMAL_BUDGET == 60
     assert HARD_CAP == 80

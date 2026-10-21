@@ -93,7 +93,19 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 块2/3 重付 2；r3 整轮 4）：task6≤47/48、全局≤71/80；控制票 T6-B5
 # （8 额 beyond_normal，T6-B4 6 额未引用即废）。全局 60/80 双门、4/7/8
 # 三顶、模型 ID 均不动。
-PHASE2_TASK_CAPS = {4: 24, 6: 48, 7: 16, 8: 16}
+# Task6 2026-10-21 晚第四次自批：seq64 第三次提顶（40→48，f918239）后
+# run1 出生成功（seq65 仅重付 1），但 seq66/67 修复后轮次耗尽 human_failure
+# （模型自写脚本临时 chdir 只读 site-packages/genesis/assets 后裸调
+# start_recording 相对路径，编码器首个 scene.step 才惰性开文件撞只读 cwd）；
+# 用户裁决①加通用产物路径纪律合同条款后重挂 run_idx=2，依同授权自批 48→56。
+# run2 信封：倒带后 run_idx 重算为 1（run 目录重编号，见 rehang runbook），
+# callcache 键名仍是 coding_<thread>_r1_round*_chunk*，但指纹含消息体——合同
+# 新增第 7 条+骨架两注后全 miss（runner.py L822/L915 语义，安全方向），出生
+# 4 块全付；最坏三轮拆块出生全败 3×4=12（现实：出生 4+至多 2 轮单补丁修复=6）；
+# task6 已用 43 → ≤55/56；全局 67 → ≤79/80（HARD_CAP 不动）；控制票 T6-B6
+# （12 额 beyond_normal，由 LEAD 自批落 quota/approvals/）。60/80 双门、
+# 4/7/8 三顶、模型 ID 均不动；口径 32768/20000/n=4 不动。
+PHASE2_TASK_CAPS = {4: 24, 6: 56, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/80 双门不变）。
 TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
