@@ -716,7 +716,8 @@ def _happy_chunk_codes():
 
 
 def _chunked_runner(tmp_path, responses, *, thread="t6chunk", cap=3,
-                    tokens=16384, timeout=600, usage=((50, 60))):
+                    # 默认对齐 task6 生产 CODING_MAX_TOKENS_V2（2026-10-21 升 32768）
+                    tokens=32768, timeout=600, usage=((50, 60))):
     wd = tmp_path / "work"
     wd.mkdir(parents=True, exist_ok=True)
     gw = FakeGateway(responses, usage=usage)
@@ -754,7 +755,7 @@ def test_12_chunked_birth_four_calls_assemble_and_birth(tmp_path):
     assert rec["coding_round"] == 1 and rec["executions"] == 2
     assert len(gw.calls) == 4                       # 恰好 4 次顺序调用
     assert [c["kw"] for c in gw.calls] == [
-        {"max_tokens": 16384, "temperature": 0.1, "timeout": 600}] * 4
+        {"max_tokens": 32768, "temperature": 0.1, "timeout": 600}] * 4
     target = wd / _CHUNK_TARGET
     assert target.is_file()
     assert target.read_text(encoding="utf-8") == "".join(codes)
@@ -843,7 +844,7 @@ def _chunked_runner_with(tmp_path, gw, *, thread, wd):
         cmd=[sys.executable, str(wd / _CHUNK_TARGET)],
         telemetry_relpath="telemetry.json", batch_id="T6-FIXTURE",
         billing_task=6, run_idx=1, max_coding_rounds=3,
-        coding_max_tokens=16384, coding_timeout_s=600,
+        coding_max_tokens=32768, coding_timeout_s=600,
         chunked_birth=ChunkSpec(
             target_path=_CHUNK_TARGET, chunk_count=4,
             chunk_titles=_CHUNK_TITLES,
@@ -918,13 +919,13 @@ def test_16_chunk_fingerprint_includes_index_and_keys_safe():
     from orchestrator.common.callcache import request_fingerprint
     fp = {i: request_fingerprint(
         "same-prompt", None,
-        {"max_tokens": 16384, "temperature": 0.1,
+        {"max_tokens": 32768, "temperature": 0.1,
          "chunk_index": i, "chunk_total": 4},
         stage="coding_debug", model="fake-model") for i in range(4)}
     assert len(set(fp.values())) == 4
     assert request_fingerprint(
         "same-prompt", None,
-        {"max_tokens": 16384, "temperature": 0.1,
+        {"max_tokens": 32768, "temperature": 0.1,
          "chunk_index": 1, "chunk_total": 4},
         stage="coding_debug", model="fake-model") == fp[1]
     import re

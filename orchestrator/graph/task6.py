@@ -109,7 +109,14 @@ RUN_CODING_CAP = 3
 # 小任务可收敛（macro seq29、seq42 8KB 易任务）。拆 4 个顺序小编排调用后
 # 每块创造量小，16384 输出余量给思考通道；单调用含合同/骨架注入的长流式
 # 响应，网关超时由默认 120s 放宽到 600s（与探针超时口径一致）。
-CODING_MAX_TOKENS_V2 = 16384
+# 2026-10-21 锁内适配（用户选项 A；图外接受性探针 seq56，提交 d5846b5，
+# 证据 runs/task6_ascent/ 下 32768 接受性探针 JSON）：seq50/54/55 三轮
+# 拆块生产均在 16384 输出顶截断（JSON 信封未闭合）；seq56 accepted=true、
+# output_tokens=32768、ordered_prefix 1..11080、output_at_cap=true，证实
+# 16384 非硬墙、shim 接受 32768——但探针在 32768 处仍被截断（线顶 ≥32768，
+# 未探更高；口径同探针 docstring），够不够出生留给生产首验；n=4 与四块行
+# 预算不变。常量 16384→32768。
+CODING_MAX_TOKENS_V2 = 32768
 CODING_TIMEOUT_S_V2 = 600
 
 # V2 解题脚本文件名：只允许出生在付费 workdir（runner 新文件补丁）。
@@ -278,9 +285,9 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             manifest_relpath=MANIFEST_NAME,
             max_coding_rounds=RUN_CODING_CAP,
             # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
-            # Task6 V2 coding 调用统一 16384 输出余量/600s 超时（出生拆块与出生后
+            # Task6 V2 coding 调用统一 32768 输出余量/600s 超时（出生拆块与出生后
             # 修补轮同口径）；chunked_birth 仅出生轮非 None，修补轮由 runner 走
-            # 既有单补丁路径。
+            # 既有单补丁路径。（2026-10-21 升 32768，见上 seq56 探针）
             coding_max_tokens=CODING_MAX_TOKENS_V2,
             coding_timeout_s=CODING_TIMEOUT_S_V2,
             chunked_birth=chunked,

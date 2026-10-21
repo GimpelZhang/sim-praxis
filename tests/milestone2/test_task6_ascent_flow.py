@@ -897,7 +897,7 @@ def test_n1_resolve_v1_splits_rejects_illegal_relpaths(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
-# 工厂在 V2 出生轮挂 4 块 ChunkSpec（合同/提案/骨架三注入、16384/600），
+# 工厂在 V2 出生轮挂 4 块 ChunkSpec（合同/提案/骨架三注入、32768/600），
 # 出生后修补轮 chunked_birth=None。合成 chosen + 合成短 V1 夹具，严禁真实
 # 43KB 方案脚本（硬规则 3）。
 # ---------------------------------------------------------------------------
@@ -931,9 +931,9 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     factory = task6_mod.make_spec_factory(T6_THREAD, "T6-B1-chunk")
     spec = factory(state)
 
-    # RunSpec 级 V2 调用口径：16384 输出余量 / 600s 超时；无 RunSpec 级额外段
+    # RunSpec 级 V2 调用口径：32768 输出余量 / 600s 超时；无 RunSpec 级额外段
     # （合同/提案/骨架只挂在 ChunkSpec 上，单补丁路径永远看不到它们）。
-    assert spec.coding_max_tokens == task6_mod.CODING_MAX_TOKENS_V2 == 16384
+    assert spec.coding_max_tokens == task6_mod.CODING_MAX_TOKENS_V2 == 32768
     assert spec.coding_timeout_s == task6_mod.CODING_TIMEOUT_S_V2 == 600
     assert spec.extra_prompt_sections == ()
 
@@ -961,7 +961,7 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     assert "@@SHA@@" not in skeleton
     assert v1_sha16 in skeleton
 
-    # 非出生轮（同 run workdir 内 V2 已出生）：chunked_birth=None；16384/600
+    # 非出生轮（同 run workdir 内 V2 已出生）：chunked_birth=None；32768/600
     # 的 RunSpec 级口径保留（出生后的单补丁修补轮同样需要思考余量）。
     runner_mod._apply_structured_patch(spec.workdir, {
         "path": task6_mod.V2_ENTRYPOINT, "old": "",
@@ -969,7 +969,7 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     spec_repair = factory(dict(state))
     assert spec_repair.workdir == spec.workdir     # run_idx 仍为 1 → 同目录
     assert spec_repair.chunked_birth is None
-    assert spec_repair.coding_max_tokens == 16384
+    assert spec_repair.coding_max_tokens == task6_mod.CODING_MAX_TOKENS_V2
     assert spec_repair.coding_timeout_s == 600
 
     # Gate2 打回后的**新 run 目录**：V2 重新 absent → 重新挂 ChunkSpec。

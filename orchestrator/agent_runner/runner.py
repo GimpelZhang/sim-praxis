@@ -51,8 +51,8 @@ TEMPERATURE = 0.1
 DEFAULT_CODING_TIMEOUT_S = 120
 CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（机器校验，短于即整轮失败）
 CHUNK_MIN_ASSEMBLED_CHARS = 12000   # 4 块拼接总长下限，防模型逃单块/碎块
-CHUNK_MAX_CODE_CHARS = 24000  # 单块 code 硬上限（seq48：冗长产出吃满 16384 output 被截断）
-# 16384 output token 还要容纳 JSON 结构与转义，24000 字符约留足余量；超长即整轮失败。
+CHUNK_MAX_CODE_CHARS = 20000  # 单块 code 硬上限（seq48 24000 首发；2026-10-21 随输出顶 16384→32768 收紧）
+# 32768 output token 仍要容纳 JSON 结构与转义，20000 字符留余量；用户选项 A（seq56 探针，见 task6 注释），超长即整轮失败。
 TB_TAIL_CHARS = 4096           # traceback 尾部 ≤4KB
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096
@@ -169,7 +169,7 @@ class RunSpec:
     # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
     # 以下四字段默认值保证 Task7/8 与既有流程字节级旧行为——coding 调用仍
     # 8192 tokens/120s（120 与 router.call 默认值同值，旧路径只是隐式吃默认），
-    # 无额外 prompt 段、无拆块。Task6 V2 出生轮显式传 16384/600 + ChunkSpec。
+    # 无额外 prompt 段、无拆块。Task6 V2 出生轮显式传 32768/600 + ChunkSpec。
     coding_max_tokens: int = MAX_TOKENS
     coding_timeout_s: int = DEFAULT_CODING_TIMEOUT_S
     extra_prompt_sections: tuple[tuple[str, str], ...] = ()
@@ -545,7 +545,7 @@ def _chunk_section(ctx: "ChunkPromptContext") -> str:
         f"total 必须是 {n}；",
         "- code 只含本块 Python 原文：无 markdown 围栏、无解释；非空且"
         f"不少于 {CHUNK_MIN_CODE_CHARS} 字符；",
-        f"- code 最长不超过 {CHUNK_MAX_CODE_CHARS} 字符（含注释；16384 output "
+        f"- code 最长不超过 {CHUNK_MAX_CODE_CHARS} 字符（含注释；32768 output "
         "token 还要容纳 JSON 结构与转义）；超限必然在闭合前被截断、整轮失败。"
         "注释精简，禁止复述合同/提案/骨架原文。",
         f"- 全部 {n} 块拼接后须为完整可运行文件（总长不少于 "
