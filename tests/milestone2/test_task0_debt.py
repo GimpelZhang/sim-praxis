@@ -750,11 +750,16 @@ def test_quota_pause_v2_schema_freeze(tmp_path, monkeypatch):
 
 # ---------- Task6 单任务硬顶自批提顶（§6.3，2026-10-16 用户自主授权） ----------
 
-def test_task6_hard_cap_raised_24_to_40_phase2_globals_unchanged():
-    """Task6 局部硬顶两次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
+def test_task6_hard_cap_raised_40_to_48_phase2_globals_unchanged():
+    """Task6 局部硬顶三次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
     Phase_2_Plan_detailed.md §6.3）：16→24（thinking 诊断 seq32-40 触顶，
     commit df1c0a9），24→40（2026-10-20 晚拆块出生生产首验 seq48 后再触顶，
-    task_used=24/24）。本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集
+    commit 7a03a05，task_used=24/24），40→48（2026-10-21 凌晨 32k 拆块出生
+    seq61-64 后再触顶：seq64 round2 chunk1 成功实呼 14005 out，round2 chunk2
+    写 req 后 preflight 拦停于 task_used=40/40，拦停时全局 64/80；重放信封
+    最坏 7 seq（seq62 r1 chunk3 网关成功但被长度机器拒绝、未入缓存须重付 1，
+    r2 块2/3 重付 2，r3 四块 4；控制票 T6-B5 8 额）：task6≤47、全局≤71）。
+    本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集
     语义，以及全局 60/80 双门始终未被牵动。0 联网。
     """
     from orchestrator.gateway.quota_ledger import (
@@ -764,12 +769,12 @@ def test_task6_hard_cap_raised_24_to_40_phase2_globals_unchanged():
         TASK_HARD_CAPS,
     )
 
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 40, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 40；task=4 仍为 24
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 48, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 48；task=4 仍为 24
     # （覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 40
+    assert TASK_HARD_CAPS[6] == 48
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 / 硬顶 80，两次提顶均不动全局门。
+    # 顺带钉死全局双门：常态 60 / 硬顶 80，三次提顶均不动全局门。
     assert NORMAL_BUDGET == 60
     assert HARD_CAP == 80

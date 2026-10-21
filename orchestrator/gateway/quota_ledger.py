@@ -85,7 +85,15 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 成功但冗长产出吃满 16384 output 被截断，round2 preflight 暂停），依同授权
 # 自批 24→40；全局 60/80 双门不动（此刻全局已用 48/80），模型 ID 不动
 # （提交见同日 chunked 接缝后）。
-PHASE2_TASK_CAPS = {4: 24, 6: 40, 7: 16, 8: 16}
+# Task6 2026-10-21 凌晨 32k 拆块出生再触顶（task_used=40/40，seq64 为 round2
+# chunk1 成功实呼 14005 out，round2 chunk2 写 req 后 preflight 拦停
+# reason=task_hard_cap、scope=task，0 多发；此时全局 64/80），依同授权自批
+# 40→48。最坏信封 7 seq（节点重放 r1：块0/1/2 缓存命中，块3 因 seq62 网关
+# 成功但 code 24661>20000 机器拒绝、未入缓存须重付 1；r2 块0/1 命中、
+# 块2/3 重付 2；r3 整轮 4）：task6≤47/48、全局≤71/80；控制票 T6-B5
+# （8 额 beyond_normal，T6-B4 6 额未引用即废）。全局 60/80 双门、4/7/8
+# 三顶、模型 ID 均不动。
+PHASE2_TASK_CAPS = {4: 24, 6: 48, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/80 双门不变）。
 TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
