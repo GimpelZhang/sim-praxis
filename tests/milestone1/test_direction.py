@@ -408,7 +408,8 @@ def test_17_normal36_without_beyond_blocks(tmp_path, monkeypatch):
 
 
 def test_18_beyond_normal_unlocks_36_to_48(tmp_path, monkeypatch):
-    # Task0：36/48 随代码常量迁到 NORMAL_BUDGET/HARD_CAP（Phase 2=60/80），
+    # Task0：36/48 随代码常量迁到 NORMAL_BUDGET/HARD_CAP（Phase 2 初值 60/80，
+    # 2026-10-21 硬顶首次 80→104，常态门 60 不动），
     # beyond-normal 区间解锁语义不变（函数名为 Phase 1 历史编号，保留）。
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
     monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))

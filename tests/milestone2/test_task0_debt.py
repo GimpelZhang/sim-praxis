@@ -686,7 +686,10 @@ CALL_CACHE_ALLOWLIST = {
     # seq48 生产首验块0 冗长截断：CHUNK_MAX_CODE_CHARS 常量+机器校验+合同
     # 提示注入（+7），复审 NIT 超长 raise 折行（再 +1）后纯位移（632→641，
     # +8 行全在构造点之前），仍无新增落点。
-    ("orchestrator/agent_runner/runner.py", 641),
+    # 2026-10-21 守卫回提 20000→26000：值行同行改数字不增行，溯源注释 2 行
+    # 扩为 7 行（净 +5）全在构造点之前，纯位移（641→646）；拆块路径仍复用
+    # 唯一 _replay_cache 构造点，无新增落点。
+    ("orchestrator/agent_runner/runner.py", 646),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
@@ -750,8 +753,8 @@ def test_quota_pause_v2_schema_freeze(tmp_path, monkeypatch):
 
 # ---------- Task6 单任务硬顶自批提顶（§6.3，2026-10-16 用户自主授权） ----------
 
-def test_task6_hard_cap_raised_48_to_56_phase2_globals_unchanged():
-    """Task6 局部硬顶四次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
+def test_task6_cap_56_to_80_and_hard_cap_80_to_104_phase2():
+    """Task6 局部硬顶五次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
     Phase_2_Plan_detailed.md §6.3）：16→24（thinking 诊断 seq32-40 触顶，
     commit df1c0a9），24→40（2026-10-20 晚拆块出生生产首验 seq48 后再触顶，
     commit 7a03a05，task_used=24/24），40→48（2026-10-21 凌晨 32k 拆块出生
@@ -765,10 +768,20 @@ def test_task6_hard_cap_raised_48_to_56_phase2_globals_unchanged():
     coding_<thread>_r1_round*_chunk*），但 callcache 指纹含消息体，合同第 7
     条+骨架两注使全部键 miss（安全方向），出生 4 块全付；最坏三轮拆块出生
     全败 3×4=12（现实：出生 4+至多 2 轮单补丁修复=6）；task6 已用 43 →
-    ≤55/56，全局 67 → ≤79/80；控制票 T6-B6 12 额 beyond_normal）。
-    本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集
-    语义，以及全局 60/80 双门始终未被牵动。0 联网。
+    ≤55/56，全局 67 → ≤79/80；控制票 T6-B6 12 额 beyond_normal，
+    commit 2835189），56→80（2026-10-21 晚第五次：run2 将 T6-B6 12 seq
+    用满（seq68-79），三轮拆块出生 chunk3 全败于 20000 字符守卫——code
+    21256/24514/22293>20000，跨 run1/run2 该块 5 次尝试仅 1 次过守
+    （seq65=18009），out token 从未触 32768，守卫是唯一约束；用户裁决
+    守卫 20000→26000（runner.CHUNK_MAX_CODE_CHARS）、task6 56→80、
+    HARD_CAP 80→104（全局硬顶史上首次）并重挂 run3；run3 信封 ≤14 seq
+    （出生最坏 3×4=12+出生后至多 2 轮单补丁修复）→ task6 55→≤69/80、
+    全局 79→≤93/104；NORMAL_BUDGET 60 不动；控制票 T6-B7 14 额，LEAD 自批）。
+    本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义，以及全局双门：
+    前四次提顶均不动全局门，第五次（2026-10-21）首次动 HARD_CAP（80→104），
+    常态 60 门始终未动。0 联网。
     """
+    from orchestrator.agent_runner.runner import CHUNK_MAX_CODE_CHARS
     from orchestrator.gateway.quota_ledger import (
         HARD_CAP,
         NORMAL_BUDGET,
@@ -776,12 +789,15 @@ def test_task6_hard_cap_raised_48_to_56_phase2_globals_unchanged():
         TASK_HARD_CAPS,
     )
 
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 56, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 56；task=4 仍为 24
+    # 守卫回提钉位，防值漂移；与 32768 输出顶的余量由生产实测覆盖（见提交说明）。
+    assert CHUNK_MAX_CODE_CHARS == 26000
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 80, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 80；task=4 仍为 24
     # （覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 56
+    assert TASK_HARD_CAPS[6] == 80
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 / 硬顶 80，四次提顶均不动全局门。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 104 是 2026-10-21 首次全局
+    # 提顶（80→104）后的值——前四次提顶均不动全局门，第五次首次动 HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 80
+    assert HARD_CAP == 104

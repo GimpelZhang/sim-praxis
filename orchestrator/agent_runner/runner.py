@@ -51,8 +51,13 @@ TEMPERATURE = 0.1
 DEFAULT_CODING_TIMEOUT_S = 120
 CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（机器校验，短于即整轮失败）
 CHUNK_MIN_ASSEMBLED_CHARS = 12000   # 4 块拼接总长下限，防模型逃单块/碎块
-CHUNK_MAX_CODE_CHARS = 20000  # 单块 code 硬上限（seq48 24000 首发；2026-10-21 随输出顶 16384→32768 收紧）
-# 32768 output token 仍要容纳 JSON 结构与转义，20000 字符留余量；用户选项 A（seq56 探针，见 task6 注释），超长即整轮失败。
+CHUNK_MAX_CODE_CHARS = 26000  # 单块 code 硬上限（超长即整轮失败，溯源见下）
+# 溯源：seq48 首发 24000；2026-10-21 用户选项 A（seq56 探针放行，commit
+# f2f5b44，随输出顶 16384→32768）收紧到 20000；同日晚 run2 三轮拆块出生
+# chunk3 全败于本守卫。跨 run1/run2 该块 5 次尝试：seq62=24661 拒、
+# seq65=18009 过（唯一一次）、run2 三轮 21256/24514/22293 全拒；
+# out token 从未触 32768，守卫是唯一约束；用户裁决回提到 26000
+# （实观察 max 24661（seq62）全纳；32768 output token 容纳 JSON/转义余量仍足）重挂 run3。超长即整轮失败语义不变。
 TB_TAIL_CHARS = 4096           # traceback 尾部 ≤4KB
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096

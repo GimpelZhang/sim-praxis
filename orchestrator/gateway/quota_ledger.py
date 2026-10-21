@@ -73,7 +73,10 @@ from orchestrator.gateway.router import (
 # Agent 可按 §6 SOP 自批提顶；触顶是自批提顶而非停工审批）。Phase 1 封存账
 # 的 36/48 双门随 29 行终值冻结，不再由本常量表达。
 NORMAL_BUDGET = 60       # 常态批准总量
-HARD_CAP = 80            # 全局先到先停硬门
+# 2026-10-21 run2 chunk3 守卫三振后用户裁决首次提全局硬顶 80→104（此前四次
+# 提顶均只动 task6 单任务顶，全局 60/80 从未动）；run3 信封 ≤14 seq（出生
+# 最坏 3×4=12+修复 2），全局 79→≤93/104。NORMAL_BUDGET 60 不动、模型 ID 不动。
+HARD_CAP = 104           # 全局先到先停硬门（2026-10-21 首次提顶，80→104）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -105,9 +108,17 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # task6 已用 43 → ≤55/56；全局 67 → ≤79/80（HARD_CAP 不动）；控制票 T6-B6
 # （12 额 beyond_normal，由 LEAD 自批落 quota/approvals/）。60/80 双门、
 # 4/7/8 三顶、模型 ID 均不动；口径 32768/20000/n=4 不动。
-PHASE2_TASK_CAPS = {4: 24, 6: 56, 7: 16, 8: 16}
+# Task6 2026-10-21 晚第五次自批（配套全局硬顶史上首提）：run2（T6-B6
+# 12 seq 用满，seq68-79）三轮拆块出生 chunk3 全败于 20000 字符守卫
+# （code 21256/24514/22293>20000），用户裁决守卫回提 26000（runner.py
+# CHUNK_MAX_CODE_CHARS）并重挂 run3；依同授权本任务顶 56→80 配套。run3
+# 信封 14 seq（出生最坏 3×4=12+出生后至多 2 轮单补丁修复），task6
+# 55→≤69/80；全局硬顶同日首次 80→104（见上 HARD_CAP 溯源）。60 常态门、
+# 4/7/8 三顶、模型 ID、n=4、32768 输出顶均不动。
+PHASE2_TASK_CAPS = {4: 24, 6: 80, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
-# choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/80 双门不变）。
+# choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/104 双门：常态门 60
+# 始终未动，硬顶 2026-10-21 80→104，见上溯源）。
 TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
 CONSECUTIVE_QUOTA_LIMIT = 3
 LOCK_NAME = ".ledger.lock"
