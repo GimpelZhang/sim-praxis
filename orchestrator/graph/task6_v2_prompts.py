@@ -17,16 +17,20 @@ runner 本地拼接校验后以单个 old="" 补丁出生。本模块提供每 c
 骨架文案与四块边界；文案以 2026-10-20 紧凑注入探针验证过的
 CONTRACT/SKELETON 为准搬入（去掉探针/证据措辞与占位符，仅保留 @@SHA@@
 由工厂运行时填入 staged V1 入口 sha256 前 16 位）。
+2026-10-21 run1（1 轮拆块出生 seq65 + 2 轮单补丁修复 seq66/67）后人因结案
+（临时 chdir+相对录制路径），用户裁决①，合同追加第 7 条通用产物路径纪律后
+重挂 run2（不改 n=4/32768/20000/行预算）。
 """
 from __future__ import annotations
 
 # ---------------------------------------------------------------------------
-# V2 升阶任务合同（六条；每块调用都注入，runner 渲染为独立 ## 段）
+# V2 升阶任务合同（七条；每块调用都注入，runner 渲染为独立 ## 段）
 # ---------------------------------------------------------------------------
 
 # 注：合同正文首行不用 ## 标题——runner 把本常量包进《## V2 升阶任务合同》
 # extra 段（评审 nit，折叠于 2026-10-20），避免相邻双 H2；优先级语义保留为加粗行。
-V2_CONTRACT = """**V2 升阶任务合同（最高依据，先于下列失败信息阅读）**
+V2_CONTRACT = (
+    """**V2 升阶任务合同（最高依据，先于下列失败信息阅读）**
 
 你要出生一个**新文件** `genesis_humanoid_dr_v2.py`：Gate2 已验收 V1 的控制器/DR 升阶版。
 
@@ -52,6 +56,16 @@ V2_CONTRACT = """**V2 升阶任务合同（最高依据，先于下列失败信�
 6. **禁硬编码结果**：summary/CSV/telemetry 全部真实运行机产；判定器从
    series 独立重算成败/滑移/峰速，伪造必被抓。
 """
+    # 锁内适配（2026-10-21 用户裁决①，seq65-67 run1 human_failure 后 run2 重挂）：
+    # 模型 V2 临时 chdir 后裸调 start_recording 相对路径，编码器惰性开文件撞只读 cwd；
+    # 条款只立通用产物路径纪律，不点名 Genesis API、不提供修法。
+    """7. **产物路径纪律**：脚本可以为解析资产临时 chdir（例如进入 genesis/assets 解析 MJCF），
+   但所有写出文件——telemetry/.json/.csv/.mp4/日志/临时件——一律以输出目录下的
+   **绝对路径**创建与打开；禁止把任何临时 chdir 之后的 cwd 当作产物写入位置前提。
+   第三方库若在内部线程中**惰性**创建文件（录制器在首个仿真步才打开文件即属此类），
+   传入的文件名同样必须是绝对路径；任何临时 chdir 必须在开始步进仿真前恢复原 cwd。
+"""
+)
 
 # ---------------------------------------------------------------------------
 # V1 冻结实现结构骨架（改写蓝本；@@SHA@@ 由工厂填 staged V1 sha256 前 16 位）
@@ -79,7 +93,8 @@ Genesis sol 7 元组 ↔ 等效 (Kp,Kd)【公式逐字复用】:
            show_viewer=False, renderer=gs.options.renderers.Rasterizer())
   scene.add_entity(gs.morphs.Plane(), material=gs.materials.Rigid(friction=mu))
   human=scene.add_entity(gs.morphs.MJCF(file="xml/humanoid.xml"))
-  （rollout 子进程 chdir 到 os.path.dirname(gs.__file__)+"/assets"）
+  （rollout 子进程 chdir 到 os.path.dirname(gs.__file__)+"/assets" 仅为解析 MJCF；
+  步进前必须 restore cwd，任何产物/录制文件名只用绝对路径，见合同 7）
   cam=scene.add_camera(model="pinhole",res=(640,480),
       pos=(1.8,-2.2,1.25),lookat=(0.6,0,0.85),fov=42,GUI=False)
   scene.build()
@@ -143,7 +158,8 @@ batch 与产物【壳逐字复用】:
   argparse: {rollout|batch}；rollout --params-json [--telemetry --video
   --label --dur-s]；batch --out-dir --seeds（默认 3）[--dur-s]
   --calibration-json（拷入 out_dir，samefile 守卫）。
-  telemetry/{run_id}.json 与 .params.json；videos/{run_id}.mp4。
+  telemetry/{run_id}.json 与 .params.json；videos/{run_id}.mp4
+  （均以 out_dir 下绝对路径传入；--video 给录制器的必须是绝对路径）。
   dr_controls_vs_experimental.csv 恰好 9 数据行（# 注释行允许），35 列
   顺序: run_id,arm,seed,mu,cone_half_angle_deg,contact_Kp_eq,
   contact_Kd_eq,contact_tau,contact_zeta,contact_Kp_target,

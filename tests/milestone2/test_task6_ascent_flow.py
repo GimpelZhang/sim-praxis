@@ -950,6 +950,21 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     assert titles == ["V2 升阶任务合同", "已批准 macro 提案", "V1 结构骨架"]
     contract, proposal, skeleton = [b for _, b in cs.per_call_sections]
     assert task6_mod.V2_ENTRYPOINT in contract
+    # 第 7 条「产物路径纪律」（2026-10-21 用户裁决①，run1 临时 chdir+相对
+    # 录制路径人因结案后重挂 run2）：通用纪律三要素必须在合同文本中。
+    assert "7. **产物路径纪律**" in contract
+    assert "绝对路径" in contract and "惰性" in contract
+    assert "恢复原 cwd" in contract
+    # 骨架两处短注同步指向合同 7：chdir 仅为解析 MJCF、录制文件名绝对路径。
+    assert "见合同 7" in skeleton
+    assert "--video 给录制器的必须是绝对路径" in skeleton
+    # 防回潮：1-6 条编号锚点未乱；七个编号标题按序且恰好七个。
+    assert "1. **严格 JSON" in contract
+    assert "6. **禁硬编码结果" in contract
+    assert re.findall(r"(?m)^([1-9])\. \*\*", contract) == [
+        str(i) for i in range(1, 8)]
+    # 条间风格齐一：每条（2-7）紧跟前条句号，无空行。
+    assert "\n\n7. **" not in contract
     # 提案 JSON 必须是 chosen 逐字序列化：ζ/Hunt-Crossley/clip 关键串不得丢。
     assert json.loads(proposal) == chosen
     assert "ζ" in proposal and "Hunt-Crossley" in proposal
