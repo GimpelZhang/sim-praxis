@@ -806,6 +806,17 @@ def _wait_pending_card(gw, thread, gate, old_mid=None, timeout=5.0):
     raise AssertionError("等不到新的 PENDING 卡片行")
 
 
+def _wait_caplog_text(caplog, needle, timeout=5.0):
+    """竞态等待：目标日志由后台线程在 DB 回填之后写（同 _wait_pending_card
+    的 deadline/0.02s 轮询形态）；只负责等，断言仍由调用方保留，超时即 fail。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if needle in caplog.text:
+            return caplog.text
+        time.sleep(0.02)
+    raise AssertionError(f"等不到日志片段：{needle}")
+
+
 def test_11_gate2_reject_reopens_with_new_card_and_explanation(gw):
     thread = "t11"
     metrics = _nested_task7_metrics()
@@ -1226,7 +1237,9 @@ def test_21_h4_placeholder_before_push_and_reattach_no_repush(
     row2 = gw.store.get_pending("th4", 2)
     assert row2["media_message_id"] == "om_media_saved"
     assert row2["card_message_id"] == cards[0]["message_id"]
-    # 重挂语义写入运行日志（卡片本身不含 video_detail 字段）
+    # 重挂语义写入运行日志（卡片本身不含 video_detail 字段）；日志在后台
+    # 线程 DB 回填之后才写，带超时等待消除观测竞态，断言本身不弱化
+    _wait_caplog_text(caplog, "复用已发送视频（重挂卡片，未重复推送）")
     assert "复用已发送视频（重挂卡片，未重复推送）" in caplog.text
     gw.store.mark_decided("th4", 2, decision="approve", source="cli")
     gw._set_event("th4", 2)
