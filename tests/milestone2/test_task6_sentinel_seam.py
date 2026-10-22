@@ -17,6 +17,7 @@ import ast
 import json
 import random
 import re
+import types
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from orchestrator.agent_runner.runner import (
     CHUNK_MIN_ASSEMBLED_CHARS,
     CHUNK_MIN_CODE_CHARS,
     ChunkBirthError,
+    _ENTRY_GUARD_REASON,
     _classify_closed_body,
     _extract_chunk,
     _scan_fence_lines,
@@ -45,6 +47,10 @@ from orchestrator.graph.task6 import V2_ENTRYPOINT
 from tests.milestone1.test_agent_runner import (
     _fixture_pad,
     _happy_chunk_codes,
+    # run6 §15.8 M2：46 形态单真值在 milestone1（禁第二份转写漂移）。
+    _RUN6_ACCEPT,
+    _RUN6_EXTERNAL,
+    _RUN6_REJECT,
 )
 from tests.milestone1.test_task8_seam import (
     FIXTURE_SOLUTIONS_ROOT,
@@ -123,7 +129,8 @@ def test_historical_char18604_escape_shape_parses_in_window():
                               index=i, total=6) == code
     assembled = "".join(codes)
     assert len(assembled) >= CHUNK_MIN_ASSEMBLED_CHARS
-    _validate_assembled_chunks(assembled)  # 六块 ast 拼接通过
+    # 六块 ast 拼接通过（run6 §15.8 起末位闸含入口守卫；c5 已带 A_v1 双引号守卫）
+    _validate_assembled_chunks(assembled)
 
 
 def test_historical_char18604_oversize_multiline_accepted_single_line_rejected():
@@ -793,3 +800,352 @@ def test_scan_helper_uses_split_n_and_ascii_whitespace_predicate():
     assert begins == [0] and ends == [2] and lines[3] == "　"
     # begin 与 end 两行含同一核记串（end 是 v1.end 超串），code/outside 行不含。
     assert nucleus == [0, 2]
+
+# ---------------------------------------------------------------------------
+# run6 §15.8-H5.5：入口守卫三函数 AST 红线 + 十变异探针（仿 run5 红线块
+# :725-768）。实测闭包从生产 ast.walk 反推固化；十枚探针旧树绿、变异后
+# 定向翻红指定形态（⑤/⑥ 各钉三形态，① 钉 R1/R9，共 15 行/10 枚）。
+# 变异模块在独立命名空间 exec 整份 runner（0 付费 0 触网）。
+# ---------------------------------------------------------------------------
+
+_RUN6_EXPECT_AST_IMPORTS = {
+    "AsyncFunctionDef", "BoolOp", "Call", "ClassDef", "Compare", "Constant",
+    "DictComp", "Eq", "For", "FunctionDef", "GeneratorExp", "If", "IfExp",
+    "Lambda", "ListComp", "Load", "Name", "SetComp", "Try", "While", "With"}
+_RUN6_GUARD_FUNCS = ("_validate_entry_guard", "_entry_guard_body_calls_main",
+                     "_entry_guard_contains")
+_RUN6_FORBIDDEN_ATTRS = {
+    "orelse", "handlers", "finalbody", "decorator_list", "type", "iter",
+    "targets", "walk"}
+# 三函数实测闭包（2026-10-22 ast.walk 反推，任何无意放宽在此翻红）。
+_RUN6_ATTR_CLOSURE = {
+    "_validate_entry_guard":
+        {"body", "comparators", "ctx", "id", "left", "ops", "test", "value"},
+    "_entry_guard_body_calls_main": {"body", "ctx", "func", "id"},
+    "_entry_guard_contains":
+        {"body", "ctx", "func", "id", "iter_child_nodes"},
+}
+_RUN6_NAME_CLOSURE = {
+    "_validate_entry_guard": {
+        "ChunkBirthError", "Compare", "Constant", "Eq", "If", "Load", "Name",
+        "_ENTRY_GUARD_REASON", "_GUARD_LITERAL", "_entry_guard_body_calls_main",
+        "comp", "isinstance", "len", "node", "str", "test", "tree", "type"},
+    "_entry_guard_body_calls_main": {
+        "BoolOp", "Call", "IfExp", "Load", "Name", "Try", "_MAIN",
+        "_SCOPE_NODES", "_STMT_BODY_ONLY", "_entry_guard_body_calls_main",
+        "_entry_guard_contains", "isinstance", "stmt", "stmts"},
+    "_entry_guard_contains": {
+        "BoolOp", "Call", "IfExp", "Load", "Name", "Try", "_MAIN",
+        "_SCOPE_NODES", "_STMT_BODY_ONLY", "_entry_guard_body_calls_main",
+        "_entry_guard_contains", "ast", "child", "isinstance", "node"},
+}
+# 三函数合并闭包（LEAD 2026-10-22 脏树实测反钉）。raise 双口径：全文件
+# ast.Raise 45→46（下面 pin 46）；raise ChunkBirthError 站点 22→23（M1 pin_23），
+# 规格「22→23」指后者、有效，两口径各自独立反钉。
+_RUN6_UNION_ATTRS = {
+    "body", "comparators", "ctx", "func", "id", "iter_child_nodes", "left",
+    "ops", "test", "value"}
+_RUN6_UNION_NAMES = {
+    "BoolOp", "Call", "ChunkBirthError", "Compare", "Constant", "Eq", "If",
+    "IfExp", "Load", "Name", "Try", "_ENTRY_GUARD_REASON", "_GUARD_LITERAL",
+    "_MAIN", "_SCOPE_NODES", "_STMT_BODY_ONLY", "_entry_guard_body_calls_main",
+    "_entry_guard_contains", "ast", "child", "comp", "isinstance", "len",
+    "node", "stmt", "stmts", "str", "test", "tree", "type"}
+
+
+_RUN6_CALL_CLOSURE = {
+    "_validate_entry_guard": {
+        "ChunkBirthError", "_entry_guard_body_calls_main", "isinstance", "len",
+        "type"},
+    "_entry_guard_body_calls_main": {
+        "_entry_guard_body_calls_main", "_entry_guard_contains", "isinstance"},
+    "_entry_guard_contains": {
+        "_entry_guard_body_calls_main", "_entry_guard_contains", "isinstance"},
+}
+
+
+def _run6_guard_funcs(tree):
+    return {n.name: n for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name in _RUN6_GUARD_FUNCS}
+
+
+def test_run6_entry_guard_redline_structure_and_closures():
+    src = _RUNNER_PY.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    # 21 名 from ast import 逐字集（可减不可增）；import ast 另存不重复。
+    ast_from = [n for n in tree.body if isinstance(n, ast.ImportFrom)
+                and n.module == "ast"]
+    assert len(ast_from) == 1
+    assert {a.name for a in ast_from[0].names} == _RUN6_EXPECT_AST_IMPORTS
+    assert len(ast_from[0].names) == 21
+    # 三函数连续块，紧随 _classify_closed_body；raise 分函数 1/0/0。
+    top = [n.name for n in tree.body if isinstance(n, ast.FunctionDef)]
+    i = top.index(_RUN6_GUARD_FUNCS[0])
+    assert top[i:i + 3] == list(_RUN6_GUARD_FUNCS)
+    assert top[i + 3] == "_classify_closed_body"
+    funcs = _run6_guard_funcs(tree)
+    # 全文件 raise pin（LEAD 2026-10-22 实测：HEAD 338a6b9 = 45=43 带 exc
+    # +2 bare；run6 新增 :712 ChunkBirthError(_ENTRY_GUARD_REASON) 恰 1
+    # 条带 exc → 46=44+2）。ChunkBirthError(...) 调用站点另在 M1 钉 23。
+    raises_all = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
+    assert len(raises_all) == 46
+    assert sum(1 for n in raises_all if n.exc is None) == 2
+    assert sum(1 for n in raises_all if n.exc is not None) == 44
+    want_raises = {"_validate_entry_guard": 1,
+                   "_entry_guard_body_calls_main": 0,
+                   "_entry_guard_contains": 0}
+    ast_attrs = []
+    for name, fn in funcs.items():
+        assert fn.returns is None
+        assert all(arg.annotation is None for arg in fn.args.args)
+        assert len([n for n in ast.walk(fn) if isinstance(n, ast.Raise)]) \
+            == want_raises[name]
+        attrs = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+        assert attrs == _RUN6_ATTR_CLOSURE[name], (name, sorted(attrs))
+        # 七禁字段 + walk 零出现（闭包白名单已含，双钉防白名单被改宽）。
+        assert not (attrs & _RUN6_FORBIDDEN_ATTRS)
+        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+        assert names == _RUN6_NAME_CLOSURE[name], (name, sorted(names))
+        calls = {n.func.id for n in ast.walk(fn) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name)}
+        assert calls == _RUN6_CALL_CLOSURE[name], (name, sorted(calls))
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                    and n.value.id == "ast":
+                ast_attrs.append(n.attr)
+        # type() 唯一调用点形态：type(comp.value)；其余两函数零 type 调用。
+        type_calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)
+                      and isinstance(n.func, ast.Name) and n.func.id == "type"]
+        if name == "_validate_entry_guard":
+            assert len(type_calls) == 1
+            tc = type_calls[0]
+            assert len(tc.args) == 1 and isinstance(tc.args[0], ast.Attribute)
+            assert tc.args[0].attr == "value"
+        else:
+            assert not type_calls
+    assert ast_attrs == ["iter_child_nodes"]
+    # 三函数并集闭包逐符反钉（30 Name / 10 attr）。
+    union_names = set()
+    union_attrs = set()
+    for name in _RUN6_GUARD_FUNCS:
+        union_names |= _RUN6_NAME_CLOSURE[name]
+        union_attrs |= _RUN6_ATTR_CLOSURE[name]
+    assert union_names == _RUN6_UNION_NAMES
+    assert len(union_names) == 30
+    assert union_attrs == _RUN6_UNION_ATTRS
+    assert len(union_attrs) == 10
+    # 禁手工栈（剥行注释后源码级扫描）+ 零 While/list()。
+    for name in _RUN6_GUARD_FUNCS:
+        seg = ast.get_source_segment(src, funcs[name])
+        code_only = "\n".join(ln.split("#", 1)[0] for ln in seg.splitlines())
+        for tok in ("append", "deque", ".pop(", ".insert(", "extend("):
+            assert tok not in code_only, (name, tok)
+        assert not [n for n in ast.walk(funcs[name])
+                    if isinstance(n, ast.While)]
+        assert not [n for n in ast.walk(funcs[name])
+                    if isinstance(n, ast.Call)
+                    and isinstance(n.func, ast.Name) and n.func.id == "list"]
+    # 挂载点唯一且为拼接闸末语句（def 行同子串，故锚四空格+换行）。
+    assembler = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                     and n.name == "_validate_assembled_chunks")
+    last = assembler.body[-1]
+    assert isinstance(last, ast.Expr) and isinstance(last.value, ast.Call)
+    assert isinstance(last.value.func, ast.Name)
+    assert last.value.func.id == "_validate_entry_guard"
+    assert src.count("    _validate_entry_guard(tree)\n") == 1
+    # run5 既有 join pin 不动（与 :790 同形双钉）。
+    assert src.count('"\\n".join(codes)') == 2
+
+
+# ---- 十变异探针锚点（每个 OLD 串在 runner 源码中恰 1 次，见 replace_once）--
+_RUN6_PROBE_3_OLD = (
+    "        test = node.test\n"
+    "        if not (isinstance(test, Compare)\n"
+    "                and isinstance(test.left, Name)\n"
+    '                and test.left.id == "__name__"\n'
+    "                and isinstance(test.left.ctx, Load)\n"
+    "                and len(test.ops) == 1\n"
+    "                and isinstance(test.ops[0], Eq)\n"
+    "                and len(test.comparators) == 1):\n"
+    "            continue\n"
+    "        comp = test.comparators[0]\n"
+    "        if not (isinstance(comp, Constant) and type(comp.value) is str\n"
+    "                and comp.value == _GUARD_LITERAL):\n"
+    "            continue\n")
+_RUN6_PROBE_3_NEW = (
+    "        test = node.test\n"
+    "        if (isinstance(test, Compare) and len(test.ops) == 1\n"
+    "                and isinstance(test.ops[0], Eq)\n"
+    "                and len(test.comparators) == 1):\n"
+    "            comp = test.comparators[0]\n"
+    "            std = (isinstance(test.left, Name) "
+    'and test.left.id == "__name__"\n'
+    "                   and isinstance(test.left.ctx, Load)\n"
+    "                   and isinstance(comp, Constant)\n"
+    "                   and type(comp.value) is str\n"
+    "                   and comp.value == _GUARD_LITERAL)\n"
+    "            yoda = (isinstance(comp, Name) "
+    'and comp.id == "__name__"\n'
+    "                    and isinstance(comp.ctx, Load)\n"
+    "                    and isinstance(test.left, Constant)\n"
+    "                    and type(test.left.value) is str\n"
+    "                    and test.left.value == _GUARD_LITERAL)\n"
+    "            if not (std or yoda):\n"
+    "                continue\n"
+    "        else:\n"
+    "            continue\n")
+_RUN6_PROBE_5_OLD = (
+    "        if isinstance(stmt, _SCOPE_NODES):\n"
+    "            continue  # 八类作用域整枝剪（def/class/lambda/推导式）\n")
+_RUN6_PROBE_6_OLD = (
+    "        if isinstance(stmt, BoolOp):\n"
+    "            continue  # BoolOp 死/活支静态不可判，整枝不认\n")
+_RUN6_PROBE_8_OLD = (
+    "    # 表达式层受控泛下降（0 raise）：入口先对 node 自身做叶子判定"
+    "（变异探针⑧）。\n"
+    "    if (isinstance(node, Call) and isinstance(node.func, Name)\n"
+    "            and node.func.id == _MAIN\n"
+    "            and isinstance(node.func.ctx, Load)):\n"
+    "        return True\n")
+_RUN6_PROBE_9_OLD = (
+    "        if isinstance(stmt, Try):\n"
+    "            if _entry_guard_body_calls_main(stmt.body):\n"
+    "                return True\n"
+    "            continue  # handlers/orelse/finalbody 均不进\n")
+_RUN6_PROBE_9_NEW_FIN = (
+    "        if isinstance(stmt, Try):\n"
+    "            if (_entry_guard_body_calls_main(stmt.body)\n"
+    "                    or _entry_guard_body_calls_main(stmt.finalbody)):\n"
+    "                return True\n"
+    "            continue\n")
+_RUN6_PROBE_9_NEW_HAND = (
+    "        if isinstance(stmt, Try):\n"
+    "            if (_entry_guard_body_calls_main(stmt.body)\n"
+    "                    or _entry_guard_body_calls_main(stmt.handlers)):\n"
+    "                return True\n"
+    "            continue\n")
+_RUN6_PROBE_HELPER2_SKIP = (
+    "        if isinstance(child, _SCOPE_NODES) or isinstance(child, BoolOp):\n"
+    "            continue\n")
+
+
+def _run6_mutated_module(src, tag):
+    """在独立命名空间 exec 变异后的整份 runner（复用已安装绝对包依赖）。"""
+    mod = types.ModuleType(f"_run6_mut_{tag}")
+    mod.__file__ = str(_RUNNER_PY)
+    # 注册进 sys.modules：runner 顶层 @dataclass(slots, kw_only...) 的字符串
+    # 注解经 cls.__module__ 回查模块全局（dataclasses._is_type）。
+    import sys as _sys
+    _sys.modules[mod.__name__] = mod
+    exec(compile(src, str(_RUNNER_PY), "exec"), mod.__dict__)
+    return mod
+
+
+def _run6_guard_accepts(mod, code):
+    try:
+        mod._validate_entry_guard(ast.parse(code))
+        return True
+    except mod.ChunkBirthError:
+        return False
+
+
+def test_run6_entry_guard_ten_mutation_probes_each_flips_named_form():
+    import orchestrator.agent_runner.runner as prod_mod
+
+    src = _RUNNER_PY.read_text(encoding="utf-8")
+    reject = _RUN6_REJECT
+    external = {k: v[1] for k, v in _RUN6_EXTERNAL.items()}
+
+    def replace_once(text, old, new):
+        assert text.count(old) == 1, old[:48]
+        return text.replace(old, new, 1)
+
+    probes = []  # (编号, 标签, 变异源码, 形态, 旧树接受, 变异接受, 入口)
+    # ① 删守卫挂载：R1/R9 补足下限走拼接闸——旧树逐字 reason 拒，变异放行。
+    m1 = replace_once(src, "    _validate_entry_guard(tree)\n", "")
+    for key in ("R1", "R9"):
+        probes.append(("01", f"01-mount-{key}", m1, reject[key],
+                       False, True, "assembled"))
+    # ② 顶层 If 放降 orelse：R7（main 仅在 else）反绿。
+    m2 = replace_once(
+        src,
+        "        if _entry_guard_body_calls_main(node.body):\n"
+        "            return\n",
+        "        if (_entry_guard_body_calls_main(node.body)\n"
+        "                or _entry_guard_body_calls_main(node.orelse)):\n"
+        "            return\n")
+    probes.append(("02", "02-orelse", m2, reject["R7"], False, True, "guard"))
+    # ③ 接受 yoda 比较：R2 反绿。
+    m3 = replace_once(src, _RUN6_PROBE_3_OLD, _RUN6_PROBE_3_NEW)
+    probes.append(("03", "03-yoda", m3, reject["R2"], False, True, "guard"))
+    # ④ Call 叶子 func 放宽任意 Name（三处叶子同时去名，任一遗漏 R14a
+    #    仍被另一助手拦下）：R14a（fixture_main）反绿。
+    m4 = src
+    for leaf in (
+            "                and stmt.func.id == _MAIN\n",
+            "            and node.func.id == _MAIN\n",
+            "                and child.func.id == _MAIN\n"):
+        m4 = replace_once(m4, leaf, "")
+    probes.append(("04", "04-any-name", m4, reject["R14a"], False, True,
+                   "guard"))
+    # ⑤ 去作用域剪枝（助手一删剪枝块；助手二合并行只留 BoolOp）：
+    #    R10（嵌套 def）/E4（列表推导）/E10（lambda）三形态反绿。
+    m5 = replace_once(
+        replace_once(src, _RUN6_PROBE_5_OLD, ""),
+        _RUN6_PROBE_HELPER2_SKIP,
+        "        if isinstance(child, BoolOp):\n            continue\n")
+    for key in ("R10", "E4_listcomp", "E10_lambda"):
+        probes.append(("05", f"05-scope-{key}", m5,
+                       reject.get(key) or external[key],
+                       False, True, "guard"))
+    # ⑥ 删 BoolOp 整跳（助手一删 BoolOp 块；助手二合并行只留作用域）：
+    #    E11（死支 and）/E12（活支 and）/E13（活支 or）反绿。
+    m6 = replace_once(
+        replace_once(src, _RUN6_PROBE_6_OLD, ""),
+        _RUN6_PROBE_HELPER2_SKIP,
+        "        if isinstance(child, _SCOPE_NODES):\n            continue\n")
+    for key in ("E11_boolop_dead_and", "E12_boolop_live_and",
+                "E13_boolop_live_or"):
+        probes.append(("06", f"06-boolop-{key}", m6, external[key],
+                       False, True, "guard"))
+    # ⑦ IfExp 放降 orelse（助手一 stmt 分支 + 助手二 child 分支同改；
+    #    E1 经 Assign.value=IfExp 走助手二，漏一处则不翻）。
+    m7 = replace_once(
+        replace_once(src, "_entry_guard_contains(stmt.body)",
+                     "_entry_guard_contains(stmt.orelse)"),
+        "_entry_guard_contains(child.body)",
+        "_entry_guard_contains(child.orelse)")
+    probes.append(("07", "07-ifexp-orelse", m7,
+                   external["E1_ternary_false_branch"], False, True, "guard"))
+    # ⑧ 删助手二入口叶子自检：E2（main 在三元真支）反红。
+    m8 = replace_once(src, _RUN6_PROBE_8_OLD, "")
+    probes.append(("08", "08-selfcheck", m8,
+                   external["E2_ternary_true_branch"], True, False, "guard"))
+    # ⑨ Try 放降 finalbody：E15 反绿。
+    m9 = replace_once(src, _RUN6_PROBE_9_OLD, _RUN6_PROBE_9_NEW_FIN)
+    probes.append(("09", "09-finalbody", m9,
+                   external["E15_try_finally_only"], False, True, "guard"))
+    # ⑩ Try 放降 handlers：E16 反绿。
+    m10 = replace_once(src, _RUN6_PROBE_9_OLD, _RUN6_PROBE_9_NEW_HAND)
+    probes.append(("10", "10-handlers", m10,
+                   external["E16_try_except_only"], False, True, "guard"))
+
+    assert sorted({p[0] for p in probes}) == [f"{i:02d}"
+                                              for i in range(1, 11)]
+    assert len(probes) == 15  # ①2 + ⑤3 + ⑥3 + 其余 7
+    for num, tag, mutated, form, old_expect, mut_expect, entry in probes:
+        assert num and tag
+        if entry == "assembled":
+            padded = form + "#" * max(
+                0, CHUNK_MIN_ASSEMBLED_CHARS - len(form))
+            with pytest.raises(ChunkBirthError) as ei:
+                _validate_assembled_chunks(padded)
+            assert str(ei.value) == _ENTRY_GUARD_REASON
+            mod = _run6_mutated_module(mutated, tag)
+            mod._validate_assembled_chunks(padded)  # 变异放行即红
+        else:
+            assert _run6_guard_accepts(prod_mod, form) is old_expect, tag
+            mod = _run6_mutated_module(mutated, tag)
+            assert _run6_guard_accepts(mod, form) is mut_expect, tag
+    # 变异在独立命名空间，生产模块不受污染：A_v1 仍受。
+    assert _run6_guard_accepts(prod_mod, _RUN6_ACCEPT["A_v1"]) is True

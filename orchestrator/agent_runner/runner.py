@@ -19,6 +19,9 @@ import json
 import os
 import re
 import subprocess
+from ast import (AsyncFunctionDef, BoolOp, Call, ClassDef, Compare, Constant,
+                 DictComp, Eq, For, FunctionDef, GeneratorExp, If, IfExp,
+                 Lambda, ListComp, Load, Name, SetComp, Try, While, With)
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -113,6 +116,33 @@ FAILURE_JSON = "FAILURE.json"
 
 # 禁改的字面文件名（任何目录层级都拒）
 FORBIDDEN_BASENAMES = frozenset({"stage_models.yaml", "00_env.sh"})
+
+# run6（2026-10-22 用户裁决 A；设计 .omc/handoffs/task6-sentinel-seam-design.md
+# §15.7-H2/H3、§15.8.2 H5）：出生拼接体必须含 V1 形可执行入口守卫，末位 AST
+# 硬闸 _validate_entry_guard 在 parse/重名/30000 地板之后执行；拒绝理由是冻结
+# 真值外串（逐字见 H3），只经 str(exc) 进下一轮块 0 反馈，不回显模型源码。
+# 作用域八类整枝剪（含推导式/Lambda/def/class）；If/For/While/With 语句只降
+# .body（Try 单独同样只降 .body）；Match 不指名，经 ast.iter_child_nodes 泛下降。
+_SCOPE_NODES = (FunctionDef, AsyncFunctionDef, ClassDef, Lambda,
+                ListComp, SetComp, GeneratorExp, DictComp)
+_STMT_BODY_ONLY = (If, For, While, With)
+_MAIN = "main"
+_GUARD_LITERAL = "__main__"
+_ENTRY_GUARD_REASON = (
+    "拼接源码缺少可执行入口守卫：顶层必须存在 if __name__ == \"__main__\": "
+    "语句，且其代码体（不含 else 分支）内调用 main()；守卫不得嵌套在函数或"
+    "类定义内，比较式必须为 __name__ 在左、字符串字面量 \"__main__\" 在右的"
+    " == 比较（反序或其他字面量均不接受）。当前拼接体不满足上述条件，python "
+    "直接运行时 main() 不会执行（与 V1 入口结构不一致），请按该形态补齐守卫"
+    "后整轮重发。")
+# run6 §15.7-H4（D2）：rc=0 但约定产物缺失时注入修补轮的机器核验真值句。
+# 全句无 ASCII 双引号（永不匹配 _FRAME_RE）；relpath 只许传 spec 的产物相对路径。
+_RC0_MISSING_ARTIFACT_FMT = (
+    "机器核验（非模型输出）：进程退出码 rc=0，但成功判据约定产物 {relpath} "
+    "在工作目录中不存在。本轮机器成功判据为「退出码 rc=0 且工作目录下存在 "
+    "{relpath}」，两条同时满足才算成功；stderr/traceback 为空，无运行时异常"
+    "信号。以上仅为机器核验事实，不含原因诊断；请自行核对脚本执行与产物写出"
+    "环节。")
 
 
 class CodingLimitError(GatewayPausedError):
@@ -654,6 +684,91 @@ def _validate_assembled_chunks(code: str) -> None:
         raise ChunkBirthError(
             f"拼接总长 {len(code)} < {CHUNK_MIN_ASSEMBLED_CHARS} chars"
             "（若行数≥600 请核对字符密度后整轮重生）")
+    # run6（§15.8-H2/H5）：末位闸——可执行入口守卫；tree 复用上方 parse。
+    _validate_entry_guard(tree)
+
+
+def _validate_entry_guard(tree):
+    # run6 §15.8.2-H5：仅枚举顶层 If（禁整树遍历，否则穿透 def/class）；
+    # 候选 test 必须恰为规范 Compare，守卫 body 经助手一命中即接受。
+    for node in tree.body:
+        if not isinstance(node, If):
+            continue
+        test = node.test
+        if not (isinstance(test, Compare)
+                and isinstance(test.left, Name)
+                and test.left.id == "__name__"
+                and isinstance(test.left.ctx, Load)
+                and len(test.ops) == 1
+                and isinstance(test.ops[0], Eq)
+                and len(test.comparators) == 1):
+            continue
+        comp = test.comparators[0]
+        if not (isinstance(comp, Constant) and type(comp.value) is str
+                and comp.value == _GUARD_LITERAL):
+            continue
+        if _entry_guard_body_calls_main(node.body):
+            return
+    raise ChunkBirthError(_ENTRY_GUARD_REASON)
+
+
+def _entry_guard_body_calls_main(stmts):
+    # 守卫体语句层受控遍历（0 raise；禁手工栈，只许 for+递归）。
+    for stmt in stmts:
+        if isinstance(stmt, _SCOPE_NODES):
+            continue  # 八类作用域整枝剪（def/class/lambda/推导式）
+        if isinstance(stmt, BoolOp):
+            continue  # BoolOp 死/活支静态不可判，整枝不认
+        if (isinstance(stmt, Call) and isinstance(stmt.func, Name)
+                and stmt.func.id == _MAIN
+                and isinstance(stmt.func.ctx, Load)):
+            return True
+        if isinstance(stmt, _STMT_BODY_ONLY):
+            if _entry_guard_body_calls_main(stmt.body):
+                return True
+            continue  # 永不进 orelse/.iter/.items
+        if isinstance(stmt, Try):
+            if _entry_guard_body_calls_main(stmt.body):
+                return True
+            continue  # handlers/orelse/finalbody 均不进
+        if isinstance(stmt, IfExp):
+            # 三元只认真分支 .body；.test/.orelse 不读
+            if _entry_guard_contains(stmt.body):
+                return True
+            continue
+        if _entry_guard_contains(stmt):
+            return True
+    return False
+
+
+def _entry_guard_contains(node):
+    # 表达式层受控泛下降（0 raise）：入口先对 node 自身做叶子判定（变异探针⑧）。
+    if (isinstance(node, Call) and isinstance(node.func, Name)
+            and node.func.id == _MAIN
+            and isinstance(node.func.ctx, Load)):
+        return True
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, _SCOPE_NODES) or isinstance(child, BoolOp):
+            continue
+        if (isinstance(child, Call) and isinstance(child.func, Name)
+                and child.func.id == _MAIN
+                and isinstance(child.func.ctx, Load)):
+            return True
+        if isinstance(child, _STMT_BODY_ONLY):
+            if _entry_guard_body_calls_main(child.body):
+                return True
+            continue
+        if isinstance(child, Try):
+            if _entry_guard_body_calls_main(child.body):
+                return True
+            continue
+        if isinstance(child, IfExp):
+            if _entry_guard_contains(child.body):
+                return True
+            continue
+        if _entry_guard_contains(child):
+            return True
+    return False
 
 
 def _classify_closed_body(code: str, index: int) -> "dict | None":
@@ -888,6 +1003,15 @@ def _tb_tail(exec_result: _ExecResult) -> str:
     return blob[-TB_TAIL_CHARS:]
 
 
+def _append_rc0_missing_artifact_note(tail: str, relpath: str) -> str:
+    # run6 §15.7-H4（D2）：rc=0 缺约定产物时的机器核验真值句。纯 str、幂等
+    # （节点重放不重复注入）；relpath 只由调用方传 spec.telemetry_relpath。
+    note = _RC0_MISSING_ARTIFACT_FMT.format(relpath=relpath)
+    if note in tail:
+        return tail
+    return tail + "\n\n" + note
+
+
 # ---------------------------------------------------------------------------
 # 主类
 # ---------------------------------------------------------------------------
@@ -1034,7 +1158,10 @@ class AgentRunner:
             timeline.append({"exec": exec_no, "rc": result.rc,
                              "stderr_tail": _tb_tail(result)[-500:]})
             last_result = result
-            if result.rc == 0 and telemetry.is_file():
+            # run6 §15.7-H4（D2）：telemetry_ok 在成功判定处一次性绑定，
+            # rc0 缺产物注入分支共用同一布尔，禁止二次 is_file。
+            telemetry_ok = result.rc == 0 and telemetry.is_file()
+            if telemetry_ok:
                 vp, dur_ms, cover = self._video_artifacts(workdir, spec)
                 return {"status": "ok", "telemetry_uri": str(telemetry),
                         "coding_round": coding_calls, "executions": exec_no,
@@ -1065,8 +1192,15 @@ class AgentRunner:
                 hits = self.vector_engine.query_kb(
                     "仿真失败 " + tail[-500:], namespace="troubleshooting",
                     top_k=TOP_K)
+            # run6 §15.7-H4（D2）：rc=0 且缺约定产物时把机器核验真值句追加进
+            # 模型侧 tail；严格在 snippets/recall 收集之后、_build_messages 之前。
+            # recall 查询串/snippets/timeline/_fail 继续用未注入 tail。
+            repair_tail = tail
+            if result.rc == 0 and not telemetry_ok:
+                repair_tail = _append_rc0_missing_artifact_note(
+                    tail, spec.telemetry_relpath)
             messages = _build_messages(
-                gate2_notes=spec.gate2_notes, traceback_tail=tail,
+                gate2_notes=spec.gate2_notes, traceback_tail=repair_tail,
                 snippets=snippets, hits=hits, cmd=spec.cmd,
                 learning_hits=learning_hits or None,
                 extra_sections=spec.extra_prompt_sections or None)
@@ -1093,7 +1227,8 @@ class AgentRunner:
                 if chunked_birth:
                     codes, records = self._run_chunked_birth_round(
                         spec=spec, root=root, model=model,
-                        coding_round=coding_calls, tail=tail, snippets=snippets,
+                        coding_round=coding_calls, tail=repair_tail,
+                        snippets=snippets,
                         hits=hits, learning_hits=learning_hits,
                         round_feedback=chunk_feedback)
                     # 设计 §2.2 EBNF：begin 行后/end 行前的 LF 是语法分隔符，

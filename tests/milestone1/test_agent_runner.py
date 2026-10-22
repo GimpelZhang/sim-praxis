@@ -16,6 +16,7 @@ import ast
 import hashlib
 import json
 import random
+import re
 import sqlite3
 from pathlib import Path
 
@@ -42,11 +43,16 @@ from orchestrator.agent_runner.runner import (
     ChunkBirthError,
     ChunkPromptContext,
     ChunkSpec,
+    _ENTRY_GUARD_REASON,
+    _FRAME_RE,
+    _RC0_MISSING_ARTIFACT_FMT,
+    _append_rc0_missing_artifact_note,
     _build_messages,
     _classify_closed_body,
     _collect_snippets,
     _extract_chunk,
     _validate_assembled_chunks,
+    _validate_entry_guard,
 )
 from orchestrator.common.callcache import (
     SCHEMA as REPLAY_SCHEMA,
@@ -844,9 +850,15 @@ def test_11_validate_assembled_machine_checks():
     except ChunkBirthError as exc:
         msg = str(exc)
         assert "def broken(" not in msg and "SyntaxError" in msg
-    # 拼接总长边界 29999/30000（字符口径）
+    # 拼接总长边界 29999/30000（字符口径）。run6 §15.8：30000 侧过地板后还须
+    # 过入口守卫——以等长植入把尾部 # 换为 def main()+A_v1 双引号守卫（逐字），
+    # 长度口径一字不动（:len 双断言、29999 raises 均原样）。
+    _guard_v1_program = (
+        'def main():\n    return 0\n\n\n'
+        'if __name__ == "__main__":\n'
+        '    raise SystemExit(main())\n')
     s29999 = "x = 1\n" + "#" * (29999 - len("x = 1\n"))
-    s30000 = "x = 1\n" + "#" * (30000 - len("x = 1\n"))
+    s30000 = _guard_v1_program + "#" * (30000 - len(_guard_v1_program))
     assert len(s29999) == 29999 and len(s30000) == 30000
     with pytest.raises(ChunkBirthError, match="拼接总长 29999 < 30000"):
         _validate_assembled_chunks(s29999)
@@ -878,8 +890,14 @@ def test_11_validate_assembled_machine_checks():
                      "closed_chars": 36000, "cut_offset": 17999,
                      "cut_line": 0, "frag0_chars": 17999,
                      "frag1_chars": 18000, "boundary": "line"}
-    pads = ["#" * 800 for _ in range(5)]
-    _validate_assembled_chunks("\n".join([big36] + pads))  # 40005 ≥ 30000
+    # run6 §15.8：pads[0] 等长植入同一 A_v1 守卫（恰 800 字符，# 补足），
+    # 其余四垫仍为纯 # 800；join 总长恒等 40005（新增 len 断言钉死）。
+    pad0 = _guard_v1_program + "#" * (800 - len(_guard_v1_program))
+    assert len(pad0) == 800
+    pads = [pad0] + ["#" * 800 for _ in range(4)]
+    joined = "\n".join([big36] + pads)
+    assert len(joined) == 40005
+    _validate_assembled_chunks(joined)  # 40005 ≥ 30000
     # 40000 单行闭合件：L>36000 → 类3 over_split_max（即使想切也越过 2×18000）。
     one40 = "#" * 40000
     with pytest.raises(ChunkBirthError) as ei40:
@@ -928,10 +946,13 @@ def _happy_chunk_codes():
           "    # 合成夹具函数 delta（数据产物族占位，非解题脚本）\n"
           "    return {'v': value}\n\n"
           + _fixture_pad("c4", 120) + "\n")
-    c5 = ("def fixture_main():\n"
+    # run6 §15.8：c5 入口须与 V1 同形——def main() + 逐字双引号 A_v1 守卫
+    # （raise SystemExit(main())）；写 telemetry.json 行为不变，仍为合成夹具。
+    c5 = ("def main():\n"
           "    Path('telemetry.json').write_text("
           "json.dumps({'_fixture': True}), encoding='utf-8')\n\n\n"
-          "if __name__ == '__main__':\n    fixture_main()\n"
+          'if __name__ == "__main__":\n'
+          "    raise SystemExit(main())\n"
           + _fixture_pad("c5", 120) + "\n")
     return [c0, c1, c2, c3, c4, c5]
 
@@ -1253,7 +1274,6 @@ def test_16_chunk_fingerprint_includes_index_and_keys_safe():
         {"max_tokens": 32768, "temperature": 0.1,
          "chunk_index": 1, "chunk_total": 6},
         stage="coding_debug", model="fake-model") == fp[1]
-    import re
     for i in range(6):
         assert re.fullmatch(
             r"[A-Za-z0-9_.-]{1,160}",
@@ -1791,3 +1811,492 @@ def test_run5_fuzz_cut_oracle_fixed_seed():
                 n_accept += 1
     # 四类在固定种子下都必须实际发生
     assert n_none > 0 and n_accept > 0 and n_ce > 0 and n_over > 0
+
+
+# ===========================================================================
+# ⑥ run6（设计 §15.7/§15.8 v3.2）：可执行入口守卫 AST 谓词 + rc0 缺产物
+#    机器核验（D2）。全部 0 付费、全合成形态——禁止读 /mnt、禁止真 V2 响应
+#    （硬规则 3）。形态逐字转写自 LEAD 仲裁件/探针（均不入仓依赖）：
+#    .omc/handoffs/lead_h5_predicate_prototype.py（46 实例）、
+#    /tmp/lead_v31_lowcheck.py（H5.3 async 三形 + R15 七实例）。
+# [run6-entry-guard-tests]
+# ===========================================================================
+
+
+_RUN6_DEF_MAIN = "def main(argv=None):\n    return 0\n"
+_RUN6_GUARD_V1 = ('if __name__ == "__main__":\n'
+                  '    raise SystemExit(main())\n')
+
+
+def _run6_h54_forms():
+    """H5.4 正式矩阵：41 标签/46 实例/45 独立代码体（E8=E17 同码）。
+
+    返回 (label, should_accept, code) 三元组；接受 8（A1-A7+A_v1）、
+    拒绝 19 实例/14 标签（R1-R14）、外延 E1-E19（E18 拒/E19 受）。
+    """
+    d = _RUN6_DEF_MAIN
+    g = _RUN6_GUARD_V1
+    accept = {
+        "A1": d + 'if __name__ == "__main__":\n    main()\n',
+        "A2": d + 'if __name__ == "__main__":\n'
+                  '    import sys; sys.exit(main())\n',
+        "A3": d + 'x = 1\nprint("hi")\n' + g,
+        "A_v1": d + g,
+        "A4": (d + 'if __name__ == "__main__":\n'
+               '    if True:\n        with open("x") as f:\n'
+               '            if f:\n                main()\n'),
+        "A5": (d + 'if __name__ == "__main__":\n'
+               '    try:\n        raise SystemExit(main())\n'
+               '    finally:\n        pass\n'),
+        "A6": ('if __name__ == "__main__":\n    pass\n' + d + g),
+        "A7": d + "if __name__ == '__main__':\n    main([])\n",
+    }
+    r1_body = "\n".join(
+        f"try:\n    x{j} = 1\nexcept Exception as exc:\n"
+        "    _ = type(exc).__name__"
+        for j in range(4))
+    reject = {
+        "R1": "def main():\n    pass\n" + r1_body
+              + '\nraise SystemExit("batch 编排未定义，请通过子命令调用")\n',
+        "R2": d + 'if "__main__" == __name__:\n    main()\n',
+        "R3a": d + 'if __name__ == "__main":\n    main()\n',
+        "R3b": d + "if __name__ == 'main':\n    main()\n",
+        "R3c": d + 'if __name__ == b"__main__":\n    main()\n',
+        "R4a": d + 'if __name__ is "__main__":\n    main()\n',
+        "R4b": d + 'if __name__ in ("__main__",):\n    main()\n',
+        "R4c": d + 'if __name__ != "x":\n    main()\n',
+        "R5": ("def wrapper():\n"
+               '    if __name__ == "__main__":\n        main()\n'
+               "def main():\n    pass\n"),
+        "R6": ("class C:\n    def run(self):\n"
+               '        if __name__ == "__main__":\n            main()\n'
+               "def main():\n    pass\n"),
+        "R7": (d + 'if __name__ == "__main__":\n    pass\n'
+               "else:\n    main()\n"),
+        "R8": d + 'if __name__ == "__main__":\n    pass\n',
+        "R9": d + 'raise SystemExit("batch 编排未定义")\n',
+        "R10": (d + 'if __name__ == "__main__":\n'
+               "    def inner():\n        main()\n"),
+        "R11": (d + 'import sys\nif __name__ == "__main__":\n'
+               '    getattr(sys.modules[__name__], "main")()\n'),
+        "R12": d + 'if __name__ == "__main__" and True:\n    main()\n',
+        "R13": (d + 'if type(exc).__name__ == "__main__":\n'
+               "    main()\n"),
+        "R14a": ("def fixture_main():\n    pass\n"
+                 "if __name__ == '__main__':\n    fixture_main()\n"),
+        "R14b": d + 'if __name__ == "__main__":\n    run()\n',
+    }
+    external = {
+        "E1_ternary_false_branch": (False, d + 'if __name__ == "__main__":\n    x = 0 if True else main()\n'),
+        "E2_ternary_true_branch": (True, d + 'if __name__ == "__main__":\n    x = main() if True else 0\n'),
+        "E3_ternary_test_call": (False, d + 'if __name__ == "__main__":\n    x = 1 if main() else 2\n'),
+        "E4_listcomp": (False, d + 'if __name__ == "__main__":\n    [main() for _ in (1,)]\n'),
+        "E5_match_case": (True, d + 'if __name__ == "__main__":\n    match 1:\n        case 1:\n            main()\n'),
+        "E6_bare_name": (False, d + 'if __name__ == "__main__":\n    main\n'),
+        "E7_module_call_no_guard": (False, d + "main()\n"),
+        "E8_nested_if_orelse_trap": (False, d + 'if __name__ == "__main__":\n    if False:\n        pass\n    else:\n        main()\n'),
+        "E9_ifexp_comparator": (False, d + 'if __name__ == ("__main__" if True else "x"):\n    main()\n'),
+        "E10_lambda": (False, d + 'if __name__ == "__main__":\n    f = lambda: main()\n'),
+        "E11_boolop_dead_and": (False, d + 'if __name__ == "__main__":\n    False and main()\n'),
+        "E12_boolop_live_and": (False, d + 'if __name__ == "__main__":\n    True and main()\n'),
+        "E13_boolop_live_or": (False, d + 'if __name__ == "__main__":\n    0 or main()\n'),
+        "E14_plain_after_boolop": (True, d + 'if __name__ == "__main__":\n    False and x\n    main()\n'),
+        "E15_try_finally_only": (False, d + 'if __name__ == "__main__":\n    try:\n        pass\n    finally:\n        main()\n'),
+        "E16_try_except_only": (False, d + 'if __name__ == "__main__":\n    try:\n        pass\n    except Exception:\n        main()\n'),
+        "E17_nested_if_orelse_trap": (False, d + 'if __name__ == "__main__":\n    if False:\n        pass\n    else:\n        main()\n'),
+        "E18_match_class_pattern": (False, d + 'if __name__ == "__main__":\n    match 1:\n        case main():\n            pass\n'),
+        "E19_match_guard_call": (True, d + 'if __name__ == "__main__":\n    match 1:\n        case 1 if main():\n            pass\n'),
+    }
+    forms = [(name, True, code) for name, code in accept.items()]
+    forms += [(name, False, code) for name, code in reject.items()]
+    forms += [(name, expect, code) for name, (expect, code) in external.items()]
+    return forms, accept, reject, external
+
+
+_RUN6_H54_FORMS, _RUN6_ACCEPT, _RUN6_REJECT, _RUN6_EXTERNAL = _run6_h54_forms()
+_RUN6_H54_IDS = [f[0] for f in _RUN6_H54_FORMS]
+
+
+def test_run6_h54_matrix_counts_41_labels_46_instances_45_bodies():
+    # v3.2 口径：核心 22（8 接受 + 14 拒签）+ 外延 19 = 41 标签；
+    # R3/R4/R14 展 a/b/c 后 46 实例；E8=E17 同码 → 45 独立体。
+    assert len(_RUN6_H54_FORMS) == 46
+    assert len(_RUN6_H54_IDS) == 46
+    # 标签口径：R3a/b/c、R4a/b/c、R14a/b 各归一标签（实例 19、标签 14）。
+    families = {re.sub(r"^(R\d+)[abc]$", r"\1", x) for x in _RUN6_H54_IDS}
+    assert len(families) == 41
+    bodies = {code for _, _, code in _RUN6_H54_FORMS}
+    assert len(bodies) == 45
+    assert _RUN6_EXTERNAL["E8_nested_if_orelse_trap"][1] \
+        == _RUN6_EXTERNAL["E17_nested_if_orelse_trap"][1]
+    assert _RUN6_EXTERNAL["E8_nested_if_orelse_trap"][0] is False
+
+
+@pytest.mark.parametrize("label,should_accept,code", _RUN6_H54_FORMS,
+                         ids=_RUN6_H54_IDS)
+def test_run6_h54_entry_guard_predicate_46_forms(
+        label, should_accept, code):
+    # 全部形态 ast 可解析（非法编译期形态是 H5.3 async 单列，不在本矩阵）。
+    tree = ast.parse(code)
+    if should_accept:
+        _validate_entry_guard(tree)               # 不抛即接受
+        _validate_assembled_chunks(
+            code + "#" * max(0, CHUNK_MIN_ASSEMBLED_CHARS - len(code))
+            + "\n")
+        return
+    with pytest.raises(ChunkBirthError) as ei:
+        _validate_entry_guard(tree)
+    # 拒绝串逐字冻结、detail 恒 None（守卫拒不带 simpraxis.chunk_split_reject）。
+    assert str(ei.value) == _ENTRY_GUARD_REASON
+    assert ei.value.detail is None
+
+
+@pytest.mark.parametrize("name,code", [
+    ("await", _RUN6_DEF_MAIN + 'if __name__ == "__main__":\n    await main()\n'),
+    ("async_for", _RUN6_DEF_MAIN + 'if __name__ == "__main__":\n'
+                   '    async for x in main():\n        pass\n'),
+    ("async_with", _RUN6_DEF_MAIN + 'if __name__ == "__main__":\n'
+                    '    async with main():\n        pass\n'),
+])
+def test_run6_h53_module_level_async_forms_parse_ok_compile_syntaxerror(
+        name, code):
+    # H5.3 唯一登记的过接受残余：谓词经泛下降可触达叶子 main（受），
+    # 但模块级 compile() 响亮 SyntaxError（编译期失败，非静默 rc0）。
+    ast.parse(code)
+    _validate_entry_guard(ast.parse(code))
+    with pytest.raises(SyntaxError):
+        compile(code, f"<run6-{name}>", "exec")
+
+
+def test_run6_guard_reject_reason_only_into_next_round_block0(tmp_path):
+    """M1②/④：守卫拒绝串只进下一轮块 0 反馈段；detail=None 三条件键缺席、
+    split_rejected=0、0 fragments 件；i>0 块反馈段为空（test_17 同源断言保留）。"""
+    codes = _happy_chunk_codes()
+    c5_noguard = ("def main():\n    pass  # run6 合成：无入口守卫\n\n"
+                  + _fixture_pad("c5nog", 120) + "\n")
+    assert CHUNK_MIN_CODE_CHARS <= len(c5_noguard) <= CHUNK_MAX_CODE_CHARS
+    round1 = [_chunk_fence(c, i)
+              for i, c in enumerate(codes[:5] + [c5_noguard])]
+    round2 = [_chunk_fence(c, i) for i, c in enumerate(codes)]
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, round1 + round2, thread="t6guard", cap=2)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok" and rec["coding_round"] == 2
+    assert len(gw.calls) == 12
+    feedback_title = "### 上一轮拆块交付失败反馈"
+    u0r2 = gw.calls[6]["messages"][1]["content"]
+    assert feedback_title in u0r2 and _ENTRY_GUARD_REASON in u0r2
+    for call in gw.calls[7:12]:
+        assert feedback_title not in call["messages"][1]["content"]
+    # round1 六块均无反馈段（首轮无历史）
+    for call in gw.calls[:6]:
+        assert feedback_title not in call["messages"][1]["content"]
+    # round1 decision：rejected 逐字串、rejected_detail 键缺席。
+    decision = json.loads(
+        (tmp_path / "ev" / "t6guard" / "coding_round1.decision.json")
+        .read_text())
+    assert decision["applied"] == []
+    assert decision["rejected"] == _ENTRY_GUARD_REASON
+    assert "rejected_detail" not in decision
+    assert "chunk_split_records" not in decision
+    assert not list((tmp_path / "ev" / "t6guard").glob("*.fragments.json"))
+    # 时间线（exec1 条目，成功返回仍携首轮拒绝注释）：三条件键缺席 + 计数 0。
+    t1 = next(t for t in rec["timeline"]
+              if "chunk_birth_rejected" in t)
+    assert t1["chunk_birth_rejected"] == _ENTRY_GUARD_REASON
+    assert "chunk_birth_rejected_detail" not in t1
+    assert t1["split_accepted"] == 0 and t1["split_rejected"] == 0
+    assert t1["closed_oversize_blocks"] == 0
+
+
+def test_run6_total_chunkbirth_error_raise_sites_pin_23():
+    # M1⑤：全文件 raise ChunkBirthError 恰 23（run6 前 22 + 入口守卫 1）。
+    import orchestrator.agent_runner.runner as runner_mod
+    src = Path(runner_mod.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    sites = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+             and isinstance(n.exc.func, ast.Name)
+             and n.exc.func.id == "ChunkBirthError"]
+    assert len(sites) == 23
+    # 守卫那一枚必须是冻结常量直填构造（无 f-string/拼接/ detail）。
+    guard_fn = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef)
+                    and n.name == "_validate_entry_guard")
+    raises = [n for n in ast.walk(guard_fn) if isinstance(n, ast.Raise)]
+    assert len(raises) == 1
+    exc = raises[0].exc
+    assert isinstance(exc, ast.Call)
+    assert isinstance(exc.func, ast.Name) and exc.func.id == "ChunkBirthError"
+    assert len(exc.args) == 1 and not exc.keywords
+    assert isinstance(exc.args[0], ast.Name)
+    assert exc.args[0].id == "_ENTRY_GUARD_REASON"
+
+
+# ---- M1⑥：D2 rc=0 缺约定产物机器核验句 -------------------------------------
+
+def test_run6_d2_note_verbatim_idempotent_no_dquote_no_frame():
+    note = _RC0_MISSING_ARTIFACT_FMT.format(relpath="summary.json")
+    assert '"' not in note                       # 全句无 ASCII 双引号
+    assert not _FRAME_RE.search(note)           # 永不被 traceback 帧正则命中
+    once = _append_rc0_missing_artifact_note("\n", "summary.json")
+    assert once == "\n\n\n" + note and once.count(note) == 1
+    twice = _append_rc0_missing_artifact_note(once, "summary.json")
+    assert twice == once                        # 幂等：节点重放不二次注入
+    empty = _append_rc0_missing_artifact_note("", "summary.json")
+    assert empty == "\n\n" + note and empty.count(note) == 1
+    # relpath 只由入参代入（两个不同产物各成一句）。
+    note2 = _RC0_MISSING_ARTIFACT_FMT.format(relpath="telemetry.json")
+    assert note != note2 and "summary.json" not in note2
+
+
+class _Run6ScriptedRecall:
+    """只记录查询串的合成 recall（0 触网；retrieve 双路均空）。"""
+
+    def __init__(self):
+        self.queries: list[str] = []
+
+    def retrieve(self, query, *, site):
+        assert site == "coding"
+        self.queries.append(query)
+        return {"kb_hits": [], "learning_hits": []}
+
+    def record_adoption(self, **kwargs):
+        pass
+
+
+def _run6_rc0_missing_spec(tmp_path, *, telemetry_relpath, script, cap,
+                           thread, responses):
+    wd = tmp_path / "work"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "script.py").write_text(script, encoding="utf-8")
+    gw = FakeGateway(responses)
+    recall = _Run6ScriptedRecall()
+    runner = AgentRunner(gw, FakeVector(), evidence_root=tmp_path / "ev",
+                         call_cache=CallReplay(tmp_path / "cache"),
+                         recall=recall)
+    spec = RunSpec(
+        thread_id=thread, workdir=wd,
+        cmd=[sys.executable, str(wd / "script.py")],
+        telemetry_relpath=telemetry_relpath, batch_id="T6-FIXTURE",
+        billing_task=6, run_idx=1, max_coding_rounds=cap)
+    return runner, spec, gw, wd, recall
+
+
+def test_run6_d2_rc0_missing_artifact_note_single_patch_path(tmp_path):
+    """rc=0 但 summary.json 缺席：机器核验句逐字进当轮模型消息（单补丁路），
+    timeline/FAILURE/recall 查询/snippets 四处不见句。"""
+    script = "import sys\nsys.exit(0)\n"
+    patch = json.dumps({"patches": [{
+        "path": "script.py", "old": "sys.exit(0)",
+        "new": "sys.exit(0)  # run6 D2 round1"}]})
+    runner, spec, gw, wd, recall = _run6_rc0_missing_spec(
+        tmp_path, telemetry_relpath="summary.json", script=script, cap=1,
+        thread="t6d2", responses=[patch])
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed" and len(gw.calls) == 1
+    note = _RC0_MISSING_ARTIFACT_FMT.format(relpath="summary.json")
+    user_msg = gw.calls[0]["messages"][1]["content"]
+    assert user_msg.count(note) == 1
+    p_tb = user_msg.index("## traceback / 日志尾部")
+    p_note = user_msg.index(note)
+    p_snip = user_msg.index("## 相关源文件片段")
+    assert p_tb < p_note < p_snip              # 只落在模型侧 tail 段
+    # 四处反查：timeline stderr_tail
+    assert all(note not in t["stderr_tail"] for t in rec["timeline"])
+    # _fail 产物（reason 与整个 FAILURE.json 正文）
+    failure = json.loads((wd / "FAILURE.json").read_text(encoding="utf-8"))
+    assert note not in failure["reason"]
+    assert note not in json.dumps(failure, ensure_ascii=False)
+    assert note not in rec["reason"]
+    # recall 查询串：raw tail（rc0 空 stderr/stdout → "\n"），无 note
+    assert recall.queries == ["仿真失败 \n"]
+    # snippets：采集发生在注入之前；note 自身无帧，真实帧片段也不含 note
+    assert _collect_snippets(wd, "\n") == []
+    framed = f'File "{wd / "script.py"}", line 1\n' + note
+    snips = _collect_snippets(wd, framed)
+    assert snips and all(note not in s["snippet"] for s in snips)
+
+
+def test_run6_d2_rc_nonzero_does_not_inject_note(tmp_path):
+    """rc≠0（真失败）路径永不注入 D2 句。"""
+    script = "import sys\nsys.exit(3)\n"
+    patch = json.dumps({"patches": [{
+        "path": "script.py", "old": "sys.exit(3)",
+        "new": "sys.exit(3)  # run6 rc3 round1"}]})
+    runner, spec, gw, wd, _ = _run6_rc0_missing_spec(
+        tmp_path, telemetry_relpath="summary.json", script=script, cap=1,
+        thread="t6d2rc", responses=[patch])
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed" and len(gw.calls) == 1
+    note = _RC0_MISSING_ARTIFACT_FMT.format(relpath="summary.json")
+    assert note not in gw.calls[0]["messages"][1]["content"]
+    assert "机器核验（非模型输出）" not in gw.calls[0]["messages"][1]["content"]
+
+
+def test_run6_d2_note_chunked_path_same_source(tmp_path, monkeypatch):
+    """拆块出生路同源：run() 把同一 repair_tail 实参透传进出生轮（白盒拦取，
+    0 网关调用）；与单补丁路共用同一 helper、同一冻结句。"""
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [], thread="t6d2chunk", cap=1)
+    spec.cmd = [sys.executable, "-c", ""]     # rc=0 空跑，目标 v2.py 缺席
+    captured = {}
+
+    def _capture_birth_round(self, **kwargs):
+        captured["tail"] = kwargs["tail"]
+        raise ChunkBirthError("run6 合成：出生轮白盒拦取，不产生网关调用")
+
+    monkeypatch.setattr(type(runner), "_run_chunked_birth_round",
+                        _capture_birth_round)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed" and gw.calls == []
+    note = _RC0_MISSING_ARTIFACT_FMT.format(relpath="telemetry.json")
+    expected = _append_rc0_missing_artifact_note("\n", "telemetry.json")
+    assert captured["tail"] == expected
+    assert captured["tail"].count(note) == 1
+
+
+def test_run6_empty_patches_hard_stop_no_retry(tmp_path):
+    """M1⑦：空 patches 硬停路径不重试（D2 接线后行为原样，恰 1 次调用）。"""
+    script = "import sys\nsys.exit(3)\n"
+    runner, spec, gw, wd, _ = _run6_rc0_missing_spec(
+        tmp_path, telemetry_relpath="summary.json", script=script, cap=3,
+        thread="t6empty", responses=[json.dumps({"patches": []})])
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 1 and rec["executions"] == 1
+    assert "补丁安全拒绝（不重试）" in rec["reason"]
+    assert (wd / "FAILURE.json").is_file()
+
+
+# ---- M1⑧：rc2 拆块六消息逐字快照（固定 tail，含 snippets/cmd 段） ----------
+
+_RUN6_RC2_SNAPSHOT = r'''"你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON：{\"patches\":[{\"path\":\"相对运行工作目录的路径\",\"old\":\"原文（须唯一）\",\"new\":\"替换文\"}]}，或 {\"unified_diff\":\"git 风格 diff\"}。补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。不要输出解释、不要输出 image。"
+"## V2 升阶任务合同（快照夹具）\n合同正文快照 ζ\n\n## 拆块交付（第 1/6 块）\n\n目标文件分 6 块顺序出生，你正在交付第 1/6 块；本次只允许产出这一块。\n\n### 交付块清单（编号、标题、行数预算与边界）\n1. 《合成头》\n第 0 块只允许写合成章节 0。\n2. 《合成注入》\n第 1 块只允许写合成章节 1。\n3. 《合成控制》\n第 2 块只允许写合成章节 2。\n4. 《合成判定》\n第 3 块只允许写合成章节 3。\n5. 《合成产物》\n第 4 块只允许写合成章节 4。\n6. 《合成媒体》\n第 5 块只允许写合成章节 5。\n\n### 本块边界（只允许写的章节）\n你本次只能产出第 1/6 块《合成头》：第 0 块只允许写合成章节 0。\n严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。\n\n### 上一轮拆块交付失败反馈（机器原因，本轮必须避免）\n合成机器原因（快照夹具）：上一轮拆块交付失败\n\n### 交付格式（围栏纯文本，禁止 JSON）\n本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；字段逐字照抄、顺序固定、ASCII 字符：\n<<<<<<< simpraxis.chunk.v1 path=v2.py index=0 total=6\n<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>\n>>>>>>> simpraxis.chunk.v1.end\n- path 逐字等于 v2.py；index 逐字等于 0；total 逐字等于 6；三个字段顺序不得调换、不加引号；\n- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；\n- 若响应在结束围栏之前结束（例如输出被截断），本机记录为「缺结束围栏」，本块机器校验失败；\n- code 只含本块 Python 原文，请控制在 18000 字符以内（本机逐字符计数）；少于 800 字符、超过 36000 字符或缺结束围栏，仍机器校验失败；\n- 全部 6 块拼接后须为完整可运行文件（总长不少于 30000 字符），块边界不得重叠。\n\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/t6/v2.py\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"v2.py\", line 7\nRuntimeError: 快照夹具失败\n\n## 相关源文件片段（仅限运行工作目录）\n### v2.py:7\n     5| x = 1\n     6| y = 2\n     7| -> raise RuntimeError('快照夹具失败')\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/t.md#s0 | evidence_refs: E0]\n合成排障条目 0"
+"## V2 升阶任务合同（快照夹具）\n合同正文快照 ζ\n\n## 拆块交付（第 2/6 块）\n\n目标文件分 6 块顺序出生，你正在交付第 2/6 块；本次只允许产出这一块。\n\n### 交付块清单（编号、标题、行数预算与边界）\n1. 《合成头》\n第 0 块只允许写合成章节 0。\n2. 《合成注入》\n第 1 块只允许写合成章节 1。\n3. 《合成控制》\n第 2 块只允许写合成章节 2。\n4. 《合成判定》\n第 3 块只允许写合成章节 3。\n5. 《合成产物》\n第 4 块只允许写合成章节 4。\n6. 《合成媒体》\n第 5 块只允许写合成章节 5。\n\n### 本块边界（只允许写的章节）\n你本次只能产出第 2/6 块《合成注入》：第 1 块只允许写合成章节 1。\n严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。\n\n### 前序已定稿块（逐字拼接文本，已最终定稿，禁止重复/改动）\n以下是前 1 块拼接后的逐字定稿，你的 code 会被直接拼在其后；拼接结果必须是合法 Python：不得重复其中 import/常量/函数，不得改动或重排其中任何字符。\n```python\n# 快照前序定稿块 0\n```\n\n### 交付格式（围栏纯文本，禁止 JSON）\n本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；字段逐字照抄、顺序固定、ASCII 字符：\n<<<<<<< simpraxis.chunk.v1 path=v2.py index=1 total=6\n<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>\n>>>>>>> simpraxis.chunk.v1.end\n- path 逐字等于 v2.py；index 逐字等于 1；total 逐字等于 6；三个字段顺序不得调换、不加引号；\n- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；\n- 若响应在结束围栏之前结束（例如输出被截断），本机记录为「缺结束围栏」，本块机器校验失败；\n- code 只含本块 Python 原文，请控制在 18000 字符以内（本机逐字符计数）；少于 800 字符、超过 36000 字符或缺结束围栏，仍机器校验失败；\n- 全部 6 块拼接后须为完整可运行文件（总长不少于 30000 字符），块边界不得重叠。\n\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/t6/v2.py\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"v2.py\", line 7\nRuntimeError: 快照夹具失败\n\n## 相关源文件片段（仅限运行工作目录）\n### v2.py:7\n     5| x = 1\n     6| y = 2\n     7| -> raise RuntimeError('快照夹具失败')\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/t.md#s0 | evidence_refs: E0]\n合成排障条目 0"
+"## V2 升阶任务合同（快照夹具）\n合同正文快照 ζ\n\n## 拆块交付（第 3/6 块）\n\n目标文件分 6 块顺序出生，你正在交付第 3/6 块；本次只允许产出这一块。\n\n### 交付块清单（编号、标题、行数预算与边界）\n1. 《合成头》\n第 0 块只允许写合成章节 0。\n2. 《合成注入》\n第 1 块只允许写合成章节 1。\n3. 《合成控制》\n第 2 块只允许写合成章节 2。\n4. 《合成判定》\n第 3 块只允许写合成章节 3。\n5. 《合成产物》\n第 4 块只允许写合成章节 4。\n6. 《合成媒体》\n第 5 块只允许写合成章节 5。\n\n### 本块边界（只允许写的章节）\n你本次只能产出第 3/6 块《合成控制》：第 2 块只允许写合成章节 2。\n严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。\n\n### 前序已定稿块（逐字拼接文本，已最终定稿，禁止重复/改动）\n以下是前 2 块拼接后的逐字定稿，你的 code 会被直接拼在其后；拼接结果必须是合法 Python：不得重复其中 import/常量/函数，不得改动或重排其中任何字符。\n```python\n# 快照前序定稿块 0\n# 快照前序定稿块 1\n```\n\n### 交付格式（围栏纯文本，禁止 JSON）\n本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；字段逐字照抄、顺序固定、ASCII 字符：\n<<<<<<< simpraxis.chunk.v1 path=v2.py index=2 total=6\n<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>\n>>>>>>> simpraxis.chunk.v1.end\n- path 逐字等于 v2.py；index 逐字等于 2；total 逐字等于 6；三个字段顺序不得调换、不加引号；\n- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；\n- 若响应在结束围栏之前结束（例如输出被截断），本机记录为「缺结束围栏」，本块机器校验失败；\n- code 只含本块 Python 原文，请控制在 18000 字符以内（本机逐字符计数）；少于 800 字符、超过 36000 字符或缺结束围栏，仍机器校验失败；\n- 全部 6 块拼接后须为完整可运行文件（总长不少于 30000 字符），块边界不得重叠。\n\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/t6/v2.py\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"v2.py\", line 7\nRuntimeError: 快照夹具失败\n\n## 相关源文件片段（仅限运行工作目录）\n### v2.py:7\n     5| x = 1\n     6| y = 2\n     7| -> raise RuntimeError('快照夹具失败')\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/t.md#s0 | evidence_refs: E0]\n合成排障条目 0"
+"## V2 升阶任务合同（快照夹具）\n合同正文快照 ζ\n\n## 拆块交付（第 4/6 块）\n\n目标文件分 6 块顺序出生，你正在交付第 4/6 块；本次只允许产出这一块。\n\n### 交付块清单（编号、标题、行数预算与边界）\n1. 《合成头》\n第 0 块只允许写合成章节 0。\n2. 《合成注入》\n第 1 块只允许写合成章节 1。\n3. 《合成控制》\n第 2 块只允许写合成章节 2。\n4. 《合成判定》\n第 3 块只允许写合成章节 3。\n5. 《合成产物》\n第 4 块只允许写合成章节 4。\n6. 《合成媒体》\n第 5 块只允许写合成章节 5。\n\n### 本块边界（只允许写的章节）\n你本次只能产出第 4/6 块《合成判定》：第 3 块只允许写合成章节 3。\n严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。\n\n### 前序已定稿块（逐字拼接文本，已最终定稿，禁止重复/改动）\n以下是前 3 块拼接后的逐字定稿，你的 code 会被直接拼在其后；拼接结果必须是合法 Python：不得重复其中 import/常量/函数，不得改动或重排其中任何字符。\n```python\n# 快照前序定稿块 0\n# 快照前序定稿块 1\n# 快照前序定稿块 2\n```\n\n### 交付格式（围栏纯文本，禁止 JSON）\n本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；字段逐字照抄、顺序固定、ASCII 字符：\n<<<<<<< simpraxis.chunk.v1 path=v2.py index=3 total=6\n<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>\n>>>>>>> simpraxis.chunk.v1.end\n- path 逐字等于 v2.py；index 逐字等于 3；total 逐字等于 6；三个字段顺序不得调换、不加引号；\n- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；\n- 若响应在结束围栏之前结束（例如输出被截断），本机记录为「缺结束围栏」，本块机器校验失败；\n- code 只含本块 Python 原文，请控制在 18000 字符以内（本机逐字符计数）；少于 800 字符、超过 36000 字符或缺结束围栏，仍机器校验失败；\n- 全部 6 块拼接后须为完整可运行文件（总长不少于 30000 字符），块边界不得重叠。\n\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/t6/v2.py\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"v2.py\", line 7\nRuntimeError: 快照夹具失败\n\n## 相关源文件片段（仅限运行工作目录）\n### v2.py:7\n     5| x = 1\n     6| y = 2\n     7| -> raise RuntimeError('快照夹具失败')\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/t.md#s0 | evidence_refs: E0]\n合成排障条目 0"
+"## V2 升阶任务合同（快照夹具）\n合同正文快照 ζ\n\n## 拆块交付（第 5/6 块）\n\n目标文件分 6 块顺序出生，你正在交付第 5/6 块；本次只允许产出这一块。\n\n### 交付块清单（编号、标题、行数预算与边界）\n1. 《合成头》\n第 0 块只允许写合成章节 0。\n2. 《合成注入》\n第 1 块只允许写合成章节 1。\n3. 《合成控制》\n第 2 块只允许写合成章节 2。\n4. 《合成判定》\n第 3 块只允许写合成章节 3。\n5. 《合成产物》\n第 4 块只允许写合成章节 4。\n6. 《合成媒体》\n第 5 块只允许写合成章节 5。\n\n### 本块边界（只允许写的章节）\n你本次只能产出第 5/6 块《合成产物》：第 4 块只允许写合成章节 4。\n严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。\n\n### 前序已定稿块（逐字拼接文本，已最终定稿，禁止重复/改动）\n以下是前 4 块拼接后的逐字定稿，你的 code 会被直接拼在其后；拼接结果必须是合法 Python：不得重复其中 import/常量/函数，不得改动或重排其中任何字符。\n```python\n# 快照前序定稿块 0\n# 快照前序定稿块 1\n# 快照前序定稿块 2\n# 快照前序定稿块 3\n```\n\n### 交付格式（围栏纯文本，禁止 JSON）\n本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；字段逐字照抄、顺序固定、ASCII 字符：\n<<<<<<< simpraxis.chunk.v1 path=v2.py index=4 total=6\n<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>\n>>>>>>> simpraxis.chunk.v1.end\n- path 逐字等于 v2.py；index 逐字等于 4；total 逐字等于 6；三个字段顺序不得调换、不加引号；\n- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；\n- 若响应在结束围栏之前结束（例如输出被截断），本机记录为「缺结束围栏」，本块机器校验失败；\n- code 只含本块 Python 原文，请控制在 18000 字符以内（本机逐字符计数）；少于 800 字符、超过 36000 字符或缺结束围栏，仍机器校验失败；\n- 全部 6 块拼接后须为完整可运行文件（总长不少于 30000 字符），块边界不得重叠。\n\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/t6/v2.py\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"v2.py\", line 7\nRuntimeError: 快照夹具失败\n\n## 相关源文件片段（仅限运行工作目录）\n### v2.py:7\n     5| x = 1\n     6| y = 2\n     7| -> raise RuntimeError('快照夹具失败')\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/t.md#s0 | evidence_refs: E0]\n合成排障条目 0"
+"## V2 升阶任务合同（快照夹具）\n合同正文快照 ζ\n\n## 拆块交付（第 6/6 块）\n\n目标文件分 6 块顺序出生，你正在交付第 6/6 块；本次只允许产出这一块。\n\n### 交付块清单（编号、标题、行数预算与边界）\n1. 《合成头》\n第 0 块只允许写合成章节 0。\n2. 《合成注入》\n第 1 块只允许写合成章节 1。\n3. 《合成控制》\n第 2 块只允许写合成章节 2。\n4. 《合成判定》\n第 3 块只允许写合成章节 3。\n5. 《合成产物》\n第 4 块只允许写合成章节 4。\n6. 《合成媒体》\n第 5 块只允许写合成章节 5。\n\n### 本块边界（只允许写的章节）\n你本次只能产出第 6/6 块《合成媒体》：第 5 块只允许写合成章节 5。\n严禁在本块 code 中写入任何其他块的章节，也不得重复前序已定稿内容。\n\n### 前序已定稿块（逐字拼接文本，已最终定稿，禁止重复/改动）\n以下是前 5 块拼接后的逐字定稿，你的 code 会被直接拼在其后；拼接结果必须是合法 Python：不得重复其中 import/常量/函数，不得改动或重排其中任何字符。\n```python\n# 快照前序定稿块 0\n# 快照前序定稿块 1\n# 快照前序定稿块 2\n# 快照前序定稿块 3\n# 快照前序定稿块 4\n```\n\n### 交付格式（围栏纯文本，禁止 JSON）\n本块 Python 原文直接书写，**不要**放入 JSON、不要做任何转义；反斜杠、引号、三引号、中文与换行都按 Python 源码原样写。你的整条响应必须且只能是下面三个部分：首行为起始围栏（独占一行）、中间为本块 Python 原文（若干行）、末行为结束围栏（独占一行）；字段逐字照抄、顺序固定、ASCII 字符：\n<<<<<<< simpraxis.chunk.v1 path=v2.py index=5 total=6\n<本块 Python 原文，逐字；不要 markdown 围栏、不要解释>\n>>>>>>> simpraxis.chunk.v1.end\n- path 逐字等于 v2.py；index 逐字等于 5；total 逐字等于 6；三个字段顺序不得调换、不加引号；\n- 起始围栏之前、结束围栏之后不允许任何字符（空白与换行除外）；代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；\n- 若响应在结束围栏之前结束（例如输出被截断），本机记录为「缺结束围栏」，本块机器校验失败；\n- code 只含本块 Python 原文，请控制在 18000 字符以内（本机逐字符计数）；少于 800 字符、超过 36000 字符或缺结束围栏，仍机器校验失败；\n- 全部 6 块拼接后须为完整可运行文件（总长不少于 30000 字符），块边界不得重叠。\n\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/t6/v2.py\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"v2.py\", line 7\nRuntimeError: 快照夹具失败\n\n## 相关源文件片段（仅限运行工作目录）\n### v2.py:7\n     5| x = 1\n     6| y = 2\n     7| -> raise RuntimeError('快照夹具失败')\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/t.md#s0 | evidence_refs: E0]\n合成排障条目 0"'''
+_RUN6_RC2_LINES = [json.loads(line) for line in _RUN6_RC2_SNAPSHOT.splitlines()]
+
+
+def test_run6_rc2_chunked_six_messages_byte_snapshot():
+    # 与 task6 出生轮完全同形的渲染输入（紧凑合成版）：固定 rc2 tail、1 片段、
+    # 1 KB 命中、固定 cmd、1 合同段；块 0 带机器反馈、块 i 前序逐字定稿。
+    titles = ("合成头", "合成注入", "合成控制", "合成判定", "合成产物", "合成媒体")
+    boundaries = tuple(f"第 {i} 块只允许写合成章节 {i}。" for i in range(6))
+    tail = ('Traceback (most recent call last):\n  File "v2.py", line 7\n'
+            "RuntimeError: 快照夹具失败")
+    snips = [{"file": "v2.py", "line": 7,
+              "snippet": "     5| x = 1\n     6| y = 2\n"
+                         "     7| -> raise RuntimeError('快照夹具失败')"}]
+    hits = [{"text": "合成排障条目 0", "evidence_refs": ["E0"],
+             "kb_relpath": "knowledge/projects/fixture/t.md",
+             "section_path": "s0"}]
+    cmd = ["/mnt/venvs/simpraxis/bin/python", "/work/t6/v2.py"]
+    sections = (("V2 升阶任务合同（快照夹具）", "合同正文快照 ζ"),)
+    feedback = "合成机器原因（快照夹具）：上一轮拆块交付失败"
+    assert len(_RUN6_RC2_LINES) == 7          # system ×1 + user ×6
+    for i in range(6):
+        ctx = ChunkPromptContext(
+            i, 6, "v2.py", titles, boundaries,
+            previous_code="\n".join(f"# 快照前序定稿块 {j}"
+                                    for j in range(i)),
+            round_feedback=feedback if i == 0 else "")
+        msgs = _build_messages(
+            gate2_notes=None, traceback_tail=tail, snippets=snips,
+            hits=hits, cmd=cmd, extra_sections=sections, chunk_context=ctx)
+        assert msgs[0]["content"] == _RUN6_RC2_LINES[0]
+        assert msgs[1]["content"] == _RUN6_RC2_LINES[i + 1]
+        # T18：snippets/cmd 段在六块消息里逐字在场
+        assert "## 失败命令\n" + " ".join(cmd) in msgs[1]["content"]
+        assert "### v2.py:7" in msgs[1]["content"]
+
+
+# ---- M1⑨：R15 严格形态有意假阴性（谓词拒，运行时 main 恰执行一次） ---------
+
+_RUN6_R15_MARKER = r'''
+class _CM:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def __iter__(self): return iter(())
+_state = {"n": 0}
+class _Callable:
+    def __call__(self):
+        _state["n"] += 1
+        return _CM()
+main = _Callable()
+'''
+
+_RUN6_R15_FORMS = {
+    "F1_with_item": 'if __name__ == "__main__":\n    with main():\n        pass\n',
+    "F2_for_iter": 'if __name__ == "__main__":\n    for x in main():\n        pass\n',
+    "F3_while_test": 'if __name__ == "__main__":\n    while main():\n        break\n',
+    "F4a_try_wrap_guard": ('try:\n'
+                           '    if __name__ == "__main__":\n'
+                           '        main()\n'
+                           'except Exception:\n    pass\n'),
+    "F4b_with_wrap_guard": ('with _CM():\n'
+                            '    if __name__ == "__main__":\n'
+                            '        main()\n'),
+    "F5_not_neq": 'if not __name__ != "__main__":\n    main()\n',
+    "F6_finally": ('if __name__ == "__main__":\n'
+                   '    try:\n        pass\n'
+                   '    finally:\n        main()\n'),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_RUN6_R15_FORMS),
+                         ids=sorted(_RUN6_R15_FORMS))
+def test_run6_r15_strict_forms_reject_but_runtime_executes_once(name):
+    # 严格形态合同（v3.1 R15，有意假阴性）：保守拒绝防未来无意放宽；
+    # python 直跑语义下 main 确执行——代价至多一轮重生。
+    code = _RUN6_R15_MARKER + "\n" + _RUN6_R15_FORMS[name]
+    with pytest.raises(ChunkBirthError) as ei:
+        _validate_entry_guard(ast.parse(code))
+    assert str(ei.value) == _ENTRY_GUARD_REASON
+    g = {"__name__": "__main__"}
+    exec(compile(code, f"<run6-r15-{name}>", "exec"), g)
+    assert g["_state"]["n"] == 1
+
+
+def test_run6_r15_canonical_control_accept_and_executes_once():
+    # 同探针环境对照：规范形必须仍受且 main 恰一次（防探针环境自身误判）。
+    code = _RUN6_R15_MARKER + '\nif __name__ == "__main__":\n    main()\n'
+    _validate_entry_guard(ast.parse(code))
+    g = {"__name__": "__main__"}
+    exec(compile(code, "<run6-r15-control>", "exec"), g)
+    assert g["_state"]["n"] == 1
+
+
+# ---- M1⑩：E18/E19 match 两形态运行时双坐实 -------------------------------
+
+def test_run6_e18_match_class_pattern_runtime_typeerror():
+    # E18：case main() 是类模式，运行时自身即 TypeError（与谓词拒双坐实）。
+    code = _RUN6_EXTERNAL["E18_match_class_pattern"][1]
+    with pytest.raises(TypeError, match="called match pattern must be a type"):
+        exec(compile(code, "<run6-e18>", "exec"), {"__name__": "__main__"})
+
+
+def test_run6_e19_match_guard_runtime_executes_main_once():
+    # E19：match 守卫位 main() 运行时恰执行一次（计数器内联，无 fixture 依赖）。
+    state = {"n": 0}
+
+    class _GuardCallable:
+        def __call__(self):
+            state["n"] += 1
+            return 1
+
+    guard = ('if __name__ == "__main__":\n'
+             '    match 1:\n        case 1 if main():\n            pass\n')
+    g = {"__name__": "__main__", "main": _GuardCallable()}
+    exec(compile(guard, "<run6-e19>", "exec"), g)
+    assert state["n"] == 1
+    # 同一守卫体即矩阵 E19 源码尾部（与 46 矩阵同源防漂移）。
+    assert _RUN6_EXTERNAL["E19_match_guard_call"][1].endswith(guard)

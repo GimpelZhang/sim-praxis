@@ -700,7 +700,11 @@ CALL_CACHE_ALLOWLIST = {
     # _count_round_fragment_files 静态助手、run() 出生/失败分支接缝代码插入
     # （含 docstring/注释，净 +99 行）全在构造点之前，纯位移（821→920）；
     # 二拆是同一 raw 上的确定性本地计算，0 新增网关调用路径，无新增落点。
-    ("orchestrator/agent_runner/runner.py", 920),
+    # 2026-10-22 run6 sentinel 末位闸：ast 21 名子集 import/三函数纯 AST
+    # 守卫/rc0 缺产物机器注记接缝（含 docstring/注释，净 +124 行）全在构造点
+    # 之前，纯位移（920→1044）；拆块路径仍复用唯一 _replay_cache 构造点，
+    # 0 新增网关调用路径，无新增落点。
+    ("orchestrator/agent_runner/runner.py", 1044),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
