@@ -695,7 +695,12 @@ CALL_CACHE_ALLOWLIST = {
     # 2026-10-21 三签修复：MAJOR-1 重名不回显（+3 注释/折行）+ LOW-1 围栏行
     # 尾类收紧注释（+3）全在构造点之前，纯位移（815→821）；LOW-4 注释改述
     # 刻意保持等行数，无新增落点。
-    ("orchestrator/agent_runner/runner.py", 821),
+    # 2026-10-22 run5 定向二拆：CHUNK_CLOSED_SPLIT_MAX_CHARS 常量、
+    # ChunkBirthError.detail 构造器、_classify_closed_body 模块级纯函数、
+    # _count_round_fragment_files 静态助手、run() 出生/失败分支接缝代码插入
+    # （含 docstring/注释，净 +99 行）全在构造点之前，纯位移（821→920）；
+    # 二拆是同一 raw 上的确定性本地计算，0 新增网关调用路径，无新增落点。
+    ("orchestrator/agent_runner/runner.py", 920),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
@@ -759,43 +764,39 @@ def test_quota_pause_v2_schema_freeze(tmp_path, monkeypatch):
 
 # ---------- Task6 单任务硬顶自批提顶（§6.3，2026-10-16 用户自主授权） ----------
 
-def test_task6_cap_80_to_86_and_hard_cap_104_to_112_phase2():
-    """Task6 局部硬顶六次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
-    Phase_2_Plan_detailed.md §6.3）：16→24（thinking 诊断 seq32-40 触顶，
-    commit df1c0a9），24→40（2026-10-20 晚拆块出生生产首验 seq48 后再触顶，
-    commit 7a03a05，task_used=24/24），40→48（2026-10-21 凌晨 32k 拆块出生
-    seq61-64 后再触顶：seq64 round2 chunk1 成功实呼 14005 out，round2 chunk2
-    写 req 后 preflight 拦停于 task_used=40/40，拦停时全局 64/80；重放信封
-    最坏 7 seq（seq62 r1 chunk3 网关成功但被长度机器拒绝、未入缓存须重付 1，
-    r2 块2/3 重付 2，r3 四块 4；控制票 T6-B5 8 额）：task6≤47、全局≤71，
-    commit f918239），48→56（2026-10-21 晚：seq65 run1 出生成功仅重付 1，
-    seq66/67 三轮修复后轮次耗尽 human_failure，用户裁决①重挂 run_idx=2；
-    run2 最坏信封 12 seq——checkpoint 倒带后 run_idx 重算为 1（键名仍是
-    coding_<thread>_r1_round*_chunk*），但 callcache 指纹含消息体，合同第 7
-    条+骨架两注使全部键 miss（安全方向），出生 4 块全付；最坏三轮拆块出生
-    全败 3×4=12（现实：出生 4+至多 2 轮单补丁修复=6）；task6 已用 43 →
-    ≤55/56，全局 67 → ≤79/80；控制票 T6-B6 12 额 beyond_normal，
-    commit 2835189），56→80（2026-10-21 晚第五次：run2 将 T6-B6 12 seq
-    用满（seq68-79），三轮拆块出生 chunk3 全败于 20000 字符守卫——code
-    21256/24514/22293>20000，跨 run1/run2 该块 5 次尝试仅 1 次过守
-    （seq65=18009），out token 从未触 32768，守卫是唯一约束；用户裁决
-    守卫 20000→26000（runner.CHUNK_MAX_CODE_CHARS）、task6 56→80、
-    HARD_CAP 80→104（全局硬顶史上首次）并重挂 run3；run3 信封 ≤14 seq
-    （出生最坏 3×4=12+出生后至多 2 轮单补丁修复）→ task6 55→≤69/80、
-    全局 79→≤93/104；NORMAL_BUDGET 60 不动；控制票 T6-B7 14 额，LEAD 自批），
-    80→86（2026-10-21 晚第六次：run4 sentinel 围栏纯文本定界接缝上线，
-    n=4→6 工厂规格；重挂信封 21 seq=出生最坏 3×6=18+出生后至多 2 轮单补丁
-    修复+kill-9 重放 1；task6 已用 65 → ≤86/86 恰顶，全局 89 → ≤110/112；
-    同步守卫 CHUNK_MAX_CODE_CHARS 26000→18000（n=6 各块推算 ≤15k 给约
-    20% 余量，字符口径）；HARD_CAP 104→112（全局硬顶第二次提）；
-    模型 ID/32768/600/NORMAL_BUDGET 60/4·7·8 任务顶均不动；
-    控制票 T6-B9-run4-birth 21 额 beyond_normal，LEAD 自批）。
-    本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义，以及全局双门：
-    前四次提顶均不动全局门，第五次（2026-10-21）首次动 HARD_CAP（80→104），
-    第六次（2026-10-21 run4）再动 HARD_CAP（104→112），常态 60 门始终未动。
+def test_task6_cap_86_to_98_and_hard_cap_112_to_122_phase2():
+    """Task6 局部硬顶七次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
+    Phase_2_Plan_detailed.md §6.3）：前六次 16→24→40→48→56→80→86、
+    HARD_CAP 80→104→112 的完整溯源见 git 历史（commits
+    df1c0a9/7a03a05/f918239/2835189/1ac430d/32bb213 及 T6-B5/6/7/9
+    控制票），此处只钉当前值。
+    第七次（2026-10-22，run5 定向二拆）：run4 三次出生全败于 n=6 体积合同
+    ——sentinel 通道 11/11 正常，但闭合块实测 19492/18029/20141 chars 全部
+    越过 18000 单片窗（run4 三次失败点，无一次进入语法轴）。用户裁决
+    「接缝加固后 run4」收口为 run5：引擎侧新增 _classify_closed_body
+    确定性纯函数，对 18001–36000 的多行闭合件机器二拆（0 新增网关调用
+    路径——分类是同一 raw 返回后的本地计算，class3 原文在调用点已缓存，
+    重放 0 重付）；模型面仅 H1 一行 bullet 改写，n=6/32768/温度/种子/Q1
+    界全部不动。重挂信封 21 seq（与 run4 同口径：出生最坏 3×6=18+出生后
+    至多 2 轮单补丁修复+kill-9 重放 1）：ledger 实况 106 行/100 seq，
+    task6 已用 76（61 ok + 15 ok=false，ok=false 同样烧 seq）→
+    76+21=97≤98（余量 1）；全局 100+21=121≤122（余量 1）。
+    故 task6 86→98、HARD_CAP 112→122（全局硬顶第三次提）；
+    NORMAL_BUDGET 60 不动；4·7·8 任务顶不动；CHUNK_MAX_CODE_CHARS 18000
+    单片窗不动，新增 CHUNK_CLOSED_SPLIT_MAX_CHARS=36000 行政顶
+    （=2×18000；算术定义域上界 36001，唯一点 {18000}）。
+    控制票 T6-B10-run5-frag 21 额 beyond_normal，LEAD 自批（常量先于票
+    落地：write_approval 硬门 used+approved>HARD_CAP 需新值在位）。
+    本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义、全局双门
+    （常态 60 门七次提顶始终未动），以及 run5 两个冻结图文件 sha256。
     0 联网。
     """
-    from orchestrator.agent_runner.runner import CHUNK_MAX_CODE_CHARS
+    import hashlib
+
+    from orchestrator.agent_runner.runner import (
+        CHUNK_CLOSED_SPLIT_MAX_CHARS,
+        CHUNK_MAX_CODE_CHARS,
+    )
     from orchestrator.gateway.quota_ledger import (
         HARD_CAP,
         NORMAL_BUDGET,
@@ -803,18 +804,38 @@ def test_task6_cap_80_to_86_and_hard_cap_104_to_112_phase2():
         TASK_HARD_CAPS,
     )
 
-    # 单块机器窗钉位（run4 26000→18000，字符口径），防值漂移；与 32768
-    # 输出顶的余量由生产实测覆盖（见提交说明）。
+    # 单块机器窗钉位（run4 26000→18000，字符口径），run5 不动；run5 新增
+    # 闭合件二拆行政顶 36000=2×18000，防值漂移。
     assert CHUNK_MAX_CODE_CHARS == 18000
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 86, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 86（第六次自批）；
-    # task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 86
+    assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
+    assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 98, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 98（第七次自批，
+    # run5 86→98）；task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
+    assert TASK_HARD_CAPS[6] == 98
+    assert TASK_HARD_CAPS[6] != 86            # run4 旧顶随 run5 提顶下线
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 112 是第六次自批（run4，
-    # 104→112）后的值——前四次提顶均不动全局门，第五次首次动 HARD_CAP。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 122 是第七次自批（run5，
+    # 112→122）后的值——前四次提顶均不动全局门，第五/六/七次动 HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 112
-    assert HARD_CAP != 104                     # run3 旧全局顶随 run4 提顶下线
+    assert HARD_CAP == 122
+    assert HARD_CAP != 112                    # run4 旧全局顶随 run5 提顶下线
+    assert HARD_CAP != 104                    # run3 旧全局顶保持下线
+    # run5 信封算术对账（余量各 1）：ledger 106 行/100 seq/task6 76。
+    assert 100 + 21 <= HARD_CAP == 122
+    assert 76 + 21 <= TASK_HARD_CAPS[6] == 98
+
+    # run5 冻结图文件钉死：二拆逻辑只许落在 runner.py，状态机/提示词文件
+    # 必须零改动（task6.py、task6_v2_prompts.py）。
+    repo_root = Path(__file__).resolve().parents[2]
+    frozen = {
+        "orchestrator/graph/task6.py":
+            "614aa790111f308d3e633d7b45cfef1ea8b9fb68619e9651a3175dc59380c415",
+        "orchestrator/graph/task6_v2_prompts.py":
+            "e8055fe3ed72ee6049e396e376b298fd36a783b12c82317e511ad72fb72f38d0",
+    }
+    for rel, want in frozen.items():
+        got = hashlib.sha256((repo_root / rel).read_bytes()).hexdigest()
+        assert got == want, f"{rel} run5 冻结期被改动：{got}"

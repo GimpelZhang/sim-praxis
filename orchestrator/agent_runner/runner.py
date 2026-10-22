@@ -51,7 +51,18 @@ TEMPERATURE = 0.1
 DEFAULT_CODING_TIMEOUT_S = 120
 CHUNK_MIN_CODE_CHARS = 800          # 单块 code 下限（不变；n=6 边界更碎，800 只拦裸逃）
 CHUNK_MIN_ASSEMBLED_CHARS = 30000   # n=6 拼接总长下限（Python 字符 len(str)，非字节）
-CHUNK_MAX_CODE_CHARS = 18000        # 单块 code 硬上限（run4 26000→18000，溯源见下）
+# run5 语义变更（规格 .omc/handoffs/task6-sentinel-seam-design.md §15.1/§15.3；
+# 锁内适配：模型面一行，用户裁决②（2026-10-22 run5 定向二拆））：
+# 18000 不再是「超即硬拒」，而是单片提示目标窗/可行窗界——18001–36000 的
+# 多行闭合件由模块级纯函数 _classify_closed_body 机器二拆（碎片不离开该
+# 函数，codes 恒为 6 个逻辑块）；模型面措辞见出生 prompt 的 H1 bullet。
+CHUNK_MAX_CODE_CHARS = 18000
+# 锁内适配：模型面一行，用户裁决②（2026-10-22 run5 定向二拆）。
+# 闭合件行政保守顶（算术定义域上界 36001，取 36000；run5，§15.2-M1/§15.5）：
+# 两片各 ≤18000 的算术定义域上界为 18000+1+18000=36001（唯一点 {18000}），
+# 行政顶刻意保守 1 字符取 36000=2×18000，L=36001 即使存在唯一可行切点也按
+# 类3拒（over_split_max）。
+CHUNK_CLOSED_SPLIT_MAX_CHARS = 36000
 # 溯源：seq48 首发 24000；2026-10-21 用户选项 A（seq56 探针放行，commit
 # f2f5b44，随输出顶 16384→32768）收紧到 20000；同日晚 run2 三轮拆块出生
 # chunk3 全败于本守卫。跨 run1/run2 该块 5 次尝试：seq62=24661 拒、
@@ -74,6 +85,13 @@ CHUNK_MAX_CODE_CHARS = 18000        # 单块 code 硬上限（run4 26000→18000
 # 字符 len(str)（V1 基线实测 898 行/43324 字节/38669 字符/43.1 字符每行；
 # 字节/字符口径不得混用，禁止写 48.2/43.3k 字符）。六标题/六边界/三窗
 # run4 起飞前冻结，撞窗不调参、不挪边界，n=7/调窗属 run5 新提案（硬规则 7）。
+# 2026-10-22 run5（用户裁决②「引擎加大块定向二拆协议」，规格 §15.1–§15.6）：
+# run4 三失败点 19492/18029/20141 chars 均围栏闭合（内容已完整生成，仅超 18000
+# 行政窗），故删除 _extract_chunk 的 >18000 硬拒分支，长度分类唯一收口到
+# _classify_closed_body：18001–36000 闭合件求可行 LF 切点出 record（code 原样
+# 接受），无可行 LF 或 L>36000 给真值外串 fail-closed；n=6/32768/三常量其余
+# 口径/两 graph 文件全部不动，0 新增网关调用（分类为本地纯计算，缓存 raw
+# 确定性重算，0 重付）。模型面仅一条 bullet 真值替换（§15.3-H1）。
 
 # sentinel 围栏字面值（独占整行；协议规范见上设计 §2.1/§2.2 EBNF）。
 # 七连尖括号（与 git conflict marker 同族）+ 项目专属核记 simpraxis.chunk.v1，
@@ -122,7 +140,17 @@ class ChunkBirthError(RuntimeError):
     循环内被捕获后，走既有「失败→再执行→下一 coding 轮」机制，仍受
     RunSpec.max_coding_rounds 约束；它不是 CodingLimitError 那种结案硬停。
     消息必须含块号与机器原因（下一轮 prompt 的失败反馈段原样带上）。
+
+    run5（规格 §15.3-H2）：keyword-only detail 是内部证据标签（schema
+    simpraxis.chunk_split_reject.v1，仅 class/window 等整数与英文枚举），
+    只在长度分类两条新路径上随异常携带，经 decision/timeline 的条件键落证据，
+    永不进 str(exc)→chunk_feedback→模型面；既有全部 raise 点不传 detail
+    （默认 None），str() 与全链路字节行为不变。
     """
+
+    def __init__(self, message: str, *, detail: "dict | None" = None):
+        super().__init__(message)
+        self.detail = detail
 
 
 @dataclass(frozen=True)
@@ -591,10 +619,10 @@ def _extract_chunk(raw: str, *, target: str, index: int, total: int) -> str:
     if len(code) < CHUNK_MIN_CODE_CHARS:  # 情形 13
         raise ChunkBirthError(
             f"块 {index} code 长度 {len(code)} < {CHUNK_MIN_CODE_CHARS} chars")
-    if len(code) > CHUNK_MAX_CODE_CHARS:
-        raise ChunkBirthError(
-            f"块 {index} code 长度 {len(code)} > {CHUNK_MAX_CODE_CHARS} chars"
-            "（机器窗上限）")
+    # run5（规格 §15.1-C/§15.3）：>18000 硬拒分支删除——围栏语法/空/800 下限/
+    # CR/BOM/零宽/核记等 15+ 形全部不动；长度唯一分类在调用点之后的模块级
+    # 纯函数 _classify_closed_body（18001–36000 可行 LF→record 原样接受，
+    # C 空/L>36000→ChunkBirthError 真值外串）。
     return code
 
 
@@ -626,6 +654,73 @@ def _validate_assembled_chunks(code: str) -> None:
         raise ChunkBirthError(
             f"拼接总长 {len(code)} < {CHUNK_MIN_ASSEMBLED_CHARS} chars"
             "（若行数≥600 请核对字符密度后整轮重生）")
+
+
+def _classify_closed_body(code: str, index: int) -> "dict | None":
+    """闭合围栏 code 体长度三分类（run5，规格 §15.1-A/B/E、§15.3-H2；纯函数）。
+
+    L≤18000：现状，返回 None。18000<L≤36000：在可行 LF 切点集合
+    C={c | code[c]=="\\n", max(800,L−18001)≤c≤min(18000,L−801)} 中取
+    c*=argmin|c−(L−1)/2|（等距取小）；C 非空返回固定白名单 record，code
+    原样接受——**碎片字符串从不离开本函数**（不构造、不返回 p0/p1），恒等式
+    code[:c]+"\\n"+code[c+1:]==code 使切点对两个既有 "\\n".join 不可观测，
+    codes 恒为 6 个逻辑块；C 空抛 ChunkBirthError（真值外串，细节进 detail）。
+    L>36000：over_split_max 抛 ChunkBirthError。只允许抛 ChunkBirthError。
+
+    确定性纪律：禁 datetime/random/任何 IO/任何持久态（kill-9 重放从调用
+    缓存 raw 在本函数确定性重算，0 重付，§15.1-C）。AST 红线（§15.2-m5/
+    §15.6，测试 ast.walk 钉死）：函数体无 import 节点、无 Attribute 节点
+    （连 str.find/rfind/.count 也禁）、无 self；调用白名单
+    len/min/abs/enumerate/range/int/sum（+lambda）；ast.Raise 恰 2 枚
+    （C 空、类3 各一），落窗/恒等式用 assert。
+    """
+    length = len(code)
+    if length <= CHUNK_MAX_CODE_CHARS:
+        return None
+    if length > CHUNK_CLOSED_SPLIT_MAX_CHARS:
+        raise ChunkBirthError(
+            f"块 {index} code 长度 {length} > 36000 chars（机器窗上限）",
+            detail={
+                "schema": "simpraxis.chunk_split_reject.v1",
+                "chunk_index": index,
+                "closed_chars": length,
+                "class": "over_split_max",
+                "window": None,
+            })
+    # lo=max(800, L-18001) 展开为 IfExp：AST 调用白名单（§15.2-m5）无 max。
+    raw_lo = length - CHUNK_MAX_CODE_CHARS - 1
+    lo = raw_lo if raw_lo > CHUNK_MIN_CODE_CHARS else CHUNK_MIN_CODE_CHARS
+    hi = min(CHUNK_MAX_CODE_CHARS, length - CHUNK_MIN_CODE_CHARS - 1)
+    cands = [j for j in range(lo, hi + 1) if code[j] == "\n"]
+    if not cands:
+        raise ChunkBirthError(
+            f"块 {index} code 长度 {length} > 18000 chars，请将该块整体缩短至"
+            " 18000 字符以内后整轮重发（本机逐字符计数）",
+            detail={
+                "schema": "simpraxis.chunk_split_reject.v1",
+                "chunk_index": index,
+                "closed_chars": length,
+                "class": "no_line_boundary",
+                "window": [lo, hi],
+            })
+    # 整数键避免浮点：|2c−(L−1)| 与 |c−(L−1)/2| 同序；等距对在第二键取小 c。
+    c = min(cands, key=lambda j: (abs(2 * j - (length - 1)), j))
+    frag0 = c
+    frag1 = length - c - 1
+    cut_line = sum(1 for j, ch in enumerate(code) if j < c and ch == "\n")
+    assert CHUNK_MIN_CODE_CHARS <= frag0 <= CHUNK_MAX_CODE_CHARS
+    assert CHUNK_MIN_CODE_CHARS <= frag1 <= CHUNK_MAX_CODE_CHARS
+    assert code[:c] + "\n" + code[c + 1:] == code
+    return {
+        "schema": "simpraxis.chunk_split.v1",
+        "chunk_index": index,
+        "closed_chars": length,
+        "cut_offset": c,
+        "cut_line": cut_line,
+        "frag0_chars": frag0,
+        "frag1_chars": frag1,
+        "boundary": "line",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -725,9 +820,13 @@ def _chunk_section(ctx: "ChunkPromptContext") -> str:
         "代码体内不允许出现围栏行或 simpraxis.chunk.v1 字样；",
         "- 若响应在结束围栏之前结束（例如输出被截断），本机记录为"
         "「缺结束围栏」，本块机器校验失败；",
-        "- code 只含本块 Python 原文，非空且不少于 "
-        f"{CHUNK_MIN_CODE_CHARS} 字符、不长于 {CHUNK_MAX_CODE_CHARS} 字符"
-        "（本机逐字符计数，超限即机器校验失败）；",
+        # 锁内适配：模型面一行，用户裁决②（2026-10-22 run5 定向二拆）。
+        # 只陈述真实硬闸（<800/>36000/缺围栏）；18001-36000 多行件机器
+        # 二拆为内部机制，不披露（规格 §15.3-H1）。
+        f"- code 只含本块 Python 原文，请控制在 {CHUNK_MAX_CODE_CHARS} 字符以内"
+        "（本机逐字符计数）；少于 "
+        f"{CHUNK_MIN_CODE_CHARS} 字符、超过 {CHUNK_CLOSED_SPLIT_MAX_CHARS} 字符"
+        "或缺结束围栏，仍机器校验失败；",
         f"- 全部 {n} 块拼接后须为完整可运行文件（总长不少于 "
         f"{CHUNK_MIN_ASSEMBLED_CHARS} 字符），块边界不得重叠。",
         "",
@@ -846,6 +945,20 @@ class AgentRunner:
         # S-6：write→chmod 收口 fsutil 原子写（mkstemp 0600→fsync→replace）。
         atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
         return f"phase1/task4_runner/{root.name}/{p.name}"
+
+    @staticmethod
+    def _count_round_fragment_files(root: Path, coding_round: int) -> int:
+        """数某出生轮已写盘 fragments 件（observe-only，§15.3-H2）。
+
+        record 非 None 即写一件，件名 coding_round{r}.chunk{i}.fragments.json；
+        正则锚定轮号（防 round5 前缀误配 round15）。仅供时间线计数器，成功
+        判据永不引用。
+        """
+        name_re = re.compile(
+            rf"^coding_round{coding_round}\.chunk\d+\.fragments\.json$")
+        return sum(1 for p in root.glob(
+            f"coding_round{coding_round}.chunk*.fragments.json")
+                   if name_re.fullmatch(p.name))
 
     @staticmethod
     def _video_artifacts(workdir: Path, spec: "RunSpec") \
@@ -978,7 +1091,7 @@ class AgentRunner:
                 Path(cs.target_path), workdir).is_file()
             try:
                 if chunked_birth:
-                    codes = self._run_chunked_birth_round(
+                    codes, records = self._run_chunked_birth_round(
                         spec=spec, root=root, model=model,
                         coding_round=coding_calls, tail=tail, snippets=snippets,
                         hits=hits, learning_hits=learning_hits,
@@ -1014,10 +1127,29 @@ class AgentRunner:
                 # 任一块不符 → 整轮失败、不半成品落盘；机器原因进 decision
                 # 证据/时间线/下一轮块 0 反馈段，继续既有失败轮机制
                 # （RUN_CODING_CAP 不变），无任何 patch 应用、无文件出生。
-                self._evidence(root, stem, "decision",
-                               {"applied": [], "rejected": str(exc)})
+                # run5（§15.3-H2）：仅长度分类两条新路径携带 detail，条件写
+                # rejected_detail（timeline 同义键）；15+ 旧形 detail 为 None，
+                # 键缺席。rejected/chunk_birth_rejected 仍是 str(exc) 原文。
+                decision_doc = {"applied": [], "rejected": str(exc)}
+                if exc.detail is not None:
+                    decision_doc["rejected_detail"] = exc.detail
+                self._evidence(root, stem, "decision", decision_doc)
                 timeline[-1]["coding_round"] = coding_calls
                 timeline[-1]["chunk_birth_rejected"] = str(exc)
+                if exc.detail is not None:
+                    timeline[-1]["chunk_birth_rejected_detail"] = exc.detail
+                if chunked_birth:
+                    # observe-only 计数器（§15.1-D/§15.3-H2）：出生成败判据
+                    # 仍是预注册 3 轮闭包，任何成功/阈值判定禁止引用本三项。
+                    # 短路失败时 accepted 以已存活 fragments 件计数
+                    # （record 非 None 数 == fragments 件数）。
+                    accepted = self._count_round_fragment_files(
+                        root, coding_calls)
+                    rejected_n = 1 if exc.detail is not None else 0
+                    timeline[-1]["split_accepted"] = accepted
+                    timeline[-1]["split_rejected"] = rejected_n
+                    timeline[-1]["closed_oversize_blocks"] = (
+                        accepted + rejected_n)
                 chunk_feedback = str(exc)
                 continue
             try:
@@ -1029,8 +1161,16 @@ class AgentRunner:
                 return self._fail(
                     root, spec, timeline, last_result,
                     reason=f"补丁安全拒绝（不重试）：{exc}")
-            self._evidence(root, stem, "decision",
-                           {"applied": applied, "rejected": None})
+            # run5 m3（§15.2-m3）：chunk_split_records 只在 chunked 出生**成功**
+            # decision 出现（长度恰 6、None 位为 null）；单补丁轮不带该键。
+            decision_doc = {"applied": applied, "rejected": None}
+            if chunked_birth:
+                decision_doc["chunk_split_records"] = records
+                accepted = sum(1 for rec in records if rec is not None)
+                timeline[-1]["split_accepted"] = accepted
+                timeline[-1]["split_rejected"] = 0
+                timeline[-1]["closed_oversize_blocks"] = accepted
+            self._evidence(root, stem, "decision", decision_doc)
             timeline[-1]["coding_round"] = coding_calls
             timeline[-1]["applied"] = applied
 
@@ -1132,17 +1272,27 @@ class AgentRunner:
                                  model: str, coding_round: int,
                                  tail: str, snippets: list[dict],
                                  hits: list[dict], learning_hits: list[dict],
-                                 round_feedback: str) -> list[str]:
-        """一个 coding 轮内顺序完成 n 次出生调用，返回各块原文列表。
+                                 round_feedback: str
+                                 ) -> "tuple[list[str], list[dict | None]]":
+        """一个 coding 轮内顺序完成 n 次出生调用，返回 (各块原文, 各块 record)。
 
         每块：构造带合同/提案/骨架 + chunk_context 的消息（硬规则1逐块文本
         守卫）→ 幂等键 coding_<t>_r<run>_round<r>_chunk<i>，指纹含
         chunk_index/total → 调用（max_tokens/timeout 取 RunSpec）→ 逐块
-        sentinel 围栏机器校验。任何一块不符即 ChunkBirthError 整轮失败（不继续为
-        后续块付费），由 run() 捕获进入下一轮；全过程不写任何目标文件。
+        sentinel 围栏机器校验 + 长度三分类。任何一块不符即 ChunkBirthError
+        整轮失败（不继续为后续块付费），由 run() 捕获进入下一轮；全过程不写
+        任何目标文件。
+
+        run5（规格 §15.1-A/C、§15.3-H2）：codes 元素只能是逻辑块 b 本身
+        （碎片字符串只在 _classify_closed_body 内以两个 int 长度存在，
+        len(codes)==chunk_count==6 不变）；records 逐块对齐（None 或白名单
+        record）。record 非 None 时**立即**写独立 fragments 证据件，先于
+        append 与拼接三闸——后续闸失败/下一轮反馈/整 run human_failure 均
+        不影响该件存活；正常块不写件。
         """
         cs = spec.chunked_birth
         codes: list[str] = []
+        records: "list[dict | None]" = []
         for i in range(cs.chunk_count):
             ctx = ChunkPromptContext(
                 index=i, total=cs.chunk_count, target_path=cs.target_path,
@@ -1178,9 +1328,18 @@ class AgentRunner:
                     self._chunk_resp_payload, root, stem,
                     target=cs.target_path, index=i, total=cs.chunk_count))
             # 拼接用未脱敏原文（resp 证据内是 redact 后的口径）。
-            codes.append(_extract_chunk(
-                raw, target=cs.target_path, index=i, total=cs.chunk_count))
-        return codes
+            b = _extract_chunk(
+                raw, target=cs.target_path, index=i, total=cs.chunk_count)
+            # run5（§15.1-A/§15.3-H2）：长度三分类。逻辑块 b 原样入 codes；
+            # 切点只用于可行性判定与 record，碎片字符串不离开纯函数。
+            rec = _classify_closed_body(b, i)
+            if rec is not None:
+                # 先于 codes.append 与拼接三闸写盘：后续 assembled ast/重名/
+                # 30000 地板拒绝时，「接受过几块二拆」仍有完整机器证据。
+                self._evidence(root, stem, "fragments", rec)
+            codes.append(b)
+            records.append(rec)
+        return codes, records
 
     def _fail(self, root: Path, spec: RunSpec, timeline: list[dict],
               result: Optional[_ExecResult], *, reason: str) -> dict:

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.agent_runner.runner import (
+    CHUNK_CLOSED_SPLIT_MAX_CHARS,
     CHUNK_FENCE_BEGIN,
     CHUNK_FENCE_END,
     CHUNK_FENCE_NUCLEUS,
@@ -30,10 +31,16 @@ from orchestrator.agent_runner.runner import (
     CHUNK_MIN_ASSEMBLED_CHARS,
     CHUNK_MIN_CODE_CHARS,
     ChunkBirthError,
+    _classify_closed_body,
     _extract_chunk,
     _scan_fence_lines,
     _validate_assembled_chunks,
 )
+
+# run5（规格 §15.2-m2）：record/detail 白名单键序（与 test_agent_runner
+# 同名常量逐字一致；两处各自钉死，禁止互相 import 稀释红线）。
+_RUN5_RECORD_KEYS = ["schema", "chunk_index", "closed_chars", "cut_offset",
+                     "cut_line", "frag0_chars", "frag1_chars", "boundary"]
 from orchestrator.graph.task6 import V2_ENTRYPOINT
 from tests.milestone1.test_agent_runner import (
     _fixture_pad,
@@ -119,9 +126,12 @@ def test_historical_char18604_escape_shape_parses_in_window():
     _validate_assembled_chunks(assembled)  # 六块 ast 拼接通过
 
 
-def test_historical_char18604_oversize_is_length_axis_not_parse_axis():
-    """同形正文超过 18000：只能落情形 13 长度机器窗，理由不得出现转义类
-    措辞（两轴可辨，§2.3 历史行为表）；棘手字符分布在 ~18600 处。"""
+def test_historical_char18604_oversize_multiline_accepted_single_line_rejected():
+    """run5（规格 §15.1-A、§15.3-H2，本用例随 run5 反转）：同形 18604
+    **多行**文（引号/反斜杠/三引号/中文密集，LF 落在可行窗 I=[800,17803]）
+    不再是失败轴——extract 逐字通过，_classify_closed_body 出 record 原样
+    接受（m2 等式对账）；只有同长**单行**件（C 空）落真值外串。长度轴与
+    JSON 转义轴的可辨性迁移到两条 run5 真值外串：均不得含转义类措辞。"""
     line = _dense_line(0)  # 定长密集行（引号/反斜杠/三引号/中文）
     body = '"合成超长块 docstring（非解题脚本）"\n'
     while len(body) + len(line) + 1 <= 18604:
@@ -130,10 +140,43 @@ def test_historical_char18604_oversize_is_length_axis_not_parse_axis():
     assert len(body) == 18604
     tail = body[18000:]  # 最后一条密集行落在该区（行长约 70）
     assert '"' in tail and "\\" in tail
-    msg = _reject(_fence(body, 0))
-    assert "code 长度 18604 > 18000 chars（机器窗上限）" in msg
-    for banned in ("JSON", "转义", "escape", "SyntaxError"):
-        assert banned not in msg
+
+    got = _extract_chunk(_fence(body, 0), target=V2_ENTRYPOINT,
+                         index=0, total=6)
+    assert got == body
+    rec = _classify_closed_body(got, 0)
+    assert rec is not None and list(rec) == _RUN5_RECORD_KEYS
+    c = rec["cut_offset"]
+    assert rec["closed_chars"] == 18604
+    assert rec["frag0_chars"] == c
+    assert rec["frag1_chars"] == 18604 - c - 1
+    assert rec["frag0_chars"] + rec["frag1_chars"] + 1 == 18604
+    assert got[:c] + "\n" + got[c + 1:] == got
+    # 注：此夹具是缩进密集行（转义轴等价形），非独立合法 Python；分类器契约
+    # 只有长度/切点，ast 是拼接三闸的独立轴（可解析变体见同文件窗内用例）。
+
+    # 同长单行件：C 空真值外串（旧「> 18000 chars（机器窗上限）」已删除，
+    # 旧串现只属于 >36000 类3）。
+    single = '"' * 18604
+    with pytest.raises(ChunkBirthError) as ei:
+        b1 = _extract_chunk(_fence(single, 0), target=V2_ENTRYPOINT,
+                            index=0, total=6)
+        _classify_closed_body(b1, 0)
+    msg = str(ei.value)
+    assert "18604 > 18000 chars，请将该块整体缩短至" in msg
+    assert "18000 字符以内后整轮重发（本机逐字符计数）" in msg
+    assert "机器窗上限" not in msg
+    assert ei.value.detail["class"] == "no_line_boundary"
+    assert ei.value.detail["window"] == [800, 17803]
+
+    # 两轴可辨：两条 run5 真值外串都不得出现转义类措辞（C 空串 + 类3 串）。
+    over36 = None
+    with pytest.raises(ChunkBirthError) as ei3:
+        _classify_closed_body("#" * 40000, 0)
+    over36 = str(ei3.value)
+    for external in (msg, over36):
+        for banned in ("JSON", "转义", "escape", "SyntaxError"):
+            assert banned not in external
 
 
 def test_historical_char139_firstline_docstring_bare_lf_parses():
@@ -530,6 +573,9 @@ def test_factory_run4_n6_titles_boundaries(tmp_path, monkeypatch):
 def test_parser_constant_pins():
     assert CHUNK_MIN_CODE_CHARS == 800
     assert CHUNK_MAX_CODE_CHARS == 18000
+    # run5：闭合件机器二拆行政顶 36000=2×18000（算术定义域上界 36001）。
+    assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
+    assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
     assert CHUNK_MIN_ASSEMBLED_CHARS == 30000  # 字符口径（Python len(str)）
     assert CHUNK_FENCE_BEGIN == "<<<<<<< simpraxis.chunk.v1"
     assert CHUNK_FENCE_END == ">>>>>>> simpraxis.chunk.v1.end"
@@ -664,6 +710,77 @@ def test_redline_diag_probe_never_imported_or_called():
                            for a in node.names), path
             elif isinstance(node, ast.Name) and node.id == "diag_json_mode":
                 pytest.fail(f"{path} 接线诊断探针：{node.lineno}")
+
+
+# ---------------------------------------------------------------------------
+# run5 纯函数 AST 红线（规格 §15.2-m5/§15.6；变异探针必须逐项翻红）
+# ---------------------------------------------------------------------------
+
+_RUN5_CALL_WHITELIST = {
+    "len", "min", "abs", "enumerate", "range", "int", "sum",
+    "ChunkBirthError",  # 唯一允许抛的异常族（白名单内的唯一非内建）
+}
+
+
+def _classifier_violations(fseg):
+    """对 _classify_closed_body 源码段跑全部 AST 红线，返回违规描述列表。"""
+    ftree = ast.parse(fseg)
+    v = []
+    if [n for n in ast.walk(ftree)
+            if isinstance(n, (ast.Import, ast.ImportFrom))]:
+        v.append("import-node")
+    if [n for n in ast.walk(ftree) if isinstance(n, ast.Attribute)]:
+        v.append("attribute-node")
+    if [n for n in ast.walk(ftree)
+            if isinstance(n, ast.Name) and n.id == "self"]:
+        v.append("self-name")
+    for n in ast.walk(ftree):
+        if isinstance(n, ast.Call):
+            fid = n.func.id if isinstance(n.func, ast.Name) else None
+            if fid not in _RUN5_CALL_WHITELIST:
+                v.append(f"call:{fid or type(n.func).__name__}")
+    if len([n for n in ast.walk(ftree) if isinstance(n, ast.Raise)]) != 2:
+        v.append("raise-count")
+    return v
+
+
+def test_run5_redline_classifier_pure_function_ast_and_mutations():
+    src = _RUNNER_PY.read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "_classify_closed_body")
+    seg = ast.get_source_segment(src, fn)
+    assert seg and _classifier_violations(seg) == []
+
+    # 锚点：函数体首条语句 length = len(code)（探针插在它之前）
+    anchor = "    length = len(code)\n"
+    assert anchor in seg
+    probes = {
+        "import-node": "    import random\n",
+        "attribute-node": "    if code.find('x'):\n        pass\n",
+        "self-name": "    _probe = self\n",
+        "call:open": "    open('probe')\n",
+        "raise-count": '    raise ChunkBirthError("probe")\n',
+    }
+    for tag, snippet in probes.items():
+        mutated = seg.replace(anchor, snippet + anchor, 1)
+        vs = _classifier_violations(mutated)
+        assert tag in vs, (tag, vs)
+
+    # 碎片绝不进 codes：出生轮内 codes.append 恰一次、参数必为 Name 'b'。
+    birth = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+                 and n.name == "_run_chunked_birth_round")
+    appends = [n for n in ast.walk(birth) if isinstance(n, ast.Call)
+               and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "append"
+               and isinstance(n.func.value, ast.Name)
+               and n.func.value.id == "codes"]
+    assert len(appends) == 1
+    a = appends[0]
+    assert len(a.args) == 1 and isinstance(a.args[0], ast.Name) \
+        and a.args[0].id == "b"
+    # 两个既有 "\n".join(codes) 站点（出生拼接 + 前序上下文）字节未改。
+    assert src.count('"\\n".join(codes)') == 2
 
 
 def test_scan_helper_uses_split_n_and_ascii_whitespace_predicate():

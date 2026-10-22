@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
+import random
 import sqlite3
 from pathlib import Path
 
@@ -30,6 +32,7 @@ from orchestrator.agent_runner import (
     agent_run_seam,
 )
 from orchestrator.agent_runner.runner import (
+    CHUNK_CLOSED_SPLIT_MAX_CHARS,
     CHUNK_MAX_CODE_CHARS,
     CHUNK_MIN_ASSEMBLED_CHARS,
     CHUNK_MIN_CODE_CHARS,
@@ -40,6 +43,7 @@ from orchestrator.agent_runner.runner import (
     ChunkPromptContext,
     ChunkSpec,
     _build_messages,
+    _classify_closed_body,
     _collect_snippets,
     _extract_chunk,
     _validate_assembled_chunks,
@@ -616,6 +620,16 @@ def test_08_chunk_section_render_fence_format():
     assert str(CHUNK_MIN_CODE_CHARS) in u0
     assert str(CHUNK_MAX_CODE_CHARS) in u0
     assert str(CHUNK_MIN_ASSEMBLED_CHARS) in u0
+    # run5（规格 §15.3-H1）：模型面只改这一行 bullet——逐字钉死渲染串；
+    # 18001–36000 多行件机器二拆是内部机制，不得在模型面披露。
+    run5_bullet = (
+        f"- code 只含本块 Python 原文，请控制在 {CHUNK_MAX_CODE_CHARS} 字符以内"
+        "（本机逐字符计数）；少于 "
+        f"{CHUNK_MIN_CODE_CHARS} 字符、超过 {CHUNK_CLOSED_SPLIT_MAX_CHARS} 字符"
+        "或缺结束围栏，仍机器校验失败；")
+    assert run5_bullet in u0
+    assert "超限即机器校验失败" not in u0       # run4 旧 bullet 反向钉
+    assert str(CHUNK_CLOSED_SPLIT_MAX_CHARS) in u0
 
     prior = "PRIOR0\nPRIOR1\n"
     ctx5 = ChunkPromptContext(
@@ -632,6 +646,38 @@ def test_08_chunk_section_render_fence_format():
     assert "```python\n" + prior + "\n```" in u5
     assert "以下是前 5 块拼接后的逐字定稿" in u5
     assert "上一轮拆块交付失败反馈" not in u5   # 反馈只进每轮块 0
+
+    # run5（规格 §15.3-H1/§15.5-LOW1）：分层词族扫描。中文机制词族
+    # （分片/拆分/二拆/机器分片/切分）对六份**渲染后** prompt 全扫——
+    # 「拆块」是 run4 既有标题用词，不在禁族；代码注释里的「二拆/切分」
+    # 不渲染，天然不可见。latin split/frag 只对三条 run5 增量字面量断言
+    # （H1 bullet + 两条真值外串），**禁止**对整份 prompt 全扫：冻结图
+    # prompt 合法含 split_normal_vs_ice…、splits/cover 等 frozen words，
+    # 全扫是规格点名的错误实现（§15.5-LOW2）。
+    cn_family = ("分片", "拆分", "二拆", "机器分片", "切分")
+    rendered = []
+    for i in range(6):
+        ctx_i = ChunkPromptContext(
+            i, 6, _CHUNK_TARGET, _CHUNK_TITLES, _CHUNK_BOUNDARIES,
+            round_feedback="块 2 path 不符：x" if i == 0 else "")
+        rendered.append(_build_messages(
+            gate2_notes=None, chunk_context=ctx_i,
+            **_snap_kwargs())[1]["content"])
+    for i, ui in enumerate(rendered):
+        for w in cn_family:
+            assert w not in ui, (i, w)
+    cempty_external = (
+        "块 2 code 长度 18802 > 18000 chars，请将该块整体缩短至"
+        " 18000 字符以内后整轮重发（本机逐字符计数）")
+    oversize_external = "块 0 code 长度 40000 > 36000 chars（机器窗上限）"
+    for w in cn_family:
+        assert w not in cempty_external
+        assert w not in oversize_external
+    # frozen-word 例外登记（不在三条增量字面量内，仅注释存证，禁止扩成白名单）：
+    # orchestrator/graph/task6.py 的 split_normal_vs_ice…、
+    # task6_v2_prompts.py 的 splits/cover 是 run4 冻结图内容，保持原样。
+    for lit in (run5_bullet, cempty_external, oversize_external):
+        assert "split" not in lit.lower() and "frag" not in lit.lower()
 
 
 def test_09_chunk_spec_construction_validation():
@@ -673,8 +719,12 @@ def test_10_extract_chunk_fence_machine_checks():
                           target=_CHUNK_TARGET, index=0, total=6) == good
 
     def expect(raw, i, needle):
+        # run5：长度分类已移出 _extract_chunk；15+ 形仍在提取器抛，长度两路径
+        # 由调用点之后的模块级纯函数 _classify_closed_body 抛（规格 §15.1-A）。
+        # 组合调用与生产 _run_chunked_birth_round 同序：extract→classify。
         with pytest.raises(ChunkBirthError, match=needle):
-            _extract_chunk(raw, target=_CHUNK_TARGET, index=i, total=6)
+            body = _extract_chunk(raw, target=_CHUNK_TARGET, index=i, total=6)
+            _classify_closed_body(body, i)
 
     # 长度窗边界（本机逐字符计数）
     assert _extract_chunk(_chunk_fence("#" * 800, 0),
@@ -682,8 +732,26 @@ def test_10_extract_chunk_fence_machine_checks():
     expect(_chunk_fence("#" * 799, 0), 0, "code 长度 799 < 800")
     assert _extract_chunk(_chunk_fence("#" * 18000, 0),
                           target=_CHUNK_TARGET, index=0, total=6) == "#" * 18000
+    # run5（§15.3-H2/§15.4-MAJORB）：单行 18001 无可行 LF（C 空）→ 真值外串
+    # 「缩短后整轮重发」，旧「> 18000 chars（机器窗上限）」随长度硬拒删除。
     expect(_chunk_fence("#" * 18001, 0), 0,
-           "18001 > 18000 chars（机器窗上限）")
+           "18001 > 18000 chars，请将该块整体缩短至"
+           " 18000 字符以内后整轮重发")
+    with pytest.raises(ChunkBirthError) as ei_18001:
+        b_18001 = _extract_chunk(_chunk_fence("#" * 18001, 0),
+                                 target=_CHUNK_TARGET, index=0, total=6)
+        _classify_closed_body(b_18001, 0)
+    assert "机器窗上限" not in str(ei_18001.value)
+    # 可行窗 I(L)=[max(800,L−18001), min(18000,L−801)]，L=18001 → [800,17200]
+    assert ei_18001.value.detail == {
+        "schema": "simpraxis.chunk_split_reject.v1",
+        "chunk_index": 0,
+        "closed_chars": 18001,
+        "class": "no_line_boundary",
+        "window": [800, 17200],
+    }
+    assert list(ei_18001.value.detail) == [
+        "schema", "chunk_index", "closed_chars", "class", "window"]
     # path/index/total 不符
     expect(_chunk_fence(good, 1, path="evil.py"), 1,
            "块 1 path 不符：收到 evil.py")
@@ -794,6 +862,40 @@ def test_11_validate_assembled_machine_checks():
     assert len("".join(pieces)) == 22005
     with pytest.raises(ChunkBirthError, match="拼接总长 22005 < 30000"):
         _validate_assembled_chunks("".join(pieces))
+    # run5（规格 §15.1-A）：逃单块组合登记到新行政顶 36000——一块 36000
+    # 多行闭合件（LF@17999，纯注释 ast/重名中立）经分类器原样接受出 record，
+    # 五块 800 桩拼接 40000+ 过三闸（语义变化：run4 前此形在长度硬拒，run5
+    # 起 18001–36000 多行件不是失败轴；单行件仍 C 空拒，见 run5 专项块）。
+    big36 = "#" * 17999 + "\n" + "#" * 18000
+    assert len(big36) == 36000
+    assert _extract_chunk(_chunk_fence(big36, 0, total=6),
+                          target=_CHUNK_TARGET, index=0, total=6) == big36
+    rec36 = _classify_closed_body(big36, 0)
+    assert list(rec36) == ["schema", "chunk_index", "closed_chars",
+                           "cut_offset", "cut_line", "frag0_chars",
+                           "frag1_chars", "boundary"]
+    assert rec36 == {"schema": "simpraxis.chunk_split.v1", "chunk_index": 0,
+                     "closed_chars": 36000, "cut_offset": 17999,
+                     "cut_line": 0, "frag0_chars": 17999,
+                     "frag1_chars": 18000, "boundary": "line"}
+    pads = ["#" * 800 for _ in range(5)]
+    _validate_assembled_chunks("\n".join([big36] + pads))  # 40005 ≥ 30000
+    # 40000 单行闭合件：L>36000 → 类3 over_split_max（即使想切也越过 2×18000）。
+    one40 = "#" * 40000
+    with pytest.raises(ChunkBirthError) as ei40:
+        b40 = _extract_chunk(_chunk_fence(one40, 0, total=6),
+                             target=_CHUNK_TARGET, index=0, total=6)
+        _classify_closed_body(b40, 0)
+    msg40 = str(ei40.value)
+    assert "40000 > 36000 chars（机器窗上限）" in msg40
+    assert "> 18000" not in msg40                    # 旧长度拒串反向钉
+    assert ei40.value.detail == {
+        "schema": "simpraxis.chunk_split_reject.v1",
+        "chunk_index": 0,
+        "closed_chars": 40000,
+        "class": "over_split_max",
+        "window": None,
+    }
 
 
 def _fixture_pad(tag, lines):
@@ -919,6 +1021,15 @@ def test_12_chunked_birth_six_calls_assemble_and_birth(tmp_path):
     decision = json.loads(
         (ev / "coding_round1.decision.json").read_text())
     assert decision["applied"] == [_CHUNK_TARGET] and decision["rejected"] is None
+    # run5 m3（§15.2-m3）：成功 chunked 出生 decision 必带长度恰 6 的 records，
+    # 六块均 ≤18000 → 全 null；键序 applied/rejected/chunk_split_records。
+    assert list(decision) == ["applied", "rejected", "chunk_split_records"]
+    assert decision["chunk_split_records"] == [None] * 6
+    # observe-only 时间线计数（§15.1-D）：0 二拆；正常出生不产生 fragments 件。
+    tl1 = next(t for t in rec["timeline"] if t.get("coding_round") == 1)
+    assert tl1["split_accepted"] == 0 and tl1["split_rejected"] == 0
+    assert tl1["closed_oversize_blocks"] == 0
+    assert not list(ev.glob("*.fragments.json"))
     assert not (wd / "FAILURE.json").exists()
 
 
@@ -1014,6 +1125,14 @@ def test_14_chunked_spec_after_birth_uses_single_patch_path(tmp_path):
     assert "拆块交付" not in prompt and "升阶任务合同" not in prompt
     assert (cache.dir / "coding_t6repair_r1_round1.json").is_file()
     assert not (cache.dir / "coding_t6repair_r1_round1_chunk0.json").exists()
+    # run5 m3（§15.2-m3）：非出生单补丁轮 decision 不带 chunk_split_records，
+    # 时间线也不写 observe-only 三计数。
+    decision = json.loads(
+        (tmp_path / "ev" / "t6repair" / "coding_round1.decision.json").read_text())
+    assert "chunk_split_records" not in decision
+    assert "rejected_detail" not in decision
+    for t in rec["timeline"]:
+        assert "split_accepted" not in t and "split_rejected" not in t
 
 
 def _chunked_runner_with(tmp_path, gw, *, thread, wd):
@@ -1099,6 +1218,15 @@ def test_15_bad_chunk_fails_whole_round_without_half_file(
     decision = json.loads(
         (ev / "coding_round1.decision.json").read_text())
     assert decision["applied"] == [] and needle in decision["rejected"]
+    # run5（§15.3-H2）：矩阵全是 15+ 旧形/短码，detail 恒 None →
+    # rejected_detail/chunk_split_records 条件键缺席；0 fragments 件。
+    assert "rejected_detail" not in decision
+    assert "chunk_split_records" not in decision
+    assert not list(ev.glob("*.fragments.json"))
+    # observe-only 计数落时间线：0 accept/0 reject（非长度两路径）。
+    tl = next(t for t in rec["timeline"] if "chunk_birth_rejected" in t)
+    assert tl["split_accepted"] == 0 and tl["split_rejected"] == 0
+    assert tl["closed_oversize_blocks"] == 0
     failure = json.loads((spec.workdir / "FAILURE.json").read_text())
     assert failure["coding_round"] == 1
     assert any("chunk_birth_rejected" in t for t in failure["timeline"])
@@ -1159,3 +1287,507 @@ def test_17_feedback_zero_change_only_block0_round2(tmp_path):
     assert feedback_title not in gw.calls[0]["messages"][1]["content"]
     # round1 失败轮不半成品出生，round2 成功后文件方出生
     assert (wd / _CHUNK_TARGET).is_file()
+
+
+# ===========================================================================
+# Task6 run5：闭合件机器二拆（唯一依据 .omc/handoffs/task6-sentinel-seam-
+# design.md §15.1–§15.6；0 付费、全 hermetic；全部夹具为合成 LF/CRLF 布局，
+# 严禁拷贝 /mnt 真实响应文本，硬规则 3）
+# ===========================================================================
+
+_RUN5_RECORD_KEYS = ["schema", "chunk_index", "closed_chars", "cut_offset",
+                     "cut_line", "frag0_chars", "frag1_chars", "boundary"]
+_RUN5_DETAIL_KEYS = ["schema", "chunk_index", "closed_chars", "class",
+                     "window"]
+_RUN5_CEMPTY_EXT = (
+    "块 0 code 长度 {L} > 18000 chars，请将该块整体缩短至"
+    " 18000 字符以内后整轮重发（本机逐字符计数）")
+_RUN5_OVERSIZE_EXT = "块 0 code 长度 {L} > 36000 chars（机器窗上限）"
+
+
+def _run5_dense_body(tag, target):
+    """合成纯注释多行闭合件（非解题脚本）：LF 密（每行约 50 字符）、
+    总长恰 target、首行/末行均为 '#'；ast 合法、无顶层名（重名中立）。"""
+    lines: list[str] = []
+    used = 0
+    k = 0
+    while True:
+        line = f"# run5合成夹具 {tag} {k:05d} " + "z" * 24
+        if used + len(line) + 1 > target:
+            break
+        lines.append(line)
+        used += len(line) + 1
+        k += 1
+    body = "\n".join(lines)
+    if len(body) < target:          # 整除边界（如 18500=370×50）：末行直接补齐
+        body += "#" * (target - len(body))
+    assert len(body) == target
+    ast.parse(body)
+    return body
+
+
+def test_run5_classifier_unit_math_three_classes():
+    """§15.1-A/B/E、§15.2-m2：三分类边界、可行窗、切点整数键（等距取小）、
+    m2 四条等式、record/detail 白名单与键序、两条真值外串逐字。"""
+    # 类 1：L≤18000 → None（18000 边界，单行/多行各一）
+    assert _classify_closed_body("#" * 18000, 0) is None
+    assert _classify_closed_body("#" * 800 + "\n" + "#" * 999, 0) is None
+
+    # run4 三次真实失败点的合成 LF 布局：19492/18029/20141 全部 class2 接受。
+    for L, tag in ((19492, "r4a"), (18029, "r4b"), (20141, "r4c")):
+        body = _run5_dense_body(tag, L)
+        rec = _classify_closed_body(body, 2)
+        assert rec is not None
+        assert list(rec) == _RUN5_RECORD_KEYS
+        c = rec["cut_offset"]
+        assert rec["schema"] == "simpraxis.chunk_split.v1"
+        assert rec["chunk_index"] == 2 and rec["closed_chars"] == L
+        assert rec["frag0_chars"] == c
+        assert rec["frag1_chars"] == L - c - 1
+        assert rec["frag0_chars"] + rec["frag1_chars"] + 1 == L
+        assert rec["cut_line"] == body[:c].count("\n")
+        assert body[:c] + "\n" + body[c + 1:] == body
+        assert CHUNK_MIN_CODE_CHARS <= rec["frag0_chars"] <= CHUNK_MAX_CODE_CHARS
+        assert CHUNK_MIN_CODE_CHARS <= rec["frag1_chars"] <= CHUNK_MAX_CODE_CHARS
+        assert rec["boundary"] == "line"
+
+    # §15.2 四构造：L18801 端点 800/18000 双向可行；L18802 坏位置 C 空。
+    rec = _classify_closed_body("#" * 800 + "\n" + "#" * 18000, 0)
+    assert (rec["frag0_chars"], rec["frag1_chars"]) == (800, 18000)
+    rec = _classify_closed_body("#" * 18000 + "\n" + "#" * 800, 0)
+    assert (rec["frag0_chars"], rec["frag1_chars"]) == (18000, 800)
+    for body in ("#" * 800 + "\n" + "#" * 18001,
+                 "#" * 18001 + "\n" + "#" * 800):
+        with pytest.raises(ChunkBirthError) as ei:
+            _classify_closed_body(body, 3)
+        assert list(ei.value.detail) == _RUN5_DETAIL_KEYS
+        assert ei.value.detail["class"] == "no_line_boundary"
+        assert ei.value.detail["window"] == [801, 18000]
+        assert ei.value.detail["closed_chars"] == 18802
+
+    # 36000 两形切点 + 单行 C 空（窗 [17999,18000]）
+    rec = _classify_closed_body("#" * 17999 + "\n" + "#" * 18000, 0)
+    assert (rec["cut_offset"], rec["frag0_chars"],
+            rec["frag1_chars"]) == (17999, 17999, 18000)
+    rec = _classify_closed_body("#" * 18000 + "\n" + "#" * 17999, 0)
+    assert (rec["cut_offset"], rec["frag0_chars"],
+            rec["frag1_chars"]) == (18000, 18000, 17999)
+    with pytest.raises(ChunkBirthError) as ei:
+        _classify_closed_body("#" * 36000, 0)
+    assert ei.value.detail["window"] == [17999, 18000]
+    assert ei.value.detail["class"] == "no_line_boundary"
+
+    # 36001：算术定义域上界唯一点 → 类3（行政顶 36000=2×18000）
+    body36001 = "#" * 18000 + "\n" + "#" * 18000
+    assert len(body36001) == 36001
+    with pytest.raises(ChunkBirthError) as ei:
+        _classify_closed_body(body36001, 0)
+    assert str(ei.value) == _RUN5_OVERSIZE_EXT.format(L=36001)
+    assert ei.value.detail == {
+        "schema": "simpraxis.chunk_split_reject.v1", "chunk_index": 0,
+        "closed_chars": 36001, "class": "over_split_max", "window": None}
+
+    # 等距切点：L=18002，LFs@8999/9000/9001，c*=9000（9000/9001 等距取小；
+    # 第三邻 8999 专杀「取首个」变异）
+    tie = "#" * 8999 + "\n\n\n" + "#" * 9000
+    assert len(tie) == 18002
+    rec = _classify_closed_body(tie, 0)
+    assert rec["cut_offset"] == 9000 and rec["cut_line"] == 1
+
+    # 窗外形 LF 不入 C，但计入 cut_line：L18202 LFs@100/@201/@9000
+    body = ("#" * 100 + "\n" + "#" * 100 + "\n" + "#" * 8798 + "\n"
+            + "#" * 9201)
+    assert len(body) == 18202
+    rec = _classify_closed_body(body, 1)
+    assert rec["cut_offset"] == 9000 and rec["cut_line"] == 2
+
+    # C 空 detail 逐字等值（两窗端点规格）+ 真值外串
+    body = "x" * 100 + "\n" + "y" * 17900
+    assert len(body) == 18001
+    with pytest.raises(ChunkBirthError) as ei:
+        _classify_closed_body(body, 0)
+    assert str(ei.value) == _RUN5_CEMPTY_EXT.format(L=18001)
+    assert ei.value.detail == {
+        "schema": "simpraxis.chunk_split_reject.v1", "chunk_index": 0,
+        "closed_chars": 18001, "class": "no_line_boundary",
+        "window": [800, 17200]}
+    assert "机器窗上限" not in str(ei.value)
+    body = "a" * 17000 + "\n" + "b" * 18998
+    assert len(body) == 35999
+    with pytest.raises(ChunkBirthError) as ei:
+        _classify_closed_body(body, 0)
+    assert ei.value.detail["window"] == [17998, 18000]
+    assert ei.value.detail["closed_chars"] == 35999
+    assert "35999" in str(ei.value) and "机器窗上限" not in str(ei.value)
+
+
+def test_run5_birth_multiline_oversize_accepted_record_and_file(tmp_path):
+    """端到端：18001 多行闭合件原样接受为第 4 个逻辑块；6 调用、fragments
+    逐 record 落盘且先于拼接闸、decision records 长度 6、下一块 prompt 只含
+    逻辑块原文而不含任何 record 字段。"""
+    codes = _happy_chunk_codes()
+    big = _run5_dense_body("e2e18001", 18001)
+    codes[3] = big
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [_chunk_fence(c, i) for i, c in enumerate(codes)],
+        thread="t6r5a", cap=1)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok", rec.get("reason")
+    assert len(gw.calls) == 6
+    born = (wd / _CHUNK_TARGET).read_text(encoding="utf-8")
+    assert born == "\n".join(codes)          # codes 恒为 6 个逻辑块
+    assert big in born
+
+    ev = tmp_path / "ev" / "t6r5a"
+    decision = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    records = decision["chunk_split_records"]
+    assert len(records) == 6
+    assert [r is None for r in records] == [True, True, True, False, True, True]
+    expect_rec = _classify_closed_body(big, 3)
+    assert records[3] == expect_rec
+    frag_p = ev / "coding_round1.chunk3.fragments.json"
+    on_disk = json.loads(frag_p.read_text())
+    assert on_disk == expect_rec
+    assert list(on_disk) == _RUN5_RECORD_KEYS
+    # 落盘 JSON 不允许 sort_keys（键序即白名单序，m2 机器可对账）
+    raw = frag_p.read_text(encoding="utf-8")
+    assert raw.index("cut_offset") < raw.index("frag0_chars")
+    assert len(list(ev.glob("*.fragments.json"))) == 1
+
+    # 块 4 的 prompt：前序含 big 逐字，零 record 机制字段
+    u4 = gw.calls[4]["messages"][1]["content"]
+    assert big in u4
+    for k in ("simpraxis.chunk_split.v1", "cut_offset", "cut_line",
+              "frag0_chars", "frag1_chars", "closed_chars"):
+        assert k not in u4
+
+    t1 = next(t for t in rec["timeline"] if t.get("coding_round") == 1)
+    assert t1["split_accepted"] == 1 and t1["split_rejected"] == 0
+    assert t1["closed_oversize_blocks"] == 1
+
+
+def test_run5_two_oversize_blocks_records_aligned(tmp_path):
+    """两块 class2：records 按下标对齐长度 6、两件 fragments、计数 2。"""
+    codes = _happy_chunk_codes()
+    b2 = _run5_dense_body("twoA", 18500)
+    b4 = _run5_dense_body("twoB", 21000)
+    codes[2], codes[4] = b2, b4
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [_chunk_fence(c, i) for i, c in enumerate(codes)],
+        thread="t6r5b", cap=1)
+    rec = runner.run(spec)
+    assert rec["status"] == "ok", rec.get("reason") and len(gw.calls) == 6
+
+    ev = tmp_path / "ev" / "t6r5b"
+    decision = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    records = decision["chunk_split_records"]
+    assert len(records) == 6
+    assert [r is None for r in records] == [True, True, False, True, False, True]
+    assert records[2] == _classify_closed_body(b2, 2)
+    assert records[4] == _classify_closed_body(b4, 4)
+    names = sorted(p.name for p in ev.glob("*.fragments.json"))
+    assert names == ["coding_round1.chunk2.fragments.json",
+                     "coding_round1.chunk4.fragments.json"]
+    # 后续块 prompt 见到的是逐字逻辑块（不是碎片）
+    assert b2 in gw.calls[3]["messages"][1]["content"]
+    assert b4 in gw.calls[5]["messages"][1]["content"]
+    t1 = next(t for t in rec["timeline"] if t.get("coding_round") == 1)
+    assert t1["split_accepted"] == 2 and t1["closed_oversize_blocks"] == 2
+
+
+@pytest.mark.parametrize("kind,body,cls,window,ext", [
+    ("over", "#" * 40000, "over_split_max", None,
+     "> 36000 chars（机器窗上限）"),
+    ("cempty", "#" * 18001, "no_line_boundary", [800, 17200],
+     "请将该块整体缩短至 18000 字符以内后整轮重发"),
+])
+def test_run5_length_reject_short_circuit(tmp_path, kind, body, cls,
+                                          window, ext):
+    """类3/C 空：块 0 即短路——后续块零调用零 req 证据；decision 带条件键
+    rejected_detail（恰三键序），计数 0/1/1，无半成品。"""
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [_chunk_fence(body, 0)], thread="t6r5" + kind, cap=1)
+    rec = runner.run(spec)
+    assert rec["status"] == "failed" and len(gw.calls) == 1
+    assert ext in rec["reason"]
+    ev = tmp_path / "ev" / ("t6r5" + kind)
+    decision = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    assert list(decision) == ["applied", "rejected", "rejected_detail"]
+    assert decision["applied"] == [] and ext in decision["rejected"]
+    detail = decision["rejected_detail"]
+    assert list(detail) == _RUN5_DETAIL_KEYS
+    assert detail["class"] == cls and detail["window"] == window
+    for i in range(1, 6):
+        assert not (ev / f"coding_round1.chunk{i}.req.json").exists()
+    assert not list(ev.glob("*.fragments.json"))
+    t1 = next(t for t in rec["timeline"] if "chunk_birth_rejected" in t)
+    assert t1["split_accepted"] == 0 and t1["split_rejected"] == 1
+    assert t1["closed_oversize_blocks"] == 1
+    assert t1["chunk_birth_rejected_detail"] == detail
+    assert not (wd / _CHUNK_TARGET).exists()
+
+
+def test_run5_oversize_bare_cr_rejected_pre_classify(tmp_path):
+    """brief §4 CRLF (a)：>18000 体中部一个非行尾 U+000D 必须死在情形 12
+    （分类前）——无 detail、无 fragments、后续块零调用、计数器 0/0/0。
+    同一基件去 CR 后分类器本应 class2 接受，证明拦截点先于长度分类。"""
+    base = _run5_dense_body("barecr", 20199)
+    assert len(base) == 20199
+    assert _classify_closed_body(base, 0) is not None  # 无 CR：本应 class2
+    pos = 10  # 行中非行尾落点（前后字符皆非 LF）
+    assert base[pos] != "\n" and base[pos + 1] != "\n"
+    body = base[:pos] + "\r" + base[pos:]
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [_chunk_fence(body, 0)], thread="t6r5cr", cap=1)
+    rec = runner.run(spec)
+    assert rec["status"] == "failed" and len(gw.calls) == 1
+    assert ("含裸控制字符 U+000D（TAB 允许；CR 只允许行尾 CRLF）"
+            in rec["reason"])
+    # 15+ 旧形 detail=None：decision 恰两键，timeline 无 detail 同义键
+    ev = tmp_path / "ev" / "t6r5cr"
+    decision = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    assert list(decision) == ["applied", "rejected"]
+    assert "rejected_detail" not in decision
+    assert decision["applied"] == []
+    for i in range(1, 6):
+        assert not (ev / f"coding_round1.chunk{i}.req.json").exists()
+    assert not list(ev.glob("*.fragments.json"))
+    t1 = next(t for t in rec["timeline"] if "chunk_birth_rejected" in t)
+    assert "chunk_birth_rejected_detail" not in t1
+    assert t1["split_accepted"] == 0 and t1["split_rejected"] == 0
+    assert t1["closed_oversize_blocks"] == 0
+    assert not (wd / _CHUNK_TARGET).exists()
+
+
+def test_run5_fragments_survive_assembled_floor_reject(tmp_path):
+    """record 先于拼接三闸写盘：块0 class2 接受、五块 801 桩 → 六调用齐后
+    拼接撞 30000 地板，fragments 件仍存活；失败 decision 不带 records。"""
+    big = _run5_dense_body("survive", 18500)
+    stubs = ["#" * 801 for _ in range(5)]
+    responses = [_chunk_fence(big, 0)] + [
+        _chunk_fence(s, i + 1) for i, s in enumerate(stubs)]
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, responses, thread="t6r5s", cap=1)
+    rec = runner.run(spec)
+    assert rec["status"] == "failed" and len(gw.calls) == 6
+    assert "拼接总长" in rec["reason"]
+
+    ev = tmp_path / "ev" / "t6r5s"
+    frag = ev / "coding_round1.chunk0.fragments.json"
+    assert frag.is_file()
+    assert json.loads(frag.read_text()) == _classify_closed_body(big, 0)
+    decision = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    assert "chunk_split_records" not in decision
+    assert "rejected_detail" not in decision       # 拼接失败 detail=None
+    t1 = next(t for t in rec["timeline"] if "chunk_birth_rejected" in t)
+    assert t1["split_accepted"] == 1               # 以存活 fragments 件计数
+    assert t1["split_rejected"] == 0
+    assert t1["closed_oversize_blocks"] == 1
+    assert not (wd / _CHUNK_TARGET).exists()
+
+
+def test_run5_external_strings_only_in_u0_next_round(tmp_path):
+    """§15.6 结构隔离：长度失败后重生轮，真值外串只进块0反馈段，块1-5 零命中。"""
+    happy = _happy_chunk_codes()
+    cempty_ext = _RUN5_CEMPTY_EXT.format(L=18001)
+    over_ext = "> 36000 chars（机器窗上限）"
+    round1 = [_chunk_fence("#" * 18001, 0)]
+    round2 = [_chunk_fence(c, i) for i, c in enumerate(happy)]
+    runner, spec, gw, _, _ = _chunked_runner(
+        tmp_path, round1 + round2, thread="t6r5fb", cap=2)
+    rec = runner.run(spec)
+    assert rec["status"] == "ok" and len(gw.calls) == 7
+
+    u0 = gw.calls[1]["messages"][1]["content"]
+    assert "### 上一轮拆块交付失败反馈" in u0
+    assert cempty_ext in u0
+    assert over_ext not in u0                      # C 空轮不泄露类3 串
+    for call in gw.calls[2:7]:
+        u = call["messages"][1]["content"]
+        assert "上一轮拆块交付失败反馈" not in u
+        assert cempty_ext not in u and over_ext not in u
+
+
+def test_run5_cache_replay_zero_calls_identical_artifacts(tmp_path):
+    """kill-9 重放：class2 原文已在调用点缓存，分类确定性重算 0 重付；
+    fragments 幂等重写 sha256 相等、records 相等、出生产物逐字相等。"""
+    codes = _happy_chunk_codes()
+    big = _run5_dense_body("replay", 19000)
+    codes[2] = big
+    runner, spec, gw, wd, cache = _chunked_runner(
+        tmp_path, [_chunk_fence(c, i) for i, c in enumerate(codes)],
+        thread="t6r5rp", cap=1)
+    rec = runner.run(spec)
+    assert rec["status"] == "ok" and len(gw.calls) == 6
+
+    ev = tmp_path / "ev" / "t6r5rp"
+    frag = ev / "coding_round1.chunk2.fragments.json"
+    sha_before = hashlib.sha256(frag.read_bytes()).hexdigest()
+    decision_before = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    born_before = (wd / _CHUNK_TARGET).read_bytes()
+
+    # 重放前情：出生文件被 kill-9 抹掉（但缓存/证据根在），出生路径重选；
+    # 新网关任何调用即炸（FakeGateway 空响应池）。
+    (wd / _CHUNK_TARGET).unlink()
+    (wd / "telemetry.json").unlink()
+    gw2 = FakeGateway([])
+    runner2 = AgentRunner(gw2, FakeVector(), evidence_root=tmp_path / "ev",
+                          call_cache=cache)
+    rec2 = runner2.run(spec)
+    assert rec2["status"] == "ok", rec2.get("reason")
+    assert gw2.calls == []
+    assert (wd / _CHUNK_TARGET).read_bytes() == born_before
+    assert hashlib.sha256(frag.read_bytes()).hexdigest() == sha_before
+    decision_after = json.loads(
+        (ev / "coding_round1.decision.json").read_text())
+    assert (decision_after["chunk_split_records"]
+            == decision_before["chunk_split_records"])
+
+
+def test_run5_oversize_reason_blocks_canary_and_mechanism_words(tmp_path):
+    """m4：模型正文 canary 绝不进机器原因/反馈段；中文机制词族对真值外串
+    与重生轮块0 prompt 零命中（块0 整份 prompt 也无 canary）。"""
+    canary = "canary-run5-m4-77e1c3"
+    head = f"# {canary} "
+    body = "#" * 700 + "\n" + head + "#" * (18001 - 701 - len(head))
+    assert len(body) == 18001 and body.count("\n") == 1 and body[700] == "\n"
+    happy = _happy_chunk_codes()
+    responses = [_chunk_fence(body, 0)] + [
+        _chunk_fence(c, i) for i, c in enumerate(happy)]
+    runner, spec, gw, _, _ = _chunked_runner(
+        tmp_path, responses, thread="t6r5m4", cap=2)
+    rec = runner.run(spec)
+    assert rec["status"] == "ok" and len(gw.calls) == 7
+
+    ev = tmp_path / "ev" / "t6r5m4"
+    d1 = json.loads((ev / "coding_round1.decision.json").read_text())
+    assert canary not in d1["rejected"]
+    assert canary not in json.dumps(d1["rejected_detail"], ensure_ascii=False)
+    failure_entries = [t for t in rec["timeline"]
+                       if "chunk_birth_rejected" in t]
+    assert failure_entries and canary not in json.dumps(
+        failure_entries, ensure_ascii=False)
+    # 重生轮块0：反馈段是真值外串，整份 prompt 无 canary、无机制词族
+    u0 = gw.calls[1]["messages"][1]["content"]
+    assert canary not in u0
+    family = ("分片", "拆分", "二拆", "机器分片", "切分")
+    for w in family:
+        assert w not in u0
+        assert w not in _RUN5_CEMPTY_EXT.format(L=18001)
+        assert w not in _RUN5_OVERSIZE_EXT.format(L=40000)
+
+
+def test_run5_classifier_pure_no_fs_double_run(monkeypatch):
+    """§15.2-m5：纯函数双跑等值且零文件 IO（builtins.open 探针）。"""
+    body = _run5_dense_body("pure", 20261)
+
+    def boom(*a, **k):
+        raise AssertionError("分类器触碰文件 IO")
+
+    monkeypatch.setattr("builtins.open", boom)
+    r1 = _classify_closed_body(body, 4)
+    r2 = _classify_closed_body(body, 4)
+    assert r1 == r2
+    with pytest.raises(ChunkBirthError):
+        _classify_closed_body("#" * 40000, 0)
+    with pytest.raises(ChunkBirthError):
+        _classify_closed_body("#" * 18001, 0)
+
+
+def test_run5_crlf_full_body_class2_and_deep_registration():
+    """CRLF 两条款：(b) 全响应 CRLF 经扫描器归一为 19899 LF 正文后 class2；
+    (c) 手工 CRLF body 直送分类器——CR 是普通字符，LF 切点恒等式仍成立。
+    夹具纪律：只在纯 LF 基件上单次 .replace（双替会造 \\r\\r\\n 假裸 CR）。"""
+    base = "\n".join("#" * 198 for _ in range(100))
+    assert len(base) == 19899 and "\r" not in base
+    raw = _chunk_fence(base, 0).replace("\n", "\r\n")
+    assert "\r\r\n" not in raw
+    b = _extract_chunk(raw, target=_CHUNK_TARGET, index=0, total=6)
+    assert b == base and len(b) == 19899 and "\r" not in b
+    rec = _classify_closed_body(b, 0)
+    assert list(rec) == _RUN5_RECORD_KEYS
+    assert rec["closed_chars"] == 19899
+    assert rec["frag0_chars"] + rec["frag1_chars"] + 1 == 19899
+    assert rec["cut_line"] == b[:rec["cut_offset"]].count("\n")
+
+    crlf_body = base.replace("\n", "\r\n")
+    assert len(crlf_body) == 19998 and "\r\r\n" not in crlf_body
+    rec2 = _classify_closed_body(crlf_body, 0)
+    c = rec2["cut_offset"]
+    assert crlf_body[c] == "\n"
+    assert crlf_body[:c] + "\n" + crlf_body[c + 1:] == crlf_body
+    assert "\r" in crlf_body[:c]                # CR 保留在碎片 int 口径内
+    assert rec2["frag0_chars"] + rec2["frag1_chars"] + 1 == 19998
+
+
+def test_run5_fuzz_cut_oracle_fixed_seed():
+    """固定种子 fuzz 200 例：独立 oracle 计算 I(L)/C/c*，与生产逐字段对账；
+    含单行（C 空）、密 LF（class2）、疏 LF、随机伯努利、类3、类1。"""
+    rng = random.Random(20261022)
+    n_none = n_accept = n_ce = n_over = 0
+    for n in range(200):
+        L = rng.randint(800, 40000)
+        chars = ["#"] * L
+        style = n % 4
+        if style == 1:                              # 密 LF
+            p = rng.randint(40, 120)
+            j = p
+            while j < L - 1:
+                chars[j] = "\n"
+                j += p + rng.randint(0, 40)
+        elif style == 2:                            # 疏 LF
+            for _ in range(rng.randint(1, 4)):
+                chars[rng.randint(1, L - 2)] = "\n"
+        elif style == 3:                            # 伯努利稀疏
+            for j in range(1, L - 1):
+                if rng.random() < 0.01:
+                    chars[j] = "\n"
+        body = "".join(chars)
+        assert len(body) == L
+
+        lo = max(800, L - 18001)
+        hi = min(18000, L - 801)
+        if L <= CHUNK_MAX_CODE_CHARS:
+            assert _classify_closed_body(body, 0) is None
+            n_none += 1
+        elif L > CHUNK_CLOSED_SPLIT_MAX_CHARS:
+            with pytest.raises(ChunkBirthError) as ei:
+                _classify_closed_body(body, 0)
+            d = ei.value.detail
+            assert d["class"] == "over_split_max" and d["window"] is None
+            n_over += 1
+        else:
+            cands = [j for j in range(lo, hi + 1) if body[j] == "\n"]
+            if not cands:
+                with pytest.raises(ChunkBirthError) as ei:
+                    _classify_closed_body(body, 0)
+                d = ei.value.detail
+                assert list(d) == _RUN5_DETAIL_KEYS
+                assert d["class"] == "no_line_boundary"
+                assert d["window"] == [lo, hi] and d["closed_chars"] == L
+                n_ce += 1
+            else:
+                cstar = min(cands,
+                            key=lambda j: (abs(2 * j - (L - 1)), j))
+                r = _classify_closed_body(body, 0)
+                assert list(r) == _RUN5_RECORD_KEYS
+                assert r["cut_offset"] == cstar
+                assert r["frag0_chars"] == cstar
+                assert r["frag1_chars"] == L - cstar - 1
+                assert r["frag0_chars"] + r["frag1_chars"] + 1 == L
+                assert r["cut_line"] == body[:cstar].count("\n")
+                assert body[:cstar] + "\n" + body[cstar + 1:] == body
+                assert (CHUNK_MIN_CODE_CHARS <= r["frag0_chars"]
+                        <= CHUNK_MAX_CODE_CHARS)
+                assert (CHUNK_MIN_CODE_CHARS <= r["frag1_chars"]
+                        <= CHUNK_MAX_CODE_CHARS)
+                n_accept += 1
+    # 四类在固定种子下都必须实际发生
+    assert n_none > 0 and n_accept > 0 and n_ce > 0 and n_over > 0
