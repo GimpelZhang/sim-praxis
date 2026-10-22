@@ -91,7 +91,18 @@ NORMAL_BUDGET = 60       # 常态批准总量
 # 打满后全局余量 1。NORMAL_BUDGET 60、4/7/8 三任务顶、模型 ID 不动；
 # 票 T6-B10-run5-frag，常量提交先于出票（write_approval used+approved>
 # HARD_CAP 硬校验）。
-HARD_CAP = 122           # 全局先到先停硬门（2026-10-22 第七次自批，112→122）
+# 2026-10-22 run6 第八次自批（付费 r1，设计终稿 task6-sentinel-seam-design.md
+# §15.8.3/LEAD 裁决 4）：G4 活探针实证 run5 终态 human_failure 节点 2026-10-22
+# 追加真实学习行 24681e47…（与 ledger seq107 同秒），learning 渲染块指纹漂移
+# 致 r1 六缓存键同名必 miss，零付费重放前提证伪——矛盾即结论（硬规则 7），
+# kb 面 6/6 逐字节相等、漂移仅 learning 一进一出，禁删学习行/伪造指纹。非模型
+# 变更，硬规则 1 不触发，模型 ID 零变更。新票 T6-B10-run6-paid-r1 approved=19
+# beyond_normal（最坏信封 6 r1 付费重出+6 r2+6 r3+1 kill-9 重放）。账实
+# 113 行/int-seq 107/task6 83（68 ok+15 ok=false）：三门算术 全局
+# 107+19=126≤128、task6 83+19=102≤106、批次 0+19=19 恰顶；打满后全局余 2、
+# task6 余 4。NORMAL_BUDGET 60、4/7/8 三任务顶不动；常量必须先于出票提交
+# （write_approval used+approved>HARD_CAP 硬门）。
+HARD_CAP = 128           # 全局先到先停硬门（2026-10-22 第八次自批，122→128）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -143,10 +154,19 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # （设计 §15；0 新增调用路径），信封仍 21；task6 已用 76（=61 ok+
 # 15 ok=false）→ 76+21=97≤98，打满后 task6 余量 1。60 常态门、4/7/8
 # 三任务顶、模型 ID、32768/600/n=6 均不动。
-PHASE2_TASK_CAPS = {4: 24, 6: 98, 7: 16, 8: 16}
+# Task6 2026-10-22 run6 第八次自批（配套全局硬顶史上第四提 122→128）：
+# G4 实证 run5 终态真实学习行 24681e47… 致 learning 指纹漂移，零付费 r1
+# 重放前提证伪（矛盾即结论，硬规则 7；kb 面 6/6 逐字节相等），run6 改为
+# 付费 r1（设计 §15.8.3/裁决 4）。新票 T6-B10-run6-paid-r1 approved=19
+# beyond_normal（6 r1 付费重出+6 r2+6 r3+1 kill-9 重放）；task6 已用
+# 83（=68 ok+15 ok=false）→ 83+19=102≤106，打满后 task6 余量 4；
+# 批次 0+19=19 恰顶，全局 107+19=126≤128（余量 2）。非模型变更、模型 ID
+# 零变更；NORMAL_BUDGET 60、4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；
+# 常量先于出票落地（write_approval 硬门）。
+PHASE2_TASK_CAPS = {4: 24, 6: 106, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
-# choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/122 双门：常态门 60
-# 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122，见上溯源）。
+# choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
+# 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。
 TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
 CONSECUTIVE_QUOTA_LIMIT = 3
 LOCK_NAME = ".ledger.lock"

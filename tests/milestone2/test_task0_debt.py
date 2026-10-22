@@ -764,8 +764,8 @@ def test_quota_pause_v2_schema_freeze(tmp_path, monkeypatch):
 
 # ---------- Task6 单任务硬顶自批提顶（§6.3，2026-10-16 用户自主授权） ----------
 
-def test_task6_cap_86_to_98_and_hard_cap_112_to_122_phase2():
-    """Task6 局部硬顶七次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
+def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
+    """Task6 局部硬顶八次自批提顶（授权依据：2026-10-16 用户预算自主授权 +
     Phase_2_Plan_detailed.md §6.3）：前六次 16→24→40→48→56→80→86、
     HARD_CAP 80→104→112 的完整溯源见 git 历史（commits
     df1c0a9/7a03a05/f918239/2835189/1ac430d/32bb213 及 T6-B5/6/7/9
@@ -787,8 +787,24 @@ def test_task6_cap_86_to_98_and_hard_cap_112_to_122_phase2():
     （=2×18000；算术定义域上界 36001，唯一点 {18000}）。
     控制票 T6-B10-run5-frag 21 额 beyond_normal，LEAD 自批（常量先于票
     落地：write_approval 硬门 used+approved>HARD_CAP 需新值在位）。
+    第八次（2026-10-22，run6 付费 r1）：G4 召回活探针实证 run5 终态
+    human_failure 节点 2026-10-22T06:00:41Z 追加真实学习行 24681e47…
+    （与 ledger seq107 同秒 coding_debug ok），缓存键同而指纹含 learning
+    渲染块，r1 六块必 miss——零付费重放前提证伪，矛盾即结论（硬规则 7，
+    禁删学习行/伪造指纹）；kb 面 6/6 逐字节相等，漂移仅 learning 一进一出
+    （设计终稿 task6-sentinel-seam-design.md §15.8.3/LEAD 裁决 4）。run6
+    改付费 r1，新票 T6-B10-run6-paid-r1 批 19 额 beyond_normal（最坏信封
+    6 r1 付费重出+6 r2 拆块重生+6 r3+1 kill-9 节点重放）。账实 113 行/
+    int-seq 107/task6 83（68 ok+15 ok=false）：全局 107+19=126≤128
+    （余量 2）、task6 83+19=102≤106（余量 4）、批次 0+19=19 恰顶。
+    故 task6 98→106、HARD_CAP 122→128（全局硬顶第四次提）；常量先于票
+    落地。非模型变更、硬规则 1 不触发，模型 ID、NORMAL_BUDGET 60、
+    4·7·8 任务顶、CHUNK_MAX_CODE_CHARS 18000/CHUNK_CLOSED_SPLIT_MAX_CHARS
+    36000、n=6、温度、种子、Q1 界全部不动。旧第七次值 98/122（票
+    T6-B10-run5-frag、算术 100+21=121≤122、76+21=97≤98）作为 git 历史
+    保留在本段叙述里——算术随真实提顶平移，非放水。
     本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义、全局双门
-    （常态 60 门七次提顶始终未动），以及 run5 两个冻结图文件 sha256。
+    （常态 60 门八次提顶始终未动），以及 run5/run6 冻结文件 sha256。
     0 联网。
     """
     import hashlib
@@ -810,31 +826,35 @@ def test_task6_cap_86_to_98_and_hard_cap_112_to_122_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 98, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 98（第七次自批，
-    # run5 86→98）；task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 98
-    assert TASK_HARD_CAPS[6] != 86            # run4 旧顶随 run5 提顶下线
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 106, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 106（第八次自批，
+    # run6 98→106）；task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
+    assert TASK_HARD_CAPS[6] == 106
+    assert TASK_HARD_CAPS[6] != 98            # run5 旧顶随 run6 提顶下线
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 122 是第七次自批（run5，
-    # 112→122）后的值——前四次提顶均不动全局门，第五/六/七次动 HARD_CAP。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 128 是第八次自批（run6，
+    # 122→128）后的值——前四次提顶均不动全局门，第五/六/七/八次动 HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 122
-    assert HARD_CAP != 112                    # run4 旧全局顶随 run5 提顶下线
+    assert HARD_CAP == 128
+    assert HARD_CAP != 122                    # run5 旧全局顶随 run6 提顶下线
     assert HARD_CAP != 104                    # run3 旧全局顶保持下线
-    # run5 信封算术对账（余量各 1）：ledger 106 行/100 seq/task6 76。
-    assert 100 + 21 <= HARD_CAP == 122
-    assert 76 + 21 <= TASK_HARD_CAPS[6] == 98
+    # run6 信封算术对账（全局余量 2/task6 余量 4/批次恰顶）：账实 113 行/
+    # int-seq 107/task6 83（68 ok+15 ok=false），新票批 19。
+    assert 107 + 19 <= HARD_CAP == 128
+    assert 83 + 19 <= TASK_HARD_CAPS[6] == 106
 
-    # run5 冻结图文件钉死：二拆逻辑只许落在 runner.py，状态机/提示词文件
-    # 必须零改动（task6.py、task6_v2_prompts.py）。
+    # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
+    # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
+    # runner.py，证据打包脚本不许顺手改）。
     repo_root = Path(__file__).resolve().parents[2]
     frozen = {
         "orchestrator/graph/task6.py":
             "614aa790111f308d3e633d7b45cfef1ea8b9fb68619e9651a3175dc59380c415",
         "orchestrator/graph/task6_v2_prompts.py":
             "e8055fe3ed72ee6049e396e376b298fd36a783b12c82317e511ad72fb72f38d0",
+        "scripts/milestone1/build_evidence_pack.py":
+            "c5e260d3fa65eae31f0b8b26b56e3ecdb5d27bc9f42d7bb4f355ff0d688c519d",
     }
     for rel, want in frozen.items():
         got = hashlib.sha256((repo_root / rel).read_bytes()).hexdigest()
