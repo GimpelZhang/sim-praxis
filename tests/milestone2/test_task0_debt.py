@@ -708,7 +708,15 @@ CALL_CACHE_ALLOWLIST = {
     # CHARS/hook 常量、_detect_workdir_hook_pollution 助手、run() 卫生预检与
     # timeline 新键接缝（含 docstring/注释，净 +34 行）全在构造点之前，纯位移
     # （1044→1078）；shim 不经网关、0 新增 CallReplay 落点。
-    ("orchestrator/agent_runner/runner.py", 1078),
+    # 2026-10-24 run7b 锚点反馈：PatchAnchorError 异常、_ANCHOR_* 常量与
+    # chr 码表、_neutralize/_anchor_note/_append_anchor_feedback/
+    # _coding_cap_reason helper、三 staging 投影函数（§3.2 整轮内存化）
+    # 接缝（含 docstring/注释）全在构造点之前，初版纯位移（1078→1245）；
+    # 锚点拒绝复用唯一 _replay_cache 构造点（同 raw 0 二次计费），0 新增
+    # CallReplay 落点、0 新增网关调用路径（冻结规格 v1.0.1 §9.1）。
+    # 同日行预算对账：非冻结注释/docstring/换行收紧后构造点纯位移
+    # 1245→1207（冻结字面块逐字不动，净增行 +203→+146），语义零改。
+    ("orchestrator/agent_runner/runner.py", 1207),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移

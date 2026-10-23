@@ -614,6 +614,9 @@ def test_chunked_birth_local_cap_3_not_raised(tmp_path):
     rounds = [t["coding_round"] for t in rec["timeline"]
               if "coding_round" in t]
     assert rounds == [1, 2, 3]
+    # run7b（冻结规格 v1.0.1 §4.2 MINOR-8，2026-10-24）：写死计算值——
+    # 三拒绝 continue + 第 4 次 exec 撞轮顶帽检，timeline 恰 4（禁读回当期望）。
+    assert len(rec["timeline"]) == 4
     # 每次调用都是拆块出生轮的块 0（chunk_index=0 指纹），无 round4/5 触达。
     for call in gw.calls:
         assert call["stage"] == "coding_debug"

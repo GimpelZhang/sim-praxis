@@ -2300,3 +2300,909 @@ def test_run6_e19_match_guard_runtime_executes_main_once():
     assert state["n"] == 1
     # 同一守卫体即矩阵 E19 源码尾部（与 46 矩阵同源防漂移）。
     assert _RUN6_EXTERNAL["E19_match_guard_call"][1].endswith(guard)
+
+
+# ===========================================================================
+# ⑧ Task6 run7b：非唯一/未命中锚点从「立即结案」改为「机器反馈 + 5 轮帽内
+#    续跑」（冻结规格 .omc/handoffs/task6-run7b-anchor-feedback-design.md
+#    v1.0.1 §8 A1-A15；2026-10-24）。全 hermetic：FakeGateway/真
+#    CallReplay(tmp)/真 tmp 文件系统，0 联网 0 付费、无 paid marker、不读
+#    /mnt。本段仅追加，旧测试一字未改；局部导入镜像 :542 段风格。
+#    E8（v1.0.1 勘误）：成功返回只在轮顶 telemetry_ok，N 次 coding 收敛
+#    ⇒ N+1 次 executions（A1/A2/A14=3、A7=4；全歧义 A4=5 末次 except 直
+#    接 _fail；test_01 单补丁=2）。
+# [run7b-anchor-feedback-tests]
+# ===========================================================================
+
+import os  # noqa: E402 （run7b 段局部导入）
+import inspect  # noqa: E402
+from orchestrator.agent_runner.runner import (  # noqa: E402
+    PatchAnchorError,
+    PatchSafetyError,
+    _ANCHOR_HINT_MULTI,
+    _ANCHOR_HINT_ZERO,
+    _ANCHOR_LINE_SEPS,
+    _ANCHOR_REJECT_FMT,
+    _anchor_note,
+    _append_anchor_feedback,
+    _apply_structured_patch,
+    _apply_unified_diff,
+    _coding_cap_reason,
+    _commit_staged,
+    _neutralize_for_model,
+    _parse_and_apply,
+    _stage_structured,
+    _stage_unified_section,
+)
+from orchestrator.common.host_shim.shim_core import redact_for_model  # noqa: E402
+
+_RUN7B_FORBIDDEN = (
+    "SIMPRAXIS_HOST_SHIM", "simpraxis-host-shim", "host_shim",
+    "平台托底", "sitecustomize", "shim_core")
+_RUN7B_MARK = "机器核验（非模型输出）：上一轮返回的补丁已被整体拒绝"
+_RUN7B_SEPS8 = ("\n", "\r", "\v", "\f", "\x1d", "\x85", " ", " ")
+_RUN7B_REASON_MULTI = "old 块命中 2 次（需恰好 1 次）：fix.txt"
+
+
+def _run7b_patch(path, old, new):
+    return {"path": path, "old": old, "new": new}
+
+
+def _run7b_structured(*patches):
+    return json.dumps({"patches": list(patches)}, ensure_ascii=False)
+
+
+def _run7b_setup(tmp_path, responses, *, script=CONVERGING_SCRIPT,
+                 cap=5, thread="t7b", fix="NEEDS_FIX",
+                 usage=(None, None), recall=None, files=None, gw=None):
+    wd = tmp_path / "work"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "script.py").write_text(script, encoding="utf-8")
+    (wd / "fix.txt").write_text(fix, encoding="utf-8")
+    for rel, content in (files or {}).items():
+        p = wd / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    if gw is None:
+        gw = FakeGateway(responses, usage=usage)
+    cache = CallReplay(tmp_path / "cache")
+    runner = AgentRunner(gw, FakeVector(), evidence_root=tmp_path / "ev",
+                         call_cache=cache, recall=recall)
+    spec = RunSpec(
+        thread_id=thread, workdir=wd,
+        cmd=[sys.executable, str(wd / "script.py")],
+        telemetry_relpath="telemetry.json", batch_id="T6-FIXTURE",
+        billing_task=6, run_idx=1, max_coding_rounds=cap)
+    return runner, spec, gw, wd, cache
+
+
+def _run7b_decision(tmp_path, thread, n):
+    p = tmp_path / "ev" / thread / f"coding_round{n}.decision.json"
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _run7b_anchor_entries(rec):
+    return [t for t in rec["timeline"] if "patch_anchor_rejected" in t]
+
+
+class _Run7bSnapshotGateway(FakeGateway):
+    """每次调用瞬间快照指定文件（mtime_ns+bytes）：钉拒绝轮到下一调用间零写。"""
+
+    def __init__(self, responses, wd, rels, **kw):
+        super().__init__(responses, **kw)
+        self.snaps = []
+        self._wd, self._rels = wd, rels
+
+    def call(self, stage, messages, **kw):
+        self.snaps.append({
+            rel: (os.stat(self._wd / rel).st_mtime_ns,
+                  (self._wd / rel).read_bytes())
+            for rel in self._rels})
+        return super().call(stage, messages, **kw)
+
+
+# ---- A1：structured 歧义→机器反馈→第二轮唯一锚→ok（executions=3，E8） ------
+
+def test_run7b_a1_structured_ambiguous_feedback_then_unique_ok(tmp_path):
+    responses = [
+        _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED")),
+        _run7b_structured(
+            _run7b_patch("fix.txt", "NEEDS_FIX NEEDS_FIX", "PATCHED"))]
+    gw = _Run7bSnapshotGateway(responses, tmp_path / "work", ["fix.txt"],
+                               usage=(10, 20))
+    runner, spec, gw, wd, cache = _run7b_setup(
+        tmp_path, responses, fix="NEEDS_FIX NEEDS_FIX",
+        thread="t7b-a1", gw=gw)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok"
+    assert rec["coding_round"] == 2 and rec["executions"] == 3
+    assert len(gw.calls) == 2
+    # round1 decision 恰两键、rejected 原文
+    assert _run7b_decision(tmp_path, "t7b-a1", 1) == {
+        "applied": [], "rejected": _RUN7B_REASON_MULTI}
+    # r1 拒绝后、r2 调用前目标字节/mtime 不变（两次调用瞬间快照相等）
+    assert gw.snaps[0] == gw.snaps[1]
+    assert gw.snaps[0]["fix.txt"][1] == "NEEDS_FIX NEEDS_FIX".encode()
+    assert (wd / "fix.txt").read_bytes() == b"PATCHED"
+    # round2 模型消息：标记句 + 多命中 hint 全文，0 六禁词
+    msg2 = gw.calls[1]["messages"][1]["content"]
+    assert _RUN7B_MARK in msg2 and _ANCHOR_HINT_MULTI in msg2
+    assert all(w not in msg2 for w in _RUN7B_FORBIDDEN)
+    # timeline r1 条三键
+    entries = _run7b_anchor_entries(rec)
+    assert len(entries) == 1
+    assert entries[0]["coding_round"] == 1
+    assert entries[0]["patch_anchor_rejected"] == _RUN7B_REASON_MULTI
+    assert entries[0]["patch_anchor_hits"] == 2
+    # sidecar 实跑恰 3 次（两脚本夹具每次 exec 追加一个 x）
+    assert (wd / "runs.log").read_text() == "xxx"
+    # 歧义 raw 在调用成功后即入缓存（先 put 后 apply 既有顺序不变）
+    assert len(list((tmp_path / "cache").glob("*.json"))) == 2
+
+
+# ---- A2：unified hunk 歧义同路径→反馈→r2 唯一→ok（executions=3） ----------
+
+def test_run7b_a2_unified_hunk_ambiguous_feedback_then_unique_ok(tmp_path):
+    r1 = ("--- a/fix.txt\n+++ b/fix.txt\n"
+          "@@ -1,1 +1,1 @@\n-DUP\n+PATCHED\n")
+    r2 = ("--- a/fix.txt\n+++ b/fix.txt\n"
+          "@@ -1,2 +1,2 @@\n-DUP\n-DUP\n+PATCHED\n")
+    responses = [json.dumps({"unified_diff": r1}, ensure_ascii=False),
+                 json.dumps({"unified_diff": r2}, ensure_ascii=False)]
+    gw = _Run7bSnapshotGateway(responses, tmp_path / "work", ["fix.txt"])
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, responses, fix="DUP\nDUP\n", thread="t7b-a2", gw=gw)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok" and len(gw.calls) == 2
+    assert rec["coding_round"] == 2 and rec["executions"] == 3
+    assert _run7b_decision(tmp_path, "t7b-a2", 1) == {
+        "applied": [],
+        "rejected": "hunk 上下文命中 2 次（需恰好 1 次）：fix.txt"}
+    assert gw.snaps[0] == gw.snaps[1]
+    msg2 = gw.calls[1]["messages"][1]["content"]
+    assert _RUN7B_MARK in msg2 and "hunk 上下文命中 2 次" in msg2
+    entries = _run7b_anchor_entries(rec)
+    assert len(entries) == 1 and entries[0]["patch_anchor_hits"] == 2
+    assert (wd / "runs.log").read_text() == "xxx"
+    assert (wd / "fix.txt").read_bytes() == b"PATCHED"
+
+
+# ---- A3：0 命中 → ZERO hint 进反馈，续跑收敛 ------------------------------
+
+def test_run7b_a3_zero_hits_feedback_continue(tmp_path):
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path,
+        [_run7b_structured(_run7b_patch("fix.txt", "NO_SUCH_ANCHOR", "x")),
+         _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))],
+        thread="t7b-a3")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok" and len(gw.calls) == 2
+    assert rec["executions"] == 3
+    entries = _run7b_anchor_entries(rec)
+    assert len(entries) == 1
+    assert entries[0]["patch_anchor_hits"] == 0
+    assert entries[0]["patch_anchor_rejected"] == (
+        "old 块命中 0 次（需恰好 1 次）：fix.txt")
+    msg2 = gw.calls[1]["messages"][1]["content"]
+    assert _RUN7B_MARK in msg2 and _ANCHOR_HINT_ZERO in msg2
+    assert _ANCHOR_HINT_MULTI not in msg2
+
+
+# ---- A4：五轮全歧义 → 末次 except 内直接 _fail（executions==5） ------------
+
+def test_run7b_a4_all_ambiguous_cap_direct_fail(tmp_path):
+    ambiguous = _run7b_structured(
+        _run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, [ambiguous] * 5, script=ALWAYS_FAIL_SCRIPT,
+        fix="NEEDS_FIX NEEDS_FIX", thread="t7b-a4")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 5 and rec["executions"] == 5
+    assert (wd / "runs.log").read_text() == "xxxxx"
+    assert not (wd / "telemetry.json").exists()
+    assert rec["coding_round"] == 5
+    expected_reason = (
+        "5 轮 coding_debug 后仍失败（RunSpec 上限）；末次锚点机器原因："
+        + _RUN7B_REASON_MULTI)
+    assert rec["reason"] == expected_reason
+    assert "（RunSpec 上限）" in rec["reason"]
+    assert "补丁安全拒绝（不重试）" not in rec["reason"]
+    failure = json.loads((wd / "FAILURE.json").read_text(encoding="utf-8"))
+    assert failure["coding_round"] == 5 and failure["executions"] == 5
+    assert failure["reason"] == expected_reason
+    entries = _run7b_anchor_entries(rec)
+    assert [e["coding_round"] for e in entries] == [1, 2, 3, 4, 5]
+    assert all(e["patch_anchor_hits"] == 2 for e in entries)
+    for n in range(1, 6):
+        assert _run7b_decision(tmp_path, "t7b-a4", n)["rejected"] == (
+            _RUN7B_REASON_MULTI)
+
+
+# ---- A5：普通「补丁已应用仍失败」5 轮帽路径不回归（executions==6） ---------
+
+def test_run7b_a5_normal_cap_path_executions_six(tmp_path):
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, _rotating_patches(5), script=ALWAYS_FAIL_SCRIPT,
+        fix="x=0", thread="t7b-a5")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 5 and rec["executions"] == 6
+    assert (wd / "fix.txt").read_text() == "x=5"
+    assert rec["reason"] == "5 轮 coding_debug 后仍失败（RunSpec 上限）"
+    assert _run7b_anchor_entries(rec) == []
+
+
+# ---- A6：整轮原子性六形（§3.3 ①-⑥；全零落盘/零目录/mtime 不变） ------------
+
+def test_run7b_a6_whole_round_atomicity_six_forms(tmp_path):
+    wd = tmp_path / "work"
+    wd.mkdir()
+    (wd / "fix.txt").write_text("DUP\nDUP\n", encoding="utf-8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep", encoding="utf-8")
+    outside_mtime = os.stat(outside).st_mtime_ns
+
+    def _stat(rel):
+        return os.stat(wd / rel).st_mtime_ns, (wd / rel).read_bytes()
+
+    # ① [合法出生补丁（会新建目录）, 歧义补丁] ⇒ PatchAnchorError，目录不建
+    s_before = _stat("fix.txt")
+    with pytest.raises(PatchAnchorError) as ei:
+        _parse_and_apply(wd, _run7b_structured(
+            _run7b_patch("sub/new.py", "", "birth"),
+            _run7b_patch("fix.txt", "DUP", "X")))
+    assert ei.value.hits == 2
+    assert not (wd / "sub").exists()
+    assert _stat("fix.txt") == s_before
+
+    # ② [歧义, 越界]：歧义先抛 PatchAnchorError；越界补丁零落盘
+    with pytest.raises(PatchAnchorError) as ei:
+        _parse_and_apply(wd, _run7b_structured(
+            _run7b_patch("fix.txt", "DUP", "X"),
+            _run7b_patch(str(outside), "keep", "HACK")))
+    assert ei.value.hits == 2
+    assert outside.read_text() == "keep"
+    assert os.stat(outside).st_mtime_ns == outside_mtime
+    assert _stat("fix.txt") == s_before
+
+    # ③ [越界] 单独：父类 PatchSafetyError（非锚点子类），1 调用结案语义
+    with pytest.raises(PatchSafetyError) as ei:
+        _parse_and_apply(wd, _run7b_structured(
+            _run7b_patch(str(outside), "keep", "HACK")))
+    assert not isinstance(ei.value, PatchAnchorError)
+
+    # ④ unified 两 section（diff --git 分隔）第二 hunk 歧义 ⇒ 第一目标不变
+    (wd / "a.txt").write_text("AAA\n", encoding="utf-8")
+    (wd / "b.txt").write_text("DUP\nDUP\n", encoding="utf-8")
+    a_before = _stat("a.txt")
+    b_before = _stat("b.txt")
+    diff = ("--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-AAA\n+BBB\n"
+            "diff --git a/b.txt b/b.txt\n"
+            "--- a/b.txt\n+++ b/b.txt\n@@ -1,1 +1,1 @@\n-DUP\n+X\n")
+    with pytest.raises(PatchAnchorError) as ei:
+        _parse_and_apply(wd, json.dumps({"unified_diff": diff}))
+    assert ei.value.hits == 2
+    assert _stat("a.txt") == a_before
+    assert _stat("b.txt") == b_before
+
+    # ⑤ 结构性坏响应（old/new 非 str、元素非对象）：任何写之前父类硬停
+    with pytest.raises(PatchSafetyError) as ei:
+        _parse_and_apply(wd, _run7b_structured(
+            _run7b_patch("fix.txt", 1, "X")))
+    assert not isinstance(ei.value, PatchAnchorError)
+    with pytest.raises(PatchSafetyError):
+        _parse_and_apply(wd, json.dumps({"patches": [1]}))
+    assert _stat("fix.txt") == s_before
+
+    # ⑥ MINOR-2：已存在非空文件 old="" ⇒ hits=len+1 的 PatchAnchorError，
+    #    零落盘（旧实现是父类硬停；新码走反馈通道）
+    (wd / "c.txt").write_text("abc", encoding="utf-8")
+    c_before = _stat("c.txt")
+    with pytest.raises(PatchAnchorError) as ei:
+        _apply_structured_patch(wd, _run7b_patch("c.txt", "", "X"))
+    assert ei.value.hits == 4  # "abc".count("") == len+1
+    assert _stat("c.txt") == c_before
+
+    # ⑥续（端到端）：该代差进入反馈通道而非结案——r1 old="" 被拒、r2 收敛
+    life = tmp_path / "life"
+    runner, spec, gw, lwd, _ = _run7b_setup(
+        life,
+        [_run7b_structured(_run7b_patch("fix.txt", "", "X")),
+         _run7b_structured(_run7b_patch("fix.txt", "abc", "PATCHED"))],
+        fix="abc", thread="t7b-a6")
+    rec = runner.run(spec)
+    assert rec["status"] == "ok" and len(gw.calls) == 2
+    assert _run7b_anchor_entries(rec)[0]["patch_anchor_hits"] == 4
+
+
+# ---- A7：成功应用即清零反馈，后继轮消息不带陈旧标记（executions=4） -------
+
+_RUN7B_STAGE_SCRIPT = '''
+from pathlib import Path
+wd = Path(__file__).parent
+log = wd / "runs.log"
+log.write_text((log.read_text() + "x") if log.exists() else "x")
+fix = (wd / "fix.txt").read_text().strip()
+if fix != "PATCHED":
+    raise RuntimeError("fixture failure: stage=" + fix)
+(wd / "telemetry.json").write_text('{"_fixture": true}')
+'''
+
+
+def test_run7b_a7_feedback_cleared_after_success(tmp_path):
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path,
+        [_run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "STAGE2")),
+         _run7b_structured(
+             _run7b_patch("fix.txt", "NEEDS_FIX NEEDS_FIX", "STAGE2")),
+         _run7b_structured(_run7b_patch("fix.txt", "STAGE2", "PATCHED"))],
+        script=_RUN7B_STAGE_SCRIPT, fix="NEEDS_FIX NEEDS_FIX",
+        thread="t7b-a7")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok"
+    assert len(gw.calls) == 3 and rec["executions"] == 4
+    m1 = gw.calls[0]["messages"][1]["content"]
+    m2 = gw.calls[1]["messages"][1]["content"]
+    m3 = gw.calls[2]["messages"][1]["content"]
+    assert _RUN7B_MARK not in m1                      # 首轮无反馈
+    assert _RUN7B_MARK in m2 and _ANCHOR_HINT_MULTI in m2
+    assert _RUN7B_MARK not in m3                      # r2 成功后已清零
+    assert "机器判定原因" not in m3
+    assert (wd / "runs.log").read_text() == "xxxx"
+    assert _run7b_anchor_entries(rec)[0]["coding_round"] == 1
+
+
+# ---- A8：常量/helper 单测（戒律 + 54 形矩阵 + 10 分隔符 + RAW + 幂等） -----
+
+def test_run7b_a8a_constants_discipline():
+    rendered = _ANCHOR_REJECT_FMT.format(reason="r", hint="h")
+    assert len(rendered.splitlines()) == 8           # 显式 8 物理行
+    assert '"' not in rendered                       # MINOR-9：常量无 ASCII 双引号
+    assert "{reason}" not in rendered and "{hint}" not in rendered
+    for blob in (rendered, _ANCHOR_HINT_MULTI, _ANCHOR_HINT_ZERO):
+        for w in _RUN7B_FORBIDDEN:
+            assert w not in blob
+    assert _ANCHOR_HINT_MULTI != _ANCHOR_HINT_ZERO
+
+
+_RUN7B_MATRIX = []
+for _w in _RUN7B_FORBIDDEN:
+    for _s in _RUN7B_SEPS8:
+        _RUN7B_MATRIX.append((_w, f"x{_s}{_w}.py{_s}z"))
+    _RUN7B_MATRIX.append((_w, f'rel 是 "x/{_w}.py"'))
+_RUN7B_MATRIX_IDS = [f"case{i:02d}" for i in range(len(_RUN7B_MATRIX))]
+
+
+@pytest.mark.parametrize("word,reason", _RUN7B_MATRIX,
+                         ids=_RUN7B_MATRIX_IDS)
+def test_run7b_a8b_redaction_matrix_54(word, reason):
+    assert len(_RUN7B_MATRIX) == 54                  # 6×8 + 6 = 54
+    exc = PatchAnchorError(
+        f"old 块命中 2 次（需恰好 1 次）：{reason}", hits=2)
+    note = _anchor_note(exc)
+    out = redact_for_model(note)
+    lines = note.splitlines()
+    assert len(lines) == 8
+    # 除原因行（index 2）外 7 行编译期常量逐字存活
+    survivors = [ln for ln in lines if word not in ln]
+    assert len(survivors) == 7
+    for ln in survivors:
+        assert ln in out
+    assert _RUN7B_MARK in out
+    # 模型面 0 六禁词（任一形）
+    for w in _RUN7B_FORBIDDEN:
+        assert w not in out
+
+
+def test_run7b_a8c_neutralize_all_ten_separators():
+    seps10 = ("\n", "\r", "\v", "\f",
+              "\x1c", "\x1d", "\x1e", "\x85", " ", " ")
+    assert len(_ANCHOR_LINE_SEPS) == 10
+    assert _ANCHOR_LINE_SEPS == seps10
+    for c in seps10:
+        assert _neutralize_for_model("x" + c + "y") == "x y"
+        assert _neutralize_for_model("a" + c + c + "b") == "a b"
+    plain = "机器判定原因：old 块命中 2 次（需恰好 1 次）：fix.txt"
+    assert _neutralize_for_model(plain) == plain
+
+
+def test_run7b_a8d_raw_triad_never_neutralized():
+    raw = "old 块命中 2 次（需恰好 1 次）：x\x85sitecustomize.py"
+    exc = PatchAnchorError(raw, hits=2)
+    assert str(exc) == raw                           # 人侧 RAW
+    assert "\x85" in str(exc) and "sitecustomize" in str(exc)
+    note = _anchor_note(exc)
+    assert "\x85" not in note                        # 模型面经中和
+    assert "x sitecustomize.py" in note
+
+
+def test_run7b_a8e_append_idempotent():
+    note = _anchor_note(PatchAnchorError(_RUN7B_REASON_MULTI, hits=2))
+    once = _append_anchor_feedback("tail", note)
+    twice = _append_anchor_feedback(once, note)
+    assert once == "tail\n\n" + note and twice == once
+    assert once.count(_RUN7B_MARK) == 1
+    empty = _append_anchor_feedback("", note)
+    assert empty == "\n\n" + note and empty.count(note) == 1
+
+
+def test_run7b_a8f_hint_dispatch():
+    n0 = _anchor_note(PatchAnchorError("zero", hits=0))
+    n2 = _anchor_note(PatchAnchorError("multi", hits=2))
+    assert _ANCHOR_HINT_ZERO in n0 and _ANCHOR_HINT_MULTI not in n0
+    assert _ANCHOR_HINT_MULTI in n2 and _ANCHOR_HINT_ZERO not in n2
+
+
+# ---- A9：消息快照（rc0 note 在前、anchor note 在后；非注入轮不含） --------
+
+def test_run7b_a9_anchor_note_message_snapshot_order(tmp_path):
+    tb = ("Traceback (most recent call last):\n"
+          '  File "script.py", line 6\n'
+          "RuntimeError: fixture failure: waiting for patch")
+    tail_rc0 = _append_rc0_missing_artifact_note(tb, "telemetry.json")
+    note = _anchor_note(PatchAnchorError(_RUN7B_REASON_MULTI, hits=2))
+    tail_both = _append_anchor_feedback(tail_rc0, note)
+    # rc0 与 anchor 可共存、次序固定 rc0 在前 anchor 在最后
+    assert tail_both == tail_rc0 + "\n\n" + note
+    msgs = _build_messages(
+        gate2_notes=None, traceback_tail=redact_for_model(tail_both),
+        snippets=[], hits=[],
+        cmd=[sys.executable, str(tmp_path / "work" / "script.py")])
+    content = msgs[1]["content"]
+    rc0_note = _RC0_MISSING_ARTIFACT_FMT.format(relpath="telemetry.json")
+    p_tb = content.index("## traceback / 日志尾部")
+    p_rc0 = content.index(rc0_note)
+    p_anchor = content.index(note)
+    assert p_tb < p_rc0 < p_anchor
+    assert content.count(note) == 1 and content.count(rc0_note) == 1
+    # 非注入轮：两种机器注记都不在
+    plain = _build_messages(
+        gate2_notes=None, traceback_tail=tb, snippets=[], hits=[],
+        cmd=[sys.executable, str(tmp_path / "work" / "script.py")])
+    plain_text = plain[1]["content"]
+    assert _RUN7B_MARK not in plain_text
+    assert "机器核验（非模型输出）" not in plain_text
+
+
+# ---- A10：脱敏分界端到端（rel 呈 sitecustomize.py 奇异形；RAW vs 模型面） --
+
+@pytest.mark.parametrize("sep", ["\x85", " "], ids=["nel", "u2028"])
+def test_run7b_a10_redaction_boundary_end_to_end(tmp_path, sep):
+    weird = f"x{sep}sitecustomize.py"
+    ambiguous = _run7b_structured(_run7b_patch(weird, "DUP", "X"))
+    recall = _Run6ScriptedRecall()
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, [ambiguous] * 5, script=ALWAYS_FAIL_SCRIPT,
+        fix="NEEDS_FIX", thread="t7b-a10", files={weird: "DUP\nDUP\n"},
+        recall=recall)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed" and len(gw.calls) == 5
+    raw_reason = f"old 块命中 2 次（需恰好 1 次）：{weird}"
+    # 模型面：round2 起消息经真实 redact——标记/指令句存活、0 六禁词
+    msg2 = gw.calls[1]["messages"][1]["content"]
+    assert _RUN7B_MARK in msg2
+    assert "必须是当前文件中恰好出现一次的连续原文" in msg2
+    for w in _RUN7B_FORBIDDEN:
+        assert w not in msg2
+    assert sep not in msg2
+    # 人侧 RAW 三元：decision / timeline / FAILURE 保原 rel 原分隔符
+    assert _run7b_decision(tmp_path, "t7b-a10", 1) == {
+        "applied": [], "rejected": raw_reason}
+    entries = _run7b_anchor_entries(rec)
+    assert entries[0]["patch_anchor_rejected"] == raw_reason
+    failure = json.loads((wd / "FAILURE.json").read_text(encoding="utf-8"))
+    assert weird in failure["reason"] and sep in failure["reason"]
+    assert "sitecustomize" in failure["reason"]
+    # recall 查询串/snippets 采集在注入之前，不被污染
+    assert recall.queries and all(
+        _RUN7B_MARK not in q and "sitecustomize" not in q
+        for q in recall.queries)
+    snips = _collect_snippets(wd, rec["timeline"][-1]["stderr_tail"])
+    assert all("sitecustomize" not in s["snippet"] for s in snips)
+
+
+# ---- A11：成功路径逐字节等价（reference 为父提交 1323143 旧算法零共享照抄） -
+
+class _Run7bRefPatchError(RuntimeError):
+    """A11 reference 本地异常（MINOR-4：禁止 import 生产私有件）。"""
+
+
+_RUN7B_REF_FORBIDDEN = frozenset({"stage_models.yaml", "00_env.sh"})
+_RUN7B_REF_HUNK_RE = re.compile(
+    r"^@@ -(?P<o>\d+)(?:,\d+)? \+(?P<n>\d+)(?:,\d+)? @@", re.M)
+
+
+def _run7b_ref_chmod(target: Path) -> None:
+    # 父提交 chmod_keep_user_exec 语义内联：0o600 | (old & 0o700)
+    os.chmod(target, 0o600 | (target.stat().st_mode & 0o700))
+
+
+def _run7b_ref_validate_target(path: Path, workdir: Path) -> Path:
+    name = path.name
+    if name in _RUN7B_REF_FORBIDDEN:
+        raise _Run7bRefPatchError(f"补丁企图修改禁改文件：{name}")
+    if "access" in path.parts:
+        raise _Run7bRefPatchError(f"补丁企图进入 ~/access 区域：{path}")
+    workdir_r = workdir.resolve()
+    target = path.resolve(strict=False) if path.is_absolute() \
+        else (workdir_r / path).resolve(strict=False)
+    try:
+        target.relative_to(workdir_r)
+    except ValueError:
+        raise _Run7bRefPatchError(
+            f"补丁目标越出 workdir：{path} -> {target}（workdir={workdir_r}）")
+    cur = workdir_r
+    for part in target.relative_to(workdir_r).parts:
+        cur = cur / part
+        if cur.is_symlink():
+            real = cur.resolve(strict=False)
+            try:
+                real.relative_to(workdir_r)
+            except ValueError:
+                raise _Run7bRefPatchError(
+                    f"补丁经符号链接逃逸 workdir：{cur} -> {real}")
+    return target
+
+
+def _run7b_ref_apply_unified_diff(workdir: Path, diff_text: str) -> list[str]:
+    """照抄父提交 1323143 runner.py 旧 _apply_unified_diff（立即写盘版）。"""
+    files = re.split(r"^diff --git .+$", diff_text, flags=re.M)
+    applied = []
+    for section in files:
+        if not section.strip():
+            continue
+        m_new = re.search(r"^\+\+\+ (?:b/)?(.+)$", section, re.M)
+        if not m_new:
+            raise _Run7bRefPatchError("unified diff 缺 +++ 头")
+        rel = m_new.group(1).strip()
+        target = _run7b_ref_validate_target(Path(rel), workdir)
+        body_start = section.find("\n@@")
+        body = section[body_start + 1:] if body_start >= 0 else ""
+        old_lines = target.read_text(encoding="utf-8").splitlines(keepends=True) \
+            if target.exists() else []
+        result = []
+        cursor = 0
+        hunks = list(_RUN7B_REF_HUNK_RE.finditer(body))
+        if not hunks:
+            raise _Run7bRefPatchError("unified diff 无 hunk")
+        for hi, hm in enumerate(hunks):
+            hunk_end = hunks[hi + 1].start() if hi + 1 < len(hunks) else len(body)
+            hunk_lines = body[hm.start():hunk_end].splitlines()
+            old_block, new_block = [], []
+            for hl in hunk_lines[1:]:
+                if hl.startswith("\\"):
+                    continue
+                if hl.startswith("-"):
+                    old_block.append(hl[1:])
+                elif hl.startswith("+"):
+                    new_block.append(hl[1:])
+                else:
+                    ctx = hl[1:] if hl[:1] in (" ", "") else hl
+                    old_block.append(ctx)
+                    new_block.append(ctx)
+            window = [l.rstrip("\n") for l in old_lines[cursor:]]
+            old_s = [l.rstrip("\n") for l in old_block]
+            hits = [i for i in range(len(window) - len(old_s) + 1)
+                    if window[i:i + len(old_s)] == old_s]
+            if len(hits) != 1:
+                raise _Run7bRefPatchError(
+                    f"hunk 上下文命中 {len(hits)} 次（需恰好 1 次）：{rel}")
+            at = cursor + hits[0]
+            result.extend(old_lines[cursor:at])
+            result.extend("\n".join(new_block).splitlines(keepends=True))
+            cursor = at + len(old_s)
+        result.extend(old_lines[cursor:])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("".join(result), encoding="utf-8")
+        _run7b_ref_chmod(target)
+        applied.append(str(target.relative_to(workdir.resolve())))
+    return applied
+
+
+def _run7b_ref_apply_structured_patch(workdir: Path, patch: dict) -> str:
+    """照抄父提交 1323143 runner.py 旧 _apply_structured_patch（立即写盘版）。"""
+    rel = patch.get("path")
+    if not isinstance(rel, str) or not rel:
+        raise _Run7bRefPatchError("补丁缺 path 字段")
+    target = _run7b_ref_validate_target(Path(rel), workdir)
+    old, new = patch.get("old"), patch.get("new")
+    if not isinstance(old, str) or not isinstance(new, str):
+        raise _Run7bRefPatchError("补丁 old/new 必须为字符串")
+    text = target.read_text(encoding="utf-8") if target.exists() else ""
+    if text.count(old) != 1:
+        raise _Run7bRefPatchError(
+            f"old 块命中 {text.count(old)} 次（需恰好 1 次）：{rel}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text.replace(old, new, 1), encoding="utf-8")
+    _run7b_ref_chmod(target)
+    return str(target.relative_to(workdir.resolve()))
+
+
+def _run7b_snapshot_tree(wd: Path) -> dict:
+    out = {}
+    for p in sorted(wd.rglob("*")):
+        rel = str(p.relative_to(wd))
+        if p.is_symlink():
+            out[rel] = ("symlink", os.readlink(p))
+        elif p.is_dir():
+            out[rel] = ("dir", p.stat().st_mode & 0o777)
+        else:
+            out[rel] = ("file", p.read_bytes(), p.stat().st_mode & 0o777)
+    return out
+
+
+def _run7b_seed(wd: Path, scenario: str):
+    if scenario == "same_file_two":
+        (wd / "f.txt").write_text("aXbYc", encoding="utf-8")
+    elif scenario == "two_section":
+        # 本仓最小 unified applier 约定：hunk 覆到 EOF 时文件尾换行随最后
+        # 一条 new_block 落盘（无 tail 行携带）；两 section 同指此文件，
+        # 终态以参考实现逐字节对照（不手写理想 git 语义）。
+        (wd / "f.txt").write_text("l1\nl2\nl3\n", encoding="utf-8")
+    elif scenario == "crlf":
+        # read_text 通用换行把 CRLF 翻成 LF（两侧算法同形，同归一即等价）。
+        (wd / "f.txt").write_bytes(b"a\r\nb\r\n")
+    elif scenario in ("mode700", "mode600"):
+        p = wd / "script_x.py"
+        p.write_text("print(1)\n", encoding="utf-8")
+        os.chmod(p, 0o700 if scenario == "mode700" else 0o600)
+    elif scenario == "symlink":
+        (wd / "real.py").write_text("abc\n", encoding="utf-8")
+        os.symlink("real.py", wd / "lnk.py")
+    # birth / multi_file / nested_dirs 无预置文件
+
+
+_RUN7B_TWO_SECTION_DIFF = (
+    "--- a/f.txt\n+++ b/f.txt\n@@ -1,3 +1,3 @@\n-l1\n+L1\n l2\n l3\n"
+    "diff --git a/f.txt b/f.txt\n"
+    "--- a/f.txt\n+++ b/f.txt\n@@ -2,2 +2,2 @@\n l2\n-l3\n+L3\n")
+
+
+def _run7b_scenario(scenario: str):
+    if scenario == "birth_old_empty":
+        return ("structured_one",
+                _run7b_patch("new.py", "", "born\n"))
+    if scenario == "same_file_two":
+        return ("structured_many", [
+            _run7b_patch("f.txt", "X", "Q"),      # 第二锚点落第一补丁结果
+            _run7b_patch("f.txt", "aQb", "ZZZ")])
+    if scenario == "two_section":
+        return ("unified", _RUN7B_TWO_SECTION_DIFF)
+    if scenario == "multi_file":
+        return ("structured_many", [
+            _run7b_patch("a.txt", "", "A\n"),
+            _run7b_patch("b.txt", "", "B\n")])
+    if scenario == "crlf":
+        # 磁盘 CRLF 经 read_text 为 LF；锚点用读入形，两侧同归一即等价。
+        return ("structured_one",
+                _run7b_patch("f.txt", "a\nb", "x\ny"))
+    if scenario in ("mode700", "mode600"):
+        return ("structured_one",
+                _run7b_patch("script_x.py", "print(1)", "print(2)"))
+    if scenario == "nested_dirs":
+        return ("structured_one",
+                _run7b_patch("d1/d2/d3/new.py", "", "deep\n"))
+    if scenario == "symlink":
+        return ("structured_one",
+                _run7b_patch("lnk.py", "abc", "XYZ"))
+    raise KeyError(scenario)
+
+
+def _run7b_run_side(wd: Path, side: str, kind: str, payload):
+    if side == "prod":
+        if kind == "structured_one":
+            return [_apply_structured_patch(wd, payload)]
+        if kind == "structured_many":
+            return _parse_and_apply(wd, _run7b_structured(*payload))
+        return _apply_unified_diff(wd, payload)
+    if kind == "structured_one":
+        return [_run7b_ref_apply_structured_patch(wd, payload)]
+    if kind == "structured_many":
+        return [_run7b_ref_apply_structured_patch(wd, p) for p in payload]
+    return _run7b_ref_apply_unified_diff(wd, payload)
+
+
+_RUN7B_SCENARIOS = [
+    "birth_old_empty", "same_file_two", "two_section", "multi_file",
+    "crlf", "mode700", "mode600", "nested_dirs", "symlink"]
+
+
+@pytest.mark.parametrize("scenario", _RUN7B_SCENARIOS, ids=_RUN7B_SCENARIOS)
+def test_run7b_a11_success_path_byte_equivalent(tmp_path, scenario):
+    kind, payload = _run7b_scenario(scenario)
+    wd_ref = tmp_path / "ref"
+    wd_new = tmp_path / "new"
+    wd_ref.mkdir()
+    wd_new.mkdir()
+    _run7b_seed(wd_ref, scenario)
+    _run7b_seed(wd_new, scenario)
+    # MINOR-3：钉新树自身补丁前后 inode 不变（两树互为独立 tmp，禁跨树比 inode）
+    ino_before = (wd_new / "real.py").stat().st_ino if scenario == "symlink" \
+        else None
+
+    applied_ref = _run7b_run_side(wd_ref, "ref", kind, payload)
+    applied_new = _run7b_run_side(wd_new, "prod", kind, payload)
+
+    assert applied_new == applied_ref
+    if scenario == "two_section":
+        # MINOR-1：一个 diff 两 section 同指一文件 ⇒ [rel, rel] 不塌缩；
+        # 第二 section 的 cursor 跑在第一 section 投影行上（L1 已在投影里）。
+        assert applied_new == ["f.txt", "f.txt"]
+        assert (wd_new / "f.txt").read_text() == "L1\nl2\nL3"
+    if scenario == "same_file_two":
+        assert applied_new == ["f.txt", "f.txt"]
+        assert (wd_new / "f.txt").read_text() == "ZZZYc"
+    if scenario == "crlf":
+        # CRLF 两侧同归一成 LF 字节。
+        assert (wd_new / "f.txt").read_bytes() == b"x\ny\n"
+    assert _run7b_snapshot_tree(wd_new) == _run7b_snapshot_tree(wd_ref)
+    if scenario == "symlink":
+        # MINOR-3：write_text 跟随链接、不换 inode
+        assert (wd_new / "real.py").stat().st_ino == ino_before
+        assert (wd_new / "real.py").read_text() == "XYZ\n"
+
+
+def test_run7b_a11_staging_functions_grep_clean():
+    # §3.3：投影函数体禁出现任何落盘原语；commit 段恰三件 rename-free 原语
+    for fn in (_stage_structured, _stage_unified_section):
+        src = inspect.getsource(fn)
+        for bad in ("mkdir", "write_text", "chmod", "os.replace",
+                    "atomic_write", "os.rename"):
+            assert bad not in src, (fn.__name__, bad)
+    csrc = inspect.getsource(_commit_staged)
+    assert "mkdir(parents=True, exist_ok=True)" in csrc
+    assert 'write_text(' in csrc and 'encoding="utf-8"' in csrc
+    assert "chmod_keep_user_exec(" in csrc
+    for bad in ("os.replace", "atomic_write", "os.rename"):
+        assert bad not in csrc
+
+
+# ---- A12：kill-9 重放两形（真 CallReplay(tmp)；FS 回滚/FS 已修补） ---------
+
+def test_run7b_a12a_replay_fs_rolled_back_zero_new_rows(tmp_path):
+    P = _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))
+    runner, spec, gw, wd, cache = _run7b_setup(
+        tmp_path, [P], thread="t7b-a12", usage=(10, 20))
+    rec = runner.run(spec)
+    assert rec["status"] == "ok" and len(gw.calls) == 1
+    rows1 = list((tmp_path / "cache").glob("*.json"))
+    assert len(rows1) == 1
+
+    # kill-9 模拟：节点重放时 FS 与 telemetry 已回滚（FAILURE 从不存在）
+    (wd / "telemetry.json").unlink()
+    (wd / "fix.txt").write_text("NEEDS_FIX", encoding="utf-8")
+    gw2 = FakeGateway([], usage=(10, 20))
+    runner2 = AgentRunner(gw2, FakeVector(), evidence_root=tmp_path / "ev",
+                          call_cache=CallReplay(tmp_path / "cache"))
+    rec2 = runner2.run(spec)
+    assert rec2["status"] == "ok"
+    assert len(gw2.calls) == 0                      # 命中重放，0 新账行
+    assert (wd / "fix.txt").read_text() == "PATCHED"
+    assert (wd / "telemetry.json").is_file()
+    assert list((tmp_path / "cache").glob("*.json")) == rows1
+
+
+def test_run7b_a12b_replay_fs_already_patched_zero_hits_feedback(tmp_path):
+    P1 = _run7b_structured(_run7b_patch("fix.txt", "x=0", "x=1"))
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, [P1], script=ALWAYS_FAIL_SCRIPT, cap=1, fix="x=0",
+        thread="t7b-a12b", usage=(10, 20))
+    rec = runner.run(spec)
+    assert rec["status"] == "failed" and rec["executions"] == 2
+    assert (wd / "fix.txt").read_text() == "x=1"
+
+    # kill-9 模拟：FS 已修补（留 x=1），仅撤 FAILURE；脚本确定性仍真失败
+    (wd / "FAILURE.json").unlink()
+    P2 = _run7b_structured(_run7b_patch("fix.txt", "x=1", "x=2"))
+    gw2 = FakeGateway([P2], usage=(10, 20))
+    runner2 = AgentRunner(gw2, FakeVector(),
+                          evidence_root=tmp_path / "ev2",
+                          call_cache=CallReplay(tmp_path / "cache"))
+    spec2 = RunSpec(
+        thread_id="t7b-a12b", workdir=wd,
+        cmd=[sys.executable, str(wd / "script.py")],
+        telemetry_relpath="telemetry.json", batch_id="T6-FIXTURE",
+        billing_task=6, run_idx=1, max_coding_rounds=2)
+    rec2 = runner2.run(spec2)
+
+    assert rec2["status"] == "failed"
+    assert len(gw2.calls) == 1                      # round1 命中缓存 0 账行
+    assert rec2["executions"] == 3
+    entries = _run7b_anchor_entries(rec2)
+    assert len(entries) == 1
+    assert entries[0]["coding_round"] == 1
+    assert entries[0]["patch_anchor_hits"] == 0
+    assert entries[0]["patch_anchor_rejected"] == (
+        "old 块命中 0 次（需恰好 1 次）：fix.txt")
+    # 真实新付费轮（指纹因反馈必变而 miss）消息含标记+ZERO hint
+    msg = gw2.calls[0]["messages"][1]["content"]
+    assert _RUN7B_MARK in msg and _ANCHOR_HINT_ZERO in msg
+    # 普通帽尽（非末次锚点帽），无锚点后缀
+    assert rec2["reason"] == "2 轮 coding_debug 后仍失败（RunSpec 上限）"
+    assert (wd / "fix.txt").read_text() == "x=2"
+    assert len(list((tmp_path / "cache").glob("*.json"))) == 2
+
+
+# ---- A13：四类硬停保持（各恰 1 调用 1 exec，锚点通道零介入） ----------------
+
+_RUN7B_HARD_CASES = {
+    "empty_patches": json.dumps({"patches": []}),
+    "json_scalar": "42",
+    "json_array": '["a"]',
+    "old_new_nonstr": _run7b_structured(_run7b_patch("fix.txt", 1, "x")),
+    "unified_no_plus": json.dumps(
+        {"unified_diff": "--- a/f.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n"},
+        ensure_ascii=False),
+    "unified_no_hunk": json.dumps(
+        {"unified_diff": "--- a/f.txt\n+++ b/f.txt\n"},
+        ensure_ascii=False),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_RUN7B_HARD_CASES),
+                         ids=sorted(_RUN7B_HARD_CASES))
+def test_run7b_a13_hard_stops_remain_one_call(tmp_path, name):
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, [_RUN7B_HARD_CASES[name]], script=ALWAYS_FAIL_SCRIPT,
+        thread="t7b-a13-" + name)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 1 and rec["executions"] == 1
+    assert "补丁安全拒绝（不重试）" in rec["reason"]
+    assert "末次锚点" not in rec["reason"]
+    assert (wd / "FAILURE.json").is_file()
+    assert _run7b_anchor_entries(rec) == []
+    assert (wd / "fix.txt").read_text() == "NEEDS_FIX"
+
+
+# ---- A14：run7 真实响应缩形回归（两补丁同指 V2，patch0 old 命中 2 次） -----
+
+def test_run7b_a14_run7_real_response_synthetic_shrink(tmp_path):
+    v2_name = "genesis_humanoid_dr_v2.py"
+    v2 = ("# synthetic shrink of run7 V2（合成夹具，禁读 /mnt）\n"
+          "def step_a():\n"
+          "    target.update(self._side_step(a=1))\n"
+          "    target.update(self._side_step(b=2))\n")
+    r1 = _run7b_structured(
+        _run7b_patch(v2_name, "target.update(self._side_step(",
+                     "target.update(self._side_step_v2("),
+        _run7b_patch(v2_name, "def control_due(subscript_index):",
+                     "def control_due(subscript_index, *, extra=0):"))
+    r2 = _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, [r1, r2], thread="t7b-a14", files={v2_name: v2})
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok" and len(gw.calls) == 2
+    assert rec["coding_round"] == 2 and rec["executions"] == 3
+    # run7 现场 105B decision 的 rejected 串逐字
+    assert _run7b_decision(tmp_path, "t7b-a14", 1) == {
+        "applied": [],
+        "rejected": f"old 块命中 2 次（需恰好 1 次）：{v2_name}"}
+    assert (wd / v2_name).read_text(encoding="utf-8") == v2
+    assert _run7b_anchor_entries(rec)[0]["patch_anchor_hits"] == 2
+
+
+# ---- A15：chunked 出生互操作（old="" 经 staging 出生，AST 闸在） ------------
+
+def test_run7b_a15_chunked_birth_through_staging(tmp_path):
+    codes = _happy_chunk_codes()
+    runner, spec, gw, wd, _ = _chunked_runner(
+        tmp_path, [_chunk_fence(c, i) for i, c in enumerate(codes)],
+        thread="t7b-a15")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok"
+    assert rec["coding_round"] == 1 and rec["executions"] == 2
+    assert len(gw.calls) == 6
+    assert (wd / _CHUNK_TARGET).read_text(encoding="utf-8") == "\n".join(codes)
+    _validate_assembled_chunks("\n".join(codes))      # AST 入口守卫在

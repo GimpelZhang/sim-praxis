@@ -157,6 +157,37 @@ _RC0_MISSING_ARTIFACT_FMT = (
     "信号。以上仅为机器核验事实，不含原因诊断；请自行核对脚本执行与产物写出"
     "环节。")
 
+# run7b（2026-10-23 用户裁决，L505② 协议口径修正，见 PatchAnchorError
+# docstring）：锚点 !=1 整轮拒绝后给模型的机器核验反馈。
+# v1.0 锁内适配（critic stage-1 MAJOR-1，2026-10-24 亲验复现）：FMT 必须
+# 显式多物理行（行间显式 \n），{reason}+{hint} 独占一条物理行——
+# redact_for_model 按物理行整行丢弃，draft 的相邻字面量隐式拼接成一行，
+# rel 含六禁词时全部指令被连带静默丢弃。现形态：redact 至多丢原因行。
+# 戒律（MINOR-9：适用范围仅常量与两 hint）：纯 str、无 ASCII 双引号
+# （不匹配 runner.py:315 _FRAME_RE 帧形）、无六禁词、无 prelude 路径、
+# 「机器核验（非模型输出）」口吻。渲染后 reason 为模型可控文本，不承诺
+# 字符集，只承诺换行中和（见 _ANCHOR_LINE_SEPS）。
+_ANCHOR_REJECT_FMT = (
+    "机器核验（非模型输出）：上一轮返回的补丁已被整体拒绝，本轮没有\n"
+    "应用任何补丁，全部目标文件字节保持不变，连新建目录也未创建。\n"
+    "机器判定原因：{reason}。{hint}\n"
+    "请在轮帽内重发修正后的补丁：old（或 unified diff 的 hunk 上下文）\n"
+    "必须是当前文件中恰好出现一次的连续原文（含缩进与空白，逐字复制）；\n"
+    "同一响应内多个补丁按给出顺序应用；多处同形位点必须扩大上下文使其\n"
+    "唯一，或拆成多条补丁让每条 old 各自只命中一个位点；禁止复用同一\n"
+    "条歧义 old，禁止凭行号或记忆猜测原文。")
+_ANCHOR_HINT_MULTI = (
+    "该锚点在当前文件中出现了多次，属于非唯一锚点。")
+_ANCHOR_HINT_ZERO = (
+    "该锚点在当前文件中一次都未出现，old 与当前文件实际内容不符。")
+
+# v1.0（MAJOR-1）：str.splitlines 全分隔符集（LEAD 2026-10-24 在
+# Python 3.10.12 亲验恰 10 个：\n \r \v \f \x1c \x1d \x1e \x85
+# U+2028 U+2029）。用 chr 码表构造（源码不出现不可见字面量，防抄损）。
+_ANCHOR_LINE_SEPS = (
+    "\n", "\r", "\v", "\f",
+    *(chr(c) for c in (0x1C, 0x1D, 0x1E, 0x85, 0x2028, 0x2029)))
+
 
 class CodingLimitError(GatewayPausedError):
     """5 轮用尽/失败 run 被再次进入：等价硬停，不发网（计划 L505 ③）。
@@ -172,6 +203,40 @@ class CodingLimitError(GatewayPausedError):
 
 class PatchSafetyError(RuntimeError):
     """补丁越界或无法安全应用：拒绝且不重试（计划 L505 ②）。"""
+
+
+class PatchAnchorError(PatchSafetyError):
+    """锚点计数 !=1 的本地拒绝：整轮不应用、零落盘，反馈后续跑（受轮帽）。
+
+    锁内适配（Phase_1 L505② 协议口径修正，用户 2026-10-23 逐字裁决
+    「把 L505② 非唯一锚从立即结案改为计为一轮失败、把歧义反馈给模型
+    令其给唯一锚点、在 5 轮帽内继续」）：L505② 原文只钉「补丁越界」不
+    重试；锚点非唯一/未命中是模型可自修的响应缺陷，run7 首跑（old 块
+    命中 2 次）暴露旧实现把它归并到越界同判立即结案，使预注册 5 轮帽
+    （L502）只花了 1 轮。本子类把该条件切到 ChunkBirthError 同构的
+    「失败→机器反馈→下一 coding 轮」通道；越界等策略违例仍由父类
+    PatchSafetyError 立即结案。这是协议口径修正，不是调参翻案：
+    RUN_CODING_CAP/MAX_CODING_ROUNDS 均=5 不动，再败仍诚实 human_failure。
+
+    hits 为机器计数（0=未命中，>1=非唯一），进 timeline 整数键与
+    模型面 hint 选择；str(exc) 仍是人侧/模型面机器原因原文。
+
+    加宽授权链留痕（critic stage-1 ACCEPT-WIDENING 条件 1）：用户
+    2026-10-23 逐字原话只点名「非唯一锚（>1）」；hits==0（未命中）
+    纳入本子类系同一 !=1 机器谓词的同缺陷类，经用户指定的「另开
+    评审+三签」协议评审通道（fresh critic 2026-10-24 APPROVE 边界）
+    接受，非用户原话字面授权；两 hint 分述。切换站点严格限
+    unified hunk 与 structured count 两个计数判定，不外延。
+
+    行为代差登记（MINOR-2）：已存在非空文件 old="" 旧实现经
+    text.count("")==len+1（>1）走父类 PatchSafetyError 立即结案，
+    本子类生效后改走反馈续跑（消息串不变、hits=len+1、零落盘）；
+    出生（文件不存在）old="" 仍恰好 1 次、正常写出，行为不变。
+    """
+
+    def __init__(self, message: str, *, hits: int):
+        super().__init__(message)
+        self.hits = hits
 
 
 class ChunkBirthError(RuntimeError):
@@ -383,65 +448,8 @@ _HUNK_RE = re.compile(
     r"^@@ -(?P<o>\d+)(?:,\d+)? \+(?P<n>\d+)(?:,\d+)? @@", re.M)
 
 
-def _apply_unified_diff(workdir: Path, diff_text: str) -> list[str]:
-    """最小 unified diff 应用器（git 风格头）；每段旧块必须唯一命中。"""
-    files = re.split(r"^diff --git .+$", diff_text, flags=re.M)
-    applied: list[str] = []
-    for section in files:
-        if not section.strip():
-            continue
-        m_old = re.search(r"^--- (?:a/)?(.+)$", section, re.M)
-        m_new = re.search(r"^\+\+\+ (?:b/)?(.+)$", section, re.M)
-        if not m_new:
-            raise PatchSafetyError("unified diff 缺 +++ 头")
-        rel = m_new.group(1).strip()
-        target = _validate_target(Path(rel), workdir)
-        body_start = section.find("\n@@")
-        body = section[body_start + 1:] if body_start >= 0 else ""
-        old_lines = target.read_text(encoding="utf-8").splitlines(keepends=True) \
-            if target.exists() else []
-        # 按 hunk 顺序定位替换
-        result: list[str] = []
-        cursor = 0
-        hunks = list(_HUNK_RE.finditer(body))
-        if not hunks:
-            raise PatchSafetyError("unified diff 无 hunk")
-        for hi, hm in enumerate(hunks):
-            hunk_end = hunks[hi + 1].start() if hi + 1 < len(hunks) else len(body)
-            hunk_lines = body[hm.start():hunk_end].splitlines()
-            old_block, new_block = [], []
-            for hl in hunk_lines[1:]:
-                if hl.startswith("\\"):
-                    continue
-                if hl.startswith("-"):
-                    old_block.append(hl[1:])
-                elif hl.startswith("+"):
-                    new_block.append(hl[1:])
-                else:
-                    ctx = hl[1:] if hl[:1] in (" ", "") else hl
-                    old_block.append(ctx)
-                    new_block.append(ctx)
-            window = [l.rstrip("\n") for l in old_lines[cursor:]]
-            old_s = [l.rstrip("\n") for l in old_block]
-            hits = [i for i in range(len(window) - len(old_s) + 1)
-                    if window[i:i + len(old_s)] == old_s]
-            if len(hits) != 1:
-                raise PatchSafetyError(
-                    f"hunk 上下文命中 {len(hits)} 次（需恰好 1 次）：{rel}")
-            at = cursor + hits[0]
-            result.extend(old_lines[cursor:at])
-            result.extend("\n".join(new_block).splitlines(keepends=True))
-            cursor = at + len(old_s)
-        result.extend(old_lines[cursor:])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text("".join(result), encoding="utf-8")
-        # L-11：收敛到属主 rw，但保留补丁目标文件原有的属主执行位（0700 脚本）。
-        chmod_keep_user_exec(target)
-        applied.append(str(target.relative_to(workdir.resolve())))
-    return applied
-
-
-def _apply_structured_patch(workdir: Path, patch: dict) -> str:
+def _stage_structured(staged: dict, workdir: Path, patch: dict) -> str:
+    """run7b §3.2：单 structured 补丁的内存投影（只读盘、只写 staged；同文件后续锚点落前序投影）。"""
     rel = patch.get("path")
     if not isinstance(rel, str) or not rel:
         raise PatchSafetyError("补丁缺 path 字段")
@@ -449,15 +457,101 @@ def _apply_structured_patch(workdir: Path, patch: dict) -> str:
     old, new = patch.get("old"), patch.get("new")
     if not isinstance(old, str) or not isinstance(new, str):
         raise PatchSafetyError("补丁 old/new 必须为字符串")
-    text = target.read_text(encoding="utf-8") if target.exists() else ""
-    if text.count(old) != 1:
-        raise PatchSafetyError(
-            f"old 块命中 {text.count(old)} 次（需恰好 1 次）：{rel}")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text.replace(old, new, 1), encoding="utf-8")
-    # L-11：0700/0755 可执行脚本补丁后保留属主执行位，不再被抹成 0600。
-    chmod_keep_user_exec(target)
+    key = str(target)
+    if key not in staged:
+        staged[key] = target.read_text(encoding="utf-8") if target.exists() else ""
+    text = staged[key]
+    hits = text.count(old)
+    if hits != 1:
+        # run7b 锁内适配（L505② 协议口径修正，§10.1 标记 2）：锚点 !=1 改道子类反馈通道（MINOR-2 old="" 见类 docstring）。
+        raise PatchAnchorError(f"old 块命中 {hits} 次（需恰好 1 次）：{rel}", hits=hits)
+    staged[key] = text.replace(old, new, 1)
     return str(target.relative_to(workdir.resolve()))
+
+
+def _commit_staged(staged: dict, workdir: Path) -> None:
+    """run7b §3.2 MINOR-3：全部锚点通过后按首触顺序落盘，每文件恰三件 rename-free 原语。"""
+    for key, text in staged.items():
+        target = Path(key)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        # L-11：0700/0755 可执行脚本补丁后保留属主执行位（幂等，跟随链接）。
+        chmod_keep_user_exec(target)
+
+
+def _stage_unified_section(staged: dict, workdir: Path, section: str) -> "Optional[str]":
+    """run7b（冻结规格 §3.2）：单 unified section 的内存投影；空段返回 None。"""
+    if not section.strip():
+        return None
+    m_new = re.search(r"^\+\+\+ (?:b/)?(.+)$", section, re.M)
+    if not m_new:
+        raise PatchSafetyError("unified diff 缺 +++ 头")
+    rel = m_new.group(1).strip()
+    target = _validate_target(Path(rel), workdir)
+    body_start = section.find("\n@@")
+    body = section[body_start + 1:] if body_start >= 0 else ""
+    key = str(target)
+    if key in staged:
+        old_lines = staged[key].splitlines(keepends=True)  # MINOR-1：第二 section 从第一 section 投影取行
+    else:
+        old_lines = (target.read_text(encoding="utf-8").splitlines(keepends=True)
+                     if target.exists() else [])
+    # 按 hunk 顺序定位替换（cursor 在投影行上推进）
+    result: list[str] = []
+    cursor = 0
+    hunks = list(_HUNK_RE.finditer(body))
+    if not hunks:
+        raise PatchSafetyError("unified diff 无 hunk")
+    for hi, hm in enumerate(hunks):
+        hunk_end = hunks[hi + 1].start() if hi + 1 < len(hunks) else len(body)
+        hunk_lines = body[hm.start():hunk_end].splitlines()
+        old_block, new_block = [], []
+        for hl in hunk_lines[1:]:
+            if hl.startswith("\\"):
+                continue
+            if hl.startswith("-"):
+                old_block.append(hl[1:])
+            elif hl.startswith("+"):
+                new_block.append(hl[1:])
+            else:
+                ctx = hl[1:] if hl[:1] in (" ", "") else hl
+                old_block.append(ctx)
+                new_block.append(ctx)
+        window = [l.rstrip("\n") for l in old_lines[cursor:]]
+        old_s = [l.rstrip("\n") for l in old_block]
+        hits_idx = [i for i in range(len(window) - len(old_s) + 1)
+                    if window[i:i + len(old_s)] == old_s]
+        if len(hits_idx) != 1:
+            # run7b 锁内适配（L505② 协议口径修正，§10.1 标记 2）：hunk 锚点 !=1 改道子类反馈通道。
+            raise PatchAnchorError(f"hunk 上下文命中 {len(hits_idx)} 次（需恰好 1 次）：{rel}", hits=len(hits_idx))
+        at = cursor + hits_idx[0]
+        result.extend(old_lines[cursor:at])
+        result.extend("\n".join(new_block).splitlines(keepends=True))
+        cursor = at + len(old_s)
+    result.extend(old_lines[cursor:])
+    staged[key] = "".join(result)
+    return str(target.relative_to(workdir.resolve()))
+
+
+def _apply_unified_diff(workdir: Path, diff_text: str) -> list[str]:
+    """最小 unified diff 应用器（git 风格头）；每段旧块必须唯一命中。run7b §3.2：投影后统一 commit，同文件两 section applied=[rel,rel] 不塌缩。"""
+    files = re.split(r"^diff --git .+$", diff_text, flags=re.M)
+    staged: dict[str, str] = {}
+    applied: list[str] = []
+    for section in files:
+        rel = _stage_unified_section(staged, workdir, section)
+        if rel is not None:
+            applied.append(rel)
+    _commit_staged(staged, workdir)
+    return applied
+
+
+def _apply_structured_patch(workdir: Path, patch: dict) -> str:
+    """run7b §3.2：单补丁薄包装（三直调 old="" 出生语义不变："".count("")==1 后 commit）。"""
+    staged: dict[str, str] = {}
+    rel = _stage_structured(staged, workdir, patch)
+    _commit_staged(staged, workdir)
+    return rel
 
 
 def _parse_and_apply(workdir: Path, raw: str) -> list[str]:
@@ -472,11 +566,14 @@ def _parse_and_apply(workdir: Path, raw: str) -> list[str]:
     patches = obj.get("patches")
     if not isinstance(patches, list) or not patches:
         raise PatchSafetyError("返回中既无 unified_diff 也无 patches[]")
+    # run7b §3.2：先逐件投影（任一锚点失败即整轮零落盘），全过后统一 commit。
+    staged: dict[str, str] = {}
     applied = []
     for p in patches:
         if not isinstance(p, dict):
             raise PatchSafetyError("patches 元素必须是对象")
-        applied.append(_apply_structured_patch(workdir, p))
+        applied.append(_stage_structured(staged, workdir, p))
+    _commit_staged(staged, workdir)
     return applied
 
 
@@ -1025,6 +1122,38 @@ def _append_rc0_missing_artifact_note(tail: str, relpath: str) -> str:
     return tail + "\n\n" + note
 
 
+def _neutralize_for_model(reason: str) -> str:
+    """v1.0 MAJOR-1：仅用于模型面 reason；全 splitlines 分隔符折叠单空格。
+
+    人侧 str(exc) 永不走此中和（decision/timeline/FAILURE RAW）。
+    """
+    for sep in _ANCHOR_LINE_SEPS:
+        reason = reason.replace(sep, " ")
+    return re.sub(r" {2,}", " ", reason)
+
+
+def _anchor_note(exc: "PatchAnchorError") -> str:
+    """run7b：锚点拒绝的机器核验反馈（模型面；reason 经换行中和）。"""
+    hint = _ANCHOR_HINT_ZERO if exc.hits == 0 else _ANCHOR_HINT_MULTI
+    return _ANCHOR_REJECT_FMT.format(reason=_neutralize_for_model(str(exc)), hint=hint)
+
+
+def _append_anchor_feedback(tail: str, note: str) -> str:
+    # run7b：幂等同 rc0 note（节点重放不重复注入）；标记句取注记首句。
+    _MARK = "机器核验（非模型输出）：上一轮返回的补丁已被整体拒绝"
+    if _MARK in tail:
+        return tail
+    return tail + "\n\n" + note
+
+
+def _coding_cap_reason(spec: RunSpec, anchor_exc: "Optional[PatchAnchorError]" = None) -> str:
+    """run7b：轮帽文案唯一收口；基串逐字同旧文案，锚点后缀与 chunk 后缀互斥。"""
+    reason = f"{spec.max_coding_rounds} 轮 coding_debug 后仍失败（RunSpec 上限）"
+    if anchor_exc is not None:
+        reason += f"；末次锚点机器原因：{anchor_exc}"
+    return reason
+
+
 def _detect_workdir_hook_pollution(workdir) -> "list[str] | None":
     """run7 §3.6 卫生预检：workdir 顶层非递归三件同名件 + pycache pyc。
 
@@ -1179,6 +1308,7 @@ class AgentRunner:
         # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
         # 上一拆块轮的机器原因（含块号），原样进下一轮块 0 的失败反馈段。
         chunk_feedback = ""
+        anchor_feedback = ""  # run7b §5.2 点 1；成功应用即清零（点 4，见下）
 
         while True:
             exec_no = len(timeline) + 1
@@ -1228,8 +1358,7 @@ class AgentRunner:
 
             # —— 失败路径：coding 调用用尽即结案，结构上不存在多一次调用 ——
             if coding_calls >= spec.max_coding_rounds:
-                reason = (f"{spec.max_coding_rounds} 轮 coding_debug "
-                          f"后仍失败（RunSpec 上限）")  # run7：去写死 D10 后缀
+                reason = _coding_cap_reason(spec)  # run7b：普通帽尽点 anchor_exc=None；chunk 后缀逻辑不动
                 if chunk_feedback:
                     reason += f"；末次拆块出生机器原因：{chunk_feedback}"
                 return self._fail(root, spec, timeline, last_result, reason=reason)
@@ -1256,6 +1385,9 @@ class AgentRunner:
             if result.rc == 0 and not telemetry_ok:
                 repair_tail = _append_rc0_missing_artifact_note(
                     tail, spec.telemetry_relpath)
+            # run7b 锁内适配（L505②，§5.2 点 3/§10.1 标记 5）：锚点注记固定 rc0 之后、redact_for_model 之前（A9 钉次序）；人侧 RAW。
+            if anchor_feedback:
+                repair_tail = _append_anchor_feedback(repair_tail, anchor_feedback)
             # run7 A1（规格 §3.4，脱敏单点）：note 注入之后只求一次模型面
             # tail；普通修补轮与拆块出生轮两通道统一吃 redact 值。人侧
             # timeline/FAILURE/snippets/recall 继续 RAW（见上各采集点）。
@@ -1350,8 +1482,21 @@ class AgentRunner:
                 continue
             try:
                 applied = _parse_and_apply(workdir, raw)
+            except PatchAnchorError as exc:
+                # run7b 锁内适配（L505② 协议口径修正，用户 2026-10-23 逐字裁决；§2.2/§4.2，§10.1 标记 3）：
+                # 锚点 !=1 模型可自修（旧实现归并越界立即结案，5 轮帽只花 1 轮），故反馈续跑；越界/结构违例走下句父类硬停。
+                # 第 5 轮拒绝在此直接 _fail——被拒轮字节未变，再跑 sidecar 确定失败（executions=5，不白跑第 6 次）；1-4 轮 continue 必先再 exec。
+                self._evidence(root, stem, "decision", {"applied": [], "rejected": str(exc)})
+                timeline[-1]["coding_round"] = coding_calls
+                timeline[-1]["patch_anchor_rejected"] = str(exc)
+                timeline[-1]["patch_anchor_hits"] = exc.hits
+                if coding_calls >= spec.max_coding_rounds:
+                    return self._fail(root, spec, timeline, last_result,
+                                      reason=_coding_cap_reason(spec, exc))
+                anchor_feedback = _anchor_note(exc)
+                continue
             except PatchSafetyError as exc:
-                # 越界/坏补丁：拒绝且不发起重试（L505 ②），直接结案
+                # 越界/坏补丁：拒绝且不发起重试（L505 ② 原文只钉越界），直接结案
                 self._evidence(root, stem, "decision",
                                {"applied": [], "rejected": str(exc)})
                 return self._fail(
@@ -1369,6 +1514,7 @@ class AgentRunner:
             self._evidence(root, stem, "decision", decision_doc)
             timeline[-1]["coding_round"] = coding_calls
             timeline[-1]["applied"] = applied
+            anchor_feedback = ""  # run7b §5.2 点 4：成功应用即清零，下轮不带陈旧注记（A7）
 
     # -- 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）--
 
