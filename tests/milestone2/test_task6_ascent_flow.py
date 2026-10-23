@@ -114,6 +114,34 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _shim_rc0_timeline() -> list[dict]:
+    """run7：Gate2 host-shim 双闸合成夹具（9 rollout torch 进程：9 banner+
+    9 atexit site=torch；V2 batch 父 + gpu_sampler：2 idle；A=9/B=0/C=0）。
+
+    真实 run 的锚由各 rollout 子进程经纯 stderr atexit 写出，本 e2e 接缝测
+    只验 Gate2 卡链/四媒体顺序，时间线按生产行格式合成（run7 零实跑）。
+    """
+    banner = "".join(
+        f"[simpraxis-host-shim v1] 平台托底激活（非模型代码） site=torch "
+        f"pid=2{i}00 label=genesis_humanoid_dr_v2.py torch=2.4.1+cu124\n"
+        for i in range(9))
+    torch_atexit = "".join(
+        f"[simpraxis-host-shim v1] 平台托底（非模型代码） site=torch "
+        f"pid=2{i}01 label=genesis_humanoid_dr_v2.py "
+        f"array_migrated=1 numpy_migrated=0 cpu_grad_detached=0\n"
+        for i in range(9))
+    idle = "".join(
+        f"[simpraxis-host-shim v1] 平台托底（非模型代码） site=idle "
+        f"pid=3{i}00 label={name} "
+        f"array_migrated=0 numpy_migrated=0 cpu_grad_detached=0\n"
+        for i, name in enumerate(
+            ("genesis_humanoid_dr_v2.py-batch", "gpu_sampler.py")))
+    tail = banner + torch_atexit + idle
+    return [{"exec": 1, "rc": 0, "stderr_tail": "",
+             "stderr_only_tail": tail,
+             "stdout_chars": 0, "stderr_chars": len(tail)}]
+
+
 # ---------------------------------------------------------------------------
 # 1. 分类节点：t6 新线程 + 冻结题 → ascent，v1_archive 归并到 V1 t8 档案
 # ---------------------------------------------------------------------------
@@ -370,7 +398,8 @@ def test_gate2_diff_card_wired_task6(tmp_path, monkeypatch):
     n_before = len(calls)
     rec = {"duration_ms": 8000,
            "cover_png": str(v2_wd / "cover.png"),
-           "video_path": str(v2_wd / SPLIT_RELS[0])}
+           "video_path": str(v2_wd / SPLIT_RELS[0]),
+           "timeline": _shim_rc0_timeline()}
     state2 = {**state0, "metrics": metrics, "agent_runs": [rec],
               "evolution_sources": partial, "gate2_rejects": 0}
     g2 = task6_mod.make_gate2_seam(
@@ -422,10 +451,12 @@ def test_gate2_diff_card_wired_task6(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 4. run 级 coding cap=3：工厂出生时 V2 入口不存在，全局 5 轮一字不动
+# 4. run 级 coding cap=5（run7：用户 2026-10-23 裁决「2+3 一起做」，
+#    cap 3→5 覆盖 plan L193/L544，票 T6-B11-run7；全局 MAX_CODING_ROUNDS=5
+#    一字不动；拆块出生本地夹具 cap==3 另见 test_chunked_birth_local_cap_3）
 # ---------------------------------------------------------------------------
 
-def test_run_level_coding_cap_3(tmp_path, monkeypatch):
+def test_run_level_coding_cap_5(tmp_path, monkeypatch):
     from orchestrator.agent_runner import runner as runner_mod
 
     monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT",
@@ -446,7 +477,9 @@ def test_run_level_coding_cap_3(tmp_path, monkeypatch):
     factory = task6_mod.make_spec_factory(T6_THREAD, "T6-B1-coding")
     spec = factory(state)
 
-    assert spec.max_coding_rounds == task6_mod.RUN_CODING_CAP == 3
+    # run7 轮帽 3→5（用户 2026-10-23 裁决「2+3 一起做」，覆盖 plan
+    # L193/L544，票 T6-B11-run7）；全局 MAX_CODING_ROUNDS 仍 5 不动。
+    assert spec.max_coding_rounds == task6_mod.RUN_CODING_CAP == 5
     assert runner_mod.MAX_CODING_ROUNDS == 5
     assert spec.billing_task == 6 and spec.batch_id == "T6-B1-coding"
     assert spec.run_timeout_s == 2400
@@ -494,7 +527,7 @@ def test_run_level_coding_cap_3(tmp_path, monkeypatch):
                      "events": [{"type": "gate2_rejected",
                                  "human_notes": "DR 应力端再外扩"}]})
     assert spec2.run_idx == 2
-    assert spec2.max_coding_rounds == 3
+    assert spec2.max_coding_rounds == 5  # run7 cap 3→5（同溯源，更新不删除）
     assert spec2.workdir != spec.workdir
     # 新 run 同样包 wrapper；`--` 后的 V2 入口仍 absent（补丁不继承）。
     assert Path(spec2.cmd[1]) == task6_mod.GPU_SAMPLER
@@ -507,6 +540,83 @@ def test_run_level_coding_cap_3(tmp_path, monkeypatch):
         factory({**state, "v1_archive": None})
     with pytest.raises(GraphStateError, match="sim_engine"):
         factory({**state, "chosen": {"sim_engine": "mujoco"}})
+
+
+def test_chunked_birth_local_cap_3_not_raised(tmp_path):
+    """P3 新增 pin（run7）：拆块出生路径的轮帽只认 RunSpec 实值——本地夹具
+    RunSpec(max_coding_rounds=3) 每轮块 0 即整轮失败时恰耗 3 轮 3 次调用，
+    不被 Task6 run 级轮帽 RUN_CODING_CAP==5 误伤。
+
+    tests/milestone1/test_agent_runner.py:1167 的 chunked 夹具本身不动，
+    本 pin 独立落在 task6 flow 件（规格 v1.1a §4/§6-P3）。
+    """
+    import sys
+    from orchestrator.agent_runner import AgentRunner, RunSpec
+    from orchestrator.agent_runner.runner import ChunkSpec
+    from orchestrator.common.callcache import CallReplay
+
+    # 对照前提：run 级轮帽已提 5；runner 永不读本常量，只认 spec。
+    assert task6_mod.RUN_CODING_CAP == 5
+
+    wd = tmp_path / "work"
+    wd.mkdir(parents=True)
+    target = "v2.py"
+    assert not (wd / target).exists()
+
+    bad_begin = "<<<<<<< simpraxis.chunk.v1 path=v2.py total=6"  # 缺 index
+    bad_response = (bad_begin + "\nx = 1\n"
+                    ">>>>>>> simpraxis.chunk.v1.end")
+
+    class _AlwaysBadGateway:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def model_id(self, stage):
+            return "fake-coding-cap3-pin"
+
+        def call(self, stage, messages, **kw):
+            self.calls.append({"stage": stage, "messages": messages, "kw": kw})
+            return bad_response, (None, None)
+
+    class _NoHits:
+        def query_kb(self, query, *, namespace, top_k):
+            return []
+
+    gw = _AlwaysBadGateway()
+    cache = CallReplay(tmp_path / "cache")
+    runner = AgentRunner(gw, _NoHits(), evidence_root=tmp_path / "ev",
+                         call_cache=cache)
+    spec = RunSpec(
+        thread_id="t6-cap3pin", workdir=wd,
+        cmd=[sys.executable, str(wd / target)],
+        telemetry_relpath="telemetry.json", batch_id="T6-CAP3PIN",
+        billing_task=6, run_idx=1, max_coding_rounds=3,
+        coding_max_tokens=32768, coding_timeout_s=600,
+        chunked_birth=ChunkSpec(
+            target_path=target, chunk_count=6,
+            chunk_titles=(
+                "头部/合成常量", "场景/合成注入", "步态/合成控制",
+                "采集/合成判定", "batch/合成数据产物", "媒体/合成产物"),
+            per_call_sections=(
+                ("V2 升阶任务合同（夹具）", "合同夹具"),
+                ("已批准 macro 提案（夹具）", '{"name": "fixture"}'),
+                ("V1 结构骨架（夹具）", "V1 骨架行")),
+            chunk_boundaries=tuple(f"第 {i} 块边界（夹具）。"
+                                   for i in range(6))))
+    rec = runner.run(spec)
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 3, "cap==3 夹具形态必须恰 3 次调用（每轮块0短路）"
+    assert rec["coding_round"] == 3
+    assert "（RunSpec 上限）" in rec["reason"]
+    assert "D10" not in rec["reason"]  # reason redline：cap=3 夹具串也无 D10
+    # 目标文件三轮整轮失败后仍未出生；时间线 coding_round 恰 1/2/3。
+    assert not (wd / target).exists()
+    rounds = [t["coding_round"] for t in rec["timeline"]
+              if "coding_round" in t]
+    assert rounds == [1, 2, 3]
+    # 每次调用都是拆块出生轮的块 0（chunk_index=0 指纹），无 round4/5 触达。
+    for call in gw.calls:
+        assert call["stage"] == "coding_debug"
 
 
 # ---------------------------------------------------------------------------

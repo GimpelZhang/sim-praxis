@@ -32,6 +32,7 @@ from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, chmod_keep_user_exec
+from orchestrator.common.host_shim.shim_core import redact_for_model
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -109,6 +110,18 @@ CHUNK_FENCE_NUCLEUS = "simpraxis.chunk.v1"
 # 能否安全逐字回显模型给值，防注入下一轮块 0 prompt）；回显判定 fullmatch only（禁 match/search），否则 "evil x.py" 类合法前缀值无锚 fail-open 被回显。
 CHUNK_FENCE_PATH_RE = re.compile(r"[A-Za-z0-9_./-]{1,128}")  # fullmatch only
 TB_TAIL_CHARS = 4096           # traceback 尾部 ≤4KB
+# run7（/tmp/a3gen 与 W1 原型 2026-10-23 实测，见
+# .omc/handoffs/task6-run7-host-shim-design.md v1.1 §3.2）：纯 stderr
+# atexit 锚独立尾窗（字符数；Gate2 offset 闸按 UTF-8 字节计）。显式撤销
+# v1.0 D4「merged stderr+stdout 8192」——genesis 日志走 stdout（≥30721B），
+# merged 窗必丢锚。旧 stderr_tail[-500:] merged 键一字节不动。
+STDERR_ONLY_TAIL_CHARS = 8192
+# run7 §3.6 卫生预检（MINOR，非安全门）：仅 marker=1 形态 exec 前非递归扫
+# workdir 顶层三件宿主引导同名件，加 __pycache__ 内三 stem 的 pyc。
+_HOST_SHIM_MARKER = "SIMPRAXIS_HOST_SHIM"
+_WORKDIR_HOOK_BASENAMES = (
+    "sitecustomize.py", "shim_core.py", "usercustomize.py")
+_WORKDIR_HOOK_STEMS = ("sitecustomize", "shim_core", "usercustomize")
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096
 RUN_TIMEOUT_S = 1800
@@ -1012,6 +1025,27 @@ def _append_rc0_missing_artifact_note(tail: str, relpath: str) -> str:
     return tail + "\n\n" + note
 
 
+def _detect_workdir_hook_pollution(workdir) -> "list[str] | None":
+    """run7 §3.6 卫生预检：workdir 顶层非递归三件同名件 + pycache pyc。
+
+    MINOR 卫生项（非安全门——真实激活形经 §2.3 d1 实验证明不可劫持）：命中
+    返回排序后的命中名（pyc 为相对路径），无命中返回 None。不递归子目录。
+    """
+    workdir = Path(workdir)
+    hits: list[str] = []
+    try:
+        top_names = set(os.listdir(workdir))
+    except OSError:
+        return None
+    hits.extend(sorted(n for n in _WORKDIR_HOOK_BASENAMES if n in top_names))
+    pycache = workdir / "__pycache__"
+    if pycache.is_dir():
+        for stem in _WORKDIR_HOOK_STEMS:
+            for pyc in sorted(pycache.glob(f"{stem}*.pyc")):
+                hits.append(str(pyc.relative_to(workdir)))
+    return hits or None
+
+
 # ---------------------------------------------------------------------------
 # 主类
 # ---------------------------------------------------------------------------
@@ -1148,6 +1182,24 @@ class AgentRunner:
 
         while True:
             exec_no = len(timeline) + 1
+            # run7 §3.6（MINOR 卫生预检，非安全门；仅 marker=1 形态）：exec 前
+            # 非递归扫 workdir 顶层三件同名件 + __pycache__ 同 stem pyc，命中
+            # 即本轮不 exec（0 付费/0 模型/0 触网），机器诊断直接 _fail，真实
+            # 文件名只进人侧 timeline/FAILURE。
+            hook_hits = (_detect_workdir_hook_pollution(workdir)
+                         if spec.env_extra.get(_HOST_SHIM_MARKER) == "1"
+                         else None)
+            if hook_hits is not None:
+                diag = ("工作目录顶层检出宿主引导同名件（卫生预检）："
+                        + ", ".join(hook_hits)
+                        + "。本轮未执行（0 运行/0 模型调用），请人工核查文件"
+                          "来源后再跑。")
+                timeline.append({
+                    "exec": exec_no, "rc": None,
+                    "stderr_tail": diag[-500:],
+                    "stderr_only_tail": diag[-STDERR_ONLY_TAIL_CHARS:],
+                    "stdout_chars": 0, "stderr_chars": len(diag)})
+                return self._fail(root, spec, timeline, None, reason=diag)
             try:
                 result = self._run(list(spec.cmd), workdir,
                                    spec.run_timeout_s, dict(spec.env_extra))
@@ -1155,8 +1207,13 @@ class AgentRunner:
                 result = _ExecResult(124, exc.stdout or "",
                                      (exc.stderr or "") + f"\nTIMEOUT after "
                                      f"{spec.run_timeout_s}s")
-            timeline.append({"exec": exec_no, "rc": result.rc,
-                             "stderr_tail": _tb_tail(result)[-500:]})
+            timeline.append({
+                "exec": exec_no, "rc": result.rc,
+                "stderr_tail": _tb_tail(result)[-500:],  # 旧 merged 键字节不动（D4 撤销）
+                "stderr_only_tail":
+                    (result.stderr or "")[-STDERR_ONLY_TAIL_CHARS:],
+                "stdout_chars": len(result.stdout or ""),
+                "stderr_chars": len(result.stderr or "")})
             last_result = result
             # run6 §15.7-H4（D2）：telemetry_ok 在成功判定处一次性绑定，
             # rc0 缺产物注入分支共用同一布尔，禁止二次 is_file。
@@ -1172,7 +1229,7 @@ class AgentRunner:
             # —— 失败路径：coding 调用用尽即结案，结构上不存在多一次调用 ——
             if coding_calls >= spec.max_coding_rounds:
                 reason = (f"{spec.max_coding_rounds} 轮 coding_debug "
-                          f"后仍失败（RunSpec 上限；默认 D10=5）")
+                          f"后仍失败（RunSpec 上限）")  # run7：去写死 D10 后缀
                 if chunk_feedback:
                     reason += f"；末次拆块出生机器原因：{chunk_feedback}"
                 return self._fail(root, spec, timeline, last_result, reason=reason)
@@ -1199,8 +1256,12 @@ class AgentRunner:
             if result.rc == 0 and not telemetry_ok:
                 repair_tail = _append_rc0_missing_artifact_note(
                     tail, spec.telemetry_relpath)
+            # run7 A1（规格 §3.4，脱敏单点）：note 注入之后只求一次模型面
+            # tail；普通修补轮与拆块出生轮两通道统一吃 redact 值。人侧
+            # timeline/FAILURE/snippets/recall 继续 RAW（见上各采集点）。
+            model_tail = redact_for_model(repair_tail)
             messages = _build_messages(
-                gate2_notes=spec.gate2_notes, traceback_tail=repair_tail,
+                gate2_notes=spec.gate2_notes, traceback_tail=model_tail,
                 snippets=snippets, hits=hits, cmd=spec.cmd,
                 learning_hits=learning_hits or None,
                 extra_sections=spec.extra_prompt_sections or None)
@@ -1227,7 +1288,7 @@ class AgentRunner:
                 if chunked_birth:
                     codes, records = self._run_chunked_birth_round(
                         spec=spec, root=root, model=model,
-                        coding_round=coding_calls, tail=repair_tail,
+                        coding_round=coding_calls, tail=model_tail,
                         snippets=snippets,
                         hits=hits, learning_hits=learning_hits,
                         round_feedback=chunk_feedback)
@@ -1499,6 +1560,10 @@ class AgentRunner:
             "executions": len(timeline),
             "last_rc": result.rc if result else None,
             "last_stderr_tail": _tb_tail(result)[-2000:] if result else "",
+            # run7 A3'：纯 stderr 新键；旧 last_stderr_tail[-2000:] 不动。
+            "last_stderr_only_tail":
+                ((result.stderr or "")[-STDERR_ONLY_TAIL_CHARS:]
+                 if result else ""),
             "timeline": timeline,
             "ts_iso": ts_iso,
         }

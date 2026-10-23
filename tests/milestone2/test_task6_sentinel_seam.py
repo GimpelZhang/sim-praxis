@@ -695,7 +695,12 @@ def test_redline_gateway_kwargs_key_set_and_no_forbidden_identifiers():
     task6_lines = _TASK6_PY.read_text(encoding="utf-8").splitlines()
     prompt_lines = _PROMPTS_PY.read_text(encoding="utf-8").splitlines()
     assert "thinking" in task6_lines[45]   # task6.py 第 46 行
-    assert "thinking" in task6_lines[136]  # task6.py 第 137 行
+    # run7（2026-10-23，冻结规格 task6-run7-host-shim-design.md v1.1a）：
+    # 规格钦点的 docstring 1→2 行、import 1→5 行、RUN_CODING_CAP 溯源注释
+    # 3→6 行三处接缝均在本行之前，行位平移 +9（137→146），断言内容一字不动
+    # （同测授权：漂移时改测试并复核评审 MAJOR-3）；内容锚 seq89 注释仍在。
+    assert "seq89" in task6_lines[145]
+    assert "thinking" in task6_lines[145]  # task6.py 第 146 行（原 137）
     assert "thinking" in prompt_lines[13]  # task6_v2_prompts.py 第 14 行
 
 

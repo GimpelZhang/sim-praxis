@@ -704,7 +704,11 @@ CALL_CACHE_ALLOWLIST = {
     # 守卫/rc0 缺产物机器注记接缝（含 docstring/注释，净 +124 行）全在构造点
     # 之前，纯位移（920→1044）；拆块路径仍复用唯一 _replay_cache 构造点，
     # 0 新增网关调用路径，无新增落点。
-    ("orchestrator/agent_runner/runner.py", 1044),
+    # 2026-10-23 run7 宿主托底：redact_for_model 包 import、STDERR_ONLY_TAIL_
+    # CHARS/hook 常量、_detect_workdir_hook_pollution 助手、run() 卫生预检与
+    # timeline 新键接缝（含 docstring/注释，净 +34 行）全在构造点之前，纯位移
+    # （1044→1078）；shim 不经网关、0 新增 CallReplay 落点。
+    ("orchestrator/agent_runner/runner.py", 1078),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
@@ -851,10 +855,14 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
     # runner.py，证据打包脚本不许顺手改）。
+    # run7（2026-10-23，冻结规格 task6-run7-host-shim-design.md v1.1a）：
+    # task6.py 经规格钦点改动（RUN_CODING_CAP 3→5、prelude 工厂注入、
+    # Gate2 shim 证据闸），冻结哈希随合法改动平移到 run7 终态；另两个冻结
+    # 文件（prompts/证据包脚本）run7 仍零改动，哈希一字不动。
     repo_root = Path(__file__).resolve().parents[2]
     frozen = {
         "orchestrator/graph/task6.py":
-            "614aa790111f308d3e633d7b45cfef1ea8b9fb68619e9651a3175dc59380c415",
+            "3c53a6275d5b6cd6687a9a7cc3ea54a450d46c1c0dcb574d7fc368d57d61acf5",
         "orchestrator/graph/task6_v2_prompts.py":
             "e8055fe3ed72ee6049e396e376b298fd36a783b12c82317e511ad72fb72f38d0",
         "scripts/milestone1/build_evidence_pack.py":

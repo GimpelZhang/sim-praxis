@@ -60,7 +60,8 @@ seq87 一次 29769 chars 合法闭合反证「超限必截断」旧经验），s
 规则 1）。出生管道改 sentinel 围栏纯文本定界（runner._extract_chunk，协议
 见设计 §2），且 n=4→6 是工厂规格变更（六标题/六边界行预算合计 860，见
 task6_v2_prompts.py 与设计 §3.1；本文件唯一构造点 chunk_count 改 6）。
-32768 输出顶/600s 超时/合同七条/RUN_CODING_CAP=3 全部不变；六标题/六边界/
+32768 输出顶/600s 超时/合同七条不变（RUN_CODING_CAP run7 3→5，见常量溯源）；
+六标题/六边界/
 800/18000/30000 三窗 run4 起飞前冻结，撞窗不调参、不挪边界（硬规则 7）。
 """
 from __future__ import annotations
@@ -68,11 +69,17 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from orchestrator.agent_runner.runner import ChunkSpec, RunSpec
+from orchestrator.agent_runner.runner import (
+    STDERR_ONLY_TAIL_CHARS,
+    ChunkSpec,
+    RunSpec,
+)
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.common.runtime_paths import phase2_root, phase2_runs_root
 from orchestrator.graph import task8
@@ -111,9 +118,12 @@ TASK = 6
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GPU_SAMPLER = REPO_ROOT / "orchestrator" / "common" / "gpu_sampler.py"
 
-# 计划 L193：ascent run 的 coding_debug 上限 run 级收窄到 3（全局
-# MAX_CODING_ROUNDS=5 不动；runner 零改动，只消费 RunSpec.max_coding_rounds）。
-RUN_CODING_CAP = 3
+# run7（2026-10-23 用户裁决「2+3 一起做」）：RUN_CODING_CAP 3→5，显式覆盖
+# Phase_2_Plan_detailed.md L193/L544 预注册 run 级 3 轮帽；票 T6-B11-run7
+# 留痕（票在特性提交后才写，注释先挂票号与裁决日期，硬规则 7 溯源）；取
+# runner 既有 D10 默认 5，最小提顶。全局 MAX_CODING_ROUNDS=5 不动；runner
+# 只消费 RunSpec.max_coding_rounds。此后不再自调本常量。
+RUN_CODING_CAP = 5
 
 # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
 # seq43/45/46/47 实证三模型在 Anthropic-Messages shim 上「单次出生 600-900
@@ -277,6 +287,15 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             "SIMPRAXIS_USE_PROXY": "0",
         }
         env_extra.update(scenario["env"])
+
+        # run7（规格 §3.1 m6/d3）：host-shim 激活只经 PYTHONPATH 前拼 prelude
+        # + marker=1（引擎不 import sitecustomize，两条解析路径不混用）。
+        # 前拼不替换——外部 PYTHONPATH 旧值必须保留。
+        prelude = str(REPO_ROOT / "orchestrator" / "common" / "host_shim")
+        old_pp = env_extra.get("PYTHONPATH")
+        env_extra["SIMPRAXIS_HOST_SHIM"] = "1"
+        env_extra["PYTHONPATH"] = prelude + (
+            os.pathsep + old_pp if old_pp else "")
 
         # VRAM sidecar 由 wrapper 设备级采样落 workdir/vram_peak.json（两侧
         # 同包裹、同设备口径；V2 脚本不自报显存）。双重防孤儿：可捕获的
@@ -716,6 +735,113 @@ def make_gate1_seam(feishu, thread_id: str, task_title: str):
     return seam
 
 
+# ---------------------------------------------------------------------------
+# run7 host-shim Gate2 双闸机验（规格 v1.1a §3.3；正则与
+# /tmp/g3_shim_evidence_probe.py v1.1a 逐字同一对，禁裸 site=torch 子串：
+# 9 banner 也含该子串，裸 text.count 必得 18）。MAJOR-1：计数/offset/求和
+# 只作用于逆序找到的最后一个 rc==0 exec 单条目；缺键 fail-closed 遍历全部。
+# ---------------------------------------------------------------------------
+
+BANNER_RE = re.compile(r"\[simpraxis-host-shim v1\] 平台托底激活")
+ATEXIT_RE = re.compile(
+    r"\[simpraxis-host-shim v1\] 平台托底（非模型代码）[^\n]*"
+    r"site=torch[^\n]*?"
+    r"array_migrated=(\d+) numpy_migrated=(\d+) cpu_grad_detached=(\d+)")
+ATEXIT_IDLE_RE = re.compile(
+    r"\[simpraxis-host-shim v1\] 平台托底（非模型代码）[^\n]*site=idle")
+FFMPEG_LINE_RE = re.compile(r"(?mi)^.*ffmpeg.*$")  # m10：单列计数，绝不作锚
+
+
+def _require_shim_evidence(state: dict, rec: dict) -> dict:
+    """Gate2 构卡前的 host-shim 证据双闸；不过即 GraphStateError（卡不发）。"""
+    tl = rec.get("timeline", []) if isinstance(rec, dict) else []
+    entries = [t for t in tl if isinstance(t, dict) and "rc" in t]
+
+    # 落盘义务闸（遍历全部 exec 条目，MAJOR-1 只缩计数作用域不缩落盘义务）。
+    missing = [i for i, t in enumerate(entries)
+               if "stderr_only_tail" not in t]
+    if missing:
+        raise GraphStateError(
+            "Task6 Gate2：exec 时间线条目缺 stderr_only_tail 键"
+            f"（下标 {missing}）——host-shim A3' 证据未随引擎落盘，"
+            "fail-closed（不以旧 merged 键顶替），禁止构卡放行。")
+
+    rc0_index = next(
+        (i for i in range(len(entries) - 1, -1, -1)
+         if entries[i].get("rc") == 0), None)
+
+    if rc0_index is None:
+        # 非 rc0 终态/中间态：只走全 timeline 弱闸（≥1 可解析 torch 行），
+        # 绝不按 9/2 判失败（LEAD 盯点：9/2 硬闸只在末次 rc0 单条目）。
+        all_text = "\n".join(t.get("stderr_only_tail", "") for t in entries)
+        weak = list(ATEXIT_RE.finditer(all_text))
+        if not weak:
+            raise GraphStateError(
+                "Task6 Gate2：无 rc==0 exec 条目且全 timeline 无可解析的 "
+                "host-shim site=torch 迁移计数行（弱闸失败）；shim 在场"
+                "证据缺失，fail-closed 禁止构卡。")
+        a = sum(int(m.group(1)) for m in weak)
+        b = sum(int(m.group(2)) for m in weak)
+        c = sum(int(m.group(3)) for m in weak)
+        return {
+            "shim_banner_seen": bool(BANNER_RE.search(all_text)),
+            "gate_scope": "last_rc0_exec_entry",
+            "rc0_gate_entry_index": None,
+            "array_migrated": a, "numpy_migrated": b,
+            "cpu_grad_detached": c,
+            "atexit_torch_lines": len(weak),
+            "idle_lines": len(ATEXIT_IDLE_RE.findall(all_text)),
+            "last_anchor_offset_bytes": None}
+
+    last = entries[rc0_index]
+    text = last.get("stderr_only_tail", "") or ""
+    torch_hits = list(ATEXIT_RE.finditer(text))
+    idle_n = len(ATEXIT_IDLE_RE.findall(text))
+    banner_seen = bool(BANNER_RE.search(text))
+
+    # 闸 A：末次 rc0 单条目内恰 9 rollout torch 行 + 2 idle（V2 batch 父 +
+    # gpu_sampler）。失败 exec 条目的崩溃子进程锚不参与计数。
+    if len(torch_hits) < 1:
+        raise GraphStateError(
+            "Task6 Gate2：末次 rc0 exec 条目的纯 stderr 流无 host-shim "
+            "site=torch 迁移计数行（A2 锚缺失，shim 未在任何 rollout 触达"
+            "torch），fail-closed 禁止构卡。")
+    if len(torch_hits) != 9:
+        raise GraphStateError(
+            f"Task6 Gate2：末次 rc0 exec 条目 site=torch atexit 行数 "
+            f"{len(torch_hits)} != 契约 9（9 rollout 子进程拓扑，"
+            f"entry_index={rc0_index}）；较早子进程锚可能被纯 stderr "
+            f"{STDERR_ONLY_TAIL_CHARS} 字符窗截断，人工研判：不得放行、"
+            "不得自行加大窗口。")
+    if idle_n != 2:
+        raise GraphStateError(
+            f"Task6 Gate2：末次 rc0 exec 条目 site=idle 行数 {idle_n} != "
+            "契约 2（V2 batch 父 + gpu_sampler），人工研判，不得放行。")
+
+    # 闸 B：末 torch 锚起点→字段尾 UTF-8 字节偏移；字符切片/字节计量的 CJK
+    # 差异如实暴露。≥窗口即 STOP——禁止静默加大常量；转全量 stderr 落证据
+    # 卷回退项另开评审（本 run 不做该回退）。
+    last_match = torch_hits[-1]
+    offset = len(text[last_match.start():].encode("utf-8", "replace"))
+    if offset >= STDERR_ONLY_TAIL_CHARS:
+        raise GraphStateError(
+            f"Task6 Gate2：末 host-shim torch 锚贴近/超出窗口边界"
+            f"（offset={offset}B ≥ {STDERR_ONLY_TAIL_CHARS} 字符窗），"
+            "禁止静默加大常量；转全量 stderr 落证据卷回退项另开评审。")
+
+    a = sum(int(m.group(1)) for m in torch_hits)
+    b = sum(int(m.group(2)) for m in torch_hits)
+    c = sum(int(m.group(3)) for m in torch_hits)
+    return {
+        "shim_banner_seen": banner_seen,
+        "gate_scope": "last_rc0_exec_entry",
+        "rc0_gate_entry_index": rc0_index,
+        "array_migrated": a, "numpy_migrated": b,
+        "cpu_grad_detached": c,
+        "atexit_torch_lines": 9, "idle_lines": 2,
+        "last_anchor_offset_bytes": offset}
+
+
 def make_gate2_seam(feishu, thread_id: str, task_title: str, *,
                     trim_for: "Callable[[dict, dict], dict | None] | None" = None):
     """ascent Gate2：四媒体严格顺序 Diff + 恰好一张 Δ 卡；批准补齐来源块。"""
@@ -763,6 +889,9 @@ def make_gate2_seam(feishu, thread_id: str, task_title: str, *,
 
         runs = state.get("agent_runs", [])
         rec = runs[-1] if runs else {}
+        # run7（规格 v1.1a §3.3）：构卡前 host-shim 双闸机验，不过即
+        # GraphStateError（卡片不发）；MAJOR-1 只认末次 rc0 exec 单条目。
+        shim_evidence = _require_shim_evidence(state, rec)
         trim = trim_for(state, rec) if trim_for is not None else None
         decision = feishu.request_gate2_diff4_approval(
             thread_id, task_title,
@@ -772,7 +901,8 @@ def make_gate2_seam(feishu, thread_id: str, task_title: str, *,
             duration_ms=rec.get("duration_ms"),
             cover_png=rec.get("cover_png"),
             trim=trim,
-            explanation=build_gate2_explanation(state, rec))
+            explanation=build_gate2_explanation(
+                state, rec, shim_evidence))
         if decision.get("decision") != "approve":
             return decision
         sdir = sources_dir(thread_id)
@@ -793,7 +923,21 @@ def make_gate2_seam(feishu, thread_id: str, task_title: str, *,
 # Gate2 四媒体卡三问说明（只写实验事实与判定口径；数字由卡片指标段渲染）
 # ---------------------------------------------------------------------------
 
-def build_gate2_explanation(state: dict, rec: dict) -> "dict[str, str]":
+_SHIM_SUPPORT_SENTENCE = (
+    "平台支持声明：本次 batch 经引擎侧主机迁移托底（sitecustomize Tensor "
+    "托底，非模型代码；stderr 激活横幅与逐进程迁移计数 array/numpy/cpu_grad "
+    "已机器核验入证据，rc0 核验 9 个 rollout 子进程 + 2 个 idle 进程）。"
+    "若 V2 物理占优，结论口径为「去除运行时摩擦后物理改进成立，但代码经"
+    "平台托底」，不得表述为模型独立修对 GPU→numpy 迁移；run6 的 3 轮独立"
+    "修复失败结论原样保留。")
+_SHIM_ZERO_MIGRATION_SENTENCE = (
+    "托底已激活但本次迁移计数为 0（9+2 进程拓扑核验通过），本批结果未实际"
+    "依赖托底，**不得归因托底**，转人工研判。")
+
+
+def build_gate2_explanation(state: dict, rec: dict,
+                            shim_evidence: "dict | None" = None
+                            ) -> "dict[str, str]":
     scheme = (state.get("chosen") or {}).get("name") or "（未命名方案）"
     task = (
         f"Gate1 批准的 V2 候选：{scheme}\n"
@@ -812,6 +956,13 @@ def build_gate2_explanation(state: dict, rec: dict) -> "dict[str, str]":
         "物理。V1 的 Q1 预注册矛盾（对照组本身不稳健）是冻结结论，V2 不负责"
         "「洗掉」它——矛盾原样报告。"
     )
+    # run7（规格 v1.1a §3.5）：平台支持声明两变体，数字由机验结果选择。
+    if shim_evidence is not None:
+        if (shim_evidence.get("array_migrated", 0)
+                + shim_evidence.get("numpy_migrated", 0)) == 0:
+            problem += "\n" + _SHIM_ZERO_MIGRATION_SENTENCE
+        else:
+            problem += "\n" + _SHIM_SUPPORT_SENTENCE
     video = (
         "顺序固定：① V1 normal vs ice_nominal → ② V1 ice_nominal vs ice_dr "
         "→ ③ V2 normal vs ice_nominal → ④ V2 ice_nominal vs ice_dr；每条约 8 s。"
