@@ -162,7 +162,7 @@ def _validate_outcomes_shape(out: dict, run_id: str) -> list[str]:
                 errs.append(f"{run_id}: outcomes.{k}.{foot} 必须是数值")
     cf = out.get("contact_frames")
     if not isinstance(cf, dict):
-        errs.append(f"{run_id}: outcomes.contact_frames 必须是 {R,L} 对象")
+        errs.append(f"{run_id}: outcomes.contact_frames 必须是 {{R,L}} 对象")
     else:
         for foot in ("R", "L"):
             v = cf.get(foot)

@@ -849,6 +849,21 @@ def test_43_validate_outcomes_shape_rejects_bad_shapes():
         assert any("outcomes" in e for e in errs), \
             f"坏形状未被抓：{patch}；errs={errs}"
 
+    # 纯追加回归：contact_frames 非 dict 分支（gait_rungs.py:165 历史
+    # NameError——f-string 内 {R,L} 未转义；上面矩阵恒给 dict，生产
+    # run7b telemetry 首次合法产出才触达该行）。缺键与非 dict 同走该分支。
+    missing_cf = json.loads(json.dumps(good))
+    del missing_cf["contact_frames"]                  # 整体缺键
+    non_dict_cf = json.loads(json.dumps(good))
+    non_dict_cf["contact_frames"] = "n/a"             # 非 dict
+    for tag, broken in (("contact_frames 缺键", missing_cf),
+                        ("contact_frames 非dict", non_dict_cf)):
+        errs = validate_telemetry_structure(
+            {**base, "outcomes": broken}, "normal_s0")
+        assert isinstance(errs, list) and errs, f"{tag}：未返回非空错误列表"
+        assert any("{R,L}" in e for e in errs), \
+            f"{tag}：错误消息缺字面量 {{R,L}}；errs={errs}"
+
 
 def test_44_missing_csv_column_is_schema_error(roots, batch_dir):
     csv_path = batch_dir / "dr_controls_vs_experimental.csv"
