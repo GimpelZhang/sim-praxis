@@ -75,7 +75,9 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
      `.gitignore` 必须用锚定 `/data`（尾斜杠 `data/` 不匹配软链本身），
      闸口打 `git check-ignore data`（穿越软链的 data/lancedb pathspec 会 fatal）。
    - **KB 首次 push 是人工 STOP 门**：push 前向用户呈 diff 清单 + 密钥扫描（公开不可回收）。
-   - 行数口径不变：kb_chunks 1542 行/104 Q 块；phase1_learnings 5 行（Task0a 后）；
+   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 11 行（=Task0a 后
+     5 + Task6 run1–6 经 gate1 批准运行后诚实 human_failure 回写 6，2026-10-23 活表
+     基线对账，规格 §8；run7 结局预期 11→12）；
      solution_chunks 独立第三表（首灌 82 块/4 方案），老三表对它恒只读。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
    禁止 `source ~/.bashrc`、禁止回显/入 URL/入日志/提交；git 认证用内存 extraheader 不落盘；
@@ -113,13 +115,17 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
   Task0b 起库默认 uri 为 `$KB_ROOT/data/lancedb`（软链 `/mnt/artifacts/embodied-kb/data`）；
   数据迁移只走 `scripts/kb/migrate_data_layer.py --apply`（同盘 st_dev 守卫 + 行数/召回快照对账）。
 - `phase1_learnings`（12 列含 vector，复用 mpnet 不二次下载）与 kb_chunks 同库独立；
-  当前 5 行（Phase 2 Task0a Q2 补点验经用户授权 4→5：gate2_accepted_supplementary/
-  rung=1，图外回写走 `memory_flywheel.phase1.offgraph_learning`，纪律 12；老 4 行
-  不重写，kb_chunks 恒 1542）。**生产召回尚未接线（production_recall_hits=0），勿声称
+  当前 11 行（= Phase 2 Task0a Q2 补点验经用户授权 4→5 的 5 行：gate2_accepted_supplementary/
+  rung=1，图外回写走 `memory_flywheel.phase1.offgraph_learning`，纪律 12，老 4 行不重写；
+  + Task6 run1–6 经 gate1 批准运行后诚实 human_failure_agent_run 回写 6 行；
+  2026-10-23 活表基线对账，规格 §8；run7 任一结局预期 11→12、新 id、f43d49 保留；
+  kb_chunks 恒 1542）。**生产召回尚未接线（production_recall_hits=0），勿声称
   飞轮已闭环**——Phase 2 项。
 - `solution_chunks`（Task0b 第三张表）：4 方案 README/manifest 原子块 + 脚本 code 块，
   relpath 前缀 `solutions/`，首灌 82 块；`python -m memory_flywheel.scripts.ingest_solutions`
-  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=5 不变。资产包：
+  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=11 不变（fail-closed
+  期望值随活表基线，2026-10-23 活表基线对账；ingest_solutions CLI 历史默认
+  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传 11，待 Phase 2 债务清理）。资产包：
   `scripts/kb/bundle_kb_asset.py --tier both` + `verify_bundle.py`（core=老两表，
   extended=全部表；sha256/行数/768 维/kb_sha/引擎 SHA 对账）。
 
