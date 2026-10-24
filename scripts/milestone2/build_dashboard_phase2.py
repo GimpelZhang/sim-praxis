@@ -41,6 +41,7 @@ import lancedb  # noqa: E402
 
 from memory_flywheel.kb_pins import default_lancedb_uri  # noqa: E402
 from memory_flywheel.recall import LOG_FIELDS, count_adoptions  # noqa: E402
+from orchestrator.common import secrets as secret_scan  # noqa: E402
 from orchestrator.common.clock import parse_ts_iso_strict, utc_now_iso_z  # noqa: E402
 from orchestrator.common.runtime_paths import phase1_root, phase2_root  # noqa: E402
 from orchestrator.gateway.quota_ledger import call_lines  # noqa: E402
@@ -127,6 +128,32 @@ def parse_collect_output(stdout: str) -> dict:
     return {"n_collected": len(ids), "node_ids": ids}
 
 
+def sanitize_node_ids(node_ids: list[str]) -> tuple[list[str], int]:
+    """对 collect-only 节点 id 做单一源脱敏（只处理严格口径命中者）。
+
+    背景：密钥扫描自测（milestone1 test_scan_detects_all_strict_forms）在
+    源码里运行时拼接假名，git 扫描无字面量；但收集期参数化 id 会展开为完整
+    密钥形状。证据包扫描只按形状，故看板不得把这些 id 原样入产物。
+    检测用严格口径（证据 FATAL 口径），脱敏用单一源 redact_text（保留已知
+    前缀）；未命中的普通节点 id 逐字节不动，避免宽模式过杀。脱敏后仍命中即
+    fail-closed。n_collected 与清单长度不变，可对收集输出重放本函数复现。
+    """
+    out: list[str] = []
+    redacted = 0
+    for nid in node_ids:
+        if secret_scan.contains_secret(nid):
+            masked = secret_scan.redact_text(nid)
+            if secret_scan.contains_secret(masked):
+                raise DashboardError(
+                    "节点 id 经单一源 redact_text 脱敏后仍命中密钥严格形状，"
+                    f"拒绝产出看板：{nid.split('[')[0]}[...]")
+            out.append(masked)
+            redacted += 1
+        else:
+            out.append(nid)
+    return out, redacted
+
+
 def collect_tests(run=_run_cmd) -> dict:
     """实跑收集（两排除口径与收尾命令逐字一致）；离线 env，不执行用例。"""
     argv = [sys.executable, "-m", "pytest", "tests", "--collect-only", "-q",
@@ -138,10 +165,18 @@ def collect_tests(run=_run_cmd) -> dict:
         rc, out, err = run(argv, timeout=COLLECT_TIMEOUT_S, cwd=_REPO, env=env)
     except Exception as exc:  # noqa: BLE001 - 收集失败要带命令证据 fail-closed
         return {"command": argv, "ok": False, "error": f"{type(exc).__name__}: {exc}",
-                "n_collected": 0, "node_ids": []}
+                "n_collected": 0, "node_ids": [], "redacted_node_ids": 0}
     parsed = parse_collect_output(out)
+    safe_ids, n_red = sanitize_node_ids(parsed["node_ids"])
     return {"command": argv, "ok": rc == 0, "n_collected": parsed["n_collected"],
-            "node_ids": parsed["node_ids"],
+            "node_ids": safe_ids,
+            "redacted_node_ids": n_red,
+            "redaction_note": (
+                "milestone1 密钥扫描自测参数化 id 在收集期展开为合成密钥形状"
+                "（源码运行时拼接、无字面量）；经 orchestrator.common.secrets "
+                "单一源脱敏，n_collected 与清单长度不变，仅这 "
+                f"{n_red} 个 id 的密钥本体被替换为 ***REDACTED***，可对 "
+                "pytest --collect-only 输出重放 sanitize_node_ids 复现。"),
             "collect_stderr_tail": err[-800:] if err else ""}
 
 

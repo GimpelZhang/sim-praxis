@@ -18,6 +18,7 @@ from pathlib import Path
 import lancedb
 import pytest
 
+from orchestrator.common import secrets as secret_scan
 from tests.kb_support import require_kb_integration
 
 REPO = Path(__file__).resolve().parents[2]
@@ -244,6 +245,55 @@ def test_parse_collect_output_counts_node_ids_only():
 
 def test_parse_collect_output_empty():
     assert BD.parse_collect_output("")["n_collected"] == 0
+
+
+def test_collect_sanitizes_synthetic_secret_shaped_node_ids():
+    # 合成形状一律运行时拼接（与 milestone1 STRICT_CASES 同惯例）：本测试源码
+    # 里不得出现完整字面密钥形状（gate4 scan_secrets 按形状即 FATAL）。
+    hf = "hf_" + "a" * 34
+    gh = "ghp_" + "b" * 36
+    nid_normal = "tests/milestone2/test_x.py::test_normal[param-AB]"
+    nid_hf = ("tests/milestone1/test_common_foundation.py::"
+              "test_scan_detects_all_strict_forms[hf_token-" + hf + "]")
+    nid_gh = ("tests/milestone1/test_common_foundation.py::"
+              "test_scan_detects_all_strict_forms[github_token-" + gh + "]")
+    stdout = "\n".join([nid_normal, nid_hf, nid_gh]) + \
+        "\n\n3 tests collected in 0.01s\n"
+
+    # 保险：纯解析保持原始未脱敏——脱敏只发生在 collect_tests 生产侧。
+    raw = BD.parse_collect_output(stdout)
+    assert raw["n_collected"] == 3
+    assert raw["node_ids"] == [nid_normal, nid_hf, nid_gh]
+    assert secret_scan.contains_secret(json.dumps(raw)) is True
+
+    def fake_run(argv, **kw):  # 接 timeout=/cwd=/env= 关键字
+        return 0, stdout, ""
+
+    blk = BD.collect_tests(run=fake_run)
+    assert blk["ok"] is True
+    assert blk["n_collected"] == 3
+    ids = blk["node_ids"]
+    assert len(ids) == 3
+    assert ids[0] == nid_normal  # 未命中的普通节点 id 逐字节不动
+    for masked, original, body in ((ids[1], nid_hf, hf),
+                                   (ids[2], nid_gh, gh)):
+        assert masked != original
+        assert secret_scan.REDACTED in masked
+        assert body not in masked  # 合成密钥本体不得残留
+    assert blk["redacted_node_ids"] == 2
+    assert blk["redaction_note"]
+    # 核心牙齿：整块序列化后不再命中证据包密钥严格口径（旧代码必红）。
+    assert secret_scan.contains_secret(
+        json.dumps(blk, ensure_ascii=False)) is False
+
+    # 纯函数口径：普通串原样透传；单点合成串脱敏后严格口径为 False。
+    plain = ["tests/a/test_x.py::test_one", "tests/a/test_x.py::test_two[p-1]"]
+    out_plain, n_plain = BD.sanitize_node_ids(plain)
+    assert out_plain == plain and n_plain == 0
+    sk = "sk-" + "e" * 48
+    out_sk, n_sk = BD.sanitize_node_ids([sk])
+    assert n_sk == 1 and out_sk[0] != sk
+    assert secret_scan.contains_secret(out_sk[0]) is False
 
 
 # ---------------------------------------------------------------------------
