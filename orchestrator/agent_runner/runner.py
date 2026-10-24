@@ -1343,10 +1343,14 @@ class AgentRunner:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
-    def _evidence(self, root: Path, stem: str, kind: str, payload: Any) -> str:
+    def _evidence(self, root: Path, stem: str, kind: "str | None",
+                  payload: Any) -> str:
         if self._write_evidence is not None:
             return self._write_evidence(root, stem, kind, payload)
-        p = root / f"{stem}.{kind}.json"
+        # 失败镜像件名为单后缀 failure.json（kind=None；历史卷 failure.json.json
+        # 为冻结证据不改名，本修复只影响今后新写件）。
+        mid = f".{kind}" if kind is not None else ""
+        p = root / f"{stem}{mid}.json"
         # S-6：write→chmod 收口 fsutil 原子写（mkstemp 0600→fsync→replace）。
         atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
         return f"phase1/task4_runner/{root.name}/{p.name}"
@@ -1861,7 +1865,7 @@ class AgentRunner:
         p = Path(spec.workdir) / FAILURE_JSON
         # S-6：原子写 0600；L-4 首写 ts 保留语义在上方不变。
         atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
-        self._evidence(root, "failure", "json", payload)
+        self._evidence(root, "failure", None, payload)
         return {"status": "failed", "failure_json": str(p),
                 "coding_round": payload["coding_round"],
                 "executions": len(timeline), "timeline": timeline,

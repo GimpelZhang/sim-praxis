@@ -288,6 +288,37 @@ def test_03_five_rounds_then_hard_stop(tmp_path):
     assert (wd / "runs.log").read_text() == runs_before
 
 
+def test_03c_failure_evidence_mirror_single_suffix(tmp_path):
+    # 回归：失败镜像件名须为单后缀 failure.json，不再双后缀 failure.json.json
+    # （历史卷 failure.json.json 为冻结证据不改名；本断言只约束今后新写件）。
+    wd = _write_workdir(tmp_path / "m", ALWAYS_FAIL_SCRIPT, fix="x=0")
+    gw = FakeGateway(_rotating_patches(5))
+    runner = _runner(tmp_path, gw)
+    thread = "t4-3c"
+    rec = runner.run(_real_cmd_spec(thread, wd))
+    assert rec["status"] == "failed"
+
+    ev = tmp_path / "ev" / thread
+    mirror = ev / "failure.json"
+    assert mirror.is_file()
+    assert not (ev / "failure.json.json").exists()
+    doubled = sorted(p.name for p in ev.iterdir()
+                     if p.name.endswith(".json.json"))
+    assert doubled == []
+
+    # 镜像与 workdir FAILURE.json 同一 payload 对象两次序列化：字节一致
+    work_failure = wd / "FAILURE.json"
+    assert mirror.read_text(encoding="utf-8") == \
+        work_failure.read_text(encoding="utf-8")
+    mirror_doc = json.loads(mirror.read_text(encoding="utf-8"))
+    work_doc = json.loads(work_failure.read_text(encoding="utf-8"))
+    for key in ("status", "reason", "coding_round", "executions"):
+        assert mirror_doc[key] == work_doc[key]
+
+    # 常规逐轮件名中间段不受影响（防过度改名）
+    assert (ev / "coding_round1.decision.json").is_file()
+
+
 def test_03b_failed_run_routes_graph_to_human_failure(tmp_path):
     wd = _write_workdir(tmp_path / "g", ALWAYS_FAIL_SCRIPT, fix="x=0")
     gw = FakeGateway(_rotating_patches(5))
