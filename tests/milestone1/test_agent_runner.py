@@ -4717,12 +4717,22 @@ def test_v14_function_source_injection_e2e(tmp_path):
 
 def test_v14_transport_probe_pure(tmp_path):
     from orchestrator.agent_runner import transport_probe as tp
-    # build_probe_messages：两件套；system 强制 class=；user 带玩具契约
+    # build_probe_messages：两件套；system 强制 class=；user 带玩具契约。
+    # 仪器保真钉（seq=121 FAIL 后）：system 必须逐字含字面 begin 前缀
+    # `<<<<<<< simpraxis.replace.v1 `（原措辞缺前缀致模型拆行、fence_parse
+    # 假阴——生产修复轮示例同款前缀），防止措辞回退。
     msgs = tp.build_probe_messages()
     assert [m["role"] for m in msgs] == ["system", "user"]
-    assert "simpraxis.replace.v1" in msgs[0]["content"]
+    assert "<<<<<<< simpraxis.replace.v1 path=" in msgs[0]["content"]
     assert "class=" in msgs[0]["content"] and "class=" in msgs[1]["content"]
     assert tp.TOY_FILENAME in msgs[1]["content"]
+    # 加固：示例 begin 行本体须过生产 _REPLACE_BEGIN_RE（三组捕获齐备）——
+    # 字面子串钉不住措辞漂移出解析器口径（critic 复审 Open Q3）。
+    from orchestrator.agent_runner.runner import _REPLACE_BEGIN_RE
+    begin_line = next(ln for ln in tp.PROBE_SYSTEM.split("\n")
+                      if ln.startswith("<<<<<<< "))
+    bm = _REPLACE_BEGIN_RE.match(begin_line)
+    assert bm is not None and bm.group(1) and bm.group(2) and bm.group(3)
     # _cache_key：前缀 + 键正则 ^[A-Za-z0-9_.-]{1,160}$（模型名白名单化）
     key = tp._cache_key("mimo-v2.6-flash/坏 字符", "[]")
     assert key.startswith("transport_probe_")

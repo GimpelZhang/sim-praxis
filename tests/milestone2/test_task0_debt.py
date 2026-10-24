@@ -733,7 +733,10 @@ CALL_CACHE_ALLOWLIST = {
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
-    ("orchestrator/agent_runner/transport_probe.py", 162),
+    # 2026-10-25 仪器保真修复（PROBE_SYSTEM 镜像生产 begin 示例，seq=121
+    # FAIL 诊断；critic MINOR-1 注释措辞修）：模块头注释+文案扩容纯位移
+    # （162→177），0 新增落点。
+    ("orchestrator/agent_runner/transport_probe.py", 177),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移

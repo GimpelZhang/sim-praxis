@@ -68,12 +68,27 @@ def check():
     assert Calc2.add(2, 3) == 5, "Calc2.add must stay sum"
 '''
 
+# 仪器保真修复（2026-10-25，seq=121 FAIL 后）：原 PROBE_SYSTEM 只说
+# 「整行 begin/end；首行 path= …」却从未给出字面前缀 `<<<<<<< `——生产
+# 修复轮 system（runner._build_messages chunk_context=None 分支）带完整
+# 示例逐字含前缀。首探输出（证据 probe_transport-probe-t6-v14_
+# 2026-10-24T171044Z.json）恰按歧义措辞拆行：核记独占行 1、字段行 2，
+# judge fence_parse 拒——仪器缺陷非模型能力证据（n=1 混杂归因，修复后
+# 是否真能过由重探实呼裁决，不双向断言）。修法=镜像生产示例（begin 行
+# 前缀+字段同行逐字），判定三闸与玩具契约零改动；相对生产示例的唯一
+# 有意分歧：class= 探针契约恒必须给（生产文案可省略；两同名方法结构性
+# 必需，非本次变更）。
 PROBE_SYSTEM = (
     "你是具身智能仿真工具链的传输预检 agent。只输出 simpraxis.replace.v1 "
-    "围栏（整行 begin/end；首行 path= 相对路径 func= 函数名 class= 类名"
-    "（class= 必须给）；中间是该函数含装饰器行的完整新源码；"
-    "======= 是可选分隔行；末行 >>>>>>> simpraxis.replace.v1.end）。"
-    "补丁只能改本次工作目录内的文件；不要输出解释、不要输出 image。")
+    "围栏整替（格式示例，begin/end 整行各独占一行）：\n"
+    "<<<<<<< simpraxis.replace.v1 path=相对路径.py func=函数名 class=类名\n"
+    "<该函数含装饰器行的完整新源码>\n"
+    "=======\n"
+    ">>>>>>> simpraxis.replace.v1.end\n"
+    "首行 path/func 逐字给相对路径与函数名，class= 必须给（本次两同名方法"
+    "必须消歧）；中间是完整新源码；======= 是可选分隔行；末行结束围栏；"
+    "三行各独占一行。补丁只能改本次工作目录内的文件；不要输出解释、"
+    "不要输出 image。")
 
 PROBE_HONESTY = (
     "预测力诚实声明（设计 §2.6）：PASS 只说明玩具契约服从，不构成任务级"
