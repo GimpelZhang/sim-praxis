@@ -481,6 +481,10 @@ def test_reattach_both_media_present_sends_card_only(gw):
 
 def test_card_already_sent_by_other_party_waits_only(gw):
     # 他方已完成全部推送并发卡：本次调用零发送，纯等待同一裁决。
+    # 同步要点：预置态在 t0 即满足 _wait_pending_card 谓词（PENDING+card），
+    # 不能用 _finish 抢跑 mark_decided——否则 worker 首次读库见到 DECIDED 会
+    # 合法走 _reopen_round（D10 多轮语义）归档重发。必须等 worker 自己登记
+    # 等待事件（fast path 选定、全部发送副作用完成后）再裁决。
     gw.store.upsert_pending(
         "th-held", 2, card_message_id="om_card_held", open_chat_id=CHAT,
         task_title="他方任务")
@@ -490,12 +494,22 @@ def test_card_already_sent_by_other_party_waits_only(gw):
         media_message_id_v2="om_media_v2_x")
     pushes: list[str] = []
     _install_video(gw, pushes, gw._calls)
+    watcher = _watch_decide_when_waiting(gw, "th-held")
+    watcher.start()
     t, box = _run_in_thread(lambda: gw.request_gate2_diff_approval(
         "th-held", "他方任务", "v1.mp4", "v2.mp4",
         _diff_rows(), "v2_dominates", max_wait=30))
-    _finish(gw, t, box, "th-held")
+    t.join(5)
+    watcher.join(2)
+    assert not t.is_alive() and not watcher.is_alive()
+    assert box.get("decision") == "approve"
     # 连卡片都不重发（fast path：PENDING + card_message_id）
     assert gw._calls == [] and pushes == []
+    # 终态钉牙：同一行直接 DECIDED，原卡 id 原样保留；若误走 _reopen_round
+    # 归档重发，原 om_card_held 会被归档、新卡 id 变为 fake_post 新造 id。
+    row = gw.store.get_pending("th-held", 2)
+    assert row["status"] == "DECIDED"
+    assert row["card_message_id"] == "om_card_held"
 
 
 def test_missing_column_without_path_fails_closed(gw):
