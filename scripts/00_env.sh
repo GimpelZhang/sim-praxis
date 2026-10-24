@@ -107,14 +107,17 @@ elif [ -n "${ANTHROPIC_MODEL:-}" ]; then SIMPRAXIS_LLM_DEFAULT_MODEL="$ANTHROPIC
 else SIMPRAXIS_LLM_DEFAULT_MODEL="$(_sp_bashrc_value ANTHROPIC_MODEL)" || return 1; fi
 export SIMPRAXIS_LLM_BASE_URL SIMPRAXIS_LLM_TOKEN SIMPRAXIS_LLM_DEFAULT_MODEL
 
-# 形状硬校验：URL 必须 https 且 host=ark.cn-beijing.volces.com（值不打印）；
-# token 为 ark- 前缀（实测 46 字符，下限按形状不按精确长度，供应侧轮换不致误杀）；
+# 形状硬校验：URL 必须 https 且 host 在白名单（值不打印）。
+# 双 host 白名单（锁内适配：机械同步用户 2026-10-24 三阶段换供 mimo 家族
+# 裁决 fa007c5——bashrc ANTHROPIC_* 已切 token-plan-cn.xiaomimimo.com/anthropic
+# 端点，本校验原单 ark host 滞后致 source 拒绝；ark 留作遗留 host 防回切）。
+# token 前缀双许：ark-（方舟遗留）/ tp-（mimo 端点 token-plan，长度下限同 40）。
 # 默认模型名非空且只含安全字符。
 printf '%s' "$SIMPRAXIS_LLM_BASE_URL" \
-  | grep -Eq '^https://ark\.cn-beijing\.volces\.com(/.*)?$' \
+  | grep -Eq '^https://(ark\.cn-beijing\.volces\.com|token-plan-cn\.xiaomimimo\.com)(/.*)?$' \
   || { echo "[00_env] ANTHROPIC_BASE_URL 形状/host 不符（拒绝）" >&2; return 1; }
 _sp_check_shape SIMPRAXIS_LLM_TOKEN "$SIMPRAXIS_LLM_TOKEN" \
-  '^ark-[A-Za-z0-9][A-Za-z0-9._-]{39,}$' \
+  '^(ark|tp)-[A-Za-z0-9][A-Za-z0-9._-]{39,}$' \
   '检查 ~/.bashrc 的 ANTHROPIC_AUTH_TOKEN export（或已导出的 SIMPRAXIS_LLM_TOKEN）' || return 1
 printf '%s' "$SIMPRAXIS_LLM_DEFAULT_MODEL" \
   | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{2,}$' \
