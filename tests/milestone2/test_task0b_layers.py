@@ -42,12 +42,16 @@ SIX_BASENAMES = (
 )
 
 # phase1_learnings 活表 id 基线（锁内适配（规格 §8 活表基线对账），工单
-# /tmp/kb_recon_dispatch.md，2026-10-23 独立债务提交，先于 run7 特性提交）：
-# 活库现实 11 行 = 迁移时历史基线 5 行（2026-10-15/16，/mnt manifest 与
+# /tmp/kb_recon_dispatch.md，2026-10-23 独立债务提交，先于 run7 特性提交；
+# 2026-10-24 run7 活表对账 11→12）：
+# 活库现实 12 行 = 迁移时历史基线 5 行（2026-10-15/16，/mnt manifest 与
 # migration_pre_inventory 双双冻结 5）+ Task6 run1–6 经 gate1 批准运行后诚实
-# human_failure 回写 6 行（2026-10-20…22，gate_source=human_failure_agent_run）。
-# 12 位前缀全列钉死、只多不少；run7 任一结局 11→12（规格 D7：新 id，f43d49
-# 旧行保留），届时本集合须再扩 1，行数断言同步 12。
+# human_failure 回写 6 行（2026-10-20…22，gate_source=human_failure_agent_run）
+# + Task6 run7a 回写 1 行（2026-10-23）。12 位前缀全列钉死、只多不少。
+# run7c（2026-10-24）失败文本与 run5 逐字相同，经内容寻址 id（learning_store
+# _id_for 对 run_id|gate_source|rung|text|evidence_relpath 取 sha256）upsert
+# 塌到既有 24681e47 行不增行；该行 created_at 被覆写 = key-collapse 尾债，另册
+# 登记，引擎代码本次不动。
 _PHASE1_LEARNING_IDS_BASELINE = {
     # —— 迁移时 5 行（历史基线，与两份冻结快照同源）——
     "dc0d01e7e53c",  # t7-mujoco 20261015 human_failure_gate2
@@ -60,8 +64,10 @@ _PHASE1_LEARNING_IDS_BASELINE = {
     "962f6d27a30a",  # 2026-10-21
     "d8681253ab4e",  # 2026-10-21
     "47479802882c",  # 2026-10-21
-    "24681e47b2fb",  # 2026-10-22
+    "24681e47b2fb",  # 2026-10-22（run7c 2026-10-24 内容寻址去重塌此 id，created_at 被覆写）
     "f43d49d1bc5e",  # 2026-10-22（f43d49；run7 结局保留不塌缩）
+    # —— Task6 run7a ——
+    "0ef64b94244b",  # 2026-10-23 Task6 run7a（锚点 2 命中→human_failure；v1.2 协议修正前）
 }
 
 def _load_script(name: str):
@@ -468,9 +474,12 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
     before = ing.old_table_rows()
     assert before["kb_chunks"] == 1542, before
     # 锁内适配（规格 §8 活表基线对账，工单 /tmp/kb_recon_dispatch.md）：活表
-    # 现实 11 行 = 迁移时 5 + Task6 run1–6 经 gate1 批准后诚实 human_failure
-    # 回写 6；11 个 id 全集合在 test_lancedb_move_regression 钉死。
-    assert before["phase1_learnings"] == 11, before
+    # 现实 12 行 = 迁移时 5 + Task6 run1–6 经 gate1 批准后诚实 human_failure
+    # 回写 6 + run7a 2026-10-23 回写 1；run7c（2026-10-24）失败文本与 run5
+    # 逐字相同，内容寻址 id upsert 塌到既有 24681e47（created_at 覆写 =
+    # key-collapse 尾债），不增行。12 个 id 全集合在 test_lancedb_move_regression
+    # 钉死。
+    assert before["phase1_learnings"] == 12, before
 
     tbl = ing.table()
     df = tbl.to_pandas()
@@ -491,9 +500,10 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
 
     # 幂等重跑（本工具设计语义）：solution_chunks 行数不翻倍，老两表冻结
     total_before = ing.count()
-    # 锁内适配（规格 §8 活表基线对账）：fail-closed 期望值随活表 5→11，
+    # 锁内适配（规格 §8 活表基线对账）：fail-closed 期望值随活表 5→11→12
+    # （run7a 2026-10-23 增 1 行；run7c 内容寻址去重塌到 24681e47 不增行），
     # 守卫语义不松——老两表行数与期望不符 ingester 仍拒入库。
-    ing.ingest(expect_kb_rows=1542, expect_learnings=11)
+    ing.ingest(expect_kb_rows=1542, expect_learnings=12)
     assert ing.count() == total_before
     assert ing.old_table_rows() == before
 
@@ -537,9 +547,12 @@ def test_lancedb_move_regression(monkeypatch):
     #   * solution_chunks 在两份迁移时快照中尚不存在（None）；
     #   * phase1_learnings 的清单/manifest 是 2026-10-17 迁移时点的历史冻结证据，
     #     恒为 5（谁把快照改成活表现值谁红）；活库自 Task6 run1–6 经 gate1 批准
-    #     运行后诚实回写 6 行 human_failure，不再等于快照——现实 11 行且全 id
-    #     集合钉死（_PHASE1_LEARNING_IDS_BASELINE，id 从活表同源连接读）；
-    #     run7 任一结局本对账再走 11→12（规格 D7：新 id、f43d49 保留）。
+    #     运行后诚实回写 6 行 human_failure，不再等于快照——run7a 2026-10-23
+    #     （锚点 2 命中→human_failure，v1.2 协议修正前）再回写 1 行后现实 12 行
+    #     且全 id 集合钉死（_PHASE1_LEARNING_IDS_BASELINE，id 从活表同源连接读）；
+    #     run7c（2026-10-24）失败文本与 run5 逐字相同，内容寻址 id upsert 塌到
+    #     既有 24681e47 不增行（created_at 覆写 = key-collapse 尾债，另册登记；
+    #     规格 D7 的 f43d49 旧行始终保留）。
     state = migrate.collect_state(live_uri, with_recall=True)
     assert inventory["rows"]["solution_chunks"] is None, inventory["rows"]
     assert manifest["tables"]["solution_chunks"] is None, manifest["tables"]
@@ -553,10 +566,11 @@ def test_lancedb_move_regression(monkeypatch):
     # 3 条固定查询召回 id 与迁移前快照逐项一致
     for name, ids in inventory["recall_snapshot"].items():
         assert state["recall_snapshot"][name] == ids, name
-    # 活 phase1_learnings：11 行且 11 个 id（12 位前缀）集合钉死，只多不少；
+    # 活 phase1_learnings：12 行且 12 个 id（12 位前缀）集合钉死，只多不少
+    # （run7a 2026-10-23 新增 0ef64b94；run7c 内容寻址塌到 24681e47 不增行）；
     # id 从 state 同源（live_uri）连接现读，防字面量与活表各说各话。
-    assert state["rows"]["phase1_learnings"] == 11
-    assert len(_PHASE1_LEARNING_IDS_BASELINE) == 11
+    assert state["rows"]["phase1_learnings"] == 12
+    assert len(_PHASE1_LEARNING_IDS_BASELINE) == 12
     import lancedb
     live_tbl = lancedb.connect(str(live_uri)).open_table("phase1_learnings")
     live_ids = {i[:12] for i in live_tbl.to_pandas()["id"]}

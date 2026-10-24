@@ -605,10 +605,12 @@ def test_live_phase1_table_not_written(tmp_path):
     before = _counts()
     assert before["kb_chunks"] == 1542
     # 锁内适配（规格 §8 活表基线对账，工单 /tmp/kb_recon_dispatch.md）：活表
-    # phase1_learnings 现实 11 行 = 迁移时 5 + Task6 run1–6 经 gate1 批准后
-    # 诚实 human_failure 回写 6；本测只读、before/after 恒等语义不动，不得写出
-    # 第 12 行（run7 任一结局才 11→12）。
-    assert before[TABLE_NAME] == 11
+    # phase1_learnings 现实 12 行 = 迁移时 5 + Task6 run1–6 经 gate1 批准后
+    # 诚实 human_failure 回写 6 + run7a 2026-10-23 回写 1（锚点 2 命中→
+    # human_failure，v1.2 协议修正前）；run7c（2026-10-24）失败文本与 run5
+    # 逐字相同，内容寻址 id upsert 塌到既有 24681e47 不增行（created_at 覆写 =
+    # key-collapse 尾债）。本测只读、before/after 恒等语义不动，不得写出第 13 行。
+    assert before[TABLE_NAME] == 12
     assert before["solution_chunks"] == 82
 
     ret = recall.retrieve(
