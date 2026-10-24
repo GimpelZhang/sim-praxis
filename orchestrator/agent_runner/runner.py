@@ -239,6 +239,40 @@ class PatchAnchorError(PatchSafetyError):
         self.hits = hits
 
 
+class PatchTransportError(PatchSafetyError):
+    """transport 层失败（v1.4 代差登记，设计稿 §3）：帽内反馈续跑，不 instant-death。
+
+    锁内适配（Task6 修复环 v1.4「IDE 式多次小合成」协议，
+    .omc/handoffs/task6-ide-repair-protocol-design.md，与 PatchAnchorError
+    同体例）：设计 §头部授权链——用户 2026-10-24 逐字原话「下面我们重点猛攻
+    Task6，务必要将Task6的Gate1至Gate2之间的代码生成、仿真执行的通路成功跑通！
+    否则的话，像Task7/Task8这样的新任务，或者我们未来将遇到的其他螺旋升级老
+    任务还是会遇到Task6这样的问题。像你刚才提到的，继续解决Task6时，我们可以
+    参考 IDE/Agent会话交互里的"多次小合成"模式，而且要提高Task6方法的鲁棒性：
+    未来像今天这样"切换到mimo-v2.6-*"的模型切换动作肯定还会有。」
+    与 2026-10-23 L505② 同类的协议口径修正（非调参翻案）：把「无法安全应用
+    且模型可自修」的补丁失败从 instant-death 收窄为帽内反馈轮；
+    **唯一保留 instant-death 的是路径越界**（_validate_target 族，P1）。
+
+    行为代差登记（设计 §3 逐站点穷举，仿 :231-234 体例；切换面=决策表中
+    全部「新行为=反馈」行）——JSON 通道 10 站（instant-death → transport
+    反馈）：J1 缺 path 字段、J2 old/new 非字符串、J3 unified diff 缺 +++ 头、
+    J4 unified diff 无 hunk、J5 返回非 JSON 对象、J6 unified_diff 空串/
+    非字符串、J7 patches 空列表（run5/run7c 实杀形态）/非列表、J8 键缺失
+    （既无 unified_diff 也无 patches）、J9 JSONDecodeError（零花括号散文/
+    截断无闭合/截断有闭合内层重 parse 三形态，_json_object 调用点前置捕获）、
+    J10 patches 元素非对象；围栏通道 7 形（新增面）：F1 围栏结构违例（半打/
+    全角/CR/正文含 end 行/围栏外正文）、F2 func 锚 0 命中（经锚点通道）、
+    F3 锚 ≥2 无 class=（经锚点通道）、F4 class 不存在/类内无该 func（经
+    锚点通道）、F5 目标文件 SyntaxError（指引 JSON 通道）、F6 投影重
+    parse 失败（携行号、零落盘）、F7 非 .py path 围栏（指引 JSON）——均
+    帽内反馈；F2/F3/F4 仍抛平级兄弟 PatchAnchorError（不入本类）。
+    唯一保留 instant-death：P1 路径越界（_validate_target 族）——父类裸
+    PatchSafetyError 直捕，test_02 no-retry 语义不变。与 PatchAnchorError
+    平级（绝不子类化锚点类——test_run7b_a6 ⑤ 断 not isinstance 依赖此形）。
+    """
+
+
 class ChunkBirthError(RuntimeError):
     """拆块出生轮本地校验失败：整轮作废、不半成品落盘，主循环进入下一轮。
 
@@ -455,11 +489,13 @@ def _stage_structured(staged: dict, workdir: Path, patch: dict) -> str:
     """run7b §3.2：单 structured 补丁的内存投影（只读盘、只写 staged；同文件后续锚点落前序投影）。"""
     rel = patch.get("path")
     if not isinstance(rel, str) or not rel:
-        raise PatchSafetyError("补丁缺 path 字段")
+        # v1.4 代差登记 J1（设计 §3 行为代差登记节）：缺 path → transport 反馈。
+        raise PatchTransportError("补丁缺 path 字段")
     target = _validate_target(Path(rel), workdir)
     old, new = patch.get("old"), patch.get("new")
     if not isinstance(old, str) or not isinstance(new, str):
-        raise PatchSafetyError("补丁 old/new 必须为字符串")
+        # v1.4 代差登记 J2（设计 §3 行为代差登记节）：old/new 非字符串 → transport 反馈。
+        raise PatchTransportError("补丁 old/new 必须为字符串")
     key = str(target)
     if key not in staged:
         staged[key] = target.read_text(encoding="utf-8") if target.exists() else ""
@@ -488,7 +524,8 @@ def _stage_unified_section(staged: dict, workdir: Path, section: str) -> "Option
         return None
     m_new = re.search(r"^\+\+\+ (?:b/)?(.+)$", section, re.M)
     if not m_new:
-        raise PatchSafetyError("unified diff 缺 +++ 头")
+        # v1.4 代差登记 J3（设计 §3 行为代差登记节）：缺 +++ 头 → transport 反馈。
+        raise PatchTransportError("unified diff 缺 +++ 头")
     rel = m_new.group(1).strip()
     target = _validate_target(Path(rel), workdir)
     body_start = section.find("\n@@")
@@ -504,7 +541,8 @@ def _stage_unified_section(staged: dict, workdir: Path, section: str) -> "Option
     cursor = 0
     hunks = list(_HUNK_RE.finditer(body))
     if not hunks:
-        raise PatchSafetyError("unified diff 无 hunk")
+        # v1.4 代差登记 J4（设计 §3 行为代差登记节）：无 hunk → transport 反馈。
+        raise PatchTransportError("unified diff 无 hunk")
     for hi, hm in enumerate(hunks):
         hunk_end = hunks[hi + 1].start() if hi + 1 < len(hunks) else len(body)
         hunk_lines = body[hm.start():hunk_end].splitlines()
@@ -558,23 +596,36 @@ def _apply_structured_patch(workdir: Path, patch: dict) -> str:
 
 
 def _parse_and_apply(workdir: Path, raw: str) -> list[str]:
-    obj = _json_object(raw)
+    try:
+        obj = _json_object(raw)
+    except json.JSONDecodeError as exc:
+        # v1.4 代差登记 J9（设计 §3 行为代差登记节）：JSONDecodeError 前置捕获
+        # 转 transport 反馈（旧实现图层逃逸不经 decision/不耗帽）；只报行列，
+        # 不附 str(exc)（内含文档片段）。
+        raise PatchTransportError(
+            f"响应不是合法 JSON 对象（JSONDecodeError：行 {exc.lineno} 列 {exc.colno}）") from None
     if not isinstance(obj, dict):
-        raise PatchSafetyError("coding_debug 返回非 JSON 对象")
+        # v1.4 代差登记 J5（设计 §3 行为代差登记节）：非 JSON 对象 → transport 反馈。
+        raise PatchTransportError("coding_debug 返回非 JSON 对象")
     if "unified_diff" in obj:
         diff = obj["unified_diff"]
         if not isinstance(diff, str) or not diff.strip():
-            raise PatchSafetyError("unified_diff 为空")
+            # v1.4 代差登记 J6（设计 §3 行为代差登记节）：空串/非字符串同站兼拒 → transport 反馈。
+            raise PatchTransportError("unified_diff 为空")
         return _apply_unified_diff(workdir, diff)
     patches = obj.get("patches")
     if not isinstance(patches, list) or not patches:
-        raise PatchSafetyError("返回中既无 unified_diff 也无 patches[]")
+        # v1.4 代差登记 J7/J8（设计 §3 行为代差登记节，run5/run7c 实杀形态）：
+        # 空列表/非列表/键缺失同站兼拒 → transport 反馈（旧实现 instant-death
+        # 废掉剩余轮帽）。
+        raise PatchTransportError("返回中既无 unified_diff 也无 patches[]")
     # run7b §3.2：先逐件投影（任一锚点失败即整轮零落盘），全过后统一 commit。
     staged: dict[str, str] = {}
     applied = []
     for p in patches:
         if not isinstance(p, dict):
-            raise PatchSafetyError("patches 元素必须是对象")
+            # v1.4 代差登记 J10（设计 §3 行为代差登记节）：元素非对象 → transport 反馈。
+            raise PatchTransportError("patches 元素必须是对象")
         applied.append(_stage_structured(staged, workdir, p))
     _commit_staged(staged, workdir)
     return applied
@@ -593,6 +644,335 @@ def _json_object(raw: str) -> Any:
         if start >= 0 and end > start:
             return json.loads(text[start:end + 1])
         raise
+
+
+# ---------------------------------------------------------------------------
+# v1.4 修复传输双通道（设计稿 §2.1/§2.2/§2.3
+# .omc/handoffs/task6-ide-repair-protocol-design.md；授权链见
+# PatchTransportError docstring）：replace 围栏整替 + JSON 兜底混出决策。
+# 围栏语法纪律与出生围栏同族（整行 begin/end、token 字段、CRLF 逐行归一、
+# 全角不命中→结构反馈、正文含 end 行→违例、半打→结构反馈）。本块零网关
+# 调用、零账本触碰；F2/F3/F4 抛 PatchAnchorError（既有键族），其余违例
+# 抛 PatchTransportError。
+# ---------------------------------------------------------------------------
+
+REPLACE_FENCE_BEGIN = "<<<<<<< simpraxis.replace.v1"
+REPLACE_FENCE_END = ">>>>>>> simpraxis.replace.v1.end"
+REPLACE_FENCE_NUCLEUS = "simpraxis.replace.v1"
+# §2.3 函数源码注入字符预算：整函数注入禁止截断；单函数超预算跳过并注记
+# 「函数过大未注入，请用 JSON 通道」；两函数合计超预算只注入较小者。
+FUNCTION_SOURCE_TOTAL_CHARS = 8192
+
+# 字段序钉死 path→func→[class]；token 口径 [^ \t\r]+ 同出生；$ 前只许空白。
+_REPLACE_BEGIN_RE = re.compile(
+    r"^[ \t]*" + re.escape(REPLACE_FENCE_BEGIN)
+    + r"[ \t]+path=([^ \t\r]+)[ \t]+func=([^ \t\r]+)"
+    r"(?:[ \t]+class=([^ \t\r]+))?[ \t]*$")
+_REPLACE_END_RE = re.compile(
+    r"^[ \t]*" + re.escape(REPLACE_FENCE_END) + r"[ \t]*$")
+
+
+@dataclass(frozen=True)
+class _ReplaceBlock:
+    """v1.4 单个合法 replace 围栏（begin RE 命中 + end 配对 + 正文捕获）。"""
+
+    path: str
+    func: str
+    cls: "Optional[str]"
+    body: str
+    line: int  # begin 行号（1-based，机器原因引用用）
+    end_line: int  # end 行号（1-based；三签 MAJOR-1 JSON 候选剥离用）
+
+
+def _scan_replace_fences(raw: str) -> "list[_ReplaceBlock]":
+    """v1.4 §2.1 围栏扫描（出生同族纪律）：违例一律 PatchTransportError（F1）。"""
+    if REPLACE_FENCE_NUCLEUS not in raw:
+        return []
+    # CRLF 逐行归一（剥恰好一粒行尾 \r，同出生扫描器口径）；后续 body 为 LF 文本，
+    # 与 read_text 通用换行模式的内存口径一致。
+    lines = [ln[:-1] if ln.endswith("\r") else ln
+             for ln in raw.split("\n")]
+    blocks: "list[_ReplaceBlock]" = []
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        bm = _REPLACE_BEGIN_RE.match(line)
+        if bm is None:
+            # 围栏外非核记内容（M1 同轮 JSON 件/短散文）容忍——M1 语义要求
+            # 围栏与 JSON 同响应共存；仅含核记的迷走行判结构违例（全角 begin
+            # ＜＜＜ 等/字段序错/迷走 end 行，机器原因不回显模型行文本）。
+            if REPLACE_FENCE_NUCLEUS in line:
+                if _REPLACE_END_RE.match(line):
+                    raise PatchTransportError(
+                        f"replace 围栏结构违例：end 行 {i + 1} 无配对 begin")
+                raise PatchTransportError(
+                    f"replace 围栏结构违例：begin/end 行不合规（行 {i + 1}）")
+            i += 1
+            continue
+        j = i + 1
+        body_lines: "list[str]" = []
+        while True:
+            if j >= n:
+                raise PatchTransportError(
+                    f"replace 围栏结构违例：begin 行 {i + 1} 无配对 end（半打）")
+            cand = lines[j]
+            if _REPLACE_END_RE.match(cand):
+                # 可选 ======= 分隔行：仅当紧贴 end 行之前才剥（前瞻一次）。
+                if body_lines and body_lines[-1].strip() == "=======":
+                    body_lines = body_lines[:-1]
+                break
+            if REPLACE_FENCE_NUCLEUS in cand:
+                # 正文中出现围栏核记（含 end 行同形）即违例（同出生纪律）。
+                raise PatchTransportError(
+                    f"replace 围栏结构违例：正文第 {j - i} 行含围栏核记（begin 行 {i + 1}）")
+            body_lines.append(cand)
+            j += 1
+        if not "".join(body_lines).strip():
+            # 格式契约底线：空/纯空白正文不是「函数整替」（解释申报件，见交付报告）。
+            raise PatchTransportError(
+                f"replace 围栏结构违例：正文为空（begin 行 {i + 1}）")
+        blocks.append(_ReplaceBlock(
+            path=bm.group(1), func=bm.group(2), cls=bm.group(3),
+            body="\n".join(body_lines), line=i + 1, end_line=j + 1))
+        i = j + 1
+    return blocks
+
+
+def _strip_replace_fence_spans(
+        raw: str, blocks: "list[_ReplaceBlock]") -> str:
+    """v1.4 三签 MAJOR-1：剥除围栏行段，得 JSON 侧候选文本。
+
+    仅在 `_scan_replace_fences` 成功后调用（结构已验：围栏外无核记行，
+    begin/end 行段与块一一对应）。按 begin..end 行号闭区间整段删除，
+    其余行逐字保留（行尾 CRLF 随行保留，剥行号不受影响）。围栏体含
+    dict 字面量（`{'sum': a + b}`）时，first-`{`/last-`}` 切片不再切
+    进围栏内容——M1 判定与 M2 JSON 回退都走该候选（先扫成功后剥离）。
+    """
+    if not blocks:
+        return raw
+    lines = raw.split("\n")
+    drop: "set[int]" = set()
+    for b in blocks:
+        # b.line / b.end_line 均 1-based 闭区间 → 0-based 半开 [begin-1, end)。
+        drop.update(range(b.line - 1, b.end_line))
+    return "\n".join(ln for idx, ln in enumerate(lines) if idx not in drop)
+
+
+def _byte_col_to_char(line: str, byte_off: int) -> int:
+    """ast 列偏移是 UTF-8 字节口径（py3.10.12 亲验）；换算该行字符列。"""
+    return len(line.encode("utf-8")[:byte_off].decode("utf-8", "ignore"))
+
+
+def _function_span(text: str, node) -> "tuple[int, int]":
+    """函数节点的字符级 [start, end) 跨度：起点含装饰器行（回退 def 行首列），终点=end 列。"""
+    lines = text.split("\n")
+    line_starts: "list[int]" = []
+    acc = 0
+    for ln in lines:
+        line_starts.append(acc)
+        acc += len(ln) + 1
+    if node.decorator_list:
+        dec = node.decorator_list[0]
+        dline = lines[dec.lineno - 1]
+        # decorator 的 col_offset 指表达式起点（@ 之后）；前缀里 rfind('@') 取 @ 位。
+        prefix = dline.encode("utf-8")[:dec.col_offset].decode("utf-8", "ignore")
+        at = prefix.rfind("@")
+        col = at if at >= 0 else _byte_col_to_char(dline, dec.col_offset)
+        start = line_starts[dec.lineno - 1] + col
+    else:
+        start = (line_starts[node.lineno - 1]
+                 + _byte_col_to_char(lines[node.lineno - 1], node.col_offset))
+    end = (line_starts[node.end_lineno - 1]
+           + _byte_col_to_char(lines[node.end_lineno - 1], node.end_col_offset))
+    return start, end
+
+
+def _find_replace_anchor(tree, block: "_ReplaceBlock"):
+    """v1.4 §2.1 AST 定位：模块级 def + ClassDef 直属方法（嵌套 def 不在域）。
+
+    class= 省略：func 在域内恰 1 处；≥2 → 锚点反馈列 AST 候选（可加 class=
+    消歧或改 JSON）；class= 给定：类不存在 class_not_found / 类内无该直属
+    func func_not_in_class（F2/F3/F4 均抛 PatchAnchorError 走既有键族）。
+    """
+    func, cls = block.func, block.cls
+    module_hits: "list[tuple[str, Any]]" = []
+    class_hits: "list[tuple[str, Any]]" = []
+    class_def_exists = False
+    for node in tree.body:
+        if isinstance(node, (FunctionDef, AsyncFunctionDef)) and node.name == func:
+            module_hits.append((func, node))
+        elif isinstance(node, ClassDef):
+            if node.name == cls:
+                class_def_exists = True
+            for m in node.body:
+                if isinstance(m, (FunctionDef, AsyncFunctionDef)) and m.name == func:
+                    if cls is None or node.name == cls:
+                        # 候选标签是文件内容（AST 派生），可回显模型面。
+                        class_hits.append((f"{node.name}.{func}", m))
+    if cls is not None:
+        if not class_def_exists:
+            raise PatchAnchorError(
+                f"replace 围栏锚点失败（begin 行 {block.line}，机器原因："
+                "class_not_found）：文件中无该类定义", hits=0)
+        if not class_hits:
+            raise PatchAnchorError(
+                f"replace 围栏锚点失败（begin 行 {block.line}，机器原因："
+                "func_not_in_class）：类内无该函数的直属方法", hits=0)
+        cands = class_hits  # class= 给定：只认该类直属，模块级同名不参与消歧
+    else:
+        cands = module_hits + class_hits
+        if not cands:
+            raise PatchAnchorError(
+                f"replace 围栏 func 锚 0 命中（begin 行 {block.line}）："
+                "目标文件中无该函数的模块级/类直属定义", hits=0)
+    if len(cands) > 1:
+        labels = "、".join(label for label, _ in cands)
+        raise PatchAnchorError(
+            f"replace 围栏锚点 {len(cands)} 命中（需恰 1；begin 行 "
+            f"{block.line}）：候选 {labels}；可加 class= 消歧或改用 JSON 通道",
+            hits=len(cands))
+    return cands[0]
+
+
+def _rebase_body_indent(body: str, prefix: str) -> str:
+    """v1.4：正文缩进归一——先剥最长公共前导空白（接受齐左/文件摘录两种约定），再给首行外的非空行加目标缩进 prefix。
+
+    span 起点在 @/def 首字符（缩进留在 prefix 里），类直属方法的多行正文
+    必须随 prefix 重定基，否则第二行起丢失类缩进（IndentationError→F6）。
+    空行不加前缀（避免行尾空白）；多行字符串内容会随缩进平移，语法无损。
+    """
+    lines = body.split("\n")
+    common: "Optional[str]" = None
+    for ln in lines:
+        if not ln.strip():
+            continue
+        ws = ln[:len(ln) - len(ln.lstrip(" \t"))]
+        if common is None:
+            common = ws
+        else:
+            i = 0
+            while i < min(len(common), len(ws)) and common[i] == ws[i]:
+                i += 1
+            common = common[:i]
+    if common:
+        lines = [ln[len(common):] if ln.strip() else ln for ln in lines]
+    if prefix:
+        # 首行不加：text[:start] 已以 prefix 收尾（span 起点在 @/def 首字符）。
+        lines = [lines[0]] + [prefix + ln if ln.strip() else ln
+                              for ln in lines[1:]]
+    return "\n".join(lines)
+
+
+def _apply_replace_staged(workdir: Path, blocks: "list[_ReplaceBlock]") -> list[str]:
+    """v1.4 §2.2 三闸：定位闸 → 投影闸（内存 staging）→ 重 parse 闸 → commit。"""
+    staged: dict[str, str] = {}
+    applied: list[str] = []
+    for b in blocks:
+        target = _validate_target(Path(b.path), workdir)  # P1：越界仍 instant-death
+        if target.suffix != ".py":
+            # F7：非 .py 围栏 → transport 反馈指引 JSON 通道（不落盘）。
+            raise PatchTransportError(
+                f"replace 围栏 path 非 .py 文件（begin 行 {b.line}；"
+                "不落盘，请改用 JSON 通道）")
+        key = str(target)
+        if key not in staged:
+            staged[key] = target.read_text(encoding="utf-8") if target.exists() else ""
+        text = staged[key]
+        try:
+            tree = ast.parse(text)
+        except SyntaxError as exc:
+            # F5：目标文件语法不可解析 → 不走 AST 通道，transport 反馈指引
+            # JSON（from None 断链：不附源码行，同出生体例）。
+            raise PatchTransportError(
+                f"replace 定位闸失败：文件当前语法不可解析（行 {exc.lineno} 列 "
+                f"{exc.offset}）；请用 JSON old/new 通道整替，或先修复语法") from None
+        _label, node = _find_replace_anchor(tree, b)
+        start, end = _function_span(text, node)
+        body = b.body
+        if body.startswith("\n"):
+            # 出生同纪律：剥恰好一个前导 LF（span 起点在 @/def 首字符）。
+            body = body[1:]
+        # 缩进重定基：span 行首缩进留在 prefix，正文非空行统一贴回该缩进
+        # （齐左与文件摘录两种正文约定都成立，见 _rebase_body_indent）。
+        prefix = text[text.rfind("\n", 0, start) + 1:start]
+        staged[key] = text[:start] + _rebase_body_indent(body, prefix) + text[end:]
+        applied.append(str(target.relative_to(workdir.resolve())))
+    # 重 parse 闸（F6）：投影全文 ast.parse 通过才 commit；失败零落盘——
+    # 封死「坏拼接落盘→AST 通道永久失效→无通道可用」自毁环。
+    for key, text in staged.items():
+        try:
+            ast.parse(text)
+        except SyntaxError as exc:
+            rel = str(Path(key).relative_to(workdir.resolve()))
+            raise PatchTransportError(
+                f"replace 重 parse 闸失败：投影全文语法不可解析（文件 {rel} 行 "
+                f"{exc.lineno}）；本轮零落盘；请改用 JSON old/new 通道或修正围栏源码") from None
+    _commit_staged(staged, workdir)
+    return applied
+
+
+def _parse_replace_and_apply(workdir: Path, raw: str) -> "tuple[list[str], dict]":
+    """v1.4 混出决策（设计 §2.1/§3 判定序）：路径闸 → 围栏探测 → JSON 尝试 → 反馈。
+
+    返回 (applied, decision_extras)：extras 为 decision 证据登记件——M1 键
+    json_part_ignored、M2 键 fence_invalid_json_applied（机器原因）。无围栏
+    核记的响应直走既有 JSON 通道（extras 恒空，字节行为不变）。
+    """
+    if REPLACE_FENCE_NUCLEUS not in raw:
+        return _parse_and_apply(workdir, raw), {}
+    fence_exc: "Optional[PatchSafetyError]" = None
+    # v1.4 三签 MAJOR-1：JSON 侧（M1 判定与 M2 回退）一律走剥除围栏行段
+    # 后的候选文本——围栏体含 dict 字面量时，raw 整段 first-`{`/last-`}`
+    # 切片会切进围栏内容成垃圾。仅在围栏扫描成功后剥离（结构已验）；
+    # 扫描失败（F1）无 span 可用，保持 raw（既有口径，申报件）。
+    json_candidate = raw
+    try:
+        blocks = _scan_replace_fences(raw)
+        # 先扫围栏成功、后剥离（顺序钉死：strip 依赖扫描已验的行段对应）。
+        json_candidate = _strip_replace_fence_spans(raw, blocks)
+        applied = _apply_replace_staged(workdir, blocks)
+        extras: dict = {}
+        # M1：围栏全部合法且应用成功 → 应用，同响应另有 JSON 补丁则忽略并
+        # 登记（半份修复不许无声蒸发）。M1 判定 = _json_object 成功且对象
+        # 含 patches/unified_diff 键（try 包裹：失败即无 JSON 件可登记）。
+        try:
+            obj = _json_object(json_candidate)
+        except json.JSONDecodeError:
+            obj = None
+        if isinstance(obj, dict) and ("patches" in obj or "unified_diff" in obj):
+            extras["json_part_ignored"] = True
+        return applied, extras
+    except PatchAnchorError as exc:
+        fence_exc = exc
+    except PatchTransportError as exc:
+        fence_exc = exc
+    except PatchSafetyError:
+        # P1 路径越界：唯一 instant-death，不回退 JSON。
+        raise
+    # 围栏整轮作废零落盘，回退尝试 JSON（M2 / 组合反馈）。MAJOR-1：候选
+    # 文本同样取剥除 span 后版本（F2–F7 时扫描已成功、json_candidate 已
+    # 剥离；F1 扫描失败保持 raw）。
+    try:
+        applied = _parse_and_apply(workdir, json_candidate)
+    except PatchSafetyError as json_exc:
+        # v1.4 三签 MAJOR-2：JSON 侧 P1 路径越界仍是唯一 instant-death——
+        # type-is 精确匹配裸 PatchSafetyError 族直接透传（不误放 transport/
+        # anchor 子类），不得洗成围栏+JSON 组合反馈轮（§3 P1「围栏或
+        # JSON…不变」）。
+        if type(json_exc) is PatchSafetyError:
+            raise
+        # JSON 也失败 → transport 反馈，机器原因取围栏错误优先、JSON 错误附后；
+        # 围栏错误本身是锚点通道（F2/F3/F4）时保持锚点键族（hits 保留）。
+        if isinstance(fence_exc, PatchAnchorError):
+            raise PatchAnchorError(
+                f"{fence_exc}；同轮 JSON 通道同时失败：{json_exc}",
+                hits=fence_exc.hits) from None
+        raise PatchTransportError(
+            f"{fence_exc}；同轮 JSON 通道同时失败：{json_exc}") from None
+    return applied, {"fence_invalid_json_applied": str(fence_exc)}
 
 
 # ---------------------------------------------------------------------------
@@ -1071,12 +1451,34 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                     extra_sections: "tuple[tuple[str, str], ...] | None" = None,
                     chunk_context: "ChunkPromptContext | None" = None,
                     ) -> list[dict[str, str]]:
-    system = (
-        "你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON："
-        '{"patches":[{"path":"相对运行工作目录的路径","old":"原文（须唯一）",'
-        '"new":"替换文"}]}，或 {"unified_diff":"git 风格 diff"}。'
-        "补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。"
-        "不要输出解释、不要输出 image。")
+    # v1.4 §2.5 条件拼装：出生轮（chunk_context 非 None）system 逐字保持
+    # 现行原文（出生环连续四跑成功路径零变化，快照测试锁逐字不变）；修复轮
+    # （None）双通道文案——JSON 通道保留原文语义，追加 replace 围栏格式
+    # （含示例）与「输出前先确认选了哪种通道」句。
+    if chunk_context is None:
+        system = (
+            "你是具身智能仿真工具链的排障 coding agent。输出前先确认选了哪种"
+            "通道。通道一（JSON，只允许输出严格 JSON）："
+            '{"patches":[{"path":"相对运行工作目录的路径","old":"原文（须唯一）",'
+            '"new":"替换文"}]}，或 {"unified_diff":"git 风格 diff"}。'
+            "通道二（simpraxis.replace.v1 围栏整替函数，优先）示例：\n"
+            "<<<<<<< simpraxis.replace.v1 path=脚本文件.py func=函数名 "
+            "[class=类名]\n"
+            "<该函数含装饰器行的完整新源码>\n"
+            "=======\n"
+            ">>>>>>> simpraxis.replace.v1.end\n"
+            "首行 path/func 逐字给相对路径与函数名，class= 可省略（函数名在"
+            "文件中多处定义时用它消歧）；中间是完整新源码；======="
+            "是可选分隔行；末行结束围栏；三行各独占一行。"
+            "补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。"
+            "不要输出解释、不要输出 image。")
+    else:
+        system = (
+            "你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON："
+            '{"patches":[{"path":"相对运行工作目录的路径","old":"原文（须唯一）",'
+            '"new":"替换文"}]}，或 {"unified_diff":"git 风格 diff"}。'
+            "补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。"
+            "不要输出解释、不要输出 image。")
     notes_block = ""
     if gate2_notes and gate2_notes.strip():
         notes_block = (
@@ -1144,6 +1546,34 @@ def _anchor_note(exc: "PatchAnchorError") -> str:
 def _append_anchor_feedback(tail: str, note: str) -> str:
     # run7b：幂等同 rc0 note（节点重放不重复注入）；标记句取注记首句。
     _MARK = "机器核验（非模型输出）：上一轮返回的补丁已被整体拒绝"
+    if _MARK in tail:
+        return tail
+    return tail + "\n\n" + note
+
+
+# v1.4（设计 §2.4）：transport 拒绝的机器核验反馈。{reason} 独占一条物理行
+# （redact_for_model 行级丢弃纪律同 _ANCHOR_REJECT_FMT；MINOR-9 戒律范围
+# 仅锁 _ANCHOR_REJECT_FMT 与两 hint——本 FMT 受设计 §2.4 逐字文本约束，
+# 保留 {"patches":[...]} 形的 ASCII 引号：不匹配 _FRAME_RE 帧形、无六禁词）。
+_TRANSPORT_REJECT_FMT = (
+    "机器核验（非模型输出）：上一轮未产出可应用补丁（机器原因：{reason}）。\n"
+    "允许且优先：simpraxis.replace.v1 围栏整替函数（格式见 system）；\n"
+    "或 JSON {\"patches\":[...]} / {\"unified_diff\":...}。")
+
+
+def _transport_note(exc: "PatchSafetyError") -> str:
+    """v1.4：transport 拒绝的模型面注记（reason 经换行中和；同锚点族）。
+
+    用定向 replace 而非 str.format：FMT 尾行含设计逐字的
+    {"patches":[...]} 字面花括号，format 会把它当格式场报 KeyError。
+    """
+    return _TRANSPORT_REJECT_FMT.replace(
+        "{reason}", _neutralize_for_model(str(exc)))
+
+
+def _append_transport_feedback(tail: str, note: str) -> str:
+    # v1.4：幂等同锚点/rc0 note（节点重放不重复注入）；标记句取注记首句。
+    _MARK = "机器核验（非模型输出）：上一轮未产出可应用补丁"
     if _MARK in tail:
         return tail
     return tail + "\n\n" + note
@@ -1264,12 +1694,139 @@ def _append_batch_schema_note(tail: str, raw: list[str], n_true: int, *,
     return tail + "\n\n" + "\n".join(parts)
 
 
-def _coding_cap_reason(spec: RunSpec, anchor_exc: "Optional[PatchAnchorError]" = None) -> str:
-    """run7b：轮帽文案唯一收口；基串逐字同旧文案，锚点后缀与 chunk 后缀互斥。"""
+def _coding_cap_reason(spec: RunSpec, anchor_exc: "Optional[PatchAnchorError]" = None,
+                       *, transport_exc: "Optional[PatchSafetyError]" = None) -> str:
+    """run7b：轮帽文案唯一收口；基串逐字同旧文案，锚点后缀与 chunk 后缀互斥。
+
+    v1.4（设计 §2.4）：transport_exc 为 keyword-only 新参；anchor_exc 给定
+    时锚点后缀优先（互斥，与既有调用字节一致），否则 transport 后缀
+    「；末次补丁传输机器原因：{exc}」。
+    """
     reason = f"{spec.max_coding_rounds} 轮 coding_debug 后仍失败（RunSpec 上限）"
     if anchor_exc is not None:
         reason += f"；末次锚点机器原因：{anchor_exc}"
+    elif transport_exc is not None:
+        reason += f"；末次补丁传输机器原因：{transport_exc}"
     return reason
+
+
+# ---------------------------------------------------------------------------
+# v1.4 §2.3 IDE 式源码上下文注入（设计稿 §2.3）：修复轮反馈段附涉案函数
+# 当前完整源码（含装饰器行）。纯本地计算（ast/read_text），0 网关触碰；
+# 注入位置 rc0→anchor→schema→transport→函数源码→redact（G10 扩展序）由
+# run() 装配点钉住；本函数只产段文本。
+# ---------------------------------------------------------------------------
+
+_FIELD_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")  # len>=3 ASCII 标识符
+_FRAME_FUNC_RE = re.compile(r",\s+in\s+([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _schema_field_names(schema_lines) -> set:
+    """schema 失败行 → 字段名词干（首个 ': ' 之后的 ASCII 标识符 token，len>=3 过滤噪声）。"""
+    names: set = set()
+    for line in schema_lines:
+        body = line.split(": ", 1)[1] if ": " in line else line
+        names.update(_FIELD_TOKEN_RE.findall(body))
+    return names
+
+
+def _frame_func_names(traceback_tail: str) -> set:
+    """traceback 尾 → 帧函数名集合（`File \"x\", line N, in f` 形；<module> 不匹配）。"""
+    return set(_FRAME_FUNC_RE.findall(traceback_tail or ""))
+
+
+def _iter_workdir_functions(workdir):
+    """workdir 树内 *.py 的模块级 def + ClassDef 直属方法（嵌套 def 不在域；排序稳定）。"""
+    wd = Path(workdir).resolve()
+    for dirpath, dirnames, filenames in os.walk(wd, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for fname in sorted(filenames):
+            if not fname.endswith(".py"):
+                continue
+            p = Path(dirpath) / fname
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+            for node in tree.body:
+                if isinstance(node, (FunctionDef, AsyncFunctionDef)):
+                    yield str(p.relative_to(wd)), node.name, node.name, node, text
+                elif isinstance(node, ClassDef):
+                    for m in node.body:
+                        if isinstance(m, (FunctionDef, AsyncFunctionDef)):
+                            yield (str(p.relative_to(wd)), m.name,
+                                   f"{node.name}.{m.name}", m, text)
+
+
+def collect_repair_functions(workdir, *, schema_lines=(),
+                             traceback_tail: str = "") -> str:
+    """v1.4 §2.3：涉案函数当前完整源码注入段（0 命中返回空串，不新增报错面）。
+
+    命中启发（设计 §2.3 校正版）：函数名 ∈ traceback 帧函数名，或函数子树
+    内 ast.Constant 字符串值与 schema 失败字段名互为 substring（任一方向，
+    len>=3 双端过滤——slip_dist_m 命中 slip_dist_m_R 键即此形）。按行数
+    升序取前 2 个函数；整函数注入禁止截断，FUNCTION_SOURCE_TOTAL_CHARS
+    是硬预算：单函数超预算跳过并注记「函数过大未注入，请用 JSON 通道」；
+    两函数合计超预算只注入较小者（较小者自身超预算 → 同跳过注记）。
+    """
+    fields = _schema_field_names(list(schema_lines or ()))
+    frames = _frame_func_names(traceback_tail or "")
+    if not fields and not frames:
+        return ""
+    hits: "list[tuple[int, str, str, str]]" = []  # (nlines, rel, label, source)
+    for rel, base, label, node, text in _iter_workdir_functions(workdir):
+        hit = base in frames
+        if not hit and fields:
+            for sub in ast.walk(node):
+                if not isinstance(sub, Constant) or not isinstance(sub.value, str):
+                    continue
+                cv = sub.value
+                if len(cv) >= 3 and any(cv in f or f in cv for f in fields):
+                    hit = True
+                    break
+        if not hit:
+            continue
+        start, end = _function_span(text, node)
+        nstart = (node.decorator_list[0].lineno
+                  if node.decorator_list else node.lineno)
+        hits.append((node.end_lineno - nstart + 1, rel, label, text[start:end]))
+    if not hits:
+        return ""
+    hits.sort(key=lambda h: (h[0], h[1], h[2]))  # 行数升序，小者优先
+    selected = hits[:2]
+    notes: "list[str]" = []
+    to_inject: "list[tuple[str, str, str]]" = []
+    if len(selected) == 1:
+        _nl, rel, label, source = selected[0]
+        if len(source) > FUNCTION_SOURCE_TOTAL_CHARS:
+            notes.append("函数过大未注入，请用 JSON 通道")
+        else:
+            to_inject.append((rel, label, source))
+    else:
+        _n0, r0, l0, s0 = selected[0]
+        _n1, r1, l1, s1 = selected[1]
+        if len(s0) + len(s1) <= FUNCTION_SOURCE_TOTAL_CHARS:
+            to_inject.append((r0, l0, s0))
+            to_inject.append((r1, l1, s1))
+        elif len(s0) <= FUNCTION_SOURCE_TOTAL_CHARS:
+            to_inject.append((r0, l0, s0))  # 只注入较小者
+        else:
+            notes.append("函数过大未注入，请用 JSON 通道")
+    parts = [
+        "## 涉案函数当前源码（机器注入，供整替参考）",
+        "以下为机器从当前工作目录源码提取的完整函数定义（含装饰器行），"
+        "优先用 simpraxis.replace.v1 围栏整替（class= 用法见 system）："]
+    for rel, label, source in to_inject:
+        parts.append(f"### {rel} :: {label}")
+        parts.append("```python")
+        parts.append(source)
+        parts.append("```")
+    parts.extend(notes)
+    return "\n".join(parts)
 
 
 def _detect_workdir_hook_pollution(workdir) -> "list[str] | None":
@@ -1431,6 +1988,9 @@ class AgentRunner:
         # 上一拆块轮的机器原因（含块号），原样进下一轮块 0 的失败反馈段。
         chunk_feedback = ""
         anchor_feedback = ""  # run7b §5.2 点 1；成功应用即清零（点 4，见下）
+        # v1.4（设计 §2.4）：transport 注记与锚点注记互斥（同轮只保留一种机器
+        # 注记）；成功应用两者一起清零。
+        transport_feedback = ""
 
         while True:
             exec_no = len(timeline) + 1
@@ -1525,7 +2085,8 @@ class AgentRunner:
             # 模型侧 tail；严格在 snippets/recall 收集之后、_build_messages 之前。
             # recall 查询串/snippets/timeline/_fail 继续用未注入 tail。
             repair_tail = tail
-            if result.rc == 0 and not telemetry_ok:
+            rc0_missing = result.rc == 0 and not telemetry_ok
+            if rc0_missing:
                 repair_tail = _append_rc0_missing_artifact_note(
                     tail, spec.telemetry_relpath)
             # run7b 锁内适配（L505②，§5.2 点 3/§10.1 标记 5）：锚点注记固定 rc0 之后、redact_for_model 之前（A9 钉次序）；人侧 RAW。
@@ -1537,6 +2098,22 @@ class AgentRunner:
                 repair_tail = _append_batch_schema_note(
                     repair_tail, schema_raw, schema_n,
                     read_fault=schema_read_fault, workdir=workdir)
+            # v1.4（设计 §2.3 G10 扩展序）：transport 注记固定 schema 之后、
+            # 函数源码之前（次序 rc0→anchor→schema→transport→函数源码→redact）。
+            if transport_feedback:
+                repair_tail = _append_transport_feedback(
+                    repair_tail, transport_feedback)
+            # v1.4 §2.3（Option B 注入闸）：修复轮反馈段附涉案函数源码——
+            # 仅当本尾带任一机器反馈件（rc0 缺产物注记/锚点/schema/transport）
+            # 时注入。锚点/schema/transport 为修复环专属通道，拆块出生轮尾
+            # 不产；rc0 缺产物注记则出生轮亦可能出现（结构闸出生轮同效），
+            # 非恒 False（三签 P3-2 措辞改准）。0 命中 collect 返回空串，
+            # 不新增报错面。
+            if rc0_missing or anchor_feedback or schema_raw or transport_feedback:
+                func_section = collect_repair_functions(
+                    workdir, schema_lines=schema_raw, traceback_tail=tail)
+                if func_section:
+                    repair_tail = repair_tail + "\n\n" + func_section
             # run7 A1（规格 §3.4，脱敏单点）：note 注入之后只求一次模型面
             # tail；普通修补轮与拆块出生轮两通道统一吃 redact 值。人侧
             # timeline/FAILURE/snippets/recall 继续 RAW（见上各采集点）。
@@ -1630,11 +2207,15 @@ class AgentRunner:
                 chunk_feedback = str(exc)
                 continue
             try:
-                applied = _parse_and_apply(workdir, raw)
+                # v1.4（设计 §2.1/§3）：修复传输双通道——replace 围栏优先、
+                # JSON 兜底混出；extras 携 M1/M2 decision 证据登记件。
+                applied, decision_extras = _parse_replace_and_apply(workdir, raw)
             except PatchAnchorError as exc:
                 # run7b 锁内适配（L505② 协议口径修正，用户 2026-10-23 逐字裁决；§2.2/§4.2，§10.1 标记 3）：
                 # 锚点 !=1 模型可自修（旧实现归并越界立即结案，5 轮帽只花 1 轮），故反馈续跑；越界/结构违例走下句父类硬停。
                 # 第 5 轮拒绝在此直接 _fail——被拒轮字节未变，再跑 sidecar 确定失败（executions=5，不白跑第 6 次）；1-4 轮 continue 必先再 exec。
+                # v1.4：F2/F3/F4 围栏锚点也走此通道（既有 patch_anchor_* 键族）；
+                # 注记互斥——本分支清 transport_feedback。
                 self._evidence(root, stem, "decision", {"applied": [], "rejected": str(exc)})
                 timeline[-1]["coding_round"] = coding_calls
                 timeline[-1]["patch_anchor_rejected"] = str(exc)
@@ -1643,9 +2224,27 @@ class AgentRunner:
                     return self._fail(root, spec, timeline, last_result,
                                       reason=_coding_cap_reason(spec, exc))
                 anchor_feedback = _anchor_note(exc)
+                transport_feedback = ""
+                continue
+            except PatchTransportError as exc:
+                # v1.4 代差登记（设计 §3 行为代差登记节）：J1-J10/F1/F5/F6/F7
+                # transport 失败由 instant-death 收窄为帽内反馈续跑（与锚点
+                # 通道同构 continue）；P1 路径越界仍走下方父类硬停。
+                # 第 5 轮拒绝在此直接 _fail（同锚点分支：被拒轮字节未变，
+                # 再跑 sidecar 确定失败；1-4 轮 continue 必先再 exec）。
+                decision_doc = {"applied": [], "rejected": str(exc), "transport": True}
+                self._evidence(root, stem, "decision", decision_doc)
+                timeline[-1]["coding_round"] = coding_calls  # v1.4 MINOR-2：与锚点通道同位落键
+                timeline[-1]["patch_transport_rejected"] = _neutralize_for_model(str(exc))
+                if coding_calls >= spec.max_coding_rounds:
+                    return self._fail(root, spec, timeline, last_result,
+                                      reason=_coding_cap_reason(spec, transport_exc=exc))
+                transport_feedback = _transport_note(exc)
+                anchor_feedback = ""  # 互斥：下一轮只带一种机器注记
                 continue
             except PatchSafetyError as exc:
-                # 越界/坏补丁：拒绝且不发起重试（L505 ② 原文只钉越界），直接结案
+                # v1.4 收窄后仅剩 _validate_target 路径越界族（P1，唯一保留项）：
+                # 拒绝且不发起重试（L505 ② 原文只钉越界），直接结案。
                 self._evidence(root, stem, "decision",
                                {"applied": [], "rejected": str(exc)})
                 return self._fail(
@@ -1653,7 +2252,9 @@ class AgentRunner:
                     reason=f"补丁安全拒绝（不重试）：{exc}")
             # run5 m3（§15.2-m3）：chunk_split_records 只在 chunked 出生**成功**
             # decision 出现（长度恰 6、None 位为 null）；单补丁轮不带该键。
-            decision_doc = {"applied": applied, "rejected": None}
+            # v1.4：decision_extras（M1 json_part_ignored / M2
+            # fence_invalid_json_applied）并入成功 decision（设计 §2.1）。
+            decision_doc = {"applied": applied, "rejected": None, **decision_extras}
             if chunked_birth:
                 decision_doc["chunk_split_records"] = records
                 accepted = sum(1 for rec in records if rec is not None)
@@ -1664,6 +2265,7 @@ class AgentRunner:
             timeline[-1]["coding_round"] = coding_calls
             timeline[-1]["applied"] = applied
             anchor_feedback = ""  # run7b §5.2 点 4：成功应用即清零，下轮不带陈旧注记（A7）
+            transport_feedback = ""  # v1.4 §2.4：成功应用同清零，下轮不带陈旧注记
 
     # -- 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）--
 

@@ -583,8 +583,13 @@ _CHUNK_BOUNDARIES = tuple(
 # 字符级快照：改前 _build_messages 两 case（无意见/有人工意见）的逐字输出，
 # 由一次性 /tmp/task6_capture_baseline.py 在改前模板上捕获（3857 B）。任何对
 # 默认模板的无意改动都会在此逐字比对下失败；如确需改模板，必须重捕并评审。
-_BASELINE_SNAPSHOT = r'''[{"role": "system", "content": "你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON：{\"patches\":[{\"path\":\"相对运行工作目录的路径\",\"old\":\"原文（须唯一）\",\"new\":\"替换文\"}]}，或 {\"unified_diff\":\"git 风格 diff\"}。补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。不要输出解释、不要输出 image。"}, {"role": "user", "content": "## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/run_1/script.py --flag 值\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"script.py\", line 12\nRuntimeError: fixture failure: boom\n\n## 相关源文件片段（仅限运行工作目录）\n### sim_main.py:12\n    7| x = 1\n    8| y = 2\n    9| z = x + y\n   10| raise RuntimeError('boom')\n   11| \n   12| -> raise RuntimeError('boom')\n   13| \n   14| def f():\n   15|     pass\n   16| \n   17| return\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/troubleshooting.md#s0 | evidence_refs: E0]\n夹具排障知识条目 0（字段名必须是 text）\n\n[S2 来源: knowledge/projects/fixture/troubleshooting.md#s1 | evidence_refs: E1]\n夹具排障知识条目 1（字段名必须是 text）\n\n[S3 来源: knowledge/projects/fixture/troubleshooting.md#s2 | evidence_refs: E2]\n夹具排障知识条目 2（字段名必须是 text）\n\n[S4 来源: knowledge/projects/fixture/troubleshooting.md#s3 | evidence_refs: E3]\n夹具排障知识条目 3（字段名必须是 text）\n\n[S5 来源: knowledge/projects/fixture/troubleshooting.md#s4 | evidence_refs: E4]\n夹具排障知识条目 4（字段名必须是 text）\n\n[S6 来源: knowledge/projects/fixture/troubleshooting.md#s5 | evidence_refs: E5]\n夹具排障知识条目 5（字段名必须是 text）"}]
-[{"role": "system", "content": "你是具身智能仿真工具链的排障 coding agent。只允许输出严格 JSON：{\"patches\":[{\"path\":\"相对运行工作目录的路径\",\"old\":\"原文（须唯一）\",\"new\":\"替换文\"}]}，或 {\"unified_diff\":\"git 风格 diff\"}。补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。不要输出解释、不要输出 image。"}, {"role": "user", "content": "## 人工评审意见（必须逐条响应，最高优先级）\n人工意见：提高分辨率\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/run_1/script.py --flag 值\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"script.py\", line 12\nRuntimeError: fixture failure: boom\n\n## 相关源文件片段（仅限运行工作目录）\n### sim_main.py:12\n    7| x = 1\n    8| y = 2\n    9| z = x + y\n   10| raise RuntimeError('boom')\n   11| \n   12| -> raise RuntimeError('boom')\n   13| \n   14| def f():\n   15|     pass\n   16| \n   17| return\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/troubleshooting.md#s0 | evidence_refs: E0]\n夹具排障知识条目 0（字段名必须是 text）\n\n[S2 来源: knowledge/projects/fixture/troubleshooting.md#s1 | evidence_refs: E1]\n夹具排障知识条目 1（字段名必须是 text）\n\n[S3 来源: knowledge/projects/fixture/troubleshooting.md#s2 | evidence_refs: E2]\n夹具排障知识条目 2（字段名必须是 text）\n\n[S4 来源: knowledge/projects/fixture/troubleshooting.md#s3 | evidence_refs: E3]\n夹具排障知识条目 3（字段名必须是 text）\n\n[S5 来源: knowledge/projects/fixture/troubleshooting.md#s4 | evidence_refs: E4]\n夹具排障知识条目 4（字段名必须是 text）\n\n[S6 来源: knowledge/projects/fixture/troubleshooting.md#s5 | evidence_refs: E5]\n夹具排障知识条目 5（字段名必须是 text）"}]'''
+# v1.4 协议变更登记件（设计 §2.5 必改清单①，.omc/handoffs/
+# task6-ide-repair-protocol-design.md §3 行为代差登记节）：修复轮 system 首行
+# 更新为双通道文案（JSON 语义保留 + replace 围栏格式 + 「输出前先确认选了
+# 哪种通道」句）；user 内容两行逐字不变。出生轮 system 逐字=旧原文由
+# test_v14_birth_system_verbatim_old_text 钉死（必改清单②）。
+_BASELINE_SNAPSHOT = r'''[{"role": "system", "content": "你是具身智能仿真工具链的排障 coding agent。输出前先确认选了哪种通道。通道一（JSON，只允许输出严格 JSON）：{\"patches\":[{\"path\":\"相对运行工作目录的路径\",\"old\":\"原文（须唯一）\",\"new\":\"替换文\"}]}，或 {\"unified_diff\":\"git 风格 diff\"}。通道二（simpraxis.replace.v1 围栏整替函数，优先）示例：\n<<<<<<< simpraxis.replace.v1 path=脚本文件.py func=函数名 [class=类名]\n<该函数含装饰器行的完整新源码>\n=======\n>>>>>>> simpraxis.replace.v1.end\n首行 path/func 逐字给相对路径与函数名，class= 可省略（函数名在文件中多处定义时用它消歧）；中间是完整新源码；=======是可选分隔行；末行结束围栏；三行各独占一行。补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。不要输出解释、不要输出 image。"}, {"role": "user", "content": "## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/run_1/script.py --flag 值\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"script.py\", line 12\nRuntimeError: fixture failure: boom\n\n## 相关源文件片段（仅限运行工作目录）\n### sim_main.py:12\n    7| x = 1\n    8| y = 2\n    9| z = x + y\n   10| raise RuntimeError('boom')\n   11| \n   12| -> raise RuntimeError('boom')\n   13| \n   14| def f():\n   15|     pass\n   16| \n   17| return\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/troubleshooting.md#s0 | evidence_refs: E0]\n夹具排障知识条目 0（字段名必须是 text）\n\n[S2 来源: knowledge/projects/fixture/troubleshooting.md#s1 | evidence_refs: E1]\n夹具排障知识条目 1（字段名必须是 text）\n\n[S3 来源: knowledge/projects/fixture/troubleshooting.md#s2 | evidence_refs: E2]\n夹具排障知识条目 2（字段名必须是 text）\n\n[S4 来源: knowledge/projects/fixture/troubleshooting.md#s3 | evidence_refs: E3]\n夹具排障知识条目 3（字段名必须是 text）\n\n[S5 来源: knowledge/projects/fixture/troubleshooting.md#s4 | evidence_refs: E4]\n夹具排障知识条目 4（字段名必须是 text）\n\n[S6 来源: knowledge/projects/fixture/troubleshooting.md#s5 | evidence_refs: E5]\n夹具排障知识条目 5（字段名必须是 text）"}]
+[{"role": "system", "content": "你是具身智能仿真工具链的排障 coding agent。输出前先确认选了哪种通道。通道一（JSON，只允许输出严格 JSON）：{\"patches\":[{\"path\":\"相对运行工作目录的路径\",\"old\":\"原文（须唯一）\",\"new\":\"替换文\"}]}，或 {\"unified_diff\":\"git 风格 diff\"}。通道二（simpraxis.replace.v1 围栏整替函数，优先）示例：\n<<<<<<< simpraxis.replace.v1 path=脚本文件.py func=函数名 [class=类名]\n<该函数含装饰器行的完整新源码>\n=======\n>>>>>>> simpraxis.replace.v1.end\n首行 path/func 逐字给相对路径与函数名，class= 可省略（函数名在文件中多处定义时用它消歧）；中间是完整新源码；=======是可选分隔行；末行结束围栏；三行各独占一行。补丁只能改本次运行工作目录内的文件；禁止改配置、凭据、仓库源码。不要输出解释、不要输出 image。"}, {"role": "user", "content": "## 人工评审意见（必须逐条响应，最高优先级）\n人工意见：提高分辨率\n## 失败命令\n/mnt/venvs/simpraxis/bin/python /work/run_1/script.py --flag 值\n\n## traceback / 日志尾部\nTraceback (most recent call last):\n  File \"script.py\", line 12\nRuntimeError: fixture failure: boom\n\n## 相关源文件片段（仅限运行工作目录）\n### sim_main.py:12\n    7| x = 1\n    8| y = 2\n    9| z = x + y\n   10| raise RuntimeError('boom')\n   11| \n   12| -> raise RuntimeError('boom')\n   13| \n   14| def f():\n   15|     pass\n   16| \n   17| return\n\n## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n[S1 来源: knowledge/projects/fixture/troubleshooting.md#s0 | evidence_refs: E0]\n夹具排障知识条目 0（字段名必须是 text）\n\n[S2 来源: knowledge/projects/fixture/troubleshooting.md#s1 | evidence_refs: E1]\n夹具排障知识条目 1（字段名必须是 text）\n\n[S3 来源: knowledge/projects/fixture/troubleshooting.md#s2 | evidence_refs: E2]\n夹具排障知识条目 2（字段名必须是 text）\n\n[S4 来源: knowledge/projects/fixture/troubleshooting.md#s3 | evidence_refs: E3]\n夹具排障知识条目 3（字段名必须是 text）\n\n[S5 来源: knowledge/projects/fixture/troubleshooting.md#s4 | evidence_refs: E4]\n夹具排障知识条目 4（字段名必须是 text）\n\n[S6 来源: knowledge/projects/fixture/troubleshooting.md#s5 | evidence_refs: E5]\n夹具排障知识条目 5（字段名必须是 text）"}]'''
 _SNAPSHOT_MSGS = [json.loads(line) for line in _BASELINE_SNAPSHOT.splitlines()]
 _SNAP_SNIPPETS = [{'file': 'sim_main.py', 'line': 12, 'snippet': "    7| x = 1\n    8| y = 2\n    9| z = x + y\n   10| raise RuntimeError('boom')\n   11| \n   12| -> raise RuntimeError('boom')\n   13| \n   14| def f():\n   15|     pass\n   16| \n   17| return"}]
 _SNAP_HITS = [{'text': '夹具排障知识条目 0（字段名必须是 text）', 'evidence_refs': ['E0'], 'kb_relpath': 'knowledge/projects/fixture/troubleshooting.md', 'section_path': 's0'}, {'text': '夹具排障知识条目 1（字段名必须是 text）', 'evidence_refs': ['E1'], 'kb_relpath': 'knowledge/projects/fixture/troubleshooting.md', 'section_path': 's1'}, {'text': '夹具排障知识条目 2（字段名必须是 text）', 'evidence_refs': ['E2'], 'kb_relpath': 'knowledge/projects/fixture/troubleshooting.md', 'section_path': 's2'}, {'text': '夹具排障知识条目 3（字段名必须是 text）', 'evidence_refs': ['E3'], 'kb_relpath': 'knowledge/projects/fixture/troubleshooting.md', 'section_path': 's3'}, {'text': '夹具排障知识条目 4（字段名必须是 text）', 'evidence_refs': ['E4'], 'kb_relpath': 'knowledge/projects/fixture/troubleshooting.md', 'section_path': 's4'}, {'text': '夹具排障知识条目 5（字段名必须是 text）', 'evidence_refs': ['E5'], 'kb_relpath': 'knowledge/projects/fixture/troubleshooting.md', 'section_path': 's5'}]
@@ -601,7 +606,9 @@ def _snap_kwargs(**over):
 
 def test_06_build_messages_default_byte_snapshot():
     # 锁内适配（计划 v1.2 外接缝）的回归锚点：extra/chunk 两新参默认 None 时，
-    # task7/8 与 V1 修补轮看到的消息必须与改前逐字一致（整条 JSON 快照）。
+    # 修补轮（chunk_context=None）看到的消息必须与登记快照逐字一致（整条
+    # JSON 快照）。v1.4 代差（设计 §3 行为代差登记节）：system 首行是修复轮
+    # 双通道文案（必改清单①，协议变更登记件）；user 内容与改前逐字一致。
     msgs_none = _build_messages(gate2_notes=None, **_snap_kwargs())
     msgs_note = _build_messages(
         gate2_notes="人工意见：提高分辨率", **_snap_kwargs())
@@ -2191,18 +2198,37 @@ def test_run6_d2_note_chunked_path_same_source(tmp_path, monkeypatch):
     assert captured["tail"].count(note) == 1
 
 
-def test_run6_empty_patches_hard_stop_no_retry(tmp_path):
-    """M1⑦：空 patches 硬停路径不重试（D2 接线后行为原样，恰 1 次调用）。"""
+def test_run6_empty_patches_feedback_continue_cap_fail(tmp_path):
+    """M1⑦ 反转（v1.4 必改清单③；设计 §3 行为代差登记节 J7）：空 patches
+    由 instant-death 收窄为帽内 transport 反馈续跑——两轮均拒后帽尽 _fail，
+    reason 携末次传输机器原因；「补丁安全拒绝（不重试）」仅保留 P1 路径
+    越界（test_02 不动）。"""
     script = "import sys\nsys.exit(3)\n"
+    empty = json.dumps({"patches": []})
     runner, spec, gw, wd, _ = _run6_rc0_missing_spec(
-        tmp_path, telemetry_relpath="summary.json", script=script, cap=3,
-        thread="t6empty", responses=[json.dumps({"patches": []})])
+        tmp_path, telemetry_relpath="summary.json", script=script, cap=2,
+        thread="t6empty", responses=[empty, empty])
     rec = runner.run(spec)
 
     assert rec["status"] == "failed"
-    assert len(gw.calls) == 1 and rec["executions"] == 1
-    assert "补丁安全拒绝（不重试）" in rec["reason"]
+    assert len(gw.calls) == 2 and rec["executions"] == 2
+    # 帽尽走 transport _fail（非 P1 instant-death 文案）
+    assert "补丁安全拒绝（不重试）" not in rec["reason"]
+    assert "末次补丁传输机器原因" in rec["reason"]
+    assert "返回中既无 unified_diff 也无 patches[]" in rec["reason"]
     assert (wd / "FAILURE.json").is_file()
+    # timeline：两轮 transport 拒绝键 + coding_round 同位落键（§2.4 MINOR-2）
+    tr = [t for t in rec["timeline"] if "patch_transport_rejected" in t]
+    assert len(tr) == 2
+    assert [t["coding_round"] for t in tr] == [1, 2]
+    # decision 证据：transport True、applied 空、rejected 为机器原因
+    ev = tmp_path / "ev" / "t6empty"
+    for n in (1, 2):
+        doc = json.loads(
+            (ev / f"coding_round{n}.decision.json").read_text(encoding="utf-8"))
+        assert doc["applied"] == [] and doc["rejected"] \
+            == "返回中既无 unified_diff 也无 patches[]"
+        assert doc["transport"] is True
 
 
 # ---- M1⑧：rc2 拆块六消息逐字快照（固定 tail，含 snippets/cmd 段） ----------
@@ -3162,7 +3188,7 @@ def test_run7b_a12b_replay_fs_already_patched_zero_hits_feedback(tmp_path):
     assert len(list((tmp_path / "cache").glob("*.json"))) == 2
 
 
-# ---- A13：四类硬停保持（各恰 1 调用 1 exec，锚点通道零介入） ----------------
+# ---- A13：六形 transport 反馈续跑（v1.4 必改清单④反转） --------------------
 
 _RUN7B_HARD_CASES = {
     "empty_patches": json.dumps({"patches": []}),
@@ -3180,19 +3206,30 @@ _RUN7B_HARD_CASES = {
 
 @pytest.mark.parametrize("name", sorted(_RUN7B_HARD_CASES),
                          ids=sorted(_RUN7B_HARD_CASES))
-def test_run7b_a13_hard_stops_remain_one_call(tmp_path, name):
+def test_run7b_a13_transport_forms_feedback_continue(tmp_path, name):
+    """A13 反转（v1.4 必改清单④；设计 §3 行为代差登记节 J5/J6/J7/J10 等）：
+    六类 JSON 通道坏响应由 instant-death 收窄为帽内 transport 反馈续跑——
+    坏形→好形两件套，第 2 轮好补丁收敛 ok；「恰 1 调用硬停」语义仅保留
+    P1 路径越界（test_02）。"""
+    good = _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))
     runner, spec, gw, wd, _ = _run7b_setup(
-        tmp_path, [_RUN7B_HARD_CASES[name]], script=ALWAYS_FAIL_SCRIPT,
+        tmp_path, [_RUN7B_HARD_CASES[name], good],
         thread="t7b-a13-" + name)
     rec = runner.run(spec)
 
-    assert rec["status"] == "failed"
-    assert len(gw.calls) == 1 and rec["executions"] == 1
-    assert "补丁安全拒绝（不重试）" in rec["reason"]
-    assert "末次锚点" not in rec["reason"]
-    assert (wd / "FAILURE.json").is_file()
+    assert rec["status"] == "ok"
+    assert len(gw.calls) == 2 and rec["executions"] == 3
+    assert rec["coding_round"] == 2
+    assert (wd / "fix.txt").read_text(encoding="utf-8") == "PATCHED"
+    # round1 decision：transport True、applied 空（六形全走 JSON 通道 transport）
+    doc1 = _run7b_decision(tmp_path, "t7b-a13-" + name, 1)
+    assert doc1["applied"] == [] and isinstance(doc1["rejected"], str)
+    assert doc1["transport"] is True
+    # timeline r1：transport 拒绝键 + coding_round 同位落键
+    tr = [t for t in rec["timeline"] if "patch_transport_rejected" in t]
+    assert len(tr) == 1 and tr[0]["coding_round"] == 1
+    # 锚点通道零介入（六形均非 F2/F3/F4）
     assert _run7b_anchor_entries(rec) == []
-    assert (wd / "fix.txt").read_text() == "NEEDS_FIX"
 
 
 # ---- A14：run7 真实响应缩形回归（两补丁同指 V2，patch0 old 命中 2 次） -----
@@ -4218,3 +4255,532 @@ def test_sg_g18_success_video_fields_unchanged(tmp_path):
         "video_path", "duration_ms", "cover_png", "intranet_url"}
     assert rec["video_path"] is None and rec["duration_ms"] is None
     assert rec["cover_png"] is None and rec["intranet_url"] is None
+
+
+# ===========================================================================
+# v1.4「IDE 式多次小合成」修复协议测试（.omc/handoffs/
+# task6-ide-repair-protocol-design.md 唯一规范件；授权链见 runner.
+# PatchTransportError docstring；§3 行为代差登记节为必改③④注释引用源）。
+# 必改清单② + §4 新增 hermetic 面：围栏扫描纪律、AST 锚三态与 class 消歧、
+# 定位/重 parse 闸零落盘、M1/M2 混出证据登记、J7/J9 反馈续跑与帽尽 _fail、
+# P1 仍 instant-death、PatchTransportError 分类学、transport 注记/帽文案、
+# 函数源码启发与 8192 预算、transport probe 纯函数面。全 0 付费：FakeGateway
+# + tmp 文件系统，无 paid marker、不联网、不读 /mnt、探针永不走 main。
+# [v1.4-ide-repair-tests]
+# ===========================================================================
+
+from orchestrator.agent_runner.runner import (  # noqa: E402 （v1.4 段局部导入）
+    FUNCTION_SOURCE_TOTAL_CHARS,
+    REPLACE_FENCE_BEGIN,
+    REPLACE_FENCE_END,
+    PatchTransportError,
+    _append_transport_feedback,
+    _scan_replace_fences,
+    _parse_replace_and_apply,
+    _transport_note,
+    collect_repair_functions,
+)
+
+_V14_B = REPLACE_FENCE_BEGIN   # "<<<<<<< simpraxis.replace.v1"（7 个 <）
+_V14_E = REPLACE_FENCE_END     # ">>>>>>> simpraxis.replace.v1.end"（7 个 >）
+
+
+def _v14_wd(tmp_path, text, name="t.py"):
+    wd = tmp_path / "wd"
+    wd.mkdir(exist_ok=True)
+    (wd / name).write_text(text, encoding="utf-8")
+    return wd
+
+
+def _v14_fence(path, func, body, cls=None):
+    head = f"{_V14_B} path={path} func={func}"
+    if cls is not None:
+        head += f" class={cls}"
+    return f"{head}\n{body}\n{_V14_E}"
+
+
+# ---- 必改②：出生轮 system 逐字=旧原文（条件拼装 §2.5） --------------------
+
+def test_v14_birth_system_verbatim_old_text():
+    """必改清单②（设计 §2.5）：chunk_context 非 None → system 逐字保持旧
+    原文（出生环连续四跑成功路径零变化）；修复轮（None）为双通道文案，由
+    _build_messages 条件分派钉死。旧原文取 rc2 快照首行（Option A 保留件）。"""
+    old_system = _RUN6_RC2_LINES[0]
+    ctx = ChunkPromptContext(
+        0, 6, "v2.py", _CHUNK_TITLES, _CHUNK_BOUNDARIES,
+        previous_code="", round_feedback="")
+    birth = _build_messages(
+        gate2_notes=None, traceback_tail="T", snippets=[], hits=[],
+        cmd=["x"], chunk_context=ctx)[0]["content"]
+    assert birth == old_system
+    assert "simpraxis.replace.v1" not in birth
+    assert "输出前先确认选了哪种通道" not in birth
+    repair = _build_messages(
+        gate2_notes=None, traceback_tail="T", snippets=[], hits=[],
+        cmd=["x"])[0]["content"]
+    assert repair != old_system
+    assert "simpraxis.replace.v1" in repair
+    assert "输出前先确认选了哪种通道" in repair
+
+
+# ---- 围栏扫描纪律（F1 各形 + 正形；§2.1） ----------------------------------
+
+def test_v14_fence_scanner_positive_variants():
+    body = "def add(a, b):\n    return a + b"
+    raw = _v14_fence("t.py", "add", body) + "\n"
+    blocks = _scan_replace_fences(raw)
+    assert len(blocks) == 1
+    b = blocks[0]
+    assert (b.path, b.func, b.cls) == ("t.py", "add", None)
+    assert b.body == body and b.line == 1
+    # 可选 ======= 分隔行（紧贴 end 前剥除）
+    raw_sep = (f"{_V14_B} path=t.py func=add\n{body}\n=======\n{_V14_E}\n")
+    assert _scan_replace_fences(raw_sep)[0].body == body
+    # CRLF 逐行归一（剥恰好一个尾 \r）
+    assert _scan_replace_fences(raw.replace("\n", "\r\n"))[0].body == body
+    # 围栏外非核记散文/JSON 件容忍（M1 同轮混出共存前提）
+    raw_mixed = f"修复如下：\n{raw}{{\"patches\": []}}\n"
+    assert len(_scan_replace_fences(raw_mixed)) == 1
+    # class= 字段捕获
+    assert _scan_replace_fences(
+        _v14_fence("t.py", "add", body, cls="Calc"))[0].cls == "Calc"
+    # 无核记 → 空列表（JSON-only 响应直走既有通道）
+    assert _scan_replace_fences('{"patches": []}') == []
+
+
+def test_v14_fence_scanner_structure_rejects():
+    # 半打（begin 无配对 end）
+    with pytest.raises(PatchTransportError, match="无配对 end"):
+        _scan_replace_fences(
+            f"{_V14_B} path=t.py func=add\ndef add():\n    return 1")
+    # 全角 begin 不命中 RE 但含核记 → begin/end 行不合规
+    with pytest.raises(PatchTransportError, match="begin/end 行不合规"):
+        _scan_replace_fences(
+            "＜＜＜ simpraxis.replace.v1 path=t.py func=add\n"
+            f"def add():\n    return 1\n{_V14_E}\n")
+    # 正文行含围栏核记（同出生纪律）
+    with pytest.raises(PatchTransportError, match="含围栏核记"):
+        _scan_replace_fences(
+            f"{_V14_B} path=t.py func=add\n"
+            "def add():\n"
+            "    # 正文禁写 simpraxis.replace.v1 字样\n"
+            f"{_V14_E}\n")
+    # 迷走 end 行（无配对 begin）
+    with pytest.raises(PatchTransportError, match="无配对 begin"):
+        _scan_replace_fences(
+            f"{_V14_E}\n{_V14_B} path=t.py func=add\n"
+            f"def add():\n    return 1\n{_V14_E}\n")
+    # 空/纯空白正文（格式契约底线）
+    with pytest.raises(PatchTransportError, match="正文为空"):
+        _scan_replace_fences(
+            f"{_V14_B} path=t.py func=add\n=======\n{_V14_E}\n")
+
+
+# ---- AST 锚三态与 class 消歧（F2/F3/F4；§2.1） -----------------------------
+
+_TWO_ADD = (
+    "class Calc:\n"
+    "    @staticmethod\n"
+    "    def add(a, b):\n"
+    "        return a - b\n"
+    "\n"
+    "\n"
+    "class Calc2:\n"
+    "    @staticmethod\n"
+    "    def add(a, b):\n"
+    "        return a + b\n")
+
+
+def test_v14_replace_anchor_states(tmp_path):
+    wd = _v14_wd(tmp_path, _TWO_ADD)
+    raw0 = _v14_fence("t.py", "missing", "def missing():\n    return 0")
+    # F2 锚 0 命中 → 锚点通道（hits=0）
+    with pytest.raises(PatchAnchorError, match="0 命中") as ei0:
+        _parse_replace_and_apply(wd, raw0)
+    assert ei0.value.hits == 0
+    # F3 锚 ≥2 无 class= → 候选列表（AST 派生标签可回显）
+    raw3 = _v14_fence("t.py", "add", "def add():\n    return 0")
+    with pytest.raises(
+            PatchAnchorError, match=r"候选 Calc\.add、Calc2\.add") as ei3:
+        _parse_replace_and_apply(wd, raw3)
+    assert ei3.value.hits == 2
+    # F4a class 不存在 → class_not_found
+    with pytest.raises(PatchAnchorError, match="class_not_found"):
+        _parse_replace_and_apply(
+            wd, _v14_fence("t.py", "add", "def add():\n    return 0",
+                           cls="Nope"))
+    # F4b 类内无该函数 → func_not_in_class
+    with pytest.raises(PatchAnchorError, match="func_not_in_class"):
+        _parse_replace_and_apply(
+            wd, _v14_fence("t.py", "other", "def other():\n    return 0",
+                           cls="Calc"))
+    # class= 消歧恰 1 → 应用；齐左正文经缩进重定基贴回类缩进（语法完好）
+    good = _v14_fence(
+        "t.py", "add",
+        "@staticmethod\ndef add(a, b):\n    return a + b", cls="Calc")
+    applied, extras = _parse_replace_and_apply(wd, good)
+    assert applied == ["t.py"] and extras == {}
+    text = (wd / "t.py").read_text(encoding="utf-8")
+    ast.parse(text)  # 重 parse 闸同款：语法必须完好
+    assert "        return a + b" in text
+    assert "        return a - b" not in text
+
+
+# ---- 三闸：F5 定位闸 / F6 重 parse 闸 / F7 非 .py（零落盘） -----------------
+
+def test_v14_replace_gates_f5_f6_f7_zero_write(tmp_path):
+    # F5：目标文件 SyntaxError → transport 指引 JSON，文件字节不动
+    wd = _v14_wd(tmp_path, "def broken(:\n")
+    raw5 = _v14_fence("t.py", "x", "def x():\n    return 1")
+    with pytest.raises(PatchTransportError, match="语法不可解析"):
+        _parse_replace_and_apply(wd, raw5)
+    assert (wd / "t.py").read_text(encoding="utf-8") == "def broken(:\n"
+    # F6：投影重 parse 失败（body 坏 Python）→ transport 携行号，零落盘
+    wd2 = _v14_wd(tmp_path, "def ok():\n    return 1\n", name="ok.py")
+    raw6 = _v14_fence("ok.py", "ok", "def ok(:")
+    with pytest.raises(PatchTransportError, match="重 parse 闸失败"):
+        _parse_replace_and_apply(wd2, raw6)
+    assert (wd2 / "ok.py").read_text(encoding="utf-8") == \
+        "def ok():\n    return 1\n"
+    # F7：非 .py path → transport 指引 JSON，不落盘
+    (wd2 / "note.txt").write_text("orig\n", encoding="utf-8")
+    raw7 = _v14_fence("note.txt", "x", "def x():\n    return 1")
+    with pytest.raises(PatchTransportError, match=r"非 \.py"):
+        _parse_replace_and_apply(wd2, raw7)
+    assert (wd2 / "note.txt").read_text(encoding="utf-8") == "orig\n"
+
+
+# ---- M1/M2 混出证据登记（§2.1） --------------------------------------------
+
+def test_v14_m1_m2_mixed_channel_extras(tmp_path):
+    # M1：围栏合法应用成功 + 同轮 JSON 件 → 应用围栏，json_part_ignored
+    wd = _v14_wd(tmp_path, "def add(a, b):\n    return a - b\n")
+    raw_m1 = (
+        _v14_fence("t.py", "add",
+                   "def add(a, b):\n    return a + b") + "\n"
+        '{"patches": [{"path": "t.py", "old": "x", "new": "y"}]}')
+    applied, extras = _parse_replace_and_apply(wd, raw_m1)
+    assert applied == ["t.py"] and extras == {"json_part_ignored": True}
+    assert "return a + b" in (wd / "t.py").read_text(encoding="utf-8")
+    # M2：围栏非法（F2 锚 0）+ 同轮 JSON 合法 → 应用 JSON + 机器原因登记
+    wd2 = _v14_wd(tmp_path, "def real():\n    return 1\n", name="t.py")
+    raw_m2 = (
+        _v14_fence("t.py", "ghost", "def ghost():\n    return 0") + "\n"
+        '{"patches": [{"path": "t.py", "old": "return 1", "new": "return 2"}]}')
+    applied2, extras2 = _parse_replace_and_apply(wd2, raw_m2)
+    assert applied2 == ["t.py"]
+    assert "fence_invalid_json_applied" in extras2
+    assert "0 命中" in extras2["fence_invalid_json_applied"]
+    assert (wd2 / "t.py").read_text(encoding="utf-8") == \
+        "def real():\n    return 2\n"
+    # 组合反馈：围栏 F2 + 同轮 JSON 也败（J7 空列表）→ 保持锚点键族（hits 保留）
+    wd3 = _v14_wd(tmp_path, "def real():\n    return 1\n", name="t.py")
+    raw_c = (
+        _v14_fence("t.py", "ghost", "def ghost():\n    return 0") + "\n"
+        '{"patches": []}')
+    with pytest.raises(PatchAnchorError) as ei_c:
+        _parse_replace_and_apply(wd3, raw_c)
+    assert "同轮 JSON 通道同时失败" in str(ei_c.value)
+    assert ei_c.value.hits == 0
+    assert (wd3 / "t.py").read_text(encoding="utf-8") == \
+        "def real():\n    return 1\n"
+
+
+def test_v14_mixed_channel_brace_body_json_candidate(tmp_path):
+    # 三签 MAJOR-1：围栏体含 dict 字面量时，JSON 侧抽取必须走剥除围栏
+    # 行段后的候选文本——raw 整段 first-`{`/last-`}` 切片会切进围栏内容
+    # 成垃圾：M1 键静默蒸发 / M2 合法 JSON 被误标 JSONDecodeError。
+    # M1：fence 体含 {'sum': a + b} → fence 应用 + json_part_ignored 登记
+    wd = _v14_wd(tmp_path, "def add(a, b):\n    return a - b\n")
+    raw_m1 = (
+        _v14_fence("t.py", "add",
+                   "def add(a, b):\n    return {'sum': a + b}") + "\n"
+        '{"patches": [{"path": "t.py", "old": "x", "new": "y"}]}')
+    applied, extras = _parse_replace_and_apply(wd, raw_m1)
+    assert applied == ["t.py"]
+    assert extras == {"json_part_ignored": True}
+    assert "'sum'" in (wd / "t.py").read_text(encoding="utf-8")
+    # M2：fence 体含 dict 字面量且 F2 锚 0 + 同轮尾部合法 JSON →
+    # JSON 被应用 + fence_invalid_json_applied 键（机器原因 0 命中）
+    wd2 = _v14_wd(tmp_path, "def real():\n    return 1\n", name="t.py")
+    raw_m2 = (
+        _v14_fence("t.py", "ghost",
+                   "def ghost():\n    return {'k': 0}") + "\n"
+        '{"patches": [{"path": "t.py", "old": "return 1", "new": "return 2"}]}')
+    applied2, extras2 = _parse_replace_and_apply(wd2, raw_m2)
+    assert applied2 == ["t.py"]
+    assert "fence_invalid_json_applied" in extras2
+    assert "0 命中" in extras2["fence_invalid_json_applied"]
+    assert (wd2 / "t.py").read_text(encoding="utf-8") == \
+        "def real():\n    return 2\n"
+
+
+def test_v14_mixed_channel_p1_path_escape_instant_death(tmp_path):
+    # 三签 MAJOR-2：混出通道 JSON 侧 P1 路径越界仍是唯一 instant-death——
+    # except 首行 type-is 精确匹配裸 PatchSafetyError 族直接 re-raise，
+    # 不得洗成围栏+JSON 组合反馈轮（§3 P1「围栏或 JSON…不变」）。
+    wd = _v14_wd(tmp_path, "def real():\n    return 1\n")
+    raw = (
+        _v14_fence("t.py", "ghost", "def ghost():\n    return 0") + "\n"
+        '{"patches": [{"path": "../evil.py", "old": "a", "new": "b"}]}')
+    with pytest.raises(PatchSafetyError) as ei:
+        _parse_replace_and_apply(wd, raw)
+    # 裸安全异常本体：绝不包装成 transport/anchor（type-is 透传依赖此形）
+    assert type(ei.value) is PatchSafetyError
+    assert not isinstance(ei.value, PatchTransportError)
+    assert not isinstance(ei.value, PatchAnchorError)
+    assert (wd / "t.py").read_text(encoding="utf-8") == \
+        "def real():\n    return 1\n"
+
+
+# ---- P1 路径越界：唯一 instant-death（test_02 run() 面不动） ----------------
+
+def test_v14_p1_path_escape_instant_death(tmp_path):
+    wd = _v14_wd(tmp_path, "def add():\n    return 1\n")
+    raw = _v14_fence("../evil.py", "add", "def add():\n    return 2")
+    with pytest.raises(PatchSafetyError) as ei:
+        _parse_replace_and_apply(wd, raw)
+    # 裸安全异常：绝不包装成 transport/anchor（run() 裸 except 硬停依赖此形）
+    assert not isinstance(ei.value, PatchTransportError)
+    assert not isinstance(ei.value, PatchAnchorError)
+
+
+# ---- 异常分类学（§4 N4 钉死） ----------------------------------------------
+
+def test_v14_transport_error_taxonomy():
+    assert issubclass(PatchTransportError, PatchSafetyError)
+    assert not issubclass(PatchTransportError, PatchAnchorError)
+    assert not issubclass(PatchAnchorError, PatchTransportError)
+    exc = PatchTransportError("x")
+    assert isinstance(exc, PatchSafetyError)
+    assert not isinstance(exc, PatchAnchorError)  # a6⑤ 同款：平级非子类
+
+
+# ---- transport 注记/幂等/帽文案（§2.4） ------------------------------------
+
+def test_v14_transport_note_and_cap_reason():
+    # 注记 3 物理行；reason 经换行中和独占首行；{"patches":[...]} 字面保留
+    note = _transport_note(PatchTransportError("行甲\n行乙"))
+    lines = note.splitlines()
+    assert len(lines) == 3
+    assert lines[0] == \
+        "机器核验（非模型输出）：上一轮未产出可应用补丁（机器原因：行甲 行乙）。"
+    assert '{"patches":[...]}' in note
+    assert "simpraxis.replace.v1 围栏整替函数" in note
+    # 幂等注入（节点重放不重复）；append 恒加两个 LF 分隔（tail 原样保留）
+    assert _append_transport_feedback(note, note) == note
+    assert _append_transport_feedback("tail\n", note) == "tail\n" + "\n\n" + note
+    # 帽文案：基串逐字；锚点后缀优先互斥；transport 后缀仅无 anchor 时
+    spec = RunSpec(
+        thread_id="t", workdir=Path("/tmp/x"), cmd=["x"],
+        telemetry_relpath="t.json", batch_id="B", billing_task=6,
+        run_idx=1, max_coding_rounds=2)
+    base = "2 轮 coding_debug 后仍失败（RunSpec 上限）"
+    assert _coding_cap_reason(spec) == base
+    anchor = PatchAnchorError("锚甲", hits=0)
+    transport = PatchTransportError("传甲")
+    assert _coding_cap_reason(spec, anchor, transport_exc=transport) \
+        == f"{base}；末次锚点机器原因：锚甲"
+    assert _coding_cap_reason(spec, transport_exc=transport) \
+        == f"{base}；末次补丁传输机器原因：传甲"
+
+
+# ---- J9：零花括号散文反馈续跑 + 帽尽 transport _fail（§3/J9） --------------
+
+def test_v14_j9_prose_feedback_continue(tmp_path):
+    # J9 三形态之一（零花括号散文；旧实现图层逃逸不经 decision/不耗帽）
+    good = _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, ["这不是 JSON 也不是围栏，抱歉。", good],
+        thread="t7b-v14j9")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok" and len(gw.calls) == 2
+    doc1 = _run7b_decision(tmp_path, "t7b-v14j9", 1)
+    assert doc1["transport"] is True and doc1["applied"] == []
+    assert "JSONDecodeError" in doc1["rejected"]
+    tr = [t for t in rec["timeline"] if "patch_transport_rejected" in t]
+    assert len(tr) == 1 and tr[0]["coding_round"] == 1
+    # 次轮模型消息：transport 标记 + 围栏通道指引；0 帧命中不注入函数源码段
+    msg2 = gw.calls[1]["messages"][1]["content"]
+    assert "上一轮未产出可应用补丁" in msg2
+    assert "simpraxis.replace.v1" in msg2
+    assert "涉案函数当前源码" not in msg2
+    assert (wd / "fix.txt").read_text(encoding="utf-8") == "PATCHED"
+
+
+def test_v14_j9_cap_exhaust_transport_suffix(tmp_path):
+    # 帽尽（cap=1 单坏轮）：_fail 携末次传输机器原因，非 P1「补丁安全拒绝」
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, ["抱歉，我不能完成。"], thread="t7b-v14j9cap", cap=1)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed" and len(gw.calls) == 1
+    assert rec["executions"] == 1
+    assert "末次补丁传输机器原因" in rec["reason"]
+    assert "补丁安全拒绝（不重试）" not in rec["reason"]
+    assert "JSONDecodeError" in rec["reason"]
+    assert (wd / "FAILURE.json").is_file()
+    assert _run7b_decision(tmp_path, "t7b-v14j9cap", 1)["transport"] is True
+
+
+# ---- §2.3 函数源码注入：启发 + 8192 预算（纯函数） -------------------------
+
+def test_v14_collect_repair_functions(tmp_path):
+    wd = tmp_path / "src"
+    wd.mkdir()
+    (wd / "sim.py").write_text(
+        "def calc_slip(params):\n"
+        "    return params['slip_dist_m_R']\n"
+        "\n"
+        "def unrelated(a):\n"
+        "    return a\n", encoding="utf-8")
+    # traceback 帧函数名命中（<module> 不匹配帧形）
+    seg = collect_repair_functions(
+        wd, traceback_tail='File "sim.py", line 2, in calc_slip')
+    assert "## 涉案函数当前源码" in seg
+    assert "### sim.py :: calc_slip" in seg and "def calc_slip" in seg
+    assert "unrelated" not in seg
+    # Constant 字符串前后缀变体命中（字段 slip_dist_m_R ⊂ 常量，len≥3 双端）
+    seg2 = collect_repair_functions(
+        wd, schema_lines=["normal: slip_dist_m_R 必须为数值"])
+    assert "calc_slip" in seg2 and "unrelated" not in seg2
+    # 0 命中 → 空串（不新增报错面）
+    assert collect_repair_functions(wd) == ""
+    assert collect_repair_functions(
+        wd, schema_lines=["normal: other_field 必须为数值"]) == ""
+
+
+def test_v14_collect_repair_functions_budget(tmp_path):
+    wd = tmp_path / "src2"
+    wd.mkdir()
+    big = ("def big_fn():\n"
+           + "".join(f"    v{i} = {i}\n" for i in range(900))
+           + "    return 0\n")
+    (wd / "big.py").write_text(big, encoding="utf-8")
+    assert len(big) > FUNCTION_SOURCE_TOTAL_CHARS   # 夹具自证超预算
+    (wd / "small.py").write_text(
+        "def small_fn():\n    return 1\n", encoding="utf-8")
+    # 恰 1 命中且超预算：跳过 + 注记（整函数注入禁止截断）
+    seg_big = collect_repair_functions(
+        wd, traceback_tail='File "big.py", line 1, in big_fn')
+    assert "函数过大未注入" in seg_big and "v0 = 0" not in seg_big
+    # 两命中合计超预算：只注入较小者（行数升序，小者优先；无注记）
+    seg_both = collect_repair_functions(
+        wd, traceback_tail=('File "big.py", line 1, in big_fn\n'
+                            'File "small.py", line 1, in small_fn'))
+    assert "### small.py :: small_fn" in seg_both
+    assert "big_fn" not in seg_both
+    assert "函数过大未注入" not in seg_both
+    # 两小者合计在预算内：双双注入（行数并列时 relpath 稳定序）
+    (wd / "a.py").write_text("def fa():\n    return 1\n", encoding="utf-8")
+    (wd / "b.py").write_text("def fb():\n    return 2\n", encoding="utf-8")
+    seg_ab = collect_repair_functions(
+        wd, traceback_tail=('File "a.py", line 1, in fa\n'
+                            'File "b.py", line 1, in fb'))
+    assert "### a.py :: fa" in seg_ab and "### b.py :: fb" in seg_ab
+
+
+def test_v14_function_source_injection_e2e(tmp_path):
+    # run() 装配点（Option B gate：rc0→anchor→schema→transport→函数源码→
+    # redact）：锚点反馈轮 gate 开 → 帧命中函数源码段进次轮模型消息；
+    # 无反馈的 round1 gate 关 → 不注入。
+    v2 = "def broken_fn():\n    raise RuntimeError('boom')\n"
+    r1 = _run7b_structured(
+        _run7b_patch("fix.txt", "NO_SUCH_ANCHOR_XYZ", "y"))
+    r2 = _run7b_structured(_run7b_patch("fix.txt", "NEEDS_FIX", "PATCHED"))
+    # 收敛脚本：恒写帧行（供启发命中），fix.txt==PATCHED 时写产物 rc=0
+    script = ('import sys\n'
+              'from pathlib import Path\n'
+              'sys.stderr.write(\'File "sim.py", line 2, in broken_fn\\n\')\n'
+              'wd = Path(__file__).parent\n'
+              'if (wd / "fix.txt").read_text().strip() == "PATCHED":\n'
+              '    (wd / "telemetry.json").write_text(\'{"_fixture": true}\')\n'
+              '    sys.exit(0)\n'
+              'sys.exit(3)\n')
+    runner, spec, gw, wd, _ = _run7b_setup(
+        tmp_path, [r1, r2], thread="t7b-v14inj",
+        files={"sim.py": v2}, script=script)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok" and len(gw.calls) == 2
+    msg1 = gw.calls[0]["messages"][1]["content"]
+    assert "涉案函数当前源码" not in msg1
+    msg2 = gw.calls[1]["messages"][1]["content"]
+    assert "## 涉案函数当前源码（机器注入，供整替参考）" in msg2
+    assert "### sim.py :: broken_fn" in msg2
+    assert "def broken_fn():" in msg2
+    assert (wd / "fix.txt").read_text(encoding="utf-8") == "PATCHED"
+
+
+# ---- transport probe 纯函数面（§2.6；永不走 main/真实 gateway） -----------
+
+def test_v14_transport_probe_pure(tmp_path):
+    from orchestrator.agent_runner import transport_probe as tp
+    # build_probe_messages：两件套；system 强制 class=；user 带玩具契约
+    msgs = tp.build_probe_messages()
+    assert [m["role"] for m in msgs] == ["system", "user"]
+    assert "simpraxis.replace.v1" in msgs[0]["content"]
+    assert "class=" in msgs[0]["content"] and "class=" in msgs[1]["content"]
+    assert tp.TOY_FILENAME in msgs[1]["content"]
+    # _cache_key：前缀 + 键正则 ^[A-Za-z0-9_.-]{1,160}$（模型名白名单化）
+    key = tp._cache_key("mimo-v2.6-flash/坏 字符", "[]")
+    assert key.startswith("transport_probe_")
+    assert re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", key)
+    # judge_probe 四阶段（tmp workdir 放玩具源；不触网不计费）
+    wd = tmp_path / "probe"
+    wd.mkdir()
+    (wd / tp.TOY_FILENAME).write_text(tp.TOY_SOURCE, encoding="utf-8")
+    good = _v14_fence(
+        tp.TOY_FILENAME, "add",
+        "@staticmethod\ndef add(a, b):\n    return a + b", cls="Calc")
+    v = tp.judge_probe(good, wd)
+    assert v["pass"] is True and v["stage"] == "ok"
+    # fence_parse：无围栏
+    v2 = tp.judge_probe("抱歉", wd)
+    assert v2["pass"] is False and v2["stage"] == "fence_parse"
+    # class_usage：缺 class=（玩具契约强制；发生在 apply 之前）
+    v3 = tp.judge_probe(good.replace(" class=Calc", ""), wd)
+    assert v3["pass"] is False and v3["stage"] == "class_usage"
+    # anchor_or_apply：func 锚不在（class=Calc 给定 → func_not_in_class）
+    v4 = tp.judge_probe(good.replace("func=add", "func=ghost"), wd)
+    assert v4["pass"] is False and v4["stage"] == "anchor_or_apply"
+    # toy_check：应用成功但 bug 未修 → check() 断言败
+    wd2 = tmp_path / "probe2"
+    wd2.mkdir()
+    (wd2 / tp.TOY_FILENAME).write_text(tp.TOY_SOURCE, encoding="utf-8")
+    noop = _v14_fence(
+        tp.TOY_FILENAME, "add",
+        "@staticmethod\ndef add(a, b):\n    return a - b", cls="Calc")
+    v5 = tp.judge_probe(noop, wd2)
+    assert v5["pass"] is False and v5["stage"] == "toy_check"
+
+
+def test_v14_transport_probe_run_hermetic(tmp_path):
+    from orchestrator.agent_runner import transport_probe as tp
+    good = _v14_fence(
+        tp.TOY_FILENAME, "add",
+        "@staticmethod\ndef add(a, b):\n    return a + b", cls="Calc")
+    gw = FakeGateway([good], usage=(10, 5))
+    cache = CallReplay(tmp_path / "cache")
+    ev = tmp_path / "ev"
+    r1 = tp.run_probe(
+        gateway=gw, batch_id="T6-PROBE-FIX", thread_id="hermetic",
+        evidence_dir=ev, workdir=tmp_path / "wd", call_cache=cache)
+    assert r1["status"] == "pass" and r1["judge"]["stage"] == "ok"
+    assert r1["cache_hit"] is False and len(gw.calls) == 1
+    assert Path(r1["evidence"]).is_file()
+    # 模型未变重跑：缓存命中 0 触网 0 记账（FakeGateway 响应已耗尽仍 pass）
+    r2 = tp.run_probe(
+        gateway=gw, batch_id="T6-PROBE-FIX", thread_id="hermetic",
+        evidence_dir=ev, workdir=tmp_path / "wd2", call_cache=cache)
+    assert r2["status"] == "pass" and r2["cache_hit"] is True
+    assert len(gw.calls) == 1
+    # FAIL：坏响应 → fail + 判定阶段件 + 诚实声明在场（不升格引用）
+    gw_bad = FakeGateway(["不是围栏"], usage=(1, 1))
+    r3 = tp.run_probe(
+        gateway=gw_bad, batch_id="T6-PROBE-FIX", thread_id="hermetic-fail",
+        evidence_dir=ev, workdir=tmp_path / "wd3",
+        call_cache=CallReplay(tmp_path / "cache3"))
+    assert r3["status"] == "fail" and r3["judge"]["stage"] == "fence_parse"
+    assert "玩具契约" in r3["honesty"]

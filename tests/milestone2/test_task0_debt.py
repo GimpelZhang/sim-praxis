@@ -721,13 +721,25 @@ CALL_CACHE_ALLOWLIST = {
     # 同源 Phase_1 L505②））：RunSpec 新字段 + 模型面六 helper/常量块插在
     # 两 appender 邻接空位、主循环扫描接线，唯一构造点纯位移 1207→1325；
     # 0 新增 CallReplay 落点、0 新增网关调用/kwargs 形变。
-    ("orchestrator/agent_runner/runner.py", 1325),
+    # 2026-10-24 v1.4 修复环双通道（设计 .omc/handoffs/task6-ide-repair-
+    # protocol-design.md §2.1-2.4）：PatchTransportError/围栏扫描器/三闸/
+    # transport 反馈/函数源码注入/双通道 system 模块级与函数级代码插入
+    # （含 docstring/注释）全在构造点之前，纯位移（1325→1846）；修复环
+    # 复用同一构造点（同 raw 0 二次计费），runner 侧 0 新增落点。
+    # 2026-10-24 三签 REVISE：MAJOR-1 JSON 候选剥离 helper/字段 + MAJOR-2
+    # type-is 透传注释/P3-2 注释均在构造点之前，纯位移（1846→1882），
+    # 0 新增落点。
+    ("orchestrator/agent_runner/runner.py", 1882),
+    # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
+    # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
+    # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
+    ("orchestrator/agent_runner/transport_probe.py", 162),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
     # （task7 331→340、task8 428→431），无新增 CallReplay 落点。
     # Task6：make_evaluate_seam 加参 + active-only 视觉闸插入，skip 分支不
-    # 构造 CallReplay，落点仍为唯一一处（431→475 纯位移），无第五落点。
+    # 构造 CallReplay，落点仍为唯一一处（431→475 纯位移），无第六落点。
     ("orchestrator/graph/task7.py", 340),
     ("orchestrator/graph/task8.py", 475),
     # Phase 2 Task1：S-5 有意关闭——macro 方向步加调用级重放
@@ -749,9 +761,9 @@ def test_s10_call_cache_landing_sites_enumerated():
                     and node.func.id == "CallReplay":
                 found[(rel, node.lineno)] = ast.unparse(node.args[0])
     assert set(found) == CALL_CACHE_ALLOWLIST, (
-        "生产 CallReplay 落点只允许这四处："
+        "生产 CallReplay 落点只允许这五处："
         f"{sorted(set(found) ^ CALL_CACHE_ALLOWLIST)}")
-    # 四处必须显式落在 Phase 1 封存的 phase1_root()/.call_cache（禁新开第二落点）
+    # 五处必须显式落在 Phase 1 封存的 phase1_root()/.call_cache（禁新开第二落点）
     for arg_src in found.values():
         assert "phase1_root()" in arg_src and ".call_cache" in arg_src, arg_src
 
