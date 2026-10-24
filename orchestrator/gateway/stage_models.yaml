@@ -15,24 +15,26 @@ meta:
   endpoint: anthropic-messages
   base_url_env: ANTHROPIC_BASE_URL
 stage_models:
+  # 2026-10-24 硬规则 1 三阶段换供（用户直接裁决，逐字 ID）：网关 base URL 已随
+  # 用户环境迁移到小米 MiMo Anthropic 兼容端点（token-plan-cn.xiaomimimo.com/anthropic），
+  # 三阶段统一 mimo 家族：macro_ideation=mimo-v2.6-pro，coding_debug=mimo-v2.6-flash，
+  # visual_rollout=mimo-v2.6-flash。清点取证：GET /v1/models 在新端点 404（枚举不可用），
+  # 证据 runs/inventory/20261024-184407/inventory_404_evidence.json；latest 保持指向上一次
+  # 成功清点 20261020-205217。用户给出逐字 ID，无猜测环节；换供后 --validate-models
+  # 四 ping（3 文本+1 视觉）重验，账外路径（G-13 不占 seq，批次件 M2-V-mimo1 计数）。
+  # 前值 macro/coding=deepseek-v4.1-flash、visual=ark-code-latest（Phase 2 全程）。
   macro_ideation:
-    model_id: deepseek-v4.1-flash   # 请求用点号 ID；响应回显规范化为 deepseek-v4-1-flash
+    model_id: mimo-v2.6-pro         # 2026-10-24 用户裁决；validate 全绿 20261024-184930
     capabilities: [text]
     purpose: "方向探索与可行性调研（Macro Ideation）"
   coding_debug:
-    # 2026-10-20 硬规则 1 两次换供（用户裁决）：glm-5.3-flash →（economy 验收阴性
-    # seq46）→ deepseek-v4.1-flash（macro 阶段同款，task2 已实证可出 text）。
-    # 证据：runs/task6_ascent/coding_model_evidence_matrix.json seq42-47——
-    # glm-5.3-flash 思考不可关（400）、budget_tokens 被忽略，规格注入 prompt 思考吃满
-    # output 预算 0 正文；economy ping 64-token 全绿但任务级 18KB 探针同形（seq46：
-    # 52k 思考吃光 16384、0 text）；非 economy 同款 seq47 仍 51715 字思考/0 text，
-    # 三模型同形直接催生拆块出生引擎接缝（另见 agent_runner chunked birth 提交）。
-    # inventory 20261020-205217 含 260910/261017 两个日期版，
-    # 沿用 macro 的点号别名自动路由（回显 deepseek-v4-1-flash）。
-    model_id: deepseek-v4.1-flash         # 与 macro_ideation 同款别名
+    # 历史沿革：glm-5.3-flash（思考不可关阴性）→ 2026-10-20 用户两次裁决
+    # deepseek-v4.1-flash → 2026-10-24 用户裁决 mimo-v2.6-flash（见文件头注释）。
+    # 旧证据 runs/task6_ascent/coding_model_evidence_matrix.json seq42-47 保留可溯。
+    model_id: mimo-v2.6-flash
     capabilities: [text]
     purpose: "环境适配与代码编写（Coding & Debugging）"
   visual_rollout:
-    model_id: ark-code-latest       # 响应回显 "auto"；视觉能力 2026-10-12 实证（32x32 红/蓝）
+    model_id: mimo-v2.6-flash       # 2026-10-24 用户裁决；vision ping Red 全绿 20261024-184930
     capabilities: [text, vision]
     purpose: "闭环仿真评估与视频审阅（Visual & Rollout Evaluation）"
