@@ -7,9 +7,17 @@ Phase 0/1 均已全绿推送：
 Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 commits 至 `966fd00`）、
 评审 P1/P2 修复批次（2026-10-16 晚，47+1 项 0 付费，三独立评审全 APPROVE，
 7 commits `b9ba5f9..8b83193`，341 测全绿，详见 Complete 附 B，余 LOW 在 Phase 2）。
+Phase 2 Milestone 2 引擎侧：Task0/0a/0b 六提交已随 2026-10-17 推送窗口在 origin/main
+（至 `38ae3e4`），Task1–9 三签提交 51 条本地攒批未推送（M2 终验 HEAD `956dc22`；用户常设指令
+「暂不推送，攒批」覆盖计划 L632 里程碑推送，锁内适配 M2-A2）；终态干净树
+1086 passed/1 skipped/42 deselected，Phase 2 台账 120 实呼（82 ok/38 fail）
++6 preflight_blocked。Task7 LIBERO、Task8 Genesis 流体仅完成 0 付费 Stage0 能力探针
+（compatible / sph_ok），Stage1+ 必须经飞书真人 Gate1/Gate2（No Fake Approval），
+用户 AFK 未启动，不得声称完成实战题。
 规范与执行记录在仓库外（与 Plan 冲突时以 Complete 为准）：
 `~/文档/Phase_0_Plan.md`（v4.2）+ `Phase_0_Plan_Complete.md`；
-`~/文档/Phase_1_Plan_detailed.md`（v1.2）+ `Phase_1_Plan_Complete.md`（偏差 A1–A24、坑 P1–P10）。
+`~/文档/Phase_1_Plan_detailed.md`（v1.2）+ `Phase_1_Plan_Complete.md`（偏差 A1–A24、坑 P1–P10）；
+`~/文档/Phase_2_Plan_detailed.md`（v1.2）+ `Phase_2_Plan_Complete.md`（偏差/锁内适配总表、付费台账、机判逐项对账、Open Items、三签记录）。
 
 ## 架构一句话
 
@@ -156,6 +164,37 @@ Rung1–4 分级（Rung4 VLM 为 record_only，用户签收）、四 track 平�
 隔离新表、证据包（2026-10-16 评审批 --clean 重建 276 文件，两存活库 backup API 快照无侧车）
 + RSI 看板、Task9 真人 HITL 抽验 6/6 一致；评审 P1/P2 47+1 项已修（Complete 附 B）。
 
-仍待 Phase 2（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
-自演进、实跑四 tour；LearningStore 生产召回接线、ledger tokens 回填/时区统一、容器非 root 运行、
-SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定、quota_pause.json schema 签收。
+Phase 2 Milestone 2（引擎侧，2026-10-17 Task1 起 → 2026-10-24 终验）已完成：Task0a
+Q2 补沉淀+图外回写通路、Task0b 三层分离（已推送部分），Task1–9 三签提交本地攒批（51 条
+`2d83528..956dc22`）。终态：干净树两排除全套 **1086 passed/1 skipped/42 deselected/exit 0**；
+证据包 570 文件/20.2 MiB（manifest git_commit=956dc22）；四表活库 1542/12/82/不存在
+（phase2_learnings exists=false/rows=0：gate2 accept 从未发生，不造表）；Phase 2 台账
+120 次实呼（seq 1..120 连续、时间戳全严格 Z、82 ok/38 fail；by_task task4=24/task6=96；
+by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占批次不占实呼），
+.call_cache 17 条与 17 个 ok seq 配对，Phase 1 账 29 行封存只读；blueprint 4 项目 16 stage、
+能力矩阵 6 引擎 41 事实、check_solutions 4 方案全过；容器零残留、显存 14 MiB、/mnt 正常。
+- Q1 冰面 DR 与预注册方向相反：ice/normal=0.824 < 界 2.0，结论 contradiction_control_not_robust
+  矛盾即结论，已冻结未翻案；V2 五战未跨过代码出生/结构闸，Gate2 全程未建行，v2_summary
+  从未生成，pareto_verdict=null（诚实留空，非失败；run 目录观察值仅作 non-authoritative 旁证）。
+- 生产召回 Task1 已双路接线（production_recall 遥测 219 行=213 coding/6 direction，
+  10 个学习 id/71 个 prompt），但**真实采纳命中=0，飞轮未闭环**（上方向量库要点段「尚未接线」
+  为 Task1 前旧句，勿据任一处声称闭环）。
+- Rung4 VLM 终态 **record_only**（min_agreement=0.8 但 defect_recall=0.0，D7 未达成，
+  用户已签收；禁止调标签/换片/改阈翻案，active 只能以新付费批次重标定）。
+- Task7/8 只有 0 付费 Stage0：LIBERO outcome=compatible（隔离 venv 六步全 rc=0、
+  import libero.libero ok、numpy/torch/mujoco 三 pin 不漂移，五轮 QA 锁内适配）；
+  Genesis outcome=sph_ok（A800 1000 粒子 10 步坐标全 finite）。**Stage1+（含 Task6 后续 run）
+  必须经飞书真人 Gate1/Gate2，No Fake Approval，用户 AFK 未启动——不得声称完成这两个实战题。**
+- coding_debug 换供 deepseek-v4.1-flash（commit 4df0e1d）经硬规则 1 两次用户裁决，为 M2 期间
+  唯一模型变更；M2 收官后 2026-10-24 用户再直接裁决三阶段换供 mimo 家族（macro=mimo-v2.6-pro、
+  coding_debug/visual_rollout=mimo-v2.6-flash，commit fa007c5，硬规则 1 全流程：inventory 404
+  取证→用户逐字裁决→改 stage_models.yaml→validate 四请求全绿，账外批次 M2-V-mimo1）。
+
+仍待 Phase 2 余项：Task7/8 Stage1+ 与 Task6 V2 升阶闭环（Pareto 判定）——启动即发飞书真人
+Gate1/Gate2 卡推进，No Fake Approval；生产召回真实采纳 >0；其余 Phase 2 尾债：
+ledger tokens 回填、SAPIEN/Bullet/传感器光学噪声矩阵缺口、
+Q2 光学模型参数标定、quota_pause.json schema 签收、task8 stage0_wheels 越界符号链接
+Stage1 前拆除；Phase 3 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、
+RSI Level 3 元 prompt 自演进、实跑四 tour；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、t3 1 条、
+ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传 12、run7c key-collapse
+覆写 created_at）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
