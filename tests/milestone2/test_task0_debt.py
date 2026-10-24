@@ -716,7 +716,12 @@ CALL_CACHE_ALLOWLIST = {
     # CallReplay 落点、0 新增网关调用路径（冻结规格 v1.0.1 §9.1）。
     # 同日行预算对账：非冻结注释/docstring/换行收紧后构造点纯位移
     # 1245→1207（冻结字面块逐字不动，净增行 +203→+146），语义零改。
-    ("orchestrator/agent_runner/runner.py", 1207),
+    # 2026-10-24 run7b 提交 B（rc0 批次结构闸；锁内适配（批次结构闸，冻结
+    # 设计 v1.0.1 E1，用户 2026-10-23「评审改闸后重跑」裁决，协议口径修正
+    # 同源 Phase_1 L505②））：RunSpec 新字段 + 模型面六 helper/常量块插在
+    # 两 appender 邻接空位、主循环扫描接线，唯一构造点纯位移 1207→1325；
+    # 0 新增 CallReplay 落点、0 新增网关调用/kwargs 形变。
+    ("orchestrator/agent_runner/runner.py", 1325),
     # Task0b：ENGINE_SCENARIOS template→solution_id + resolver.stage 插入后
     # 纯位移（task7 330→331、task8 424→428），无新增 CallReplay 落点。
     # Task4：frames.contact_window_plan 并行接缝注入纯位移
@@ -867,10 +872,16 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # task6.py 经规格钦点改动（RUN_CODING_CAP 3→5、prelude 工厂注入、
     # Gate2 shim 证据闸），冻结哈希随合法改动平移到 run7 终态；另两个冻结
     # 文件（prompts/证据包脚本）run7 仍零改动，哈希一字不动。
+    # run7b 提交 B（2026-10-24，锁内适配（批次结构闸，冻结设计 v1.0.1
+    # 勘误 E1，用户 2026-10-23「评审改闸后重跑」裁决，协议口径修正同源
+    # Phase_1 L505②）：§3.3 钦点 task6 工厂传 batch_schema_check=True，
+    # 适用块内 run7 平移协议——仅 task6.py 一值平移到提交 B 终态实测 sha256
+    # （run7 值 3c53a627… → 44db236b…），prompts/证据包脚本两值一字不动；
+    # 断言形状保持逐字节 sha256 硬钉（最强形式，非放水）。
     repo_root = Path(__file__).resolve().parents[2]
     frozen = {
         "orchestrator/graph/task6.py":
-            "3c53a6275d5b6cd6687a9a7cc3ea54a450d46c1c0dcb574d7fc368d57d61acf5",
+            "44db236b5ab946dd145fec22c8bf5f210a2d7caa7feba2185ee360b958cf6ce6",
         "orchestrator/graph/task6_v2_prompts.py":
             "e8055fe3ed72ee6049e396e376b298fd36a783b12c82317e511ad72fb72f38d0",
         "scripts/milestone1/build_evidence_pack.py":

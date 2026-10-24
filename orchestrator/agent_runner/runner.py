@@ -346,6 +346,9 @@ class RunSpec:
     coding_timeout_s: int = DEFAULT_CODING_TIMEOUT_S
     extra_prompt_sections: tuple[tuple[str, str], ...] = ()
     chunked_birth: "ChunkSpec | None" = None
+    # run7b 提交 B（rc0 批次结构闸，用户 2026-10-23 评审改闸授权）：默认 False
+    # 保持逐字节旧行为（缓存键/指纹/成功判据不变）；仅 Task6 run 工厂显式 True。
+    batch_schema_check: bool = False
 
 
 @dataclass
@@ -1146,6 +1149,121 @@ def _append_anchor_feedback(tail: str, note: str) -> str:
     return tail + "\n\n" + note
 
 
+# ---------------------------------------------------------------------------
+# run7b 提交 B：rc0 批次结构闸模型面（锁内适配（批次结构闸，用户 2026-10-23
+# 评审改闸授权））。人侧 timeline RAW 全量/不截断/不去重/不脱敏，绝不走本通道。
+# 本块零 raise/零 try/零新顶层 import；re 复用顶部既有导入。
+# ---------------------------------------------------------------------------
+
+MODEL_SCHEMA_FACE_CAP = 8
+
+# 两形归一化模板（溯源 gait_rungs.validate_telemetry_structure :181 与
+# :183-184 的实际发射；runner 不跨模块导入 ENGINE 等常量，期望值一律用捕获
+# 组从校验器自己发射的常量位置回填，禁止手写 1.3.3 等字面）。两形均须
+# flags=re.S：engine 形「实际」尾部模型值未经 repr，可含真实换行/tab。
+_SCHEMA_FACE_SCHEMA_RE = re.compile(
+    r"^(?P<run>normal|ice_nominal|ice_dr)_s\d+: schema=.*?，要求 "
+    r"(?P<want>\S+)$", flags=re.S)
+_SCHEMA_FACE_ENGINE_RE = re.compile(
+    r"^(?P<run>normal|ice_nominal|ice_dr)_s\d+: engine/version 必须是 "
+    r"(?P<eng>\S+) (?P<ver>\S+)，实际.*$", flags=re.S)
+
+
+def _schema_face_normalize(line: str) -> str:
+    """模型面专用：仅两形模型可控值模板做固定改写，模型值整段丢弃；其余原样。"""
+    m = _SCHEMA_FACE_SCHEMA_RE.match(line)
+    if m:
+        return f"{m.group('run')}: schema 不等于约定值（要求 {m.group('want')}）"
+    m = _SCHEMA_FACE_ENGINE_RE.match(line)
+    if m:
+        return (f"{m.group('run')}: engine/version 必须是 {m.group('eng')} "
+                f"{m.group('ver')}")
+    return line
+
+
+def _sanitize_schema_face(line: str) -> str:
+    """通用净化：ASCII 双引号→单引号；剔除其余 ASCII 控制符（\\x00-\\x1f）。"""
+    line = line.replace('"', "'")
+    return "".join(c for c in line if ord(c) >= 32)
+
+
+def _scrub_workdir(line: str, workdir) -> str:
+    """仅模型面 bullet：绝对 workdir 前缀折叠（带斜杠形先行，避免 '.' 尾巴）。"""
+    return line.replace(str(workdir) + "/", "").replace(str(workdir), ".")
+
+
+def _dedup_schema_face(lines: list[str]) -> tuple[list[str], int]:
+    """对归一化+净化+scrub 后的面文保序去重；键取首个 ': ' 之后的消息模板。
+
+    run_id 不含 ': '，全角「：」不参与；缺件/缺列/seeds 文案各自成类。
+    """
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for line in lines:
+        key = line.split(": ", 1)[1] if ": " in line else line
+        if key not in seen:
+            seen.add(key)
+            uniq.append(line)
+    return uniq, len(uniq)
+
+
+def _build_schema_face(raw: list[str], *, workdir) -> tuple[list[str], int]:
+    """RAW → 模型面：逐条归一化→净化→scrub，再保序去重，返回 (各类首例, M)。"""
+    faces = [
+        _scrub_workdir(_sanitize_schema_face(_schema_face_normalize(line)),
+                       workdir)
+        for line in raw
+    ]
+    return _dedup_schema_face(faces)
+
+
+_SCHEMA_NOTE_HEAD_FMT = (
+    "机器核验（非模型输出）：上一轮脚本 rc=0，但批次结构闸未通过"
+    "（共 {n} 条，去重 {m} 类；下为各类首例）：")
+_SCHEMA_OMIT_FMT = (
+    "- ……（其余 {omitted} 类略，完整机器证据见 timeline/FAILURE）")
+_SCHEMA_REPAIR_HEAD = (
+    "修复要求（仅结构修正，不得改阈值、随机种子、通过判据或帧数设置）：")
+_SCHEMA_REPAIR_BULLETS = (
+    "- outcomes 中的左右脚量（slip_dist_m、slip_v_max_mps、"
+    "slip_v_max_postpush_mps、contact_force_peak_N、contact_frames）"
+    "必须是嵌套对象，即 R 与 L 两个键的对象，与同目录 V1 种子 "
+    "genesis_humanoid_dr.py 的 outcomes 块形状一致。",
+    "- 扁平后缀键（如 slip_dist_m_R、contact_frames_L）只允许出现在 "
+    "CSV 行里；telemetry JSON 必须嵌套。",
+    "- 只修正输出结构后重跑 batch，不要改动实验语义。",
+)
+_READFAULT_REPAIR_HEAD = (
+    "修复要求（仅产物修复，不得改阈值、随机种子、通过判据或帧数设置）：")
+_READFAULT_REPAIR_BULLET = (
+    "- 请重新完整产出该批次产物（summary.json、telemetry/*.json、"
+    "dr_controls_vs_experimental.csv），保证文件存在且为可解析的约定格式"
+    "后重跑 batch。"
+)
+
+
+def _append_batch_schema_note(tail: str, raw: list[str], n_true: int, *,
+                              read_fault: bool, workdir) -> str:
+    """把批次结构闸结果装配成模型面注记（两形只看 read_fault bool 分流）。
+
+    有意不做标记式幂等检查：tail 含不可信模型 stdout，标记检查可被回声
+    抑制；每轮恰好一次由控制流保证（迭代内重建）。字句见设计件 §5 快照。
+    """
+    faces, m_total = _build_schema_face(list(raw), workdir=workdir)
+    parts = [_SCHEMA_NOTE_HEAD_FMT.format(n=n_true, m=m_total)]
+    parts.extend("- " + face for face in faces[:MODEL_SCHEMA_FACE_CAP])
+    if m_total > MODEL_SCHEMA_FACE_CAP:
+        parts.append(_SCHEMA_OMIT_FMT.format(
+            omitted=m_total - MODEL_SCHEMA_FACE_CAP))
+    if read_fault:
+        parts.append(_READFAULT_REPAIR_HEAD)
+        parts.append(_READFAULT_REPAIR_BULLET)
+    else:
+        parts.append(_SCHEMA_REPAIR_HEAD)
+        parts.extend(_SCHEMA_REPAIR_BULLETS)
+    return tail + "\n\n" + "\n".join(parts)
+
+
 def _coding_cap_reason(spec: RunSpec, anchor_exc: "Optional[PatchAnchorError]" = None) -> str:
     """run7b：轮帽文案唯一收口；基串逐字同旧文案，锚点后缀与 chunk 后缀互斥。"""
     reason = f"{spec.max_coding_rounds} 轮 coding_debug 后仍失败（RunSpec 上限）"
@@ -1348,7 +1466,20 @@ class AgentRunner:
             # run6 §15.7-H4（D2）：telemetry_ok 在成功判定处一次性绑定，
             # rc0 缺产物注入分支共用同一布尔，禁止二次 is_file。
             telemetry_ok = result.rc == 0 and telemetry.is_file()
-            if telemetry_ok:
+            # run7b 提交 B（rc0 批次结构闸）：仅在 rc0+产物在且 Task6 opt-in
+            # 时只读扫描。函数内模块导入 + 属性访问（测试 monkeypatch 模块
+            # 属性）；引擎类异常（含 ImportError）无 try 自然上冒至图 __error__。
+            if telemetry_ok and spec.batch_schema_check:
+                from orchestrator.judge import gait_rungs
+                schema_raw, schema_n, schema_read_fault = (
+                    gait_rungs.scan_batch_schema_gate(workdir))
+            else:
+                schema_raw, schema_n, schema_read_fault = [], 0, False
+            # 人侧 RAW：全量/不截断/不去重/不脱敏（含绝对路径），立即挂当前
+            # 失败 exec 条目；干净/rc!=0 轮键不存在（非空 list）。
+            if schema_raw:
+                timeline[-1]["batch_schema_errors"] = schema_raw
+            if telemetry_ok and not schema_raw:
                 vp, dur_ms, cover = self._video_artifacts(workdir, spec)
                 return {"status": "ok", "telemetry_uri": str(telemetry),
                         "coding_round": coding_calls, "executions": exec_no,
@@ -1361,6 +1492,14 @@ class AgentRunner:
                 reason = _coding_cap_reason(spec)  # run7b：普通帽尽点 anchor_exc=None；chunk 后缀逻辑不动
                 if chunk_feedback:
                     reason += f"；末次拆块出生机器原因：{chunk_feedback}"
+                # run7b 提交 B：结构闸未过走模型反馈轮；帽尽时 reason 追加
+                # N/M（M 现算）。锚点帽尽路径在下方 PatchAnchorError 分支，
+                # 有意不拼此句（G13b）。
+                if schema_raw:
+                    _sf, _schema_m = _build_schema_face(
+                        schema_raw, workdir=workdir)
+                    reason += (f"；末次批次结构闸未通过：共 {schema_n} 条，"
+                               f"去重 {_schema_m} 类（机器证据见 timeline）")
                 return self._fail(root, spec, timeline, last_result, reason=reason)
 
             tail = _tb_tail(result)
@@ -1388,6 +1527,12 @@ class AgentRunner:
             # run7b 锁内适配（L505②，§5.2 点 3/§10.1 标记 5）：锚点注记固定 rc0 之后、redact_for_model 之前（A9 钉次序）；人侧 RAW。
             if anchor_feedback:
                 repair_tail = _append_anchor_feedback(repair_tail, anchor_feedback)
+            # run7b 提交 B：批次结构闸注记固定锚点之后、redact 之前
+            # （次序 rc0→anchor→schema→redact，G10 钉）。
+            if schema_raw:
+                repair_tail = _append_batch_schema_note(
+                    repair_tail, schema_raw, schema_n,
+                    read_fault=schema_read_fault, workdir=workdir)
             # run7 A1（规格 §3.4，脱敏单点）：note 注入之后只求一次模型面
             # tail；普通修补轮与拆块出生轮两通道统一吃 redact 值。人侧
             # timeline/FAILURE/snippets/recall 继续 RAW（见上各采集点）。

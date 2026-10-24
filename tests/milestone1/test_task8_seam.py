@@ -1021,3 +1021,279 @@ def test_48_l7_visual_exception_writes_fail_resp_and_no_cache(roots, batch_dir):
         (evd / f"rung4_t8-r1_{split_key}.resp.json").read_text())
     assert resp["ok"] is False and "visual outage" in resp["error"]
     assert list(cache_dir.iterdir()) == []     # 失败不留缓存（安全方向：重呼）
+
+
+# ===========================================================================
+# ⑨ Task6 run7b 提交 B：rc0 批次结构闸（冻结规格
+#    .omc/handoffs/task6-schema-gate-design.md v1.0，2026-10-24；简报
+#    /tmp/commit_b_executor_brief.md §3b）。全 hermetic tmp 合成批，0 联网
+#    0 付费、不读 /mnt。本段仅追加，旧测试一字未改。
+# [run7b-schema-gate-tests]
+# ===========================================================================
+
+import csv as _csv_sg  # noqa: E402 （提交 B 段局部导入）
+
+from orchestrator.judge import gait_rungs as _gr  # noqa: E402
+
+_FEET_KEYS = ("slip_dist_m", "slip_v_max_mps", "slip_v_max_postpush_mps",
+              "contact_force_peak_N", "contact_frames")
+
+
+def _flatten_all_feet(wd):
+    """把 9 个 telemetry 的五个左右脚量打平 → 45 条结构错（run7b 活跑同形）。"""
+    td = wd / "telemetry"
+    for p in sorted(td.glob("*_s?.json")):
+        data = json.loads(p.read_text(encoding="utf-8"))
+        for k in _FEET_KEYS:
+            data["outcomes"][k] = 0 if k == "contact_frames" else 0.0
+        p.write_text(json.dumps(data), encoding="utf-8")
+
+
+# ---- G11：collector 单一真值——evaluate 脏短路/干净路径同集；不触 rung ------
+
+def test_sg_g11_collector_equivalence_dirty_and_clean(roots, monkeypatch):
+    dirty = roots["tmp"] / "run_sg-dirty"
+    build_synthetic_batch(dirty)
+    _flatten_all_feet(dirty)
+
+    telemetries, _rows, summary, load_errs = _gr.load_batch(dirty)
+    assert load_errs == []
+    coll_errors, seeds = _gr.collect_batch_schema_errors(
+        telemetries, summary, load_errs)
+    assert seeds == 3 and len(coll_errors) == 45
+
+    result = evaluate_batch(dirty)
+    assert result["ok"] is False
+    assert result["schema_errors"] == coll_errors
+    # 扫描器（runner 路径）与 evaluate（Task8 路径）输出逐字同源
+    raw, n, rf = _gr.scan_batch_schema_gate(dirty)
+    assert (raw, n, rf) == (coll_errors, 45, False)
+    assert result["schema_errors"] == raw
+    # rung 全炸（含校准检查）不影响 collector/evaluate 脏短路——
+    # s2 终裁口径：与 runner 面 G2b 四 spy 合证结构闸零 rung 耦合
+    rung_calls = []
+    for name in ("rung1_check", "rung2_check", "rung3_check",
+                 "_check_calibration"):
+        def boom(*a, _n=name, **k):
+            rung_calls.append(_n)
+            raise AssertionError(f"结构闸不得调用 {_n}")
+        monkeypatch.setattr(_gr, name, boom)
+    coll2, _ = _gr.collect_batch_schema_errors(telemetries, summary, load_errs)
+    assert coll2 == coll_errors and rung_calls == []
+    assert evaluate_batch(dirty)["schema_errors"] == raw
+    assert rung_calls == []
+
+
+def test_sg_g11_collector_clean_batch(roots):
+    wd = roots["tmp"] / "run_sg-clean"
+    build_synthetic_batch(wd)
+    telemetries, _rows, summary, load_errs = _gr.load_batch(wd)
+    errors, seeds = _gr.collect_batch_schema_errors(
+        telemetries, summary, load_errs)
+    assert errors == [] and seeds == 3
+    raw, n, rf = _gr.scan_batch_schema_gate(wd)
+    assert (raw, n, rf) == ([], 0, False)
+
+
+def test_sg_g11_collector_non_dict_summary_and_injected_loaderr():
+    # summary 非 dict（防御分支）：seeds=0，门槛文案照发
+    errors, seeds = _gr.collect_batch_schema_errors({}, [], [])
+    assert seeds == 0 and errors == [
+        f"summary.seeds=0 < {_gr.MIN_SEEDS}（计划 L567 N≥3）"]
+    # load_errs 原样前置（缺件/缺列不被吞、不被改写）
+    line = "/abs/wd/telemetry/normal_s0.json"
+    errors2, seeds2 = _gr.collect_batch_schema_errors(
+        {}, {"seeds": 3}, [f"缺 {line}"])
+    assert errors2 == [f"缺 {line}"] and seeds2 == 3
+
+
+# ---- D-rc1-1：四个读盘点 filename 补挂（类型/消息/传播不变） ----------------
+
+def test_sg_drc1_summary_jsondecode_filename(roots):
+    wd = roots["tmp"] / "d1"
+    wd.mkdir(parents=True)
+    (wd / "summary.json").write_bytes(b'{"seeds":')
+    with pytest.raises(json.JSONDecodeError) as ei:
+        _gr.load_batch(wd)
+    assert Path(ei.value.filename).name == "summary.json"
+    assert ei.value.doc.startswith('{"seeds":') and ei.value.pos == 9
+
+
+def test_sg_drc1_seeds_three_forms_filename(roots):
+    wd = roots["tmp"] / "d2"
+    wd.mkdir(parents=True)
+    for obj, exc_t in (({}, KeyError),
+                       ({"seeds": None}, TypeError),
+                       ([], TypeError),
+                       ({"seeds": "x"}, ValueError)):
+        (wd / "summary.json").write_text(json.dumps(obj), encoding="utf-8")
+        with pytest.raises(exc_t) as ei:
+            _gr.load_batch(wd)
+        assert Path(ei.value.filename).name == "summary.json"
+
+
+def test_sg_drc1_broken_telemetry_filename(roots):
+    wd = roots["tmp"] / "d3"
+    (wd / "telemetry").mkdir(parents=True)
+    (wd / "summary.json").write_text(json.dumps({"seeds": 3}),
+                                     encoding="utf-8")
+    (wd / "telemetry" / "normal_s0.json").write_bytes(b'{"broken":')
+    with pytest.raises(json.JSONDecodeError) as ei:
+        _gr.load_batch(wd)
+    assert Path(ei.value.filename).name == "normal_s0.json"
+
+
+def test_sg_drc1_bad_utf8_summary_filename(roots):
+    wd = roots["tmp"] / "d4"
+    wd.mkdir(parents=True)
+    (wd / "summary.json").write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(UnicodeDecodeError) as ei:
+        _gr.load_batch(wd)
+    assert Path(ei.value.filename).name == "summary.json"
+    assert ei.value.encoding == "utf-8"
+
+
+def test_sg_drc1_csv_error_filename(roots, monkeypatch):
+    wd = roots["tmp"] / "d5"
+    build_synthetic_batch(wd)
+
+    class BoomReader:
+        def __init__(self, *a, **k):
+            raise _csv_sg.Error("engine injected csv error")
+
+    monkeypatch.setattr(_gr.csv, "DictReader", BoomReader)
+    with pytest.raises(_csv_sg.Error) as ei:
+        _gr.load_batch(wd)
+    assert Path(ei.value.filename).name == "dr_controls_vs_experimental.csv"
+    assert "injected" in str(ei.value)
+
+
+def test_sg_drc1_natural_filenoterror_not_overwritten(roots):
+    wd = roots["tmp"] / "d6"
+    wd.mkdir(parents=True)
+    with pytest.raises(FileNotFoundError) as ei:
+        _gr.load_batch(wd)
+    # 自然异常自带全路径 filename，补挂守卫不得改写
+    assert ei.value.filename == str(wd / "summary.json")
+    raw, n, rf = _gr.scan_batch_schema_gate(wd)
+    assert rf is True and n == 1
+    assert raw == [_gr.PRODUCT_READ_PREFIX
+                   + "：FileNotFoundError: summary.json"]
+    assert str(wd) not in raw[0]
+
+
+# ---- 扫描器四分支：干净 / 结构 RAW / 9 类产品 / 引擎 -----------------------
+
+def test_sg_scanner_structural_raw_is_full_and_unscrubbed(roots):
+    wd = roots["tmp"] / "run_sg-raw"
+    build_synthetic_batch(wd)
+    _flatten_all_feet(wd)
+    raw, n, rf = _gr.scan_batch_schema_gate(wd)
+    assert rf is False and n == len(raw) == 45
+    assert len(set(raw)) == 45                        # 9 run × 5 全量不去重
+    assert raw[0].startswith("normal_s0: outcomes.")
+    assert all(str(wd) not in ln for ln in raw)       # 结构形 45 行不带路径
+
+
+_NAMED_OS_EXC = {
+    "FileNotFoundError": lambda: FileNotFoundError(2, "x", "/x/summary.json"),
+    "IsADirectoryError": lambda: IsADirectoryError(21, "x",
+                                                   "/x/summary.json"),
+    "NotADirectoryError": lambda: NotADirectoryError(20, "x",
+                                                     "/x/summary.json"),
+}
+
+
+# (参数 id, type(exc).__name__)：csv.Error 的类名按语言语义就是 "Error"
+_PRODUCT_CASES = [
+    ("FileNotFoundError", "FileNotFoundError"),
+    ("IsADirectoryError", "IsADirectoryError"),
+    ("NotADirectoryError", "NotADirectoryError"),
+    ("UnicodeDecodeError", "UnicodeDecodeError"),
+    ("JSONDecodeError", "JSONDecodeError"),
+    ("csv.Error", "Error"),
+    ("KeyError", "KeyError"),
+    ("TypeError", "TypeError"),
+    ("ValueError", "ValueError")]
+
+
+@pytest.mark.parametrize("exc_name,type_name", _PRODUCT_CASES,
+                         ids=[c[0] for c in _PRODUCT_CASES])
+def test_sg_scanner_nine_product_classes(monkeypatch, exc_name, type_name):
+    if exc_name in _NAMED_OS_EXC:
+        exc = _NAMED_OS_EXC[exc_name]()
+    elif exc_name == "UnicodeDecodeError":
+        exc = UnicodeDecodeError("utf-8", b"x", 0, 1, "boom")
+        exc.filename = "/x/summary.json"
+    elif exc_name == "JSONDecodeError":
+        exc = json.JSONDecodeError("boom", "doc", 0)
+        exc.filename = "/x/summary.json"
+    elif exc_name == "csv.Error":
+        exc = _csv_sg.Error("boom")
+        exc.filename = "/x/summary.json"
+    elif exc_name == "KeyError":
+        exc = KeyError("seeds")
+        exc.filename = "/x/summary.json"
+    elif exc_name == "TypeError":
+        exc = TypeError("int() boom")
+        exc.filename = "/x/summary.json"
+    else:
+        exc = ValueError("int() boom")
+        exc.filename = "/x/summary.json"
+    monkeypatch.setattr(_gr, "load_batch", lambda _wd: (_ for _ in ()).throw(exc))
+    raw, n, rf = _gr.scan_batch_schema_gate(Path("/nonexistent-wd"))
+    assert rf is True and n == 1 and len(raw) == 1
+    assert raw[0] == (f"{_gr.PRODUCT_READ_PREFIX}：{type_name}: summary.json")
+    assert '"' not in raw[0]
+    assert "/x" not in raw[0] and "boom" not in raw[0]   # 路径/消息零泄漏
+
+
+def test_sg_scanner_nameless_product_exception_fallback(monkeypatch):
+    def boom(_wd):
+        raise json.JSONDecodeError("boom", "doc", 0)
+
+    monkeypatch.setattr(_gr, "load_batch", boom)
+    raw, n, rf = _gr.scan_batch_schema_gate(Path("/nonexistent-wd"))
+    assert (raw, n, rf) == (
+        [f"{_gr.PRODUCT_READ_PREFIX}：JSONDecodeError: 批次产物"], 1, True)
+
+
+def test_sg_scanner_engine_read_phase(monkeypatch):
+    def boom(_wd):
+        raise PermissionError(13, "secret kernel detail", "/x/secret.json")
+
+    monkeypatch.setattr(_gr, "load_batch", boom)
+    with pytest.raises(_gr.BatchSchemaGateError) as ei:
+        _gr.scan_batch_schema_gate(Path("/nonexistent-wd"))
+    assert ei.value.phase == "read"
+    assert isinstance(ei.value, RuntimeError)
+    assert isinstance(ei.value.__cause__, PermissionError)
+    assert str(ei.value) == "批次产物读取引擎异常：PermissionError"
+    assert "secret" not in str(ei.value) and "/x" not in str(ei.value)
+
+
+@pytest.mark.parametrize("boom_name,boom_exc", [
+    ("NameError", NameError), ("KeyError", KeyError),
+    ("TypeError", TypeError)])
+def test_sg_scanner_engine_collector_phase(monkeypatch, tmp_path,
+                                           boom_name, boom_exc):
+    def boom(_t, _s, _l):
+        raise boom_exc(f"future_{boom_name.lower()}")
+
+    monkeypatch.setattr(_gr, "load_batch",
+                        lambda _wd: ({}, [], {}, []))
+    monkeypatch.setattr(_gr, "collect_batch_schema_errors", boom)
+    with pytest.raises(_gr.BatchSchemaGateError) as ei:
+        _gr.scan_batch_schema_gate(tmp_path)
+    assert ei.value.phase == "collector"
+    assert isinstance(ei.value.__cause__, boom_exc)
+    assert str(ei.value).startswith("批次结构校验器引擎异常：")
+    assert boom_name in str(ei.value)
+
+
+def test_sg_scanner_gate_error_kwonly():
+    with pytest.raises(TypeError):
+        _gr.BatchSchemaGateError("x", "read")     # phase 必须 kw-only
+    e = _gr.BatchSchemaGateError("x", phase="read")  # phase 不做取值校验
+    assert e.phase == "read"
+    assert issubclass(_gr.BatchSchemaGateError, RuntimeError)

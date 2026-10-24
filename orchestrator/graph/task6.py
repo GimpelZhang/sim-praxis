@@ -331,6 +331,9 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             coding_max_tokens=CODING_MAX_TOKENS_V2,
             coding_timeout_s=CODING_TIMEOUT_S_V2,
             chunked_birth=chunked,
+            # run7b 提交 B：rc0 批次结构闸仅 Task6 run opt-in（用户 2026-10-23
+            # 评审改闸授权）；task7/task8 工厂不传，保持逐字节旧行为。
+            batch_schema_check=True,
         )
 
     return factory

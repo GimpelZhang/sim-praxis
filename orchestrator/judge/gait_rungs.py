@@ -579,11 +579,37 @@ def contrast_block(groups: dict[str, dict]) -> dict:
 # 入口
 # ---------------------------------------------------------------------------
 
+def _attach_filename(exc: Exception, path: "str | Path") -> Exception:
+    """锁内适配（批次结构闸，用户 2026-10-23 评审改闸授权）：给读盘产品类异常
+    补挂 .filename（单一真值在本读盘点，扫描器不猜文件）。
+
+    仅当异常原本不带 filename 时补 str(path)，属性只读/不可写则静默放行；
+    异常类型、消息、traceback 一律不变（调用方随后 bare raise）。
+    FileNotFoundError 等天然带名者不会被覆盖。
+    """
+    if getattr(exc, "filename", None) is None:
+        try:
+            exc.filename = str(path)  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
+    return exc
+
+
 def load_batch(workdir: str | Path) -> tuple[dict[str, dict], list[dict],
                                              dict, list[str]]:
     wd = Path(workdir)
-    summary = json.loads((wd / "summary.json").read_text(encoding="utf-8"))
-    seeds = int(summary["seeds"])
+    # 锁内适配（批次结构闸，用户 2026-10-23 评审改闸授权）：四个读盘点给产品类
+    # 异常补挂 filename（异常类型/消息/传播不变，evaluate_batch 输出逐字节不变）。
+    try:
+        summary = json.loads((wd / "summary.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        _attach_filename(exc, wd / "summary.json")
+        raise
+    try:
+        seeds = int(summary["seeds"])
+    except (KeyError, TypeError, ValueError) as exc:
+        _attach_filename(exc, wd / "summary.json")
+        raise
     telemetries: dict[str, dict] = {}
     errs: list[str] = []
     for arm in ARMS:
@@ -592,21 +618,46 @@ def load_batch(workdir: str | Path) -> tuple[dict[str, dict], list[dict],
             if not p.is_file():
                 errs.append(f"缺 {p}")
                 continue
-            telemetries[f"{arm}_s{seed}"] = json.loads(
-                p.read_text(encoding="utf-8"))
+            try:
+                telemetries[f"{arm}_s{seed}"] = json.loads(
+                    p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                _attach_filename(exc, p)
+                raise
     rows: list[dict] = []
-    with open(wd / "dr_controls_vs_experimental.csv", newline="",
-              encoding="utf-8") as fh:
-        reader = csv.DictReader(line for line in fh
-                                if not line.startswith("#"))
-        rows = list(reader)
-        header = set(reader.fieldnames or [])
+    try:
+        with open(wd / "dr_controls_vs_experimental.csv", newline="",
+                  encoding="utf-8") as fh:
+            reader = csv.DictReader(line for line in fh
+                                    if not line.startswith("#"))
+            rows = list(reader)
+            header = set(reader.fieldnames or [])
+    except (OSError, csv.Error, UnicodeDecodeError) as exc:
+        _attach_filename(exc, wd / "dr_controls_vs_experimental.csv")
+        raise
     # L-3：CSV 缺列转 schema 错误（evaluate_batch 在发任何视觉调用前短路），
     # 而不是让 rung2 的 row[...] 抛裸 KeyError。
     missing_cols = [c for c in CSV_REQUIRED_FIELDS if c not in header]
     if missing_cols:
         errs.append(f"dr_controls_vs_experimental.csv 缺列：{missing_cols}")
     return telemetries, rows, summary, errs
+
+
+def collect_batch_schema_errors(telemetries: dict[str, dict],
+                                summary: object,
+                                load_errs: list[str]) -> tuple[list[str], int]:
+    """结构闸单一真值：seeds 门槛 + 逐 run 结构校验；不读盘、不做 rung 计算、
+    不触网络/GPU。evaluate_batch 与 runner rc0 批次结构闸共用。
+    返回 (schema_errors, seeds)。"""
+    schema_errors: list[str] = []
+    schema_errors.extend(load_errs)
+    seeds = int(summary.get("seeds", 0)) if isinstance(summary, dict) else 0
+    if seeds < MIN_SEEDS:
+        schema_errors.append(f"summary.seeds={seeds} < {MIN_SEEDS}（计划 L567 N≥3）")
+
+    for run_id, data in telemetries.items():
+        schema_errors.extend(validate_telemetry_structure(data, run_id))
+    return schema_errors, seeds
 
 
 def evaluate_batch(workdir: str | Path, *,
@@ -619,15 +670,9 @@ def evaluate_batch(workdir: str | Path, *,
     """
     prof = resolve_threshold_profile(profile)
     wd = Path(workdir)
-    schema_errors: list[str] = []
     telemetries, csv_rows, summary, load_errs = load_batch(wd)
-    schema_errors.extend(load_errs)
-    seeds = int(summary.get("seeds", 0)) if isinstance(summary, dict) else 0
-    if seeds < MIN_SEEDS:
-        schema_errors.append(f"summary.seeds={seeds} < {MIN_SEEDS}（计划 L567 N≥3）")
-
-    for run_id, data in telemetries.items():
-        schema_errors.extend(validate_telemetry_structure(data, run_id))
+    schema_errors, seeds = collect_batch_schema_errors(
+        telemetries, summary, load_errs)
 
     if schema_errors:
         return {"ok": False, "schema_errors": schema_errors,
@@ -657,3 +702,63 @@ def evaluate_batch(workdir: str | Path, *,
         "dr_envelope": summary.get("dr_envelope", {}),
         "provenance": f"file:{wd}/summary.json+telemetry/*.json+csv(series-recomputed)",
     }
+
+
+class BatchSchemaGateError(RuntimeError):
+    """批次结构闸的引擎/宿主侧缺陷（非模型可修）。禁止转成模型反馈轮。
+
+    phase="read"：load_batch 非白名单异常（宿主/环境类，如 PermissionError）；
+    phase="collector"：结构收集器自身缺陷（校验器 bug 类，如 :165 同类）。
+    消息受控：read 只含内异常类型名；collector 含类型名+str[:200]。
+    """
+    def __init__(self, message: str, *, phase: str):
+        super().__init__(message)
+        self.phase = phase
+
+
+PRODUCT_READ_PREFIX = "批次产物无法读取（机器核验）"
+
+# 读盘面产品类白名单（默认拒绝：不在表内的一切异常走引擎事故通道）。
+# 结构安全性（§1.8）：K/T/V 在 load_batch 内唯一可能来源是 seeds 解析（:586，
+# 含 summary 非 dict 的下标 TypeError）；json/csv/os 族由显式类型先行匹配；
+# 结构遍历在收集器独立 try，其 K/T/V 永不走本表（G5b③③' 变异钉）。
+_PRODUCT_READ_EXC = (
+    FileNotFoundError, IsADirectoryError, NotADirectoryError,
+    UnicodeDecodeError, json.JSONDecodeError, csv.Error,
+    KeyError, TypeError, ValueError,
+)
+
+
+def scan_batch_schema_gate(workdir: "str | Path") -> tuple[list[str], int, bool]:
+    """rc0 批次结构闸 runner 面唯一入口（锁内适配（批次结构闸，用户
+    2026-10-23 评审改闸授权））：只读、不写盘、不触网络/GPU、不做 rung 计算。
+
+    runner 是唯一调用方；evaluate_batch 路径零变化。
+    返回 (raw_errors, n_true, read_fault)：
+      - 正常/结构违约：(逐条 schema 错原文 list[含 load_errs 绝对路径 RAW]、
+        len(raw)、False)，全量不截断、不去重；
+      - 读盘产品类异常：([受控单行], 1, True)（basename，不回显 str(exc)）；
+      - 读盘非白名单异常：raise BatchSchemaGateError(phase="read")；
+      - 收集器任何异常：raise BatchSchemaGateError(phase="collector")。
+    """
+    wd = Path(workdir)
+    try:
+        telemetries, _rows, summary, load_errs = load_batch(wd)
+    except _PRODUCT_READ_EXC as exc:
+        filename = getattr(exc, "filename", None)
+        basename = Path(filename).name if filename else "批次产物"
+        line = (f"{PRODUCT_READ_PREFIX}：{type(exc).__name__}: {basename}"
+                .replace('"', "'"))
+        return [line], 1, True
+    except Exception as exc:
+        raise BatchSchemaGateError(
+            f"批次产物读取引擎异常：{type(exc).__name__}",
+            phase="read") from exc
+    try:
+        errs, _seeds = collect_batch_schema_errors(
+            telemetries, summary, load_errs)
+    except Exception as exc:
+        raise BatchSchemaGateError(
+            f"批次结构校验器引擎异常：{type(exc).__name__}: {str(exc)[:200]}",
+            phase="collector") from exc
+    return list(errs), len(errs), False

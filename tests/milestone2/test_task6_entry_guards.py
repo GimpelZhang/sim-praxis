@@ -242,3 +242,53 @@ def test_legacy_cli_track1_corrupt_index_still_fail_closed(
     assert rc == 6
     _assert_zero_construction(wired)
     assert "损坏" in capsys.readouterr().err
+
+
+# ===========================================================================
+# ⑨ Task6 run7b 提交 B：rc0 批次结构闸 opt-in 边界（冻结规格
+#    .omc/handoffs/task6-schema-gate-design.md v1.0，2026-10-24；简报 §3c）。
+#    仅 Task6 工厂传 batch_schema_check=True；task7/task8 一字不传，
+#    RunSpec 默认 False → 逐字节旧行为。AST 钉死 + 行号锚定。
+# [run7b-schema-gate-tests]
+# ===========================================================================
+
+import ast  # noqa: E402 （提交 B 段局部导入）
+import dataclasses  # noqa: E402
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_RUNSPEC_SITES = (
+    ("orchestrator/graph/task6.py", 306),
+    ("orchestrator/graph/task7.py", 161),
+    ("orchestrator/graph/task8.py", 209),
+)
+
+
+def _runspec_call(rel, pinned_lineno):
+    tree = ast.parse((_REPO_ROOT / rel).read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name)
+             and n.func.id == "RunSpec"]
+    assert len(calls) == 1
+    assert calls[0].lineno == pinned_lineno, (
+        f"{rel} RunSpec 调用行漂移：{calls[0].lineno} != {pinned_lineno}，"
+        "更新测试并核对冻结设计 §3")
+    return calls[0]
+
+
+def test_batch_schema_check_opted_in_only_by_task6():
+    c6 = _runspec_call(*_RUNSPEC_SITES[0])
+    flag = {kw.arg: kw.value for kw in c6.keywords}.get("batch_schema_check")
+    assert isinstance(flag, ast.Constant) and flag.value is True
+
+    for rel, lineno in _RUNSPEC_SITES[1:]:
+        c = _runspec_call(rel, lineno)
+        assert all(kw.arg != "batch_schema_check" for kw in c.keywords), (
+            f"{rel} 不得透传 batch_schema_check（默认关旧行为）")
+
+
+def test_batch_schema_check_runspec_default_off():
+    from orchestrator.agent_runner.runner import RunSpec
+    field = next(f for f in dataclasses.fields(RunSpec)
+                 if f.name == "batch_schema_check")
+    assert field.default is False
