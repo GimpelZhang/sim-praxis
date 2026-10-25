@@ -109,7 +109,21 @@ NORMAL_BUDGET = 60       # 常态批准总量
 # 越旧顶，须抬顶。全局 122+8=130≤136、task6 98+8=106≤106（恰顶）、批次
 # 0+8=8 恰顶。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/7/8 任务顶
 # 不动；常量先于出票提交。
-HARD_CAP = 136           # 全局先到先停硬门（2026-10-25 第九次自批，128→136）
+# 2026-10-25 run8 第十次自批（配套全局硬顶史上第五提 136→148；同日第九次
+# 后数小时）：T6-B13-run8 实跑烧满——seq123-128 V2 出生 round1 六 chunk
+# 全 ok 但组装闸顶层 def/class 重名硬失败（applied=[]，整轮重生），round2
+# chunk0/1（seq129/130）后批 8/8 用满且 task6 恰顶 106/106，chunk2 preflight
+# 双触顶（reason=task_hard_cap，seq=None blocked 行占批不占实呼），
+# GatewayPausedError 原样穿透（cli 设计：不包装成 human_failure，rc=1，
+# 线程形状干净 latest=KEEP/ns0=5/writes=1）。续跑语义：resume 重启
+# agent_run run_idx=1，callcache 键 r1_round1_chunk0-5 与 r1_round2_chunk0-1
+# 指纹命中确定性重放（round1 重名拒绝将复现，0 实呼），新付费自 round2
+# chunk2（seq131）起。新票 T6-B14-run8b approved=8 beyond_normal 信封 =
+# round2 余 4 chunk + exec 修复至多 2 + kill-9/重放储备 2。三门算术：
+# 全局 130+8=138≤148、task6 106+8=114≤118、批次 0+8=8 恰顶；打满后全局
+# 余 10、task6 余 4。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、
+# 4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；常量先于出票提交。
+HARD_CAP = 148           # 全局先到先停硬门（2026-10-25 第十次自批，136→148）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -170,7 +184,11 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 批次 0+19=19 恰顶，全局 107+19=126≤128（余量 2）。非模型变更、模型 ID
 # 零变更；NORMAL_BUDGET 60、4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；
 # 常量先于出票落地（write_approval 硬门）。
-PHASE2_TASK_CAPS = {4: 24, 6: 106, 7: 16, 8: 16}
+# Task6 2026-10-25 run8 第十次自批（配套全局硬顶第五提 136→148，溯源见上
+# HARD_CAP 块）：run8 烧满 T6-B13-run8 后 task6 恰顶 106/106 与批顶同时触
+# 拦（round2 chunk2 preflight，reason=task_hard_cap），续跑新票
+# T6-B14-run8b approved=8 → 106+8=114≤118（新顶），打满后 task6 余 4。
+PHASE2_TASK_CAPS = {4: 24, 6: 118, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。

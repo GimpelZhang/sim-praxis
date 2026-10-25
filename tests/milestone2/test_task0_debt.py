@@ -846,8 +846,22 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     三门算术：全局 122+8=130≤136、task6 98+8=106≤106（恰顶）、批次 0+8=8
     恰顶；常量先于票落地。授权链：规则 2（含提高项目总预算）+ 用户当次
     报备确认（run8 启动方案含 128→136）。task6 顶 106 不动，只提全局门。
+    第十次（2026-10-25，run8 烧满续跑；同日第九次后数小时）：T6-B13-run8
+    实跑烧满——seq123-128 V2 出生 round1 六 chunk 全 ok 但组装闸顶层
+    def/class 重名硬失败（applied=[]，整轮重生），round2 chunk0/1
+    （seq129/130）后批 8/8 用满且 task6 恰顶 106/106，chunk2 preflight
+    双触顶（reason=task_hard_cap，seq=None blocked 行占批不占实呼），
+    GatewayPausedError 原样穿透 rc=1（cli 设计不包装成 human_failure），
+    线程形状干净（latest=KEEP/ns0=5/writes=1）。续跑：resume 重启
+    agent_run run_idx=1，callcache r1_round1_chunk0-5 + r1_round2_chunk0-1
+    指纹命中确定性重放（0 实呼），新付费自 round2 chunk2（seq131）起。
+    新票 T6-B14-run8b approved=8（round2 余 4 chunk+exec 修复至多 2+储备 2）。
+    三门算术：全局 130+8=138≤148、task6 106+8=114≤118、批次 0+8=8 恰顶。
+    故 task6 106→118、HARD_CAP 136→148（全局硬顶第五次提）；常量先于票
+    落地。非模型变更、硬规则 1 不触发，模型 ID、NORMAL_BUDGET 60、
+    4·7·8 任务顶、CHUNK 窗、n=6、温度、种子、Q1 界全部不动。
     本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义、全局双门
-    （常态 60 门九次提顶始终未动），以及 run5/run6 冻结文件 sha256。
+    （常态 60 门十次提顶始终未动），以及 run5/run6 冻结文件 sha256。
     0 联网。
     """
     import hashlib
@@ -869,25 +883,27 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 106, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 106（第八次自批，
-    # run6 98→106）；task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 106
-    assert TASK_HARD_CAPS[6] != 98            # run5 旧顶随 run6 提顶下线
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 118, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 118（第十次自批，
+    # run8 烧满 106→118）；task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
+    assert TASK_HARD_CAPS[6] == 118
+    assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶随第十次提顶下线
+    assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 136 是第九次自批（run8，
-    # 128→136）后的值——前四次提顶均不动全局门，第五/六/七/八/九次动
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 148 是第十次自批（run8
+    # 烧满续跑，136→148）后的值——前四次提顶均不动全局门，第五至十次动
     # HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 136
-    assert HARD_CAP != 128                    # run8 旧全局顶随第九次提顶下线
+    assert HARD_CAP == 148
+    assert HARD_CAP != 136                    # run8 首跑旧全局顶随第十次下线
+    assert HARD_CAP != 128                    # 第九次前旧顶保持下线
     assert HARD_CAP != 122                    # run5 旧全局顶保持下线
     assert HARD_CAP != 104                    # run3 旧全局顶保持下线
-    # run8 信封算术对账（全局 130≤136 余 6/task6 106≤106 恰顶/批次恰顶）：
-    # 账实 int-seq 122/task6 98（探针 T6-B12 两实呼后），新票批 8。
-    assert 122 + 8 <= HARD_CAP == 136
-    assert 98 + 8 <= TASK_HARD_CAPS[6] == 106
+    # run8b 信封算术对账（全局 138≤148 余 10/task6 114≤118 余 4/批次恰顶）：
+    # 账实 int-seq 130/task6 106（T6-B13 烧满 8 笔后），新票批 8。
+    assert 130 + 8 <= HARD_CAP == 148
+    assert 106 + 8 <= TASK_HARD_CAPS[6] == 118
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
