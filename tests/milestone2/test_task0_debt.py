@@ -839,8 +839,15 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     36000、n=6、温度、种子、Q1 界全部不动。旧第七次值 98/122（票
     T6-B10-run5-frag、算术 100+21=121≤122、76+21=97≤98）作为 git 历史
     保留在本段叙述里——算术随真实提顶平移，非放水。
+    第九次（2026-10-25，run8 修复环 v1.4 首跑）：探针 T6-B12 两实呼
+    （seq121 仪器缺陷 FAIL + 保真修复后 seq122 PASS）后账实 int-seq 122/
+    task6 98；新票 T6-B13-run8 approved=8 beyond_normal（镜像 run7 信封：
+    5 coding 轮帽+2 节点重放 miss+1 储备），122+8=130 越旧顶 128 须抬顶。
+    三门算术：全局 122+8=130≤136、task6 98+8=106≤106（恰顶）、批次 0+8=8
+    恰顶；常量先于票落地。授权链：规则 2（含提高项目总预算）+ 用户当次
+    报备确认（run8 启动方案含 128→136）。task6 顶 106 不动，只提全局门。
     本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义、全局双门
-    （常态 60 门八次提顶始终未动），以及 run5/run6 冻结文件 sha256。
+    （常态 60 门九次提顶始终未动），以及 run5/run6 冻结文件 sha256。
     0 联网。
     """
     import hashlib
@@ -869,16 +876,18 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶随 run6 提顶下线
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 128 是第八次自批（run6，
-    # 122→128）后的值——前四次提顶均不动全局门，第五/六/七/八次动 HARD_CAP。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 136 是第九次自批（run8，
+    # 128→136）后的值——前四次提顶均不动全局门，第五/六/七/八/九次动
+    # HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 128
-    assert HARD_CAP != 122                    # run5 旧全局顶随 run6 提顶下线
+    assert HARD_CAP == 136
+    assert HARD_CAP != 128                    # run8 旧全局顶随第九次提顶下线
+    assert HARD_CAP != 122                    # run5 旧全局顶保持下线
     assert HARD_CAP != 104                    # run3 旧全局顶保持下线
-    # run6 信封算术对账（全局余量 2/task6 余量 4/批次恰顶）：账实 113 行/
-    # int-seq 107/task6 83（68 ok+15 ok=false），新票批 19。
-    assert 107 + 19 <= HARD_CAP == 128
-    assert 83 + 19 <= TASK_HARD_CAPS[6] == 106
+    # run8 信封算术对账（全局 130≤136 余 6/task6 106≤106 恰顶/批次恰顶）：
+    # 账实 int-seq 122/task6 98（探针 T6-B12 两实呼后），新票批 8。
+    assert 122 + 8 <= HARD_CAP == 136
+    assert 98 + 8 <= TASK_HARD_CAPS[6] == 106
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
