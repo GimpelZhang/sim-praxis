@@ -910,6 +910,20 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     规则 1 不触发，模型 ID、NORMAL_BUDGET 60、4·7·8 任务顶、CHUNK 窗、
     n=6、温度、种子、Q1 界全部不动。旧第十二次值 152/176 与算术 159+15/
     135+15 随真实提顶下线——算术随真实提顶平移，非放水。
+    第十七次（2026-10-26，run26 后；配套全局硬顶第十二提）：run26 是
+    Option 2 首次实跑（894aa77 反馈入编码环），5 轮 req 全含拓扑反馈、
+    模型侧 4/5 轮响应格式劣化（r1 锚点 miss、r2 工具调用 XML、r4 重复
+    循环、r5 空 patches），seq230-234 五笔全 ok 烧满修复帽，rc=3
+    human_failure；终态账实 int-seq 234/task6 210。同日完成拓扑墙定源
+    诊断（strace execve 逐字节取证 diag_topo_run26：import genesis →
+    mujoco.glfw → glfw 包底 _load_library spawn `python -c` ctypes 版本
+    探针恒 +1 条 site=idle label=-c，模型侧不可满足）并落 LEAD 宿主平台
+    托底（PYGLFW_LIBRARY，攒批第 66 条）。run27 票 T6-B35 approved=5：
+    234+5=239≤250（余 11）、210+5=215≤227（余 12）、批次 0+5=5 恰顶。
+    故 task6 212→227、HARD_CAP 235→250（预扩三轮修复帽 15：234+15=249
+    ≤250 余 1、210+15=225≤227 余 2）。常量先于票落地。非模型变更、硬
+    规则 1 不触发，模型 ID、NORMAL_BUDGET 60、4·7·8 任务顶、CHUNK 窗、
+    n=6、温度、种子、Q1 界全部不动。旧第十六次值 212/235 随真实提顶下线。
     本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义、全局双门
     （常态 60 门十次提顶始终未动），以及 run5/run6 冻结文件 sha256。
     0 联网。
@@ -933,11 +947,12 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 212, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 212（第十六次自批，
-    # 2026-10-25 十三至十六次连续四提 152→167→182→197→212）；task=4 仍为
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批，
+    # 2026-10-26 十三至十七次连续五提 152→167→182→197→212→227）；task=4 仍为
     # 24（覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 212
+    assert TASK_HARD_CAPS[6] == 227
+    assert TASK_HARD_CAPS[6] != 212           # 十六次旧顶随第十七次提顶下线
     assert TASK_HARD_CAPS[6] != 197           # 十五次旧顶随第十六次提顶下线
     assert TASK_HARD_CAPS[6] != 182           # 十四次旧顶随第十五次下线
     assert TASK_HARD_CAPS[6] != 167           # 十三次旧顶随第十四次下线
@@ -948,11 +963,12 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 235 是第十六次自批（2026-10-25
-    # 十三至十六次连续四提，176→190→205→220→235）后的值——前四次提顶均不动
-    # 全局门，第五至十六次动 HARD_CAP。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 250 是第十七次自批（2026-10-26
+    # 十三至十七次连续五提，176→190→205→220→235→250）后的值——前四次提顶均
+    # 不动全局门，第五至十七次动 HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 235
+    assert HARD_CAP == 250
+    assert HARD_CAP != 235                    # 十六次旧全局顶随第十七次下线
     assert HARD_CAP != 220                    # 十五次旧全局顶随第十六次下线
     assert HARD_CAP != 205                    # 十四次旧顶随第十五次下线
     assert HARD_CAP != 190                    # 十三次旧顶随第十四次下线
@@ -963,11 +979,12 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert HARD_CAP != 128                    # 第九次前旧顶保持下线
     assert HARD_CAP != 122                    # run5 旧全局顶保持下线
     assert HARD_CAP != 104                    # run3 旧全局顶保持下线
-    # run26 信封算术对账（全局 234≤235 余 1/task6 210≤212 余 2/批次 5 恰顶）：
-    # 账实 int-seq 229/task6 205（T6-B33 惰停终态），run26 为当前顶下唯一
-    # 剩余槽；run27 前须第十七次自批抬顶（余量不足以再预扩三轮帽 15）。
-    assert 229 + 5 <= HARD_CAP == 235
-    assert 205 + 5 <= TASK_HARD_CAPS[6] == 212
+    # run27 信封算术对账（全局 239≤250 余 11/task6 215≤227 余 12/批次 5 恰顶）：
+    # 账实 int-seq 234/task6 210（run26 T6-B34 五笔全 ok 终态，rc=3
+    # human_failure）；第十七次抬顶后预扩三轮修复帽 15（234+15=249≤250、
+    # 210+15=225≤227）。
+    assert 234 + 5 <= HARD_CAP == 250
+    assert 210 + 5 <= TASK_HARD_CAPS[6] == 227
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
