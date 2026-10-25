@@ -123,7 +123,26 @@ NORMAL_BUDGET = 60       # 常态批准总量
 # 全局 130+8=138≤148、task6 106+8=114≤118、批次 0+8=8 恰顶；打满后全局
 # 余 10、task6 余 4。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、
 # 4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；常量先于出票提交。
-HARD_CAP = 148           # 全局先到先停硬门（2026-10-25 第十次自批，136→148）
+# 2026-10-25 run8c 第十一次自批（配套全局硬顶史上第六提 148→168；同日第十次
+# 后约一小时）：T6-B15-run8b2 烧满 4（seq139-142 为 round1 重生 c0-c3——指纹
+# 失配之谜：run8b 全命中重放、run8c 同码同检查点却自 c0 起全 miss，所有可见
+# 输入（stage/model/extra/召回段 sha/工厂文本）已逐一排除，矛盾三角未破；
+# run8c 时代 r1c0-c4 证据与缓存已快照
+# anomaly_run8c_round1_repay_20261025T0339Z 作对照件），c4 写 req 后
+# preflight 拦（task_hard_cap 118>=118，seq=None 占批不占实呼），
+# GatewayPausedError rc=1、线程形状干净。引擎侧已实证：chunked birth 每块
+# prompt 经 previous_code="\n".join(codes) 携带前序块提取码（runner.py
+# _run_chunked_birth_round），c0 重付后 c1-c4 级联失配由新前块码长度差
+# 解释（同索引体积差 c1+241/c2+3464/c3+2883/c4+7989 字节，非单调恰符
+# 响应长度波动）；唯 c0 首笔失配根因未明，留 run8d 新旧 req 字节 diff
+# 定位。续跑 run8d 双预测：A（隐藏输入已稳定）：c0-c3 命中 run8c 缓存、
+# 付 c4+c5 后组装闸裁决；B（再失配）：首笔 c0 付费后即比对快照 diff、
+# 停烧票转引擎确定性缺陷修复。信封 18 = round1 收尾 2 + round2/3 整轮
+# 重生 ≤12 + 出生后 exec 修复 ≤2 + kill-9/重放储备 ≤2。三门算术：全局
+# 142+18=160≤168、task6 118+18=136≤138（打满后余 2）、批次 0+18=18 恰顶。
+# 非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/7/8 三任务顶、
+# 32768/600/n=6/温度/种子均不动；常量先于出票提交。
+HARD_CAP = 168           # 全局先到先停硬门（2026-10-25 第十一次自批，148→168）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -188,7 +207,12 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # HARD_CAP 块）：run8 烧满 T6-B13-run8 后 task6 恰顶 106/106 与批顶同时触
 # 拦（round2 chunk2 preflight，reason=task_hard_cap），续跑新票
 # T6-B14-run8b approved=8 → 106+8=114≤118（新顶），打满后 task6 余 4。
-PHASE2_TASK_CAPS = {4: 24, 6: 118, 7: 16, 8: 16}
+# Task6 2026-10-25 run8c 第十一次自批（配套全局硬顶第六提 148→168，溯源见
+# 上 HARD_CAP 块）：run8c 烧满 T6-B15-run8b2（seq139-142 round1 重生 c0-c3
+# 指纹失配重付）后 task6 恰顶 118/118（round1 c4 preflight 拦，
+# reason=task_hard_cap），续跑新票 T6-B16-run8d approved=18 →
+# 118+18=136≤138（新顶），打满后 task6 余 2。
+PHASE2_TASK_CAPS = {4: 24, 6: 138, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。
