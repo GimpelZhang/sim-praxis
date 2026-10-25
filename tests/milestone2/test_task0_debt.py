@@ -988,10 +988,17 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # 接线，+24 行零删除），冻结哈希随合法改动平移到 Option 2 终态实测
     # sha256（44db236b… → c112a745…），prompts/证据包脚本两值一字不动；
     # 断言形状保持逐字节 sha256 硬钉（最强形式，非放水）。
+    # 2026-10-26 run26 诊断（strace execve 取证 diag_topo_run26，锁内适配
+    # （宿主平台托底））：-c 源＝pyGLFW 包底对包内 libglfw.so 的
+    # `python -c` ctypes 版本探针（import genesis→mujoco→glfw 恒触发，
+    # V1 同链路，模型侧不可满足 idle==2）；task6 工厂 env_extra 注入
+    # PYGLFW_LIBRARY 直指包内 x11 libglfw.so 短路探针（断言 9+2 一字不动），
+    # 冻结哈希平移到该终态实测 sha256（c112a745… → ba2fb372…），
+    # prompts/证据包脚本两值一字不动；断言形状保持逐字节 sha256 硬钉。
     repo_root = Path(__file__).resolve().parents[2]
     frozen = {
         "orchestrator/graph/task6.py":
-            "c112a74522afe227f48a7784941674199b5c7f463e0bf70a54149415c709725e",
+            "ba2fb3728c2d1001d0e516eb4713140ed25ec4beea0e2d97f8d58a677703dda7",
         "orchestrator/graph/task6_v2_prompts.py":
             "e8055fe3ed72ee6049e396e376b298fd36a783b12c82317e511ad72fb72f38d0",
         "scripts/milestone1/build_evidence_pack.py":

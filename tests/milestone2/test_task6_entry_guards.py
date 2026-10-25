@@ -256,8 +256,11 @@ import ast  # noqa: E402 （提交 B 段局部导入）
 import dataclasses  # noqa: E402
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+# 2026-10-26 宿主平台托底锁内适配（PYGLFW_LIBRARY env 注入，Option 2 诊断
+# 后续）：task6.py 工厂 env_extra 段 +17 行，RunSpec 行号锚 306→323 纯平移
+# （调用本体一字未动）。
 _RUNSPEC_SITES = (
-    ("orchestrator/graph/task6.py", 306),
+    ("orchestrator/graph/task6.py", 323),
     ("orchestrator/graph/task7.py", 161),
     ("orchestrator/graph/task8.py", 209),
 )

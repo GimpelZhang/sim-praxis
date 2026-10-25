@@ -288,6 +288,23 @@ def make_spec_factory(thread_id: str, coding_batch: str,
         }
         env_extra.update(scenario["env"])
 
+        # 锁内适配（计划 v1.2 外，run26 诊断→宿主平台托底，2026-10-26 LEAD）：
+        # import genesis → genesis.utils.mjcf 硬 import mujoco → mujoco.glfw →
+        # import glfw；pyGLFW 包底 _load_library 对包内候选 libglfw.so spawn
+        # 一条 `python -c` ctypes 版本探针（glfw/library.py::_glfw_get_version，
+        # strace execve 逐字节取证 diag_topo_run26），每个 import genesis 的
+        # rollout 恒 +1 条 site=idle label=-c → idle==2 契约在宿主钉死栈上
+        # 模型侧不可满足（run26 五轮反馈实证，V1 同链路同样触发）。PYGLFW_
+        # LIBRARY 直指包内 x11 libglfw.so 时 library.py:228 短路为进程内
+        # CDLL（探针零子进程、glfw 功能保留）；闸断言 9 torch+2 idle/8192 窗
+        # 一字不动，task7/8 工厂不传，保持逐字节旧行为。注意 VENV_PY 是
+        # venv 内 symlink 链（bin/python→python3→/usr/bin/python3），按词法
+        # 前缀上溯 venv 根、不得 resolve()（resolve 会落到 base 解释器前缀）。
+        _glfw_probe = sorted(Path(VENV_PY).parent.parent.glob(
+            "lib/python3*/site-packages/glfw/x11/libglfw.so"))
+        if _glfw_probe:
+            env_extra["PYGLFW_LIBRARY"] = str(_glfw_probe[0])
+
         # run7（规格 §3.1 m6/d3）：host-shim 激活只经 PYTHONPATH 前拼 prelude
         # + marker=1（引擎不 import sitecustomize，两条解析路径不混用）。
         # 前拼不替换——外部 PYTHONPATH 旧值必须保留。

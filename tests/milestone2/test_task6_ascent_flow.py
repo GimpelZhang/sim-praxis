@@ -542,6 +542,39 @@ def test_run_level_coding_cap_5(tmp_path, monkeypatch):
         factory({**state, "chosen": {"sim_engine": "mujoco"}})
 
 
+def test_factory_pyglfw_library_env_tuodi(tmp_path, monkeypatch):
+    """锁内适配（宿主平台托底，2026-10-26，run26 诊断）：task6 工厂
+    env_extra 注入 PYGLFW_LIBRARY 直指包内 x11 libglfw.so——短路 pyGLFW
+    包底对候选库的 `python -c` ctypes 版本探针（import genesis→
+    genesis.utils.mjcf 硬 import mujoco→mujoco.glfw→import glfw 恒触发，
+    每 rollout +1 条 site=idle label=-c，strace execve 取证
+    diag_topo_run26；V1 同链路，idle==2 契约模型侧不可满足）。指向文件
+    必须真实存在（进程内 CDLL 加载保留 glfw 功能、零子进程）；
+    9 torch+2 idle 断言本体一字不动，仍由 _require_shim_evidence /
+    scan_shim_topology_gate 单真值承担。"""
+    monkeypatch.setenv("SIMPRAXIS_SOLUTIONS_ROOT",
+                       str(FIXTURE_SOLUTIONS_ROOT))
+    cal_src = tmp_path / "cal_src.json"
+    cal_src.write_text(json.dumps(_calibration_v2()), encoding="utf-8")
+    monkeypatch.setattr(task8, "CALIBRATION_SOURCE", cal_src)
+
+    state = {
+        "chosen": {"sim_engine": "genesis", "name": "V2 阻抗+DR"},
+        "v1_archive": {"thread_id": V1_THREAD,
+                       "host_workdir": str(tmp_path / "v1arch")},
+        "agent_runs": [], "events": [], "gate1_rejects": 0,
+        "proposals": []}
+    spec = task6_mod.make_spec_factory(T6_THREAD, "T6-B1-pyglfw")(state)
+
+    val = spec.env_extra["PYGLFW_LIBRARY"]
+    assert val.endswith(str(Path("glfw") / "x11" / "libglfw.so"))
+    assert Path(val).is_file()
+    # 托底不动引擎场景 env 与 host-shim prelude（既有键保持）。
+    assert spec.env_extra["PYOPENGL_PLATFORM"] == "egl"
+    assert spec.env_extra["GS_ENABLE_ZEROCOPY"] == "0"
+    assert spec.env_extra["SIMPRAXIS_HOST_SHIM"] == "1"
+
+
 def test_chunked_birth_local_cap_3_not_raised(tmp_path):
     """P3 新增 pin（run7）：拆块出生路径的轮帽只认 RunSpec 实值——本地夹具
     RunSpec(max_coding_rounds=3) 每轮块 0 即整轮失败时恰耗 3 轮 3 次调用，
