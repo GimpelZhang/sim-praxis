@@ -729,7 +729,12 @@ CALL_CACHE_ALLOWLIST = {
     # 2026-10-24 三签 REVISE：MAJOR-1 JSON 候选剥离 helper/字段 + MAJOR-2
     # type-is 透传注释/P3-2 注释均在构造点之前，纯位移（1846→1882），
     # 0 新增落点。
-    ("orchestrator/agent_runner/runner.py", 1882),
+    # 2026-10-25 Option 2（run25 host-shim 拓扑墙反馈入编码环，用户裁决
+    # 「选择 option 2」，锁内适配）：RunSpec.shim_topology_check 字段、
+    # _SHIM_* 常量/helper、扫描接线与 ChunkSpec 分层 docstring 改述全在
+    # 构造点之前，纯位移（1882→1921，+37+2 行）；修复环复用同一构造点，
+    # 0 新增 CallReplay 落点。
+    ("orchestrator/agent_runner/runner.py", 1921),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
@@ -892,6 +897,19 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     硬顶第七次提）；常量先于票落地。非模型变更、硬规则 1 不触发，模型
     ID、NORMAL_BUDGET 60、4·7·8 任务顶、CHUNK 窗、n=6、温度、种子、
     Q1 界全部不动。
+    第十三至十六次（2026-10-25，run12/15/18/21 烧满或卫生拦停续跑；同日
+    十二次后连续四提，raise 提交 f25a4c3/5e6dc99/4484552/953a8a4 当时漏更
+    本用例，本提交按平移协议补齐断言+溯源）：run12 烧满 152→167/176→190
+    （十三）、run15 卫生预检拦停 167→182/190→205（十四）、run18 烧满
+    182→197/205→220（十五）、run21 批次首次 exit 0 197→212/220→235（十六）。
+    run22-24 推进至 run24 突破（seq227-229：telemetry schema v1+9 局物理
+    序列全非零+evaluate），run25 撞 host-shim 拓扑墙惰停（0 实呼 delta=0）；
+    终态账实 int-seq 229/task6 205。run26 票 T6-B34 approved=5：229+5=234
+    ≤235（余 1）、205+5=210≤212（余 2）、批次 0+5=5 恰顶——当前顶下唯一
+    剩余槽，run27 前须第十七次自批抬顶。常量先于票落地。非模型变更、硬
+    规则 1 不触发，模型 ID、NORMAL_BUDGET 60、4·7·8 任务顶、CHUNK 窗、
+    n=6、温度、种子、Q1 界全部不动。旧第十二次值 152/176 与算术 159+15/
+    135+15 随真实提顶下线——算术随真实提顶平移，非放水。
     本用例钉死当前提顶值、Phase 2 覆盖 Phase 1 的并集语义、全局双门
     （常态 60 门十次提顶始终未动），以及 run5/run6 冻结文件 sha256。
     0 联网。
@@ -915,31 +933,41 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 152, 7: 16, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 152（第十二次自批，
-    # run9 烧满 138→152）；task=4 仍为 24（覆盖 Phase 1 的 8）；7/8 不动。
-    assert TASK_HARD_CAPS[6] == 152
-    assert TASK_HARD_CAPS[6] != 138           # run9 旧顶随第十二次提顶下线
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 212, 7: 16, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 212（第十六次自批，
+    # 2026-10-25 十三至十六次连续四提 152→167→182→197→212）；task=4 仍为
+    # 24（覆盖 Phase 1 的 8）；7/8 不动。
+    assert TASK_HARD_CAPS[6] == 212
+    assert TASK_HARD_CAPS[6] != 197           # 十五次旧顶随第十六次提顶下线
+    assert TASK_HARD_CAPS[6] != 182           # 十四次旧顶随第十五次下线
+    assert TASK_HARD_CAPS[6] != 167           # 十三次旧顶随第十四次下线
+    assert TASK_HARD_CAPS[6] != 152           # 十二次旧顶随第十三次下线
+    assert TASK_HARD_CAPS[6] != 138           # run9 旧顶保持下线
     assert TASK_HARD_CAPS[6] != 118           # run8c 旧顶保持下线
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
     assert TASK_HARD_CAPS[7] == 16 and TASK_HARD_CAPS[8] == 16
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 176 是第十二次自批（run9
-    # 烧满续跑，168→176）后的值——前四次提顶均不动全局门，第五至十二次动
-    # HARD_CAP。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 235 是第十六次自批（2026-10-25
+    # 十三至十六次连续四提，176→190→205→220→235）后的值——前四次提顶均不动
+    # 全局门，第五至十六次动 HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 176
-    assert HARD_CAP != 168                    # run9 旧全局顶随第十二次下线
+    assert HARD_CAP == 235
+    assert HARD_CAP != 220                    # 十五次旧全局顶随第十六次下线
+    assert HARD_CAP != 205                    # 十四次旧顶随第十五次下线
+    assert HARD_CAP != 190                    # 十三次旧顶随第十四次下线
+    assert HARD_CAP != 176                    # 十二次旧顶随第十三次下线
+    assert HARD_CAP != 168                    # 十一次旧全局顶保持下线
     assert HARD_CAP != 148                    # run8c 旧顶保持下线
     assert HARD_CAP != 136                    # run8 首跑旧顶保持下线
     assert HARD_CAP != 128                    # 第九次前旧顶保持下线
     assert HARD_CAP != 122                    # run5 旧全局顶保持下线
     assert HARD_CAP != 104                    # run3 旧全局顶保持下线
-    # run10 信封算术对账（全局 174≤176 余 2/task6 150≤152 余 2/批次恰顶）：
-    # 账实 int-seq 159/task6 135（T6-B17 烧满 5 笔后），三轮修复帽预扩 15。
-    assert 159 + 15 <= HARD_CAP == 176
-    assert 135 + 15 <= TASK_HARD_CAPS[6] == 152
+    # run26 信封算术对账（全局 234≤235 余 1/task6 210≤212 余 2/批次 5 恰顶）：
+    # 账实 int-seq 229/task6 205（T6-B33 惰停终态），run26 为当前顶下唯一
+    # 剩余槽；run27 前须第十七次自批抬顶（余量不足以再预扩三轮帽 15）。
+    assert 229 + 5 <= HARD_CAP == 235
+    assert 205 + 5 <= TASK_HARD_CAPS[6] == 212
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
@@ -954,10 +982,16 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # 适用块内 run7 平移协议——仅 task6.py 一值平移到提交 B 终态实测 sha256
     # （run7 值 3c53a627… → 44db236b…），prompts/证据包脚本两值一字不动；
     # 断言形状保持逐字节 sha256 硬钉（最强形式，非放水）。
+    # 2026-10-25 Option 2（run25 host-shim 拓扑墙反馈入编码环，用户裁决
+    # 「选择 option 2,继续工作」，锁内适配）：task6.py 经合法改动
+    # （scan_shim_topology_gate 包装器 + 工厂 shim_topology_check=True
+    # 接线，+24 行零删除），冻结哈希随合法改动平移到 Option 2 终态实测
+    # sha256（44db236b… → c112a745…），prompts/证据包脚本两值一字不动；
+    # 断言形状保持逐字节 sha256 硬钉（最强形式，非放水）。
     repo_root = Path(__file__).resolve().parents[2]
     frozen = {
         "orchestrator/graph/task6.py":
-            "44db236b5ab946dd145fec22c8bf5f210a2d7caa7feba2185ee360b958cf6ce6",
+            "c112a74522afe227f48a7784941674199b5c7f463e0bf70a54149415c709725e",
         "orchestrator/graph/task6_v2_prompts.py":
             "e8055fe3ed72ee6049e396e376b298fd36a783b12c82317e511ad72fb72f38d0",
         "scripts/milestone1/build_evidence_pack.py":

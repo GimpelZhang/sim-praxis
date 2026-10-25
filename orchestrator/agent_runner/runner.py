@@ -304,8 +304,10 @@ class ChunkSpec:
     块数（防模型逃单块）。
 
     chunk_boundaries 是工单四字段外的最小增补（同条锁内适配）：runner 在
-    底层（不得反向 import orchestrator.graph），渲染「本块边界/行数预算」
-    所需文本只能经规格从工厂流入，故与 chunk_titles 同形并列，构造即校长度。
+    底层（不得模块级反向 import orchestrator.graph；Option 2 起唯一例外＝
+    flag 守卫的函数级 lazy import scan_shim_topology_gate），渲染「本块
+    边界/行数预算」所需文本只能经规格从工厂流入，故与 chunk_titles 同形
+    并列，构造即校长度。
     """
 
     target_path: str
@@ -383,6 +385,13 @@ class RunSpec:
     # run7b 提交 B（rc0 批次结构闸，用户 2026-10-23 评审改闸授权）：默认 False
     # 保持逐字节旧行为（缓存键/指纹/成功判据不变）；仅 Task6 run 工厂显式 True。
     batch_schema_check: bool = False
+    # 锁内适配（计划 v1.2 外，用户 2026-10-25 裁决 Option 2）：默认 False 保持
+    # 逐字节旧行为（task7/8 不传）；仅 Task6 run 工厂显式 True。True 时 rc0+遥测
+    # +结构闸全绿后仍跑 Gate2 构卡前同款 host-shim 双闸机验
+    # （task6.scan_shim_topology_gate＝_require_shim_evidence 同一闸，窗口/正则/
+    # 9-2 契约单真值），违例跳过 ok 短路并注入编码修复轮——run25 结构性停机
+    #（拓扑墙反馈永不进模型环 → 重挂 delta=0）的反馈通路；帽仍 max_coding_rounds。
+    shim_topology_check: bool = False
 
 
 @dataclass
@@ -1694,6 +1703,36 @@ def _append_batch_schema_note(tail: str, raw: list[str], n_true: int, *,
     return tail + "\n\n" + "\n".join(parts)
 
 
+_SHIM_NOTE_HEAD = (
+    "机器核验（非模型输出）：上一轮脚本 rc=0，但 host-shim 证据双闸未通过"
+    "（与 Gate2 构卡前同款机验；违例原文如下）：")
+_SHIM_REPAIR_HEAD = (
+    "修复要求（仅进程拓扑收敛，不得改阈值、随机种子、通过判据、帧数设置、"
+    "host-shim 本体或 9/2 契约数字，不得过滤/吞掉 stderr）：")
+_SHIM_REPAIR_BULLETS = (
+    "- 契约（Gate2 构卡前双闸单真值）：末次 rc0 批次的 stderr 窗口内恰 9 条 "
+    "site=torch atexit 行（9 个 rollout 子进程）+ 恰 2 条 site=idle 行"
+    "（V2 batch 父 + gpu_sampler）。",
+    "- 只收敛 V2 自增的包装/守护进程使 site=idle 回到 2；禁止改契约数字、"
+    "禁止加大窗口、禁止在 V2 内屏蔽或稀释 host-shim 输出。",
+    "- 修完重跑 batch；拓扑对齐后同款双闸自然放行至 Gate2 构卡。",
+)
+
+
+def _append_shim_topology_note(tail: str, errors: "list[str]") -> str:
+    """把 host-shim 双闸违例装配成模型面注记（锁内适配，用户 2026-10-25）。
+
+    违例文本＝Gate2 GraphStateError 原文（人侧 timeline/模型侧注记同源机器
+    证据）。有意不做标记式幂等检查（同 _append_batch_schema_note：tail 含
+    不可信模型 stdout，标记检查可被回声抑制）；每轮恰一次由控制流保证。
+    """
+    parts = [_SHIM_NOTE_HEAD]
+    parts.extend("- " + err for err in errors)
+    parts.append(_SHIM_REPAIR_HEAD)
+    parts.extend(_SHIM_REPAIR_BULLETS)
+    return tail + "\n\n" + "\n".join(parts)
+
+
 def _coding_cap_reason(spec: RunSpec, anchor_exc: "Optional[PatchAnchorError]" = None,
                        *, transport_exc: "Optional[PatchSafetyError]" = None) -> str:
     """run7b：轮帽文案唯一收口；基串逐字同旧文案，锚点后缀与 chunk 后缀互斥。
@@ -2043,7 +2082,22 @@ class AgentRunner:
             # 失败 exec 条目；干净/rc!=0 轮键不存在（非空 list）。
             if schema_raw:
                 timeline[-1]["batch_schema_errors"] = schema_raw
-            if telemetry_ok and not schema_raw:
+            # 锁内适配（计划 v1.2 外，用户 2026-10-25 裁决 Option 2）：run25
+            # 结构性停机——rc0+遥测+结构闸全绿即 ok 短路复用批次，Gate2 构卡前
+            # host-shim 双闸 GraphStateError 节点外抛，拓扑漂移反馈永不进编码
+            # 环。Task6 opt-in：短路前跑 Gate2 同款机验（task6.scan_shim_topology_
+            # gate＝_require_shim_evidence 同一闸，窗口/正则/9-2 契约单真值），
+            # 违例跳过短路并强制模型修复轮（帽仍 max_coding_rounds）；任务侧闸
+            # 本体一字不改，双闸纵深防御保留。人侧 RAW：违例原文（Gate2 逐字
+            # 文案）立即挂当前 exec 条目；干净/rc!=0 轮键不存在（非空 list）。
+            if telemetry_ok and spec.shim_topology_check:
+                from orchestrator.graph.task6 import scan_shim_topology_gate
+                shim_errors = scan_shim_topology_gate(timeline)
+            else:
+                shim_errors = []
+            if shim_errors:
+                timeline[-1]["shim_topology_errors"] = shim_errors
+            if telemetry_ok and not schema_raw and not shim_errors:
                 vp, dur_ms, cover = self._video_artifacts(workdir, spec)
                 return {"status": "ok", "telemetry_uri": str(telemetry),
                         "coding_round": coding_calls, "executions": exec_no,
@@ -2064,6 +2118,9 @@ class AgentRunner:
                         schema_raw, workdir=workdir)
                     reason += (f"；末次批次结构闸未通过：共 {schema_n} 条，"
                                f"去重 {_schema_m} 类（机器证据见 timeline）")
+                if shim_errors:
+                    reason += (f"；末次 host-shim 证据双闸未通过（与 Gate2 "
+                               f"构卡前同款机验）：{shim_errors[0]}")
                 return self._fail(root, spec, timeline, last_result, reason=reason)
 
             tail = _tb_tail(result)
@@ -2098,18 +2155,26 @@ class AgentRunner:
                 repair_tail = _append_batch_schema_note(
                     repair_tail, schema_raw, schema_n,
                     read_fault=schema_read_fault, workdir=workdir)
+            # 锁内适配（用户 2026-10-25 裁决 Option 2）：host-shim 双闸注记固定
+            # schema 之后、transport 之前（次序 rc0→anchor→schema→[shim]→
+            # transport→函数源码→redact；[shim] 仅 Task6 opt-in 在场，其余任务
+            # 注记序列逐字节不变，G10 既有钉点保持）。
+            if shim_errors:
+                repair_tail = _append_shim_topology_note(
+                    repair_tail, shim_errors)
             # v1.4（设计 §2.3 G10 扩展序）：transport 注记固定 schema 之后、
             # 函数源码之前（次序 rc0→anchor→schema→transport→函数源码→redact）。
             if transport_feedback:
                 repair_tail = _append_transport_feedback(
                     repair_tail, transport_feedback)
             # v1.4 §2.3（Option B 注入闸）：修复轮反馈段附涉案函数源码——
-            # 仅当本尾带任一机器反馈件（rc0 缺产物注记/锚点/schema/transport）
-            # 时注入。锚点/schema/transport 为修复环专属通道，拆块出生轮尾
-            # 不产；rc0 缺产物注记则出生轮亦可能出现（结构闸出生轮同效），
-            # 非恒 False（三签 P3-2 措辞改准）。0 命中 collect 返回空串，
-            # 不新增报错面。
-            if rc0_missing or anchor_feedback or schema_raw or transport_feedback:
+            # 仅当本尾带任一机器反馈件（rc0 缺产物注记/锚点/schema/transport/
+            # shim 双闸）时注入。锚点/schema/transport/shim 为修复环专属通道，
+            # 拆块出生轮尾不产；rc0 缺产物注记则出生轮亦可能出现（结构闸出生轮
+            # 同效），非恒 False（三签 P3-2 措辞改准）。0 命中 collect 返回
+            # 空串，不新增报错面。
+            if (rc0_missing or anchor_feedback or schema_raw or transport_feedback
+                    or shim_errors):
                 func_section = collect_repair_functions(
                     workdir, schema_lines=schema_raw, traceback_tail=tail)
                 if func_section:

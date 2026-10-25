@@ -2051,3 +2051,201 @@ def test_r4_ticket_schema_fields_pinned_without_writing_ticket():
         assert token in spec_head, token
     # 信封行逐字钉（防口径漂移）。
     assert "envelope 8（5 coding+2 节点重放+1 储备）" in spec_head
+
+
+# ===========================================================================
+# 红测组 6：Option 2（用户 2026-10-25 裁决）——host-shim 双闸反馈入编码环。
+# run25 结构性停机：rc0+遥测+结构闸全绿即 ok 短路复用批次，Gate2 构卡前双闸
+# GraphStateError 节点外抛，拓扑漂移（site=idle 11 != 契约 2）反馈永不进编码
+# 环。本组钉 runner 侧：违例跳过短路→注记入模型修复轮→修完同判放行；帽尽
+# reason 带 Gate2 逐字文案；默认关（task7/8）路径逐字节旧行为。闸本体单测见
+# 红测组 4/5（_require_shim_evidence 一字不改）。
+# ===========================================================================
+
+_SHIM_TOP_SCRIPT_TMPL = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "wd = Path(__file__).parent\n"
+    "SENTINEL = 'A'\n"
+    "for i in range(9):\n"
+    "    sys.stderr.write(\n"
+    "        '[simpraxis-host-shim v1] 平台托底（非模型代码） site=torch '\n"
+    "        f'pid={{2000 + i}} label=run_x array_migrated=1 '\n"
+    "        'numpy_migrated=0 cpu_grad_detached=0\\n')\n"
+    "for i in range({n_idle}):\n"
+    "    sys.stderr.write(\n"
+    "        '[simpraxis-host-shim v1] 平台托底（非模型代码） site=idle '\n"
+    "        f'pid={{3000 + i}} label=batch_parent.py array_migrated=0 '\n"
+    "        'numpy_migrated=0 cpu_grad_detached=0\\n')\n"
+    "(wd / 'summary.json').write_text(json.dumps({{'ok': True}}),\n"
+    "                                 encoding='utf-8')\n"
+    "sys.exit(0)\n")
+
+
+class _ShimTopGateway:
+    """顺序响应桩：response 为 JSON 串（patches 通道），照抄 FakeGateway 形。"""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    def model_id(self, stage):
+        return "fake-coding-shimtop"
+
+    def call(self, stage, messages, **kw):
+        self.calls.append({"stage": stage, "messages": messages, "kw": kw})
+        assert self._responses, "第 " + str(len(self.calls)) + " 次调用：响应耗尽"
+        return self._responses.pop(0), (None, None)
+
+
+class _ShimTopVector:
+    def query_kb(self, query, *, namespace, top_k):
+        return []
+
+
+def _shim_top_setup(tmp_path, responses, *, n_idle=11, cap=5,
+                    shim_flag=True, schema_flag=False, thread="t6-shimtop"):
+    from orchestrator.agent_runner.runner import AgentRunner, RunSpec
+    wd = tmp_path / "work"
+    wd.mkdir(parents=True, exist_ok=True)
+    script = wd / "script.py"
+    script.write_text(_SHIM_TOP_SCRIPT_TMPL.format(n_idle=n_idle),
+                      encoding="utf-8")
+    gw = _ShimTopGateway(responses)
+    runner = AgentRunner(gw, _ShimTopVector(), evidence_root=tmp_path / "ev",
+                         call_cache=None, recall=None)
+    spec = RunSpec(
+        thread_id=thread, workdir=wd,
+        cmd=[sys.executable, str(script)],
+        telemetry_relpath="summary.json", batch_id="T6-SHIMTOP",
+        billing_task=6, run_idx=1, max_coding_rounds=cap,
+        shim_topology_check=shim_flag,
+        batch_schema_check=schema_flag)
+    return runner, spec, gw, wd
+
+
+def _shim_top_entries(rec):
+    return [t for t in rec["timeline"] if "shim_topology_errors" in t]
+
+
+def test_shimtop_g1_topology_violation_forces_model_repair_round(tmp_path):
+    """9/11 墙形 → 跳过 ok 短路 → 违例注记入模型消息 → 1 补丁收敛（9/2）。"""
+    patch = json.dumps({"patches": [{
+        "path": "script.py", "old": "for i in range(11):",
+        "new": "for i in range(2):"}]}, ensure_ascii=False)
+    runner, spec, gw, _ = _shim_top_setup(tmp_path, [patch], n_idle=11)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok"
+    assert rec["executions"] == 2 and rec["coding_round"] == 1
+    assert len(gw.calls) == 1
+    # 人侧 RAW：违例原文（Gate2 逐字文案）挂首个 exec 条目；收敛轮键不存在。
+    e0 = _shim_top_entries(rec)[0]
+    assert len(e0["shim_topology_errors"]) == 1
+    assert "site=idle 行数 11 != 契约 2" in e0["shim_topology_errors"][0]
+    assert e0["shim_topology_errors"][0].startswith("Task6 Gate2：")
+    assert "shim_topology_errors" not in rec["timeline"][1]
+    # 模型侧：注记 head + Gate2 违例原文 + 修复要求三件齐；逐字 Gate2 文案入环。
+    user = gw.calls[0]["messages"][1]["content"]
+    assert "机器核验（非模型输出）：上一轮脚本 rc=0，但 host-shim 证据双闸未通过" in user
+    assert "site=idle 行数 11 != 契约 2" in user
+    assert "仅进程拓扑收敛" in user
+    assert "恰 2 条 site=idle 行（V2 batch 父 + gpu_sampler）" in user
+    assert "禁止改契约数字" in user
+
+
+def test_shimtop_g2_contract_topology_zero_coding(tmp_path):
+    """9/2 契约形 → 同判放行：0 coding、1 exec、无注记键（闸不虚报）。"""
+    runner, spec, gw, _ = _shim_top_setup(tmp_path, [], n_idle=2)
+    rec = runner.run(spec)
+    assert rec["status"] == "ok"
+    assert rec["executions"] == 1 and rec["coding_round"] == 0
+    assert gw.calls == []
+    assert _shim_top_entries(rec) == []
+
+
+def test_shimtop_g3_default_off_keeps_legacy_inert_path(tmp_path):
+    """默认关（task7/8 路径）：9/11 拓扑不触发修复环——逐字节旧行为（短路
+    复用批次）。该 inert 形正是 run25 停机成因；opt-in 边界由本测钉死。"""
+    runner, spec, gw, _ = _shim_top_setup(tmp_path, [], n_idle=11,
+                                          shim_flag=False)
+    rec = runner.run(spec)
+    assert rec["status"] == "ok"
+    assert rec["executions"] == 1 and rec["coding_round"] == 0
+    assert gw.calls == []
+    assert _shim_top_entries(rec) == []
+
+
+def test_shimtop_g4_cap_exhausted_reason_carries_gate_text(tmp_path):
+    """帽尽（cap=1）且拓扑未收敛 → _fail reason 带 Gate2 逐字违例文案。"""
+    no_op = json.dumps({"patches": [{
+        "path": "script.py", "old": "SENTINEL = 'A'",
+        "new": "SENTINEL = 'B'"}]}, ensure_ascii=False)
+    runner, spec, gw, _ = _shim_top_setup(tmp_path, [no_op], n_idle=11, cap=1)
+    rec = runner.run(spec)
+
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 1                       # 帽守卫：恰一次不越顶
+    assert rec["executions"] == 2 and rec["coding_round"] == 1
+    assert "host-shim 证据双闸未通过" in rec["reason"]
+    assert "site=idle 行数 11 != 契约 2" in rec["reason"]
+    # 两 exec 条目均挂人侧违例原文（每轮机器证据不丢）。
+    assert len(_shim_top_entries(rec)) == 2
+
+
+def test_shimtop_g5_schema_and_shim_notes_coexist_in_order(tmp_path):
+    """同轮 schema+shim 双违例：注记次序 schema 段先于 shim 段（G10 次序钉
+    对 [shim] 槽位的扩展；锁内适配 Option 2，评审 MINOR 建议同提交补钉）。"""
+    no_op = json.dumps({"patches": [{
+        "path": "script.py", "old": "SENTINEL = 'A'",
+        "new": "SENTINEL = 'B'"}]}, ensure_ascii=False)
+    runner, spec, gw, _ = _shim_top_setup(
+        tmp_path, [no_op], n_idle=11, cap=1, schema_flag=True,
+        thread="t6-shimtop-g5")
+    rec = runner.run(spec)
+
+    # summary.json={"ok": True} 经 load_batch 读出 KeyError → schema 读盘形
+    # 1 条（探针实证），shim 9/11 同轮违例 → 双注记入同一模型消息。
+    assert rec["status"] == "failed"
+    assert len(gw.calls) == 1
+    user = gw.calls[0]["messages"][1]["content"]
+    i_schema = user.index("批次结构闸未通过")
+    i_shim = user.index("host-shim 证据双闸未通过")
+    assert i_schema < i_shim                     # 次序 schema→[shim] 钉死
+    # 人侧 RAW：同轮两键齐挂首 exec 条目；帽尽 reason 两段机器件俱在。
+    e0 = rec["timeline"][0]
+    assert e0["batch_schema_errors"] and e0["shim_topology_errors"]
+    assert "批次结构闸未通过" in rec["reason"]
+    assert "host-shim 证据双闸未通过" in rec["reason"]
+
+
+def test_shimtop_g6_shim_and_transport_notes_coexist_in_order(tmp_path):
+    """shim 违例轮遇 transport 拒（J7 空 patches）→ 次轮同带 shim+transport
+    两注记且 shim 段先于 transport 段（次序 [shim]→transport 钉）。"""
+    transport_bad = json.dumps({"patches": []})
+    fix = json.dumps({"patches": [{
+        "path": "script.py", "old": "for i in range(11):",
+        "new": "for i in range(2):"}]}, ensure_ascii=False)
+    runner, spec, gw, _ = _shim_top_setup(
+        tmp_path, [transport_bad, fix], n_idle=11, cap=5,
+        thread="t6-shimtop-g6")
+    rec = runner.run(spec)
+
+    assert rec["status"] == "ok"
+    assert rec["executions"] == 3 and rec["coding_round"] == 2
+    assert len(gw.calls) == 2
+    # call1：仅 shim 注记（transport 尚未发生，注记不得预支）。
+    user1 = gw.calls[0]["messages"][1]["content"]
+    assert "host-shim 证据双闸未通过" in user1
+    assert "上一轮未产出可应用补丁" not in user1
+    # call2：shim+transport 两注记齐，且 shim 段先于 transport 段。
+    user2 = gw.calls[1]["messages"][1]["content"]
+    i_shim = user2.index("host-shim 证据双闸未通过")
+    i_tp = user2.index("上一轮未产出可应用补丁")
+    assert i_shim < i_tp                          # 次序 [shim]→transport 钉死
+    # 人侧 RAW：exec1/exec2 两轮挂 shim 违例；transport 拒绝件挂 call1 当轮
+    # exec 条目（timeline[0]），收敛轮（timeline[1]）不再带。
+    assert len(_shim_top_entries(rec)) == 2
+    assert "patch_transport_rejected" in rec["timeline"][0]
+    assert "patch_transport_rejected" not in rec["timeline"][1]
+    assert rec["timeline"][1]["applied"] == ["script.py"]

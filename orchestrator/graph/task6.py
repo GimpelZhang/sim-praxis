@@ -334,6 +334,12 @@ def make_spec_factory(thread_id: str, coding_batch: str,
             # run7b 提交 B：rc0 批次结构闸仅 Task6 run opt-in（用户 2026-10-23
             # 评审改闸授权）；task7/task8 工厂不传，保持逐字节旧行为。
             batch_schema_check=True,
+            # 锁内适配（计划 v1.2 外，用户 2026-10-25 裁决 Option 2）：run25
+            # host-shim 拓扑墙（site=idle 11 != 契约 2）反馈入编码环——Gate2
+            # 构卡前同款双闸前移进 runner 修复环（scan_shim_topology_gate＝
+            # _require_shim_evidence 同一闸），违例跳过 ok 短路强制模型修复轮
+            # （帽仍 max_coding_rounds=5）；闸本体一字不改，task7/8 不传。
+            shim_topology_check=True,
         )
 
     return factory
@@ -843,6 +849,24 @@ def _require_shim_evidence(state: dict, rec: dict) -> dict:
         "cpu_grad_detached": c,
         "atexit_torch_lines": 9, "idle_lines": 2,
         "last_anchor_offset_bytes": offset}
+
+
+def scan_shim_topology_gate(timeline: list) -> list[str]:
+    """agent_run 编码环前置同款双闸机验（锁内适配，用户 2026-10-25 裁决 Option 2）。
+
+    run25 结构性停机：agent_run rc0+遥测+结构闸全绿即 ok 短路复用批次，Gate2
+    构卡前双闸（_require_shim_evidence）GraphStateError 在节点外抛出——模型侧
+    拓扑漂移（site=idle 11 != 契约 2）的反馈永不进编码环，重挂只会 delta=0。
+    本函数把**同一闸**前移进 runner 修复环：违例以 GraphStateError 原文（与
+    Gate2 构卡前逐字同文案）回给模型修 V2 进程拓扑；空表＝与 Gate2 同判放行。
+    闸本体/正则/9-2 契约/offset 窗口单真值不复制（_require_shim_evidence
+    一字不改，双闸纵深防御保留）；timeline 条目形状＝ runner exec 时间线。
+    """
+    try:
+        _require_shim_evidence({}, {"timeline": list(timeline)})
+    except GraphStateError as exc:
+        return [str(exc)]
+    return []
 
 
 def make_gate2_seam(feishu, thread_id: str, task_title: str, *,

@@ -292,3 +292,66 @@ def test_batch_schema_check_runspec_default_off():
     field = next(f for f in dataclasses.fields(RunSpec)
                  if f.name == "batch_schema_check")
     assert field.default is False
+
+
+# ===========================================================================
+# ⑩ 锁内适配 Option 2（用户 2026-10-25 裁决）：host-shim 双闸反馈入编码环
+#    opt-in 边界——仅 Task6 工厂传 shim_topology_check=True；task7/task8 一字
+#    不传，RunSpec 默认 False → 逐字节旧行为。闸本体
+#    （task6._require_shim_evidence）一字不改，包装器＝同一闸单真值。
+# ===========================================================================
+
+def test_shim_topology_check_opted_in_only_by_task6():
+    c6 = _runspec_call(*_RUNSPEC_SITES[0])
+    flag = {kw.arg: kw.value for kw in c6.keywords}.get("shim_topology_check")
+    assert isinstance(flag, ast.Constant) and flag.value is True
+
+    for rel, lineno in _RUNSPEC_SITES[1:]:
+        c = _runspec_call(rel, lineno)
+        assert all(kw.arg != "shim_topology_check" for kw in c.keywords), (
+            f"{rel} 不得透传 shim_topology_check（默认关旧行为）")
+
+
+def test_shim_topology_check_runspec_default_off():
+    from orchestrator.agent_runner.runner import RunSpec
+    field = next(f for f in dataclasses.fields(RunSpec)
+                 if f.name == "shim_topology_check")
+    assert field.default is False
+
+
+def test_scan_shim_topology_gate_reuses_gate_single_source():
+    """包装器＝_require_shim_evidence 同一闸：违例原文逐字 Gate2 文案、
+    空表＝同判放行；9/2 契约/正则/窗口单真值不复制（Option 2）。"""
+    from orchestrator.graph import task6 as task6_mod
+
+    def _torch(pid):
+        return ("[simpraxis-host-shim v1] 平台托底（非模型代码） site=torch "
+                f"pid={pid} label=run_x array_migrated=1 numpy_migrated=0 "
+                "cpu_grad_detached=0\n")
+
+    def _idle(pid):
+        return ("[simpraxis-host-shim v1] 平台托底（非模型代码） site=idle "
+                f"pid={pid} label=x array_migrated=0 numpy_migrated=0 "
+                "cpu_grad_detached=0\n")
+
+    def _tl(n_torch, n_idle):
+        tail = "".join(_torch(i) for i in range(n_torch))
+        tail += "".join(_idle(i) for i in range(n_idle))
+        return [{"exec": 1, "rc": 0, "stderr_only_tail": tail}]
+
+    # 9/2 契约形 → 放行（空表）。
+    assert task6_mod.scan_shim_topology_gate(_tl(9, 2)) == []
+    # run25 墙形（9 torch + 11 idle）→ 恰 1 条违例，文案与 Gate2 逐字同源。
+    errs = task6_mod.scan_shim_topology_gate(_tl(9, 11))
+    assert len(errs) == 1
+    assert errs[0].startswith("Task6 Gate2：")
+    assert "site=idle 行数 11 != 契约 2" in errs[0]
+    # torch 计数违例走同一闸同一文案（8/2 先于 idle 判）。
+    errs8 = task6_mod.scan_shim_topology_gate(_tl(8, 2))
+    assert len(errs8) == 1
+    assert "site=torch atexit 行数 8 != 契约 9" in errs8[0]
+    # 非 rc0 条目不参与 9/2 硬闸（弱闸形态下 shim 在场即放行——与 Gate2 一致：
+    # 包装器只在 runner telemetry_ok（rc==0）路径被调用，非 rc0 复现仅防回归）。
+    tl_weak = [{"exec": 1, "rc": 1,
+                "stderr_only_tail": _torch(0) + _idle(0)}]
+    assert task6_mod.scan_shim_topology_gate(tl_weak) == []
