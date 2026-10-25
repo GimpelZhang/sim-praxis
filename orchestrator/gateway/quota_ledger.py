@@ -163,7 +163,20 @@ NORMAL_BUDGET = 60       # 常态批准总量
 # task6 150+15=165≤167、批次 0+5=5 恰顶；不抬则 run13 第 3 笔即触
 # task_used 152>=152 拦。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、
 # 4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；常量先于出票提交。
-HARD_CAP = 190           # 全局先到先停硬门（2026-10-25 第十三次自批，176→190）
+# 2026-10-25 run15 后第十四次自批（配套全局硬顶史上第九提 190→205；同日
+# 第十三次后约 1 小时）：run13/14/15 三轮修复帽烧满（seq175-186，run15 仅
+# 2 笔即被卫生预检拦停）。run13 批次产出 normal×3+ice_nominal×3 完整遥测
+# 死于 ice_dr set_sol_params；run14 修通后 9 局全落盘+summary/energy_audit/
+# innovation 齐全，但遥测序列 400 帧全零退化（_torso_pose 静默返零，5/5
+# claim vacuous met，rc=1）；run15 r1 transport 拒、r2 模型写 usercustomize.py
+# 引导劫持件（诊断 Genesis teardown 崩 rc=1 方向有价值、手段不可接受），
+# exec3 卫生预检（runner §3.6 三 stem）正确拦停，LEAD 核查来源=本轮 r2 补丁
+# 后 rename 隔离。task_used=162；run16 票 approved=5 若不抬，第 3 笔写后
+# task_used=167 即触 167>=167 拦，且全局 186+5=191>190 同拦。新顶 182：
+# 预扩三轮修复帽 15（run16/17/18 各 5），162+15=177≤182（打满后余 5）。
+# 非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/7/8 三任务顶、
+# 32768/600/n=6/温度/种子均不动；常量先于出票提交。
+HARD_CAP = 205           # 全局先到先停硬门（2026-10-25 第十四次自批，190→205）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -246,10 +259,21 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # None 致采集器 fr[k] TypeError；run12 消除 NoneType 后死点进入 pd_update
 # 控制环（_ank→th 未绑定）。task_used=150；run13 票 approved=5 若不抬，第
 # 3 笔写后 task_used=152 即触 152>=152 拦。新顶 167：预扩三轮修复帽 15
-# （run13/14/15 各 5），150+15=165≤167（打满后余 2）。非模型变更、硬规则 1
-# 不触发；NORMAL_BUDGET 60、4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；
-# 常量先于出票提交。
-PHASE2_TASK_CAPS = {4: 24, 6: 167, 7: 16, 8: 16}
+# （run13/14/15 各 5），150+15=165≤167（打满后余 2）。
+# Task6 2026-10-25 run15 第十四次自批（配套全局硬顶第九提 190→205，溯源见
+# 上 HARD_CAP 块）：run13/14/15 三轮修复帽烧满（seq175-186）。run13 修通
+# pd_update 后 6 局完整遥测落盘、死于 ice_dr set_sol_params；run14 修通
+# 后 9 局全落盘+summary/energy_audit/innovation 齐全，但遥测序列 400 帧
+# 全零退化（_torso_pose 静默返零，5/5 claim vacuous met，rc=1）；run15
+# r1 transport 拒、r2 模型写 usercustomize.py 引导劫持件（诊断方向有价值、
+# 手段不可接受），exec3 卫生预检（runner §3.6 三 stem）正确拦停，仅烧
+# seq185-186 两笔。LEAD 核查来源=本轮 r2 补丁后 rename 隔离。task_used=
+# 162；run16 票 approved=5 若不抬，第 3 笔写后 task_used=167 即触
+# 167>=167 拦，且全局 186+5=191>190 同拦。新顶 182：预扩三轮修复帽 15
+# （run16/17/18 各 5），162+15=177≤182（打满后余 5）。非模型变更、硬规则
+# 1 不触发；NORMAL_BUDGET 60、4/7/8 三任务顶、32768/600/n=6/温度/种子均
+# 不动；常量先于出票提交。
+PHASE2_TASK_CAPS = {4: 24, 6: 182, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。
