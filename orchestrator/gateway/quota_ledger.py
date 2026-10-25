@@ -142,7 +142,18 @@ NORMAL_BUDGET = 60       # 常态批准总量
 # 142+18=160≤168、task6 118+18=136≤138（打满后余 2）、批次 0+18=18 恰顶。
 # 非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/7/8 三任务顶、
 # 32768/600/n=6/温度/种子均不动；常量先于出票提交。
-HARD_CAP = 168           # 全局先到先停硬门（2026-10-25 第十一次自批，148→168）
+# 2026-10-25 run9 烧满后第十二次自批（配套全局硬顶史上第七提 168→176；同日
+# 第十一次后数小时）：run8d V2 出生后 exec 死点逐层推进（NameError run_batch
+# → transport 拒 round5 → run9：vel 属性→rot 属性→KeyError in_swing，仿真已
+# 真跑到 ~400 FPS），T6-B17-run9 approved=5 烧满（seq155-159：r1 tool-call
+# 残片 transport 拒、r2-r4 三连 applied、r5 rot→quat applied 后 exec#6 死
+# gait 状态机缺键）→ 5 轮帽尽 human_failure rc=3（设计内终态）。信封预扩
+# 三轮修复帽 15 = run10/11/12 各 5（V2 在世免重生、evaluate 零视觉实呼，
+# 每轮独立票）。三门算术（run10 票出票时点）：全局 159+15=174≤176、
+# task6 135+15=150≤152、批次 0+5=5 恰顶；不抬则 run10 第 4 笔即触
+# task_used 138>=138 拦。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、
+# 4/7/8 三任务顶、32768/600/n=6/温度/种子均不动；常量先于出票提交。
+HARD_CAP = 176           # 全局先到先停硬门（2026-10-25 第十二次自批，168→176）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -212,7 +223,13 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 指纹失配重付）后 task6 恰顶 118/118（round1 c4 preflight 拦，
 # reason=task_hard_cap），续跑新票 T6-B16-run8d approved=18 →
 # 118+18=136≤138（新顶），打满后 task6 余 2。
-PHASE2_TASK_CAPS = {4: 24, 6: 138, 7: 16, 8: 16}
+# Task6 2026-10-25 run9 第十二次自批（配套全局硬顶第七提 168→176，溯源见
+# 上 HARD_CAP 块）：run9 烧满 T6-B17-run9（seq155-159 修复环五轮：r1
+# transport 拒 + r2/r3/r4/r5 全 applied，exec 死点 vel→rot→in_swing 逐层
+# 推进）后 task_used=135；run10 票 approved=5 若不抬，第 4 笔写后
+# task_used=138 即触 138>=138 拦，实际只能烧 3 笔。新顶 152：预扩三轮
+# 修复帽 15（run10/11/12 各 5），135+15=150≤152（打满后余 2）。
+PHASE2_TASK_CAPS = {4: 24, 6: 152, 7: 16, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。
