@@ -8,12 +8,13 @@ schema simpraxis.rsi_dashboard_phase2.v1，必含段：
   机判（由 LEAD 在 Task7/8 提交后以 --tests-result 喂入真实全跑结果；未喂入
   时如实为 null，不把收集清单冒充全绿）；
 - lance_tables：四表行数实读（kb_chunks/phase1_learnings/solution_chunks/
-  phase2_learnings；phase2_learnings gate2 accept 从未发生 → 活表不存在，
-  如实 exists=false/rows=0，不造表）；
+  phase2_learnings；run27 首次 Gate2 accept 后活表已建，如实 exists/rows，
+  不造表、不填占位）；
 - production_recall：219 行生产采纳遥测明细（复用 memory_flywheel.recall
   的严格计数口径 + 按 site/thread_id 聚合）；
 - pareto：V1 冻结档案六指标 + Q1 矛盾结论（0.824<界 2.0，矛盾即结论、未翻案），
-  V2 终态无 Pareto 判定（v2_summary.json 从未生成，Gate2 从未建行）；
+  V2 终态 Pareto 判定（run27 Gate2 accept 后 v2_summary 已生成，机判
+  dominated_by_v1——V2 六指标与 V1 逐位相同、仅 solve_wallclock 回退）；
 - rung4_calibration：record_only 终态（D7 未达成，禁止声称 active）；
 - paid_reconciliation：phase2 新账整数 seq=实呼（120）+ call_cache 命中口径
   （0 账行调用）+ phase1 封存账 29 行只读 + blocked 6 行单列；
@@ -45,6 +46,11 @@ from orchestrator.common import secrets as secret_scan  # noqa: E402
 from orchestrator.common.clock import parse_ts_iso_strict, utc_now_iso_z  # noqa: E402
 from orchestrator.common.runtime_paths import phase1_root, phase2_root  # noqa: E402
 from orchestrator.gateway.quota_ledger import call_lines  # noqa: E402
+from orchestrator.judge.pareto import (  # noqa: E402
+    NON_DOMINATED as PARETO_NON_DOMINATED,
+    V2_DOMINATES as PARETO_V2_DOMINATES,
+    pareto_verdict,
+)
 
 SCHEMA = "simpraxis.rsi_dashboard_phase2.v1"
 VERSION = 1
@@ -507,9 +513,9 @@ def lance_tables_block(uri: str | None = None) -> dict:
     names = set(db.table_names())
     table_specs = [
         ("kb_chunks", "KB 切块基线（只读，永不写）"),
-        ("phase1_learnings", "Phase 1 学习行（含 Task6/run7a 活表 12 行）"),
+        ("phase1_learnings", "Phase 1 学习行（活表实读，run27 后含 Gate2 accept 行）"),
         ("solution_chunks", "方案切块独立第三表"),
-        ("phase2_learnings", "Phase 2 升阶 accept 行（无 accept 即无表）"),
+        ("phase2_learnings", "Phase 2 升阶 accept 行（run27 accept 后活表已建）"),
     ]
     tables = []
     for name, desc in table_specs:
@@ -525,8 +531,9 @@ def lance_tables_block(uri: str | None = None) -> dict:
         "uri_resolved": str(p.resolve(strict=False)),
         "tables": tables,
         "phase2_learnings_note": (
-            "gate2 accept 从未发生，phase2_learnings 表在活库不存在（"
-            "table_exists=False）即真实终态；看板不造表、不填占位行。"),
+            "run27 首次 Gate2 accept（2026-10-26）后 phase2_learnings 表已在"
+            "活库建成（table_exists=True）；上表 exists/rows 为机读真值，"
+            "看板不造表、不填占位行。"),
     }
 
 
@@ -559,13 +566,43 @@ def pareto_block(p2_root: Path) -> dict:
              for f in sorted(evo_dir.glob("*.md"))]
     run_dir = p2_root / "runs" / "task6_ascent" / (
         f"run_{ASCENT_THREAD}_1")
+
+    # ---- Gate2 accept 判据：v2_summary 存在且 pareto_verdict 机判可算 ----
+    # run27（2026-10-26）首次 Gate2 accept 后 v2_summary.json 已生成；此处
+    # 对 v1/v2 冻结六指标跑 pareto_verdict（有序、ε 带、方向表私改即报错），
+    # 不硬编码结论。缺 v2 或指标不全则如实 no_verdict（不造判定）。
+    verdict = None
+    no_verdict_reason = None
+    v2_metrics = None
+    per_metric_delta = None
+    if not v2_path.is_file():
+        no_verdict_reason = (
+            "v2_summary.json 不存在：V2 未产出可判 summary，无 Pareto 判定"
+            "对象（诚实留空，不造判定）。")
+    else:
+        v2_doc = _load_json(v2_path)
+        v2_metrics = v2_doc.get("pareto_metrics")
+        try:
+            verdict = pareto_verdict(v1["pareto_metrics"], v2_metrics)
+        except Exception as exc:  # 指标缺/维度不符/方向冲突 → fail-closed
+            verdict = None
+            no_verdict_reason = (
+                f"pareto_verdict 机判失败（fail-closed，不降级、不猜测）："
+                f"{type(exc).__name__}: {exc}")
+        if verdict is not None:
+            per_metric_delta = {
+                k: {"v1": v1["pareto_metrics"][k], "v2": v2_metrics[k],
+                    "delta": v2_metrics[k] - v1["pareto_metrics"][k]}
+                for k in v1["pareto_metrics"]}
+    # Gate2 机器 accept 证据（pending_gates）——只读核验，不改判、不代批。
+    gate2_accept = _gate2_accept_block()
+
     observed = None
     envelope = None
     sp = run_dir / "summary.json"
     if sp.is_file():
         s = _load_json(sp)
-        # 仅作机产事实呈现：未经 evaluate seam 默认口径重算/采纳，不是
-        # Pareto 机判输入（v2_summary.json 才是，而它从未生成）。
+        # run 目录观察值：仅作旁证，机判以 v2_summary 六指标为准。
         observed = {
             "run_dir": str(run_dir), "summary_schema": s.get("schema"),
             "groups_success_rate": {
@@ -573,9 +610,8 @@ def pareto_block(p2_root: Path) -> dict:
                 (s.get("groups") or {}).items()},
             "groups_n_fell": {k: v.get("n_fell") for k, v in
                               (s.get("groups") or {}).items()},
-            "provenance": "V2 批次物理跑过（run7b/7c 期工作目录），但图从未"
-                          "产出 v2_summary.json；本块是 run 目录原始观察值，"
-                          "非 Pareto 机判、非 Gate2 证据。",
+            "provenance": "V2 批次物理跑过；Pareto 机判以 v2_summary 六指标"
+                          "为准，本块为 run 目录原始观察值旁证。",
         }
     fp = run_dir / "FAILURE.json"
     if fp.is_file():
@@ -591,16 +627,40 @@ def pareto_block(p2_root: Path) -> dict:
         "q1_contradiction": q1,
         "v2_summary_path": str(v2_path),
         "v2_summary_present": v2_path.is_file(),
-        "pareto_verdict": None,
-        "no_verdict_reason": (
-            "V2 从未通过 Gate2（gate2 全程未建行），v2_summary.json 从未"
-            "生成；按 pareto.py 与失败演化志，终态既非 non_dominated 亦非 "
-            "dominated_by_v1——是升阶方案未跨过代码出生/结构闸的工程结局，"
-            "不构成对 V1 科学结论的支持或削弱。"),
-        "evolution_failure_notes": notes,
+        "v2_pareto_metrics": v2_metrics,
+        "pareto_per_metric_delta": per_metric_delta,
+        "pareto_verdict": verdict,
+        "no_verdict_reason": no_verdict_reason,
+        "gate2_accept": gate2_accept,
+        "evolution_notes": notes,
         "v2_batch_observed_nonauthoritative": observed,
         "final_envelope": envelope,
     }
+
+
+def _gate2_accept_block() -> dict:
+    """只读核验 pending_gates 里 ASCENT_THREAD 的 Gate2 真人裁决（No Fake
+    Approval：只记录机读事实，decision 由真人卡填，本函数不代批、不改判）。"""
+    db_path = phase1_root() / "state" / "pending_gates.db"
+    if not db_path.is_file():
+        return {"present": False,
+                "reason": f"pending_gates.db 不存在：{db_path}"}
+    import sqlite3
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        row = con.execute(
+            "SELECT gate, status, decision, human_notes, decided_at "
+            "FROM pending_gates WHERE thread_id=? AND gate=2 "
+            "ORDER BY rowid DESC LIMIT 1", (ASCENT_THREAD,)).fetchone()
+    finally:
+        con.close()
+    if row is None:
+        return {"present": False, "reason": "无 Gate2 pending_gates 行"}
+    gate, status, decision, notes, decided_at = row
+    return {"present": True, "gate": gate, "status": status,
+            "decision": decision, "human_notes": notes,
+            "decided_at": decided_at,
+            "human_approved": status == "DECIDED" and decision == "approve"}
 
 
 # ---------------------------------------------------------------------------
