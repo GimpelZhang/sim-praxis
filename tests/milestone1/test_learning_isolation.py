@@ -546,5 +546,74 @@ def test_16_runs_root_tagged_evidence_and_clean_accept(store, roots,
                            failure_symptom="越界探测", effective=True)
 
 
+def test_17_phase2_root_tagged_evidence_and_env(monkeypatch, roots, runs_root,
+                                                 tmp_path):
+    """锁内适配第三根（2026-10-26 run27 首次 Gate2 accept）：Task6 升阶
+    telemetry 落 $SIMPRAXIS_PHASE2_ROOT/runs 下，relpath 必须带 @phase2/
+    标记并被接受写库；phase1/@runs/ 两根换算逐字节不变；@phase2/ 下的
+    ../ 越界同样拒绝；缺文件 FileNotFoundError；phase2_root() env 缺省回退
+    为 phase1 根同级 phase2/（与 runtime_paths.phase2_root 同语义）。
+    """
+    from orchestrator.graph.learning import make_learning_seam
+    from memory_flywheel.phase1.learning_store import (
+        PHASE2_ROOT_TAG, RUNS_ROOT_TAG,
+    )
+    # --- phase2_root() env 缺省回退（不污染生产 /mnt 根） ---
+    monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "p1"))
+    monkeypatch.delenv("SIMPRAXIS_PHASE2_ROOT", raising=False)
+    assert ls_mod.phase2_root() == tmp_path / "phase2"
+    monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "explicit_p2"))
+    assert ls_mod.phase2_root() == tmp_path / "explicit_p2"
+
+    # --- 三方向换算：phase1 裸 / runs @runs/ / phase2 @phase2/ ---
+    phase2_ev = tmp_path / "phase2"
+    (phase2_ev / "runs" / "task6_ascent").mkdir(parents=True)
+    s = LearningStore(uri=str(roots[0]), evidence_root=roots[1],
+                      runs_evidence_root=runs_root,
+                      phase2_evidence_root=phase2_ev)
+    p1f = roots[1] / "evidence.json"
+    p1f.write_text("{}", encoding="utf-8")
+    assert s.relativize_evidence(p1f) == "evidence.json"
+    rf = runs_root / "rollout.json"
+    rf.write_text("{}", encoding="utf-8")
+    assert s.relativize_evidence(rf) == RUNS_ROOT_TAG + "rollout.json"
+    p2f = phase2_ev / "runs" / "task6_ascent" / "summary.json"
+    p2f.write_text(json.dumps({"_fixture": True}), encoding="utf-8")
+    assert s.relativize_evidence(p2f) == \
+        PHASE2_ROOT_TAG + "runs/task6_ascent/summary.json"
+    # 缺文件 → FileNotFoundError（无证据不写）
+    with pytest.raises(FileNotFoundError):
+        s.relativize_evidence(phase2_ev / "missing.json")
+
+    # --- seam accept：phase2 telemetry → @phase2/ 落库（run27 拒写现场重放） ---
+    tele = phase2_ev / "runs" / "task6_ascent" / "run_t6" / "telemetry.json"
+    tele.parent.mkdir(parents=True, exist_ok=True)
+    tele.write_text(json.dumps({"_fixture": True}), encoding="utf-8")
+    state = {
+        "thread_id": "t-p2", "track": "track2",
+        "chosen": {"name": "Genesis 升阶", "sim_engine": "genesis"},
+        "agent_runs": [{"status": "ok", "telemetry_uri": str(tele),
+                        "coding_round": 0, "timeline": []}],
+        "metrics": {"rungs": {"rung1": {"pass": True}, "rung2": {"pass": True},
+                              "rung3": {"pass": True}, "rung4": None},
+                    "rung4": None, "rules_pass": True},
+        "events": [{"type": "gate2_accepted"}],
+    }
+    summary = make_learning_seam(s)({**state, "_learning": {"kind": "accept"}})
+    expected = PHASE2_ROOT_TAG + "runs/task6_ascent/run_t6/telemetry.json"
+    assert summary["evidence_relpath"] == expected
+    assert s.count() == 1
+    row = s.query("Gate2 验收通过 Genesis", top_k=1)[0]
+    assert row["evidence_relpath"] == expected
+    assert row["run_id"] == "t-p2" and row["rung"] == 3
+
+    # --- @phase2/ 标记下的 ../ 越界同样拒绝（逃出 phase2 根） ---
+    with pytest.raises(ValueError, match="越界"):
+        s.add_learning(run_id="t-esc", track="track2", rung=1,
+                       sim_engine="g", gate_source="gate2_accepted",
+                       evidence_relpath=PHASE2_ROOT_TAG + "../escape.json",
+                       failure_symptom="越界探测", effective=True)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

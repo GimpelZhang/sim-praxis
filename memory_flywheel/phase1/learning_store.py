@@ -8,10 +8,14 @@
   768（ONNX 已缓存 /mnt/caches/fastembed），懒加载同一个 ``TextEmbedding``
   封装，不复制模型文件、不触发下载、不 rebuild。
 - 无证据不写：每条学习必须带可解析的 evidence_relpath，写入时该文件必须真实
-  存在（越界/不存在直接拒写）。两个证据根（锁内适配，Task7 计划 §1.8 两路
-  区分）：宿主侧证据相对 $SIMPRAXIS_PHASE1_ROOT 用裸 relpath（Task2-6 既有
-  行格式不变）；真实 rollout 产物在 $SIMPRAXIS_RUN_DIR 下，用带标记前缀
-  "@runs/" 的 relpath；标记集中在 RUNS_ROOT_TAG 一处，禁止裸 ../ 跨根。
+  存在（越界/不存在直接拒写）。三个证据根（Task7 计划 §1.8 两路 + 锁内适配
+  第三根，2026-10-26 run27 首次 Gate2 accept）：宿主侧证据相对
+  $SIMPRAXIS_PHASE1_ROOT 用裸 relpath（Task2-6 既有行格式不变）；真实
+  rollout 产物在 $SIMPRAXIS_RUN_DIR 下，用带标记前缀 "@runs/" 的 relpath；
+  Task6 升阶实证 telemetry 在 $SIMPRAXIS_PHASE2_ROOT/runs 下（前两根皆不
+  覆盖，persist 接缝首跑即触发拒写），用 "@phase2/" 前缀。标记集中在
+  RUNS_ROOT_TAG/PHASE2_ROOT_TAG 两处，禁止裸 ../ 跨根；phase1/@runs/ 两根
+  既有行格式与语义逐字节不变。
 - 过程级信号（RSI survey §5.5）：记录「失败现象/修复动作/人工意见/生效与否」
   的失败-修复过程结构，不是单轮结果数字。
 
@@ -68,8 +72,17 @@ _FAILURE_RE = re.compile(r"^human_failure_(agent_run|gate1|gate2)$")
 
 
 # evidence_relpath 根标记：裸 relpath = phase1 证据根（Task2-6 既有行）；
-# 该前缀 = run 产物根 $SIMPRAXIS_RUN_DIR（Task7 真实 rollout，计划 §1.8 两路）。
+# "@runs/" = run 产物根 $SIMPRAXIS_RUN_DIR（Task7 真实 rollout，计划 §1.8 两路）。
 RUNS_ROOT_TAG = "@runs/"
+# 锁内适配（计划 v1.2 外，2026-10-26 LEAD，run27 首次 Gate2 accept）：
+# Task6 升阶实证（track2 ascent）的 telemetry_uri 落
+# $SIMPRAXIS_PHASE2_ROOT/runs/task6_ascent/…（Phase 1 双根皆不覆盖）——
+# persist 接缝首跑即被「无证据不写」拒写（FAILURE.json
+# 20261026T005127Z 逐字：「既不在 phase1 根…也不在 runs 根…」）。第三根
+# 标记沿 RUNS_ROOT_TAG 单点模式：宿主 phase2 根与 runtime_paths.phase2_root
+# 同源同缺省（env SIMPRAXIS_PHASE2_ROOT，缺省回退 phase1 根同级 phase2/）；
+# phase1/@runs/ 两根行为逐字节不变，老行不迁移。
+PHASE2_ROOT_TAG = "@phase2/"
 
 
 def phase1_root() -> Path:
@@ -80,6 +93,11 @@ def phase1_root() -> Path:
 def runs_root() -> Path:
     return Path(os.environ.get("SIMPRAXIS_RUN_DIR",
                                "/mnt/artifacts/simpraxis/runs"))
+
+
+def phase2_root() -> Path:
+    return Path(os.environ.get("SIMPRAXIS_PHASE2_ROOT",
+                               str(Path(phase1_root()).parent / "phase2")))
 
 
 def compose_text(*, gate_source: str, run_id: str, sim_engine: str, rung: int,
@@ -104,7 +122,8 @@ class LearningStore:
 
     def __init__(self, uri: "str | None" = None,
                  evidence_root: "str | Path | None" = None,
-                 runs_evidence_root: "str | Path | None" = None):
+                 runs_evidence_root: "str | Path | None" = None,
+                 phase2_evidence_root: "str | Path | None" = None):
         # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
         self.uri = uri or kb_pins.default_lancedb_uri()
         # Task0b QA（M1）：缺链/实体 data/ 在任何 mkdir 之前 fail-closed。
@@ -117,6 +136,9 @@ class LearningStore:
         # Task7（§1.8 双证据根）：真实 rollout 产物根；单测可注入临时根。
         self.runs_evidence_root = Path(runs_evidence_root) if runs_evidence_root \
             else runs_root()
+        # 锁内适配第三根（见 PHASE2_ROOT_TAG）：Task6 升阶 telemetry 证据根。
+        self.phase2_evidence_root = Path(phase2_evidence_root) \
+            if phase2_evidence_root else phase2_root()
         self.db = lancedb.connect(self.uri)
         self._assert_own_vector_dim()
         self._embedder = None
@@ -174,18 +196,28 @@ class LearningStore:
                                  mode="create")
         return self.db.open_table(TABLE_NAME)
 
-    # ---------- 证据校验：无证据不写（phase1 / runs 双根，Task7 §1.8） ----------
-    def _evidence_base(self, rel: str) -> "tuple[Path, str, bool]":
-        """按根标记选证据根，返回 (root, 去标记 payload, 是否带 runs 标记)。"""
+    # ---------- 证据校验：无证据不写（phase1 / runs / phase2 三根，Task7 §1.8 + 锁内适配） ----------
+    def _evidence_base(self, rel: str) -> "tuple[Path, str, str]":
+        """按根标记选证据根，返回 (root, 去标记 payload, 标记前缀原样)。
+
+        裸路径 → phase1 根（无标记前缀）；"@runs/" → runs 根；
+        "@phase2/" → phase2 根（锁内适配第三根，见 PHASE2_ROOT_TAG）。
+        """
+        if rel.startswith(PHASE2_ROOT_TAG):
+            return (self.phase2_evidence_root.resolve(),
+                    rel[len(PHASE2_ROOT_TAG):], PHASE2_ROOT_TAG)
         if rel.startswith(RUNS_ROOT_TAG):
-            return self.runs_evidence_root.resolve(), rel[len(RUNS_ROOT_TAG):], True
-        return self.evidence_root.resolve(), rel, False
+            return (self.runs_evidence_root.resolve(),
+                    rel[len(RUNS_ROOT_TAG):], RUNS_ROOT_TAG)
+        return self.evidence_root.resolve(), rel, ""
 
     def relativize_evidence(self, abs_path: "str | Path") -> str:
-        """绝对证据路径 → 落库 relpath（先 phase1 根，再 runs 根）；文件必须存在。
+        """绝对证据路径 → 落库 relpath（phase1 根→裸，runs 根→"@runs/"，phase2 根→"@phase2/"）；文件必须存在。
 
         phase1 根下返回裸 relpath（Task2-6 既有格式不变）；runs 根下返回
-        "@runs/<rel>"。两根都不命中或文件不存在即拒（无证据不写）。
+        "@runs/<rel>"；phase2 根（锁内适配第三根）下返回 "@phase2/<rel>"。
+        三根都不命中或文件不存在即拒（无证据不写）。phase1/@runs/ 两根
+        行为逐字节不变——第三分支仅在前两根均 miss 时触发。
         """
         target = Path(abs_path).resolve()
         if not target.is_file():
@@ -198,10 +230,15 @@ class LearningStore:
         runs = self.runs_evidence_root.resolve()
         try:
             return RUNS_ROOT_TAG + target.relative_to(runs).as_posix()
+        except ValueError:
+            pass
+        phase2 = self.phase2_evidence_root.resolve()
+        try:
+            return PHASE2_ROOT_TAG + target.relative_to(phase2).as_posix()
         except ValueError as exc:
             raise ValueError(
                 f"证据 {target} 既不在 phase1 根 {phase} 也不在 runs 根 "
-                f"{runs} 之下（无证据不写）") from exc
+                f"{runs} 也不在 phase2 根 {phase2} 之下（无证据不写）") from exc
 
     def _resolve_evidence(self, evidence_relpath: str) -> str:
         if not isinstance(evidence_relpath, str) or not evidence_relpath.strip():
@@ -210,24 +247,26 @@ class LearningStore:
         if rel.startswith("/"):
             raise ValueError(
                 "evidence_relpath 必须是相对证据根的路径（runs 根用 "
-                f"{RUNS_ROOT_TAG!r} 前缀标记），收到绝对路径：{evidence_relpath}")
-        root, payload, tagged = self._evidence_base(rel)
+                f"{RUNS_ROOT_TAG!r} 前缀、phase2 根用 {PHASE2_ROOT_TAG!r} "
+                f"前缀标记），收到绝对路径：{evidence_relpath}")
+        root, payload, tag = self._evidence_base(rel)
         if not payload or payload.startswith("/"):
             raise ValueError(
-                f"evidence_relpath 标记 {RUNS_ROOT_TAG!r} 后必须接根内相对路径："
+                f"evidence_relpath 标记 {tag or ''!r} 后必须接根内相对路径："
                 f"{evidence_relpath}")
         target = (root / payload).resolve()
-        # 越界守卫：禁 ../ 逃出对应证据根（tagged 路径同样按 runs 根校验）
+        # 越界守卫：禁 ../ 逃出对应证据根（tagged 路径同样按其根校验）
         if not str(target).startswith(str(root) + os.sep) and target != root:
-            kind = "$SIMPRAXIS_RUN_DIR" if tagged else "$SIMPRAXIS_PHASE1_ROOT"
+            kind = {RUNS_ROOT_TAG: "$SIMPRAXIS_RUN_DIR",
+                    PHASE2_ROOT_TAG: "$SIMPRAXIS_PHASE2_ROOT"}.get(
+                        tag, "$SIMPRAXIS_PHASE1_ROOT")
             raise ValueError(
                 f"evidence_relpath 越界（{evidence_relpath} → {target} 不在 "
                 f"{kind} {root} 之下）")
         if not target.is_file():
             raise FileNotFoundError(
                 f"证据文件不存在，拒写学习：{target}（无证据不写）")
-        return target.relative_to(root).as_posix() if not tagged else \
-            RUNS_ROOT_TAG + target.relative_to(root).as_posix()
+        return tag + target.relative_to(root).as_posix()
 
     @staticmethod
     def _id_for(run_id: str, gate_source: str, rung: int, text: str,

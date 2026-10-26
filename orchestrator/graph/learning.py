@@ -89,7 +89,8 @@ def _last_event(state: dict, event_type: str) -> dict | None:
 
 
 def _rel_evidence(store: LearningStore, abs_path: str) -> str:
-    """证据路径换算委托 store：phase1/runs 双根（Task7 §1.8），无证据不写。"""
+    """证据路径换算委托 store：phase1/runs/phase2 三根（Task7 §1.8 双根 +
+    锁内适配第三根 @phase2/，2026-10-26 run27 首次 Gate2 accept），无证据不写。"""
     try:
         return store.relativize_evidence(abs_path)
     except (ValueError, FileNotFoundError) as exc:
