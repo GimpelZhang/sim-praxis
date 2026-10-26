@@ -216,7 +216,23 @@ NORMAL_BUDGET = 60       # 常态批准总量
 # 硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶、32768/600/温度/种子均
 # 不动；常量先于出票/恢复提交（write_approval used+approved>HARD_CAP 硬门、
 # resume 预算类恢复验新票 beyond_normal）。
-HARD_CAP = 265           # 全局先到先停硬门（2026-10-26 第十八次自批，250→265）
+# 2026-10-26 run2h 烧满 T7-C3 后第十九次自批（配套全局硬顶第十四提 265→290；
+# 同日十八次后）：run2h（T7-C3 coding 7 额）出生循环 5 轮帽尽 human_failure
+# （executions=6）。**复盘非 run1 真兼容墙**——run2h 死在 LIBERO API 名墙
+# （模型 import benchmark_dict，tour 只导出 get_benchmark_dict()/get_benchmark()），
+# 5 轮浪费在猜 API 名+依赖（easydict/gym），从未到 env-sim。真根因＝Stage0
+# "compatible" 谎言性遗漏（只验 import libero.libero，未验 OffScreenRenderEnv
+# 导入链）。已容器实证：venv 补装 easydict+gym==0.26.2（0 付费，四 pin 零漂移）
+# 后 import 三连全绿；并在 stage0_facts_text 注入实测 API 真值段（get_benchmark_dict/
+# OffScreenRenderEnv，攢批待提交）供新出生脚本一次写对。run2i 起新线程（旧脚本
+# benchmark_dict 错值不可 resume，recycle 态无出生合同模型无从发现改名）需新 Gate1。
+# 续跑票结构：T7-M3-stage1 macro 3 + T7-C4-stage1 coding 11（各已出）＝14 额。
+# 三门算术：全局 256+14=270≤290（余 20）、task7 22+14=36≤36（余 0）、批次
+# 各自 0+N 恰顶信封。新顶 290/task7 36：为 run2i 出生修复帽 5 + Stage1 通过后
+# Stage2/3 预留余量。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8
+# 任务顶、32768/600/温度/种子均不动；常量先于出票提交（write_approval
+# used+approved>HARD_CAP 硬门）。
+HARD_CAP = 290           # 全局先到先停硬门（2026-10-26 第十九次自批，265→290）
 LEDGER_PHASE = 2         # 台账期：写入批准件/恢复流水的 phase 断言标记
 # Phase 1 各任务局部硬上限（封存值，仅作历史并集保留；Task2 14 为 D1 签收）。
 PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
@@ -341,7 +357,12 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 8+11=19≤24（余 5）。新顶 24：run2 复飞+出生修复帽+stage2 预留。非模型
 # 变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动；常量先于
 # 出票/恢复提交。
-PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 24, 8: 16}
+# Task7 2026-10-26 run2h 后第十九次自批（配套全局硬顶第十四提 265→290，
+# 溯见上 HARD_CAP 块）：run2h 烧满 T7-C3 后 human_failure，账实 task7 22。
+# run2i 新线程票 T7-M3(3)+T7-C4(11)=14：22+14=36≤36（余 0）。新顶 36：
+# run2i 出生修复帽 5 + Stage1 通过后 Stage2/3 预留。非模型变更、硬规则 1
+# 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动；常量先于出票提交。
+PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 36, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。

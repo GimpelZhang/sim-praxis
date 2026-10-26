@@ -123,4 +123,24 @@ def stage0_facts_text(proposal: dict) -> str:
         "reasons：" + ("；".join(map(str, reasons)) if reasons else "无"),
         "notes：" + ("；".join(map(str, notes)) if notes else "无"),
         f"tour_dir={proposal.get('tour_dir')}",
+        # LIBERO 实证 API/依赖事实（2026-10-26 run2h 撞墙后容器实测注入，
+        # 锁内适配）：run2h 的模型 5 轮浪费在猜 API 名（benchmark_dict）与
+        # 依赖（easydict/gym），从未到 env-sim。此段是**引擎侧实测真值**（容器
+        # import 三连全绿取证），非模型猜测，供出生脚本一次写对官方 API：
+        "libero_tour_api_facts（容器实测真值，2026-10-26）：",
+        "  - 官方 benchmark API：from libero.libero.benchmark import "
+        "get_benchmark_dict, get_benchmark（**不是** benchmark_dict；该 tour "
+        "顶层只导出 get_benchmark_dict()/get_benchmark() 两函数，返回 "
+        "BENCHMARK_MAPPING）。",
+        "  - 官方环境类：from libero.libero.envs import OffScreenRenderEnv"
+        "（venv 已补 easydict+gym==0.26.2，导入链已实测 import OK）。"
+        "注意该 import 会触发 envs/venv.py 的 import gym 与 objects 的 "
+        "easydict——二者为硬依赖，已在 venv 内装好，无需再 pip install。",
+        "  - pin 未漂移：mujoco 3.15.0 / robosuite 1.4.0 / numpy 1.26.4 / "
+        "torch 2.4.1+cu124；gym 0.26.2 与 gymnasium 1.4.0 共存（gym 的 "
+        "deprecated warning 无害）。",
+        "  - bddl 任务定义：tour 包内 libero/libero/bddl_files/"
+        "{libero_spatial,libero_object,libero_goal,...}/*.bddl；config.yaml "
+        "已由引擎在 .libero/ 预置（LIBERO_CONFIG_PATH 已注入），直接 "
+        "OffScreenRenderEnv(bddl_file_name=...) 即可，勿交互式建 config。",
     ])
