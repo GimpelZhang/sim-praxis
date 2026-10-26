@@ -374,7 +374,19 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 新线程票需 1 macro + ≤5 coding，31+6=37>36 恰顶无缓冲，故 task7 36→44（run2k
 # 出生帽 5 + Stage1 通过后 Stage2/3 预留）。全局 265+6=271≤290（余 19），HARD_CAP
 # 不动。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动。
-PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 44, 8: 16}
+# Task7 2026-10-26 run2k 修复环第二十一次自批（HARD_CAP 290 不动）：run2k 首轮
+# 全套产物落地（seq267 一次 coding 写对全部 env API、容器真跑仿真+EGL 渲染五件套）
+# → Gate2 真人 reject_with_comments（批注：0/20 成功、夹爪无序抖动、要成功抓取 demo）
+# → 图路由回 agent_run 修复环（gate2_rejects=1，human_notes 进修复上下文）。修复轮
+# 连遇供应侧断流坏窗（2026-10-26 14:17Z 起 >5h，seq268-277 十连 GatewayError
+# incomplete chunked read，router 5 重试阶梯仍死；0 付费 stale-model 探针 400/0.12s
+# 证明前门传输活，断流仅在真实流式补全路径——与 run2e A/B 结论一致，非客户端可修）。
+# 每次断流死占 1 coding 额（ok=false 也占 seq）。账实 task7 43（T7-M1/M2/M3/M4 macro 8
+# + T7-C1..C6 coding 35，其中 C6 已用 5/6）。seq278 将填满 task7 44/44 且 T7-C6 6/6
+# 双触顶。故 task7 44→52（修复环续窗缓冲 + Stage1 通过后 Stage2/3 预留）。全局
+# 277+…≤290（断流窗内每次 +1，预留 ≤13 格续窗），HARD_CAP 不动。非模型变更、
+# 硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动。
+PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 52, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。

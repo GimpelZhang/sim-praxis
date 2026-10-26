@@ -971,7 +971,7 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 44, 8: 16}
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 52, 8: 16}
     # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批，
     # 2026-10-26 十三至十七次连续五提 152→167→182→197→212→227）；task=4 仍为
     # 24（覆盖 Phase 1 的 8）；task=7 当前顶 24（第十八次自批 16→24，
@@ -987,7 +987,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
-    assert TASK_HARD_CAPS[7] == 44 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] == 52 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] != 44            # 二十次旧 task7 顶随第二十一次下线
     assert TASK_HARD_CAPS[7] != 36            # 十九次旧 task7 顶随第二十次下线
     assert TASK_HARD_CAPS[7] != 24            # 十八次旧 task7 顶随第十九次下线
     assert TASK_HARD_CAPS[7] != 16            # 十七次旧 task7 顶随第十八次下线
@@ -1016,12 +1017,13 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # run27 算术继续成立（HARD_CAP 随第十九次到 290）。
     assert 234 + 5 <= HARD_CAP == 290
     assert 210 + 5 <= TASK_HARD_CAPS[6] == 227
-    # Task7 Stage1 run2k 续跑信封算术（第二十次，HARD_CAP 290 不动）：账实
-    # int-seq 265/task7 31（run1/run2h/run2i/run2j 四次出生帽+断流）；新线程
-    # run2k 票 1 macro + ≤5 coding。三门：全局 265+6=271≤290 余 19、
-    # task7 31+6=37≤44 余 7、批次 0+N 恰顶。
-    assert 265 + 6 <= HARD_CAP == 290
-    assert 31 + 6 <= TASK_HARD_CAPS[7] == 44
+    # Task7 Stage1 run2k 修复环续窗信封算术（第二十一次，HARD_CAP 290 不动）：
+    # 账实 int-seq 277/task7 43（run2k 首轮产物落地后 Gate2 真人 reject，修复环
+    # 遭供应侧断流坏窗 seq268-277 十连 GatewayError，每次断流死占 1 coding 额）。
+    # 修复环续窗票 T7-C7（coding 6）。三门：全局 277+6=283≤290 余 7、
+    # task7 43+6=49≤52 余 3、批次 0+6 恰顶。
+    assert 277 + 6 <= HARD_CAP == 290
+    assert 43 + 6 <= TASK_HARD_CAPS[7] == 52
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
