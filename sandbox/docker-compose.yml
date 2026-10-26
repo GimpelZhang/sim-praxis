@@ -56,9 +56,16 @@ services:
       # Task0b QA（L8）：数据层（LanceDB）不挂容器、不透传 SIMPRAXIS_LANCEDB_URI
       # ——sandbox/ 全树无数据层消费者，容器内内容层只有只读 /kb（见 volumes）。
       FASTEMBED_CACHE_PATH: ${FASTEMBED_CACHE_PATH:-}
-      # Task0b：容器内方案内容层根（宿主 $KB_ROOT/solutions 只读挂到 /kb）
-      SIMPRAXIS_SOLUTIONS_ROOT: ${SIMPRAXIS_SOLUTIONS_ROOT:-/kb}
-      KB_ROOT: ${KB_ROOT:-/home/vipuser/embodied-ai-sim-knowledge-base}
+      # Task0b：容器内方案内容层根 = 只读挂载点 /kb（下方 volumes）。
+      # 锁内适配（Task7 Stage1 首启 2026-10-26）：宿主 00_env.sh 恒导出
+      # SIMPRAXIS_SOLUTIONS_ROOT/KB_ROOT=<宿主绝对路径>，按名插值会把宿主路径
+      # 带进容器（容器内无此路径，解析器 fail-closed 拒启）。处置：方案根恒
+      # /kb；KB_ROOT 按「同路径挂载」约定给宿主字面路径（下方 volumes 把整个
+      # 内容仓只读挂到宿主同路径）——VectorEngine 的 $KB_ROOT/data 软链闸
+      # （kb_pins.ensure_content_data_link）依赖仓内 data -> /mnt/实体 绝对软链，
+      # 经 /mnt/artifacts 同路径挂载在容器内可解析，与宿主单份不劈裂。
+      SIMPRAXIS_SOLUTIONS_ROOT: /kb
+      KB_ROOT: /home/vipuser/embodied-ai-sim-knowledge-base
       # 代理从宿主机 shell 显式继承（source scripts/00_env.sh 后再 compose）
       http_proxy: ${http_proxy:-}
       https_proxy: ${https_proxy:-}
@@ -82,6 +89,12 @@ services:
       # Task0b 三层分离：解题方案内容层只读挂载（KB 公开仓 solutions/），
       # 解析器在容器内经 SIMPRAXIS_SOLUTIONS_ROOT=/kb 读取，禁写。
       - ${KB_ROOT:-/home/vipuser/embodied-ai-sim-knowledge-base}/solutions:/kb:ro
+      # 锁内适配（Task7 Stage1 首启 2026-10-26）：整个 KB 仓按宿主同路径只读
+      # 挂载一份——图启动时 VectorEngine 的 kb_pins 数据层软链闸要读仓内
+      # data -> /mnt/artifacts/embodied-kb/data 绝对软链（目标经 /mnt 同路径
+      # 挂载可解析）；只读禁写，公开仓零污染。与上方 /kb 子树挂载并存无害
+      # （同源两视图，/kb 为方案根契约入口）。
+      - ${KB_ROOT:-/home/vipuser/embodied-ai-sim-knowledge-base}:/home/vipuser/embodied-ai-sim-knowledge-base:ro
     deploy:
       resources:
         reservations:
