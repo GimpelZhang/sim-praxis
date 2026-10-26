@@ -83,11 +83,11 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
      `.gitignore` 必须用锚定 `/data`（尾斜杠 `data/` 不匹配软链本身），
      闸口打 `git check-ignore data`（穿越软链的 data/lancedb pathspec 会 fatal）。
    - **KB 首次 push 是人工 STOP 门**：push 前向用户呈 diff 清单 + 密钥扫描（公开不可回收）。
-   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 12 行（=Task0a 后
-     5 + Task6 run1–6 经 gate1 批准运行后诚实 human_failure 回写 6 + run7a
-     2026-10-23 回写 1（锚点 2 命中→human_failure，v1.2 协议修正前；新 id 0ef64b94），
-     2026-10-24 活表基线对账，规格 §8；run7c 失败文本与 run5 逐字相同，内容寻址
-     upsert 塌到既有 24681e47 不增行，该行 created_at 覆写为 key-collapse 尾债已登记）；
+   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 26 行（2026-10-26 活表对账
+     =M2 时 12（Task0a 后 5 + Task6 run1–6 human_failure 6 + run7a 1，id 0ef64b94）；
+     + 升阶战役 10-25 十二条诚实 human_failure 回写 + persist 首崩 020327ed + Gate2
+     accept 行 66bafb1d（gate2_accepted/rung=3，evidence `@phase2/` 第三根）；
+     run7c key-collapse 塌到 24681e47 不增行仍登记）；
      solution_chunks 独立第三表（首灌 82 块/4 方案），老三表对它恒只读。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
    禁止 `source ~/.bashrc`、禁止回显/入 URL/入日志/提交；git 认证用内存 extraheader 不落盘；
@@ -125,20 +125,22 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
   Task0b 起库默认 uri 为 `$KB_ROOT/data/lancedb`（软链 `/mnt/artifacts/embodied-kb/data`）；
   数据迁移只走 `scripts/kb/migrate_data_layer.py --apply`（同盘 st_dev 守卫 + 行数/召回快照对账）。
 - `phase1_learnings`（12 列含 vector，复用 mpnet 不二次下载）与 kb_chunks 同库独立；
-  当前 12 行（= Phase 2 Task0a Q2 补点验经用户授权 4→5 的 5 行：gate2_accepted_supplementary/
-  rung=1，图外回写走 `memory_flywheel.phase1.offgraph_learning`，纪律 12，老 4 行不重写；
-  + Task6 run1–6 经 gate1 批准运行后诚实 human_failure_agent_run 回写 6 行；
-  + run7a 2026-10-23 回写 1 行（锚点 2 命中→human_failure，v1.2 协议修正前；新 id
-  0ef64b94244b）；2026-10-24 活表基线对账，规格 §8；run7c 失败文本与 run5 逐字相同，
-  内容寻址 id（_id_for 对 run_id|gate_source|rung|text|evidence_relpath 取 sha256）
-  upsert 塌到既有 24681e47 不增行（该行 created_at 覆写 = key-collapse 尾债，已登记），
-  f43d49 旧行始终保留；kb_chunks 恒 1542）。**生产召回尚未接线（production_recall_hits=0），
-  勿声称飞轮已闭环**——Phase 2 项。
+  当前 26 行（2026-10-26 对账：= M2 时 12——Task0a 授权 4→5 后的 5 行
+  gate2_accepted_supplementary/rung=1 + Task6 run1–6 human_failure 6 行 + run7a 1 行
+  （id 0ef64b94）——+ 升阶战役 10-25 十二条 human_failure + persist 首崩 020327ed
+  + Gate2 accept 行 66bafb1d（rung=3，evidence `@phase2/…summary.json`）；
+  run7c key-collapse 塌到 24681e47 不增行仍登记，f43d49 等旧行不重写；
+  kb_chunks 恒 1542）。**生产召回 2026-10-26 已闭环**：555 行采纳遥测
+  （Task6 线程 549 coding/6 direction，17 个学习 id 全为活表真实行），
+  516 行经实际 req 证据逐字节互证 + 同线程 Gate2 accept 反证成功结果，
+  机判 `scripts/verification/check_recall_closure.py` rc=0（报告
+  recall/adoption_crosscheck_2026-10-26T021811Z.json）。
 - `solution_chunks`（Task0b 第三张表）：4 方案 README/manifest 原子块 + 脚本 code 块，
   relpath 前缀 `solutions/`，首灌 82 块；`python -m memory_flywheel.scripts.ingest_solutions`
-  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=12 不变（fail-closed
-  期望值随活表基线，2026-10-24 活表基线对账；ingest_solutions CLI 历史默认
-  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传 12，待 Phase 2 债务清理）。资产包：
+  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=26 不变（fail-closed
+  期望值随活表基线，2026-10-26 活表基线对账；ingest_solutions CLI 历史默认
+  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传当前活表行数（现 26），
+  LOW 债务清理）。资产包：
   `scripts/kb/bundle_kb_asset.py --tier both` + `verify_bundle.py`（core=老两表，
   extended=全部表；sha256/行数/768 维/kb_sha/引擎 SHA 对账）。
 
@@ -167,18 +169,21 @@ Rung1–4 分级（Rung4 VLM 为 record_only，用户签收）、四 track 平�
 Phase 2 Milestone 2（引擎侧，2026-10-17 Task1 起 → 2026-10-24 终验）已完成：Task0a
 Q2 补沉淀+图外回写通路、Task0b 三层分离（已推送部分），Task1–9 三签提交本地攒批（51 条
 `2d83528..956dc22`）。终态：干净树两排除全套 **1086 passed/1 skipped/42 deselected/exit 0**；
-证据包 570 文件/20.2 MiB（manifest git_commit=956dc22）；四表活库 1542/12/82/不存在
-（phase2_learnings exists=false/rows=0：gate2 accept 从未发生，不造表）；Phase 2 台账
+证据包 570 文件/20.2 MiB（manifest git_commit=956dc22）；M2 时点四表活库
+1542/12/82/不存在（phase2_learnings 未建表——gate2 accept 未发生；2026-10-26 后活表现为
+1542/26/82/1，见下 Task6 V2 段）；M2 时点 Phase 2 台账
 120 次实呼（seq 1..120 连续、时间戳全严格 Z、82 ok/38 fail；by_task task4=24/task6=96；
 by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占批次不占实呼），
 .call_cache 17 条与 17 个 ok seq 配对，Phase 1 账 29 行封存只读；blueprint 4 项目 16 stage、
 能力矩阵 6 引擎 41 事实、check_solutions 4 方案全过；容器零残留、显存 14 MiB、/mnt 正常。
 - Q1 冰面 DR 与预注册方向相反：ice/normal=0.824 < 界 2.0，结论 contradiction_control_not_robust
-  矛盾即结论，已冻结未翻案；V2 五战未跨过代码出生/结构闸，Gate2 全程未建行，v2_summary
-  从未生成，pareto_verdict=null（诚实留空，非失败；run 目录观察值仅作 non-authoritative 旁证）。
-- 生产召回 Task1 已双路接线（production_recall 遥测 219 行=213 coding/6 direction，
-  10 个学习 id/71 个 prompt），但**真实采纳命中=0，飞轮未闭环**（上方向量库要点段「尚未接线」
-  为 Task1 前旧句，勿据任一处声称闭环）。
+  矛盾即结论，已冻结未翻案；V2 升阶在 M2 终验时五战未跨过代码出生/结构闸、Gate2 未建行
+  （pareto_verdict=null 诚实留空），2026-10-26 run27 后已闭合——v2_summary 已生成、
+  看板机判 pareto_verdict=**dominated_by_v1**（见下 Task6 V2 段）。
+- 生产召回 2026-10-26 **已闭环**（攒批第 70 条机判）：555 行采纳遥测（549 coding/
+  6 direction，17 学习 id 全为活表真实行），516/555 行（167/180 prompt）经实际 req 证据
+  逐字节复原且学习文本逐字在场 + 同线程 Gate2 accept 反证成功结果；
+  `check_recall_closure.py` rc=0，39 行证据缺口如实挂牌 provenance_limited 不计入通过。
 - Rung4 VLM 终态 **record_only**（min_agreement=0.8 但 defect_recall=0.0，D7 未达成，
   用户已签收；禁止调标签/换片/改阈翻案，active 只能以新付费批次重标定）。
 - Task7/8 只有 0 付费 Stage0：LIBERO outcome=compatible（隔离 venv 六步全 rc=0、
@@ -190,11 +195,19 @@ by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占
   coding_debug/visual_rollout=mimo-v2.6-flash，commit fa007c5，硬规则 1 全流程：inventory 404
   取证→用户逐字裁决→改 stage_models.yaml→validate 四请求全绿，账外批次 M2-V-mimo1）。
 
-仍待 Phase 2 余项：Task7/8 Stage1+ 与 Task6 V2 升阶闭环（Pareto 判定）——启动即发飞书真人
-Gate1/Gate2 卡推进，No Fake Approval；生产召回真实采纳 >0；其余 Phase 2 尾债：
-ledger tokens 回填、SAPIEN/Bullet/传感器光学噪声矩阵缺口、
-Q2 光学模型参数标定、quota_pause.json schema 签收、task8 stage0_wheels 越界符号链接
-Stage1 前拆除；Phase 3 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、
-RSI Level 3 元 prompt 自演进、实跑四 tour；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、t3 1 条、
-ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传 12、run7c key-collapse
-覆写 created_at）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
+Task6 V2 升阶闭环已达成（2026-10-26 攒批第 68/69 条）：run27 机器侧全通 + Gate2 真人 accept
+（decision=approve "V2通过"，首次 accept）+ @phase2/ 第三证据根修复后 persist 成功，
+phase2_learnings 首行落库（1 行）+ 五段式演化志；看板机判 Pareto = **dominated_by_v1**
+（V2 六指标与 V1 逐位相同、仅 solve_wallclock 14.03→21.02s 回退），与真人 Gate2 accept
+两轴正交自洽；Q1 矛盾 0.824<2.0 原样冻结未翻案。ledger tokens 回填（194/196 ok 行，
+余 2 为 deepseek→mimo 过渡批已登记）、quota_pause schema v2 已签收、task8 stage0_wheels
+越界符号链接联合已拆除（M2-A6，cache 目标未动、stage0 报告保留）。
+
+仍待 Phase 2 余项：Task7/8 Stage1+——**开工前工作是 CLI 接线**（`--task 7` 现仍路由
+Phase 1 task7 工厂，task7_libero/task8_fluid 未接 orchestrator.graph.cli；task8_fluid
+execute_stage1 为显式拒跑合同桩），接线完成即发飞书真人 Gate1/Gate2 卡启动，No Fake Approval。
+Phase 3 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
+自演进、实跑四 tour、SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定
+（计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
+t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 26）、
+run7c key-collapse 覆写 created_at）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
