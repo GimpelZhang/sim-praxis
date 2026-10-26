@@ -295,8 +295,15 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 重挂不重发/打回归档重开/No Fake Approval 全继承）；import 两行 +
     # 新方法使老五处位移：1031→1033、1117→1119、1327→1329、1460→1462、
     # 1530→1580。grep 对账（同上口径排除 tests/）恰六处，无第七处旁路。
+    # Task8 fluid（2026-10-26，攢批第 74 条）：request_gate1_fluid_approval
+    # 新增第六个发送闸门（upsert 1561，与 libero/ascent Gate1 同一占位协议——
+    # 重挂不重发/打回归档重开/No Fake Approval 全继承，D-5 时零卡片）；import
+    # 两行 + 新方法使老六处纯位移：1033→1035、1119→1121、1329→1331、
+    # 1462→1464、1510→1512、1580→1631。grep 对账（同上口径排除 tests/）
+    # 恰七处（client.py 七处 + probe_c_form.py:115 + q2_human_gate.py:484），
+    # 无第八处旁路；attach_message_ids 仍走 UPDATE 不进白名单。
     "orchestrator/feishu_gateway/client.py": {
-        1033, 1119, 1329, 1462, 1510, 1580},
+        1035, 1121, 1331, 1464, 1512, 1561, 1631},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）

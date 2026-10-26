@@ -565,11 +565,40 @@ def _gate2_metrics_md(
     # H-2：原片时长始终展示；实际走到 step4 裁剪时再附裁剪区间行。
     if trim_note:
         lines.append(trim_note)
+    # Task8 流体（WJ-Fluid）：aggregate 以 cup_entry_rate 为键（evaluate 接缝
+    # 已按 simpraxis.wj_fluid_report.v1 校验过）→ 渲染流体分支。必须先于
+    # Task7 WJ-Lite 分支判定——两分支都读 wj_report_path，按 aggregate 键
+    # 分流（流体键集合与 success/episodes 不同）。
+    agg0 = metrics.get("aggregate")
+    if isinstance(agg0, dict) and "cup_entry_rate" in agg0:
+        rate = agg0.get("cup_entry_rate")
+        rate_s = (f"{rate:.3f}" if isinstance(rate, (int, float))
+                  and not isinstance(rate, bool) else "-")
+        target = agg0.get("target")
+        target_s = (f"{target}" if isinstance(target, (int, float))
+                    and not isinstance(target, bool) else "-")
+        used = "/".join(str(s) for s in
+                        (metrics.get("judge_sources_used") or [])) or "-"
+        lines += [
+            "**WJ 验收指标 · Task8 流体（simpraxis.wj_fluid_report.v1，"
+            "数字引擎现算）**：",
+            f"- 入杯率中位数：{rate_s}（目标 {target_s}，"
+            f"{'达成' if agg0.get('meets_target') else '未达成'}）",
+            f"- 守恒机判：{'通过' if agg0.get('conservation_pass') else '违例'}",
+            f"- 飞溅中位：{agg0.get('splash_rate', '-')}；越界中位："
+            f"{agg0.get('out_of_bounds_rate', '-')}",
+            f"- stage：{metrics.get('stage', '-')}",
+            f"- 判分来源：{used}",
+            f"- gate2_ready：{'是' if metrics.get('gate2_ready') else '否'}",
+            f"- 报表：{inline_code(metrics.get('wj_report_path'))}",
+        ]
     # Task7 LIBERO（WJ-Lite）：metrics 带 wj_report_path + aggregate（evaluate
     # 接缝已按 simpraxis.wj_report.v1 校验过）→ 渲染 WJ 分支，不走 rungs 嵌套
     # 也不落旧式扁平兜底（LIBERO 没有那组 pose_error 键，兜底会渲染一屏 '-'）。
     wj_path = metrics.get("wj_report_path")
-    if isinstance(wj_path, str) and wj_path and isinstance(
+    if isinstance(agg0, dict) and "cup_entry_rate" in agg0:
+        pass  # Task8 流体分支已渲染（见上）
+    elif isinstance(wj_path, str) and wj_path and isinstance(
             metrics.get("aggregate"), dict):
         agg = metrics["aggregate"]
         rate = agg.get("success_rate")
@@ -807,6 +836,71 @@ def build_gate1_card_libero_v1(
     card["header"]["title"]["content"] = _GATE1_LIBERO_TITLE
     card["elements"].insert(
         1, {"tag": "markdown", "content": _libero_stage0_md(stage0_facts)})
+    return card
+
+
+# ---------------- Gate1 · Task8 流体变体（Stage0 流体能力事实随卡） ----------------
+
+def _fluid_stage0_md(stage0_facts: dict[str, Any]) -> str:
+    """Stage0 流体能力事实块正文（Gate1 卡插页；全部来自容器探针机器事实，
+    H-7：逐字段转义——非模型文案也不豁免）。"""
+    gpu = stage0_facts.get("gpu") if isinstance(
+        stage0_facts.get("gpu"), dict) else {}
+    versions = stage0_facts.get("versions") if isinstance(
+        stage0_facts.get("versions"), dict) else {}
+    ver_line = "、".join(f"{md_escape(k)}={inline_code(v)}"
+                        for k, v in versions.items()) or "-"
+    return "\n".join([
+        "🔬 **Stage0 流体能力事实（容器探针产物，非模型文案）**",
+        f"- outcome：**{md_escape(stage0_facts.get('outcome', '-'))}**"
+        f"（schema `{md_escape(stage0_facts.get('stage0_schema', '-'))}`）",
+        f"- solver_api：{inline_code(stage0_facts.get('solver_api', '-'))}"
+        "（反射发现，非硬编码）",
+        f"- n_particles：{md_escape(stage0_facts.get('n_particles', '-'))}"
+        f"（Stage1 硬天花板 "
+        f"{md_escape(stage0_facts.get('particle_cap', '-'))}）",
+        f"- gpu：{md_escape(gpu.get('name', '-'))}"
+        f"（peak {md_escape(gpu.get('peak_mib', '-'))} MiB）",
+        f"- 入杯目标/沉降窗：{md_escape(stage0_facts.get('cup_entry_target', '-'))}"
+        f" / {md_escape(stage0_facts.get('settling_window_s', '-'))} s",
+        f"- versions：{ver_line}",
+        f"- ts_utc：{md_escape(stage0_facts.get('ts_utc', '-'))}",
+    ])
+
+
+_GATE1_FLUID_TITLE = "【SimPraxis】Gate 1：Q5 厨房倒水方案审批（Stage0 已证流体能力）"
+
+
+def build_gate1_card_fluid(
+    task_title: str,
+    proposals: list[dict[str, Any]],
+    stage0_facts: dict[str, Any],
+    feedback_required: bool = True,
+) -> dict:
+    """Gate1 schema 2.0 卡 · Task8 流体变体：通用 v2 卡合成 + Stage0 流体
+    能力事实块插到 body.elements[1]（任务目标之后、方案 0 之前——真人先看
+    探针事实再裁运行案）；只在 propose_run=True 时被 client 发出
+    （both_fail/D-5 降级零卡片）。"""
+    card = build_gate1_card_v2(task_title, proposals, feedback_required)
+    card["header"] = _v2_header("blue", _GATE1_FLUID_TITLE)
+    card["body"]["elements"].insert(
+        1, _div_lark_md(_fluid_stage0_md(stage0_facts)))
+    return card
+
+
+def build_gate1_card_fluid_v1(
+    task_title: str,
+    proposals: list[dict[str, Any]],
+    stage0_facts: dict[str, Any],
+    feedback_required: bool = True,
+) -> dict:
+    """Gate1 1.0 卡 · Task8 流体变体（2.0 被服务端拒时的自动降级形态，与
+    通用/libero 家法同链路）：通用卡合成 + Stage0 事实 markdown 插
+    elements[1]。"""
+    card = build_gate1_card(task_title, proposals, feedback_required)
+    card["header"]["title"]["content"] = _GATE1_FLUID_TITLE
+    card["elements"].insert(
+        1, {"tag": "markdown", "content": _fluid_stage0_md(stage0_facts)})
     return card
 
 

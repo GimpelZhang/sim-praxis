@@ -56,6 +56,7 @@ TASK6 = 6             # Task6 ascent V1→V2 升阶（ascent 模式；run 级 co
 TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 stage 批次）
 TASK8 = 8             # Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）
 TASK7_VARIANT_LIBERO = "libero"  # Task7 B 线：LIBERO 第五平台（--variant 仅此值）
+TASK8_VARIANT_FLUID = "fluid"    # Task8 C 线：Q5 厨房倒水流体（--variant 仅 task=8）
 
 # H-2/C1：Gate2 卡片 30s 截窗（飞书侧视频大小/可看性约束）；纯函数
 # compute_gate2_trim 决定窗口，request_gate2_approval 的 trim 形参由
@@ -233,6 +234,13 @@ def _libero_stage0_path(args: argparse.Namespace) -> Path:
         else default_stage0_report_path()
 
 
+def _fluid_stage0_path(args: argparse.Namespace) -> Path:
+    """Task8 fluid 的 --stage0-report 解析（缺省 = Stage0 流体探针产物）。"""
+    from orchestrator.graph.task8_fluid import default_stage0_report_path
+    return Path(args.stage0_report) if args.stage0_report \
+        else default_stage0_report_path()
+
+
 def _initial_state(args: argparse.Namespace, payload: dict) -> dict:
     """从已解析冻结 payload 构造图初始状态（纯函数；QA-1 C1）。
 
@@ -240,21 +248,27 @@ def _initial_state(args: argparse.Namespace, payload: dict) -> dict:
     （track2=question / track1=name），否则 classify 对已登记 ascent 题
     拿到空题面静默判 standard（生产路径上 Task2 主体失效）。
 
-    libero variant：注入 stage0_report_path 声明通道（langgraph 0.2.28 对
-    TypedDict 未声明键静默丢弃，state.py 里已声明——Gate1 提案机判唯一输入）。
+    libero/fluid variant：注入 stage0_report_path 声明通道（langgraph
+    0.2.28 对 TypedDict 未声明键静默丢弃，state.py 里已声明——Gate1
+    提案机判唯一输入）。
     """
     question = payload.get("question") if args.track == "track2" \
         else payload.get("name")
     state = initial_state(thread_id=args.thread, track=args.track,
                           question=question or "")
-    if getattr(args, "variant", None) == TASK7_VARIANT_LIBERO:
+    variant = getattr(args, "variant", None)
+    if variant == TASK7_VARIANT_LIBERO:
         from orchestrator.graph.task7_libero import STAGE0_REPORT_STATE_KEY
         state[STAGE0_REPORT_STATE_KEY] = str(_libero_stage0_path(args))
+    elif variant == TASK8_VARIANT_FLUID:
+        from orchestrator.graph.task8_fluid import STAGE0_REPORT_STATE_KEY
+        state[STAGE0_REPORT_STATE_KEY] = str(_fluid_stage0_path(args))
     return state
 
 
 def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     libero = getattr(args, "variant", None) == TASK7_VARIANT_LIBERO
+    fluid = getattr(args, "variant", None) == TASK8_VARIANT_FLUID
     if libero:
         # D-4 fail-closed 前移：Stage0 报告缺件/坏件在花任何 macro 之前就拒
         # （未过 Stage0 禁止提 Gate1 运行案，更不允许方向模型白烧一轮）。
@@ -265,6 +279,16 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
                 f"Task7 LIBERO Stage0 兼容报告不存在：{s0}"
                 "（先跑 sandbox/probes/probe_libero_compat.py；D-4）")
         t7l.load_stage0_report(s0)  # 坏 JSON/schema/伪造 → GraphStateError
+    if fluid:
+        # 同 D-4 fail-closed 前移：Stage0 流体能力报告缺件/坏件在花任何
+        # macro 之前就拒（both_fail 情形下甚至不会构造任何运行案——D-5）。
+        from orchestrator.graph import task8_fluid as t8f
+        s0 = _fluid_stage0_path(args)
+        if not s0.is_file():
+            raise SystemExit(
+                f"Task8 流体 Stage0 能力报告不存在：{s0}"
+                "（先跑 sandbox/probes/probe_genesis_fluid.py；D-4/D-5）")
+        t8f.load_stage0_report(s0)  # 坏 JSON/schema/伪造 → GraphStateError
 
     payload = _payload(args.track, args.index, args.question)
     title = args.task_title or (
@@ -310,6 +334,11 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             # GraphStateError 零卡片；No Fake Approval 仍阻塞等真人）。
             from orchestrator.graph import task7_libero as t7l
             return t7l.make_gate1_seam(feishu, thread, title)(state)
+        if fluid:
+            # Task8 C 线：Stage0 流体能力事实随卡（both_fail 降级时 seam
+            # 内直接 GraphStateError 零卡片；No Fake Approval 仍阻塞等真人）。
+            from orchestrator.graph import task8_fluid as t8f
+            return t8f.make_gate1_seam(feishu, thread, title)(state)
         if args.task == TASK6:
             # Task6 ascent：升阶假设卡（V1 冻结指标摘要）；批准后接缝落
             # gate1_opinion.v1 与部分 evolution_sources（No Fake Approval：
@@ -337,6 +366,11 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
         if libero:
             from orchestrator.graph import task7_libero as t7l
             explanation = t7l.build_gate2_explanation(state, rec)
+        elif fluid:
+            # Task8 流体：85% 入杯口径 + 守恒机判叙事（数字从 wj_fluid_report
+            # 现读；缺报表返回 None 退回纯指标，不编故事——同 task7 家法）。
+            from orchestrator.graph import task8_fluid as t8f
+            explanation = t8f.build_gate2_explanation(state, rec)
         elif args.task == TASK7:
             from orchestrator.graph.task7 import build_gate2_explanation
             explanation = build_gate2_explanation(state, rec)
@@ -376,6 +410,12 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
                     "Task7 libero 必须提供 --coding-batch-id；--batch-id 为 "
                     "direction 的 macro_ideation 批次（libero 的 evaluate "
                     "零视觉实呼，--visual-batch-id 可省）")
+        elif fluid:
+            if not args.coding_batch_id:
+                raise SystemExit(
+                    "Task8 fluid 必须提供 --coding-batch-id；--batch-id 为 "
+                    "direction 的 macro_ideation 批次（fluid 的 evaluate "
+                    "零视觉实呼，--visual-batch-id 可省）")
         elif not args.coding_batch_id or not args.visual_batch_id:
             raise SystemExit(
                 f"Task{args.task} 必须同时提供 --coding-batch-id 与 "
@@ -383,7 +423,7 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
         from orchestrator.agent_runner.runner import (
             AgentRunner, agent_run_seam as _agent_run_seam,
         )
-        if args.task == TASK8:
+        if args.task == TASK8 and not fluid:
             # Task8 spec 跑 batch 子命令（三臂×3 种子聚合产物）；evaluate 走
             # gait_rungs 三级文件判定 + 两张分屏的步态 Rung4。
             from orchestrator.graph.task8 import (
@@ -397,7 +437,7 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             from orchestrator.graph.task6 import (
                 make_evaluate_seam, make_spec_factory,
             )
-        elif not libero:
+        elif not libero and not fluid:
             from orchestrator.graph.task7 import (
                 make_evaluate_seam, make_spec_factory,
             )
@@ -411,6 +451,16 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
                 thread, args.coding_batch_id, task_title=title)
             agent_run_seam_impl = _agent_run_seam(runner, spec_factory)
             evaluate_seam_impl = t7l.make_evaluate_seam(thread)
+        elif fluid:
+            # Task8 C 线（Q5 厨房倒水流体）：出生/回收双态工厂 + 几何机判
+            # evaluate（从 results.json+trajectory.npz 引擎现算组装
+            # wj_fluid_report）；evaluate 接缝签名只有 thread_id（零视觉网关、
+            # 零 Genesis 环境——只读产物）。
+            from orchestrator.graph import task8_fluid as t8f
+            spec_factory = t8f.make_spec_factory(
+                thread, args.coding_batch_id, task_title=title)
+            agent_run_seam_impl = _agent_run_seam(runner, spec_factory)
+            evaluate_seam_impl = t8f.make_evaluate_seam(thread)
         else:
             spec_factory = make_spec_factory(
                 thread, args.coding_batch_id, task_title=title)
@@ -528,13 +578,17 @@ def main(argv: "list[str] | None" = None) -> int:
                        help="coding_debug 批次凭据（task=6/7/8 必填）")
         p.add_argument("--visual-batch-id", dest="visual_batch_id", default=None,
                        help="visual_rollout 批次凭据（task=6/7/8 必填；"
-                            "task=7 --variant libero 可省——evaluate 零视觉实呼）")
-        p.add_argument("--variant", default=None, choices=(TASK7_VARIANT_LIBERO,),
-                       help="Task7 变体：libero = B 线第五平台"
-                            "（仅 --task 7；缺省 = Phase1 Track1 路径）")
+                            "task=7 --variant libero 与 task=8 --variant fluid "
+                            "可省——evaluate 零视觉实呼）")
+        p.add_argument("--variant", default=None,
+                       choices=(TASK7_VARIANT_LIBERO, TASK8_VARIANT_FLUID),
+                       help="变体：libero = Task7 B 线第五平台（仅 --task 7）；"
+                            "fluid = Task8 C 线 Q5 厨房倒水流体（仅 --task 8）；"
+                            "缺省 = Phase1 Track1 路径")
         p.add_argument("--stage0-report", dest="stage0_report", default=None,
-                       help="libero Stage0 兼容报告路径（缺省 "
-                            "runs/phase2/task7/stage0/stage0_compat_report.json）")
+                       help="libero/fluid Stage0 兼容/能力报告路径（缺省 "
+                            "runs/phase2/task7/stage0/stage0_compat_report.json "
+                            "或 runs/phase2/task8/stage0/stage0_fluid_report.json）")
         p.add_argument("--task-title", default=None)
 
     p_run = sub.add_parser("run", help="首次运行（gate 处阻塞等真人）")
@@ -553,14 +607,18 @@ def main(argv: "list[str] | None" = None) -> int:
     # C4：线程/批次 ID 在 CLI 边界先验（只允许 1-64 位 [A-Za-z0-9_-]），
     # 非法值直接退出 2，不进账套、不构网关、不建 run 目录。
     if args.cmd in ("run", "resume"):
-        # libero 组合守卫（fail-closed，exit 2 不进账套/不构网关）：
-        # --variant 仅 task=7 合法；--stage0-report 只在 libero 下有意义，
-        # 静默忽略会把用户以为生效的路径悄悄丢掉——直接拒。
-        if args.variant and args.task != TASK7:
+        # libero/fluid 组合守卫（fail-closed，exit 2 不进账套/不构网关）：
+        # --variant 各自只在对应 task 合法；--stage0-report 只在 variant 下
+        # 有意义，静默忽略会把用户以为生效的路径悄悄丢掉——直接拒。
+        if args.variant == TASK7_VARIANT_LIBERO and args.task != TASK7:
             print(f"--variant {args.variant} 仅支持 --task 7", file=sys.stderr)
             return 2
+        if args.variant == TASK8_VARIANT_FLUID and args.task != TASK8:
+            print(f"--variant {args.variant} 仅支持 --task 8", file=sys.stderr)
+            return 2
         if args.stage0_report and not args.variant:
-            print("--stage0-report 仅在 --variant libero 下生效", file=sys.stderr)
+            print("--stage0-report 仅在 --variant libero|fluid 下生效",
+                  file=sys.stderr)
             return 2
         try:
             validate_thread_id(args.thread)
