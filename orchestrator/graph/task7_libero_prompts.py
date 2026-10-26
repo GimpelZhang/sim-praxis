@@ -136,9 +136,16 @@ def stage0_facts_text(proposal: dict) -> str:
         "（venv 已补 easydict+gym==0.26.2，导入链已实测 import OK）。"
         "注意该 import 会触发 envs/venv.py 的 import gym 与 objects 的 "
         "easydict——二者为硬依赖，已在 venv 内装好，无需再 pip install。",
-        "  - pin 未漂移：mujoco 3.15.0 / robosuite 1.4.0 / numpy 1.26.4 / "
-        "torch 2.4.1+cu124；gym 0.26.2 与 gymnasium 1.4.0 共存（gym 的 "
-        "deprecated warning 无害）。",
+        "  - pin：mujoco 3.1.6（2026-10-26 用户裁决降版破 robosuite 1.4.0 "
+        "API 断裂墙：3.15 无 MjData.qM、np.int32 in 枚举断言失败；3.1.6 两墙全消）"
+        "/ robosuite 1.4.0 / numpy 1.26.4 / torch 2.4.1+cu124；gym 0.26.2 与 "
+        "gymnasium 1.4.0 共存（gym 的 deprecated warning 无害）。",
+        "  - get_benchmark/get_benchmark_dict 返回的是**类/工厂**（如 LIBERO_SPATIAL "
+        "类），不是实例——须再调用实例化：`suite = get_benchmark('libero_spatial')"
+        "()`（末尾一对括号），否则 `suite.get_task_names()` 报 missing self。"
+        "实测 get_benchmark('libero_spatial') 返回 abc.ABCMeta 类，加 () 实例化后 "
+        "get_task_names()/get_task_bddl_file_path(index) 正常（bddl 路径用 int 索引，"
+        "非任务名字符串）。",
         "  - bddl 任务定义：tour 包内 libero/libero/bddl_files/"
         "{libero_spatial,libero_object,libero_goal,...}/*.bddl；config.yaml "
         "已由引擎在 .libero/ 预置（LIBERO_CONFIG_PATH 已注入），直接 "
