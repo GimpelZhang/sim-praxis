@@ -971,7 +971,7 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 36, 8: 16}
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 44, 8: 16}
     # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批，
     # 2026-10-26 十三至十七次连续五提 152→167→182→197→212→227）；task=4 仍为
     # 24（覆盖 Phase 1 的 8）；task=7 当前顶 24（第十八次自批 16→24，
@@ -987,7 +987,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
-    assert TASK_HARD_CAPS[7] == 36 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] == 44 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] != 36            # 十九次旧 task7 顶随第二十次下线
     assert TASK_HARD_CAPS[7] != 24            # 十八次旧 task7 顶随第十九次下线
     assert TASK_HARD_CAPS[7] != 16            # 十七次旧 task7 顶随第十八次下线
     # 顺带钉死全局双门：常态 60 始终未动；硬顶 290 是第十九次自批（2026-10-26
@@ -1015,12 +1016,12 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # run27 算术继续成立（HARD_CAP 随第十九次到 290）。
     assert 234 + 5 <= HARD_CAP == 290
     assert 210 + 5 <= TASK_HARD_CAPS[6] == 227
-    # Task7 Stage1 run2i 续跑信封算术（第十九次）：账实 int-seq 256/task7 22
-    # （run2h 烧满 T7-C3 后 human_failure）；新线程 run2i 票 T7-M3(macro 3)+
-    # T7-C4(coding 11)=14。三门：全局 256+14=270≤290 余 20、task7 22+14=36≤36
-    # 余 0、批次 0+N 恰顶。
-    assert 256 + 14 <= HARD_CAP == 290
-    assert 22 + 14 <= TASK_HARD_CAPS[7] == 36
+    # Task7 Stage1 run2k 续跑信封算术（第二十次，HARD_CAP 290 不动）：账实
+    # int-seq 265/task7 31（run1/run2h/run2i/run2j 四次出生帽+断流）；新线程
+    # run2k 票 1 macro + ≤5 coding。三门：全局 265+6=271≤290 余 19、
+    # task7 31+6=37≤44 余 7、批次 0+N 恰顶。
+    assert 265 + 6 <= HARD_CAP == 290
+    assert 31 + 6 <= TASK_HARD_CAPS[7] == 44
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动

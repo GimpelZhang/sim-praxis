@@ -150,4 +150,26 @@ def stage0_facts_text(proposal: dict) -> str:
         "{libero_spatial,libero_object,libero_goal,...}/*.bddl；config.yaml "
         "已由引擎在 .libero/ 预置（LIBERO_CONFIG_PATH 已注入），直接 "
         "OffScreenRenderEnv(bddl_file_name=...) 即可，勿交互式建 config。",
+        # —— run2j 实跑 API 真值（2026-10-26，攢批77）：run2j env 墙已过
+        # （ENV_OK+RESET_OK），但死于 3 个 LIBERO env API 用法坑——gym 式
+        # action_space 不存在、init_states 入参、渲染入口。以下全部容器实测
+        # 真值（0 补丁单进程取证），防 run2k 再烧 5 轮同坑：
+        "  - **无 gym API**：OffScreenRenderEnv 没有 action_space / "
+        "action_spec / render()（实测全 AttributeError）。动作维数=7（传 8 报 "
+        "AssertionError \"expected 7, got 8\"——7=delta 位姿 6 + 夹爪 1），"
+        "动作值域 [-1,1] 归一化；直接 `env.step(np.zeros(7))` 或随机 "
+        "`np.random.uniform(-1,1,7)`。step 返回经典 4 元组 "
+        "(obs: OrderedDict, reward: float, done: np.bool_, info: dict)。",
+        "  - 成功判据（官方）：`env.check_success()` → bool（容器实测可调；"
+        "零动作返回 False）。逐局判分入口就是它，勿自造阈值。",
+        "  - 视频帧来源：无 env.render()——帧在 obs 里："
+        "`obs['agentview_image']` 与 `obs['robot0_eye_in_hand_image']` 均 "
+        "(128,128,3) uint8（容器实测），每 step 后取 agentview_image "
+        "累积成帧列表 → imageio 写 mp4 即可。",
+        "  - 初态回放：`suite.get_task_init_states(<int 索引>)`——入参是 int "
+        "任务索引（传任务名字符串会 TypeError list indices），返回 50 局的 "
+        "qpos 数组（每局 shape (92,) ndarray；内部 torch.load 自动完成，"
+        "无需自己 load）。`env.set_init_state(qpos)` 设置后返回新 obs "
+        "（OrderedDict），随后 step 正常。每局可 set_init_state(init[i]) "
+        "复现官方第 i 局初始状态。",
     ])

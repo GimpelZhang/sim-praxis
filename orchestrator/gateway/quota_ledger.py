@@ -362,7 +362,19 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # run2i 新线程票 T7-M3(3)+T7-C4(11)=14：22+14=36≤36（余 0）。新顶 36：
 # run2i 出生修复帽 5 + Stage1 通过后 Stage2/3 预留。非模型变更、硬规则 1
 # 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动；常量先于出票提交。
-PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 36, 8: 16}
+# Task7 2026-10-26 run2j 后第二十次自批（HARD_CAP 290 不动）：run2j（新线程
+# t7-libero-stage1-20261026d）出生循环 5 轮帽尽 human_failure（executions=6）。
+# 复盘：攢批75/76 注入的 API 真值已生效——模型一次写对 get_benchmark 实例化
+# +OffScreenRenderEnv 导入链，**env 墙已过**（降 mujoco 3.1.6 后 ENV_OK+RESET_OK），
+# 死因收敛到 3 个 LIBERO env API 用法坑：gym 式 action_space/action_spec 全不
+# 存在（动作维=7 硬断言、值域 [-1,1]、step 返回 4 元组）、get_task_init_states
+# 入参是 int 索引非任务名、无 env.render()（帧在 obs['agentview_image']
+# (128,128,3) uint8）。三坑已 0 补丁容器取证并随攢批77 注入 stage0_facts_text。
+# 账实 task7 31（seq235-265：run1/run2h/run2i/run2j 四次出生帽+断流）。run2k
+# 新线程票需 1 macro + ≤5 coding，31+6=37>36 恰顶无缓冲，故 task7 36→44（run2k
+# 出生帽 5 + Stage1 通过后 Stage2/3 预留）。全局 265+6=271≤290（余 19），HARD_CAP
+# 不动。非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动。
+PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 44, 8: 16}
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。
