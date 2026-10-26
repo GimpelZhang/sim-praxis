@@ -36,6 +36,11 @@ class SimPraxisState(TypedDict, total=False):
     # Phase 2 Task6：ascent 演化志四来源件路径块（Gate1 批准写部分块、
     # Gate2 批准补齐五键；仅 dict 加法透传，reject/hard-failure 路径不写）。
     evolution_sources: dict
+    # Phase 2 Task7 B 线（libero variant）：Stage0 兼容报告路径。CLI run 时注入
+    # 初始状态（langgraph 0.2.28 对 TypedDict 未声明键静默丢弃——实测 input/
+    # 节点 update 双侧都丢，故必须声明为通道）；Gate1 提案机判（task7_libero.
+    # gate1_proposal）与 D-4 降级的唯一状态输入。standard 任务缺省不写。
+    stage0_report_path: str
     events: Annotated[list, operator.add]
 
 

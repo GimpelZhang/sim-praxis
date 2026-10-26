@@ -31,6 +31,8 @@ from .cards import (
     build_gate1_card,
     build_gate1_card_ascent,
     build_gate1_card_ascent_v1,
+    build_gate1_card_libero,
+    build_gate1_card_libero_v1,
     build_gate1_card_v2,
     build_gate2_card,
     build_gate2_card_diff,
@@ -1468,6 +1470,54 @@ class FeishuGateway:
                 card_message_id=sent["message_id"],
                 open_chat_id=sent["chat_id"])
             self._log.info("Gate1(ascent) 卡片已发出 thread=%s schema=%s",
+                           thread_id, sent["schema"])
+        self._event_for(thread_id, gate)
+        return self._await_decision(thread_id, gate, max_wait=max_wait)
+
+    def request_gate1_libero_approval(
+        self,
+        thread_id: str,
+        task_title: str,
+        proposals: list[dict[str, Any]],
+        *,
+        stage0_facts: dict[str, Any],
+        max_wait: "float | None" = None,
+    ) -> dict:
+        """Task7 B 线 Gate1：LIBERO 巡礼方案卡（Stage0 兼容事实随卡）。
+
+        等待/重挂/打回语义与标准 Gate1 完全一致（upsert 占位、不重发、打回
+        归档重开），仅卡片换成 build_gate1_card_libero（2.0 主发 + 1.0 降级）。
+        No Fake Approval：本方法阻塞等待真人点击，任何分支都没有硬编码 approve；
+        D-4 降级在 task7_libero.make_gate1_seam 就已 GraphStateError，到不了这里。
+        """
+        gate = 1
+        row = self.store.get_pending(thread_id, gate)
+        if row is not None and row["status"] == "PENDING" and row["card_message_id"]:
+            # 重启重挂：PENDING 行且卡已发，不重发（与标准/ascent Gate1 同）。
+            self._log.info(
+                "Gate1(libero) 重启重挂 thread=%s message_id=%s（不重发卡片）",
+                thread_id, row["card_message_id"])
+        else:
+            self._reopen_round(thread_id, gate)
+            sent = self._send_interactive(
+                self.owner_open_id,
+                build_gate1_card_libero_v1(
+                    task_title, proposals, stage0_facts),
+                build_gate1_card_libero(
+                    task_title, proposals, stage0_facts),
+                form_required=True,
+            )
+            self.store.upsert_pending(
+                thread_id, gate,
+                card_message_id=sent["message_id"],
+                open_chat_id=sent["chat_id"],
+                task_title=task_title)
+            # 极端竞态保底回填（R-LOW-3 家法：0 行=卡片刚发出行即终结）。
+            self._attach_ids_or_warn(
+                thread_id, gate, sent_kind="Gate1(libero) 卡片",
+                card_message_id=sent["message_id"],
+                open_chat_id=sent["chat_id"])
+            self._log.info("Gate1(libero) 卡片已发出 thread=%s schema=%s",
                            thread_id, sent["schema"])
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)

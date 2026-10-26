@@ -565,20 +565,43 @@ def _gate2_metrics_md(
     # H-2：原片时长始终展示；实际走到 step4 裁剪时再附裁剪区间行。
     if trim_note:
         lines.append(trim_note)
-    nested = _rungs_metrics_md(metrics)
-    if nested is not None:
-        lines.append(nested)
-    else:
-        # 旧式扁平 metrics 兜底（Task3/合成 Gate2 测试仍用这组键）。
+    # Task7 LIBERO（WJ-Lite）：metrics 带 wj_report_path + aggregate（evaluate
+    # 接缝已按 simpraxis.wj_report.v1 校验过）→ 渲染 WJ 分支，不走 rungs 嵌套
+    # 也不落旧式扁平兜底（LIBERO 没有那组 pose_error 键，兜底会渲染一屏 '-'）。
+    wj_path = metrics.get("wj_report_path")
+    if isinstance(wj_path, str) and wj_path and isinstance(
+            metrics.get("aggregate"), dict):
+        agg = metrics["aggregate"]
+        rate = agg.get("success_rate")
+        rate_s = (f"{rate:.3f}" if isinstance(rate, (int, float))
+                  and not isinstance(rate, bool) else "-")
+        used = "/".join(str(s) for s in
+                        (metrics.get("judge_sources_used") or [])) or "-"
         lines += [
-            "**Rung 1-4 验收指标**：",
-            f"- 位姿误差：{metrics.get('pose_error', '-')}",
-            f"- 最大接触深度：{metrics.get('max_contact_depth', '-')}",
-            f"- 接触持续：{metrics.get('contact_duration', '-')}",
-            f"- jerk 平顺度：{metrics.get('jerk', '-')}"]
-        rung4 = metrics.get("rung4_atomic")
-        if rung4 is not None:
-            lines.append(f"- Rung4 原子题结果：{rung4}")
+            "**WJ-Lite 验收指标 · Task7 LIBERO**"
+            "（simpraxis.wj_report.v1，数字引擎现算）：",
+            f"- 聚合：{agg.get('success')}/{agg.get('episodes')} 局成功"
+            f"（成功率 {rate_s}）",
+            f"- stage：{metrics.get('stage', '-')}",
+            f"- 判分来源：{used}",
+            f"- gate2_ready：{'是' if metrics.get('gate2_ready') else '否'}",
+            f"- 报表：{inline_code(wj_path)}",
+        ]
+    else:
+        nested = _rungs_metrics_md(metrics)
+        if nested is not None:
+            lines.append(nested)
+        else:
+            # 旧式扁平 metrics 兜底（Task3/合成 Gate2 测试仍用这组键）。
+            lines += [
+                "**Rung 1-4 验收指标**：",
+                f"- 位姿误差：{metrics.get('pose_error', '-')}",
+                f"- 最大接触深度：{metrics.get('max_contact_depth', '-')}",
+                f"- 接触持续：{metrics.get('contact_duration', '-')}",
+                f"- jerk 平顺度：{metrics.get('jerk', '-')}"]
+            rung4 = metrics.get("rung4_atomic")
+            if rung4 is not None:
+                lines.append(f"- Rung4 原子题结果：{rung4}")
     if video_fallback:
         lines.append("")
         lines.append("⚠️ 原生视频上传失败，已降级（video_fallback=true），"
@@ -726,6 +749,65 @@ def build_gate1_card_v2(
         "header": _v2_header("blue", "【SimPraxis】Gate 1：研究方案审批"),
         "body": {"elements": body},
     }
+
+
+# ---------------- Gate1 · Task7 LIBERO 变体（Stage0 兼容事实随卡） ----------------
+
+def _libero_stage0_md(stage0_facts: dict[str, Any]) -> str:
+    """Stage0 兼容事实块正文（Gate1 卡插页；全部来自容器探针机器事实，
+    H-7：逐字段转义——非模型文案也不豁免）。"""
+    pins = stage0_facts.get("pin_facts") if isinstance(
+        stage0_facts.get("pin_facts"), dict) else {}
+    pin_line = "、".join(
+        f"{md_escape(k)}={inline_code(pins.get(k))}" for k in
+        ("numpy_is_shared_pin", "torch_is_shared_pin",
+         "mujoco_is_shared_pin", "mujoco_diverged"))
+    reasons = stage0_facts.get("reasons") or []
+    notes = stage0_facts.get("notes") or []
+    return "\n".join([
+        "🔬 **Stage0 兼容事实（容器探针产物，非模型文案）**",
+        f"- outcome：**{md_escape(stage0_facts.get('outcome', '-'))}**"
+        f"（schema `{md_escape(stage0_facts.get('stage0_schema', '-'))}`）",
+        f"- 隔离 venv：{inline_code(stage0_facts.get('venv_path', '-'))}",
+        f"- pin_facts：{pin_line or '-'}",
+        f"- reasons：{md_escape('；'.join(map(str, reasons)) if reasons else '无')}",
+        f"- notes：{md_escape('；'.join(map(str, notes)) if notes else '无')}",
+        f"- tour 目录：{inline_code(stage0_facts.get('tour_dir', '-'))}",
+    ])
+
+
+_GATE1_LIBERO_TITLE = "【SimPraxis】Gate 1：LIBERO 巡礼方案审批（Stage0 已证兼容）"
+
+
+def build_gate1_card_libero(
+    task_title: str,
+    proposals: list[dict[str, Any]],
+    stage0_facts: dict[str, Any],
+    feedback_required: bool = True,
+) -> dict:
+    """Gate1 schema 2.0 卡 · LIBERO 变体：通用 v2 卡合成 + Stage0 兼容事实块
+    插到 body.elements[1]（任务目标之后、方案 0 之前——真人先看探针事实再
+    裁运行案）；只在 outcome=compatible 时被 client 发出（D-4 降级零卡片）。"""
+    card = build_gate1_card_v2(task_title, proposals, feedback_required)
+    card["header"] = _v2_header("blue", _GATE1_LIBERO_TITLE)
+    card["body"]["elements"].insert(
+        1, _div_lark_md(_libero_stage0_md(stage0_facts)))
+    return card
+
+
+def build_gate1_card_libero_v1(
+    task_title: str,
+    proposals: list[dict[str, Any]],
+    stage0_facts: dict[str, Any],
+    feedback_required: bool = True,
+) -> dict:
+    """Gate1 1.0 卡 · LIBERO 变体（2.0 被服务端拒时的自动降级形态，与通用
+    家法同链路）：通用卡合成 + Stage0 事实 markdown 插 elements[1]。"""
+    card = build_gate1_card(task_title, proposals, feedback_required)
+    card["header"]["title"]["content"] = _GATE1_LIBERO_TITLE
+    card["elements"].insert(
+        1, {"tag": "markdown", "content": _libero_stage0_md(stage0_facts)})
+    return card
 
 
 def _gate2_form_2(video_fallback: bool) -> dict:

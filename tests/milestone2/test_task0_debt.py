@@ -290,8 +290,13 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # Gate2 claim）、1305→1327（Task3 Diff claim）、1438→1460（Task6 ascent
     # Gate1 upsert）、1508→1530（Task6 diff4 Gate2 claim）。新分支只 toast
     # 不落库（mark_decided 不可达），grep 对账无新增写闸门。
+    # Task7 libero（2026-10-26，攢批第 71 条）：request_gate1_libero_approval
+    # 新增第五个发送闸门（upsert 1510，与 ascent Gate1 同一占位协议——
+    # 重挂不重发/打回归档重开/No Fake Approval 全继承）；import 两行 +
+    # 新方法使老五处位移：1031→1033、1117→1119、1327→1329、1460→1462、
+    # 1530→1580。grep 对账（同上口径排除 tests/）恰六处，无第七处旁路。
     "orchestrator/feishu_gateway/client.py": {
-        1031, 1117, 1327, 1460, 1530},
+        1033, 1119, 1329, 1462, 1510, 1580},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
