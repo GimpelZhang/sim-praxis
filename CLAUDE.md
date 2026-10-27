@@ -11,9 +11,10 @@ Phase 2 Milestone 2 引擎侧：Task0/0a/0b 六提交已随 2026-10-17 推送窗
 （至 `38ae3e4`），Task1–9 三签提交 51 条本地攒批未推送（M2 终验 HEAD `956dc22`；用户常设指令
 「暂不推送，攒批」覆盖计划 L632 里程碑推送，锁内适配 M2-A2）；终态干净树
 1086 passed/1 skipped/42 deselected，Phase 2 台账 120 实呼（82 ok/38 fail）
-+6 preflight_blocked。Task7 LIBERO、Task8 Genesis 流体仅完成 0 付费 Stage0 能力探针
-（compatible / sph_ok），Stage1+ 必须经飞书真人 Gate1/Gate2（No Fake Approval），
-用户 AFK 未启动，不得声称完成实战题。
++6 preflight_blocked。Task7 LIBERO Stage1 战役已收官（2026-10-27 Gate2 真人 accept
++ phase1_learnings accept 行 1b10ac8d + 方案回收 KB，攢批85/86）；Task8 Genesis 流体
+仅完成 0 付费 Stage0 能力探针（sph_ok），Stage1+ 必须经飞书真人 Gate1/Gate2
+（No Fake Approval），用户 AFK 未启动，不得声称完成该实战题。
 规范与执行记录在仓库外（与 Plan 冲突时以 Complete 为准）：
 `~/文档/Phase_0_Plan.md`（v4.2）+ `Phase_0_Plan_Complete.md`；
 `~/文档/Phase_1_Plan_detailed.md`（v1.2）+ `Phase_1_Plan_Complete.md`（偏差 A1–A24、坑 P1–P10）；
@@ -76,19 +77,23 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
      sha256 集逐字钉死 `aac53313…` 基线（只增不改；新 md 必须用户签收并显式登记
      `memory_flywheel/kb_pins.py::KNOWLEDGE_ADDITIONS`）；当前 HEAD 必须是迁移提交
      `c5712e9f73fc17cd2649cae359aad216e8f3bd07`（solutions/ 首次写入）的后代；
-     `solutions/` 4 方案（6 脚本）随 git 公开，追加走新提交，公开历史不回收。
+     `solutions/` 5 方案（7 脚本；Task7 攒批86 追加 track1_tools/03_libero Gate2 accept
+     回收件）随 git 公开，追加走新提交，公开历史不回收。
      单真值在 kb_pins（preflight/ingest/e2e/matrix 四断言统一调它，禁止抄字面量）。
    - **数据层**（闭源、永不入库）：lancedb/blobs/bundles 实体在
      `/mnt/artifacts/embodied-kb/data`（0700），`$KB_ROOT/data` 是软链，
      `.gitignore` 必须用锚定 `/data`（尾斜杠 `data/` 不匹配软链本身），
      闸口打 `git check-ignore data`（穿越软链的 data/lancedb pathspec 会 fatal）。
    - **KB 首次 push 是人工 STOP 门**：push 前向用户呈 diff 清单 + 密钥扫描（公开不可回收）。
-   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 26 行（2026-10-26 活表对账
+   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 32 行（2026-10-27 活表对账
      =M2 时 12（Task0a 后 5 + Task6 run1–6 human_failure 6 + run7a 1，id 0ef64b94）；
      + 升阶战役 10-25 十二条诚实 human_failure 回写 + persist 首崩 020327ed + Gate2
-     accept 行 66bafb1d（gate2_accepted/rung=3，evidence `@phase2/` 第三根）；
+     accept 行 66bafb1d（gate2_accepted/rung=3，evidence `@phase2/` 第三根）
+     + Task7 LIBERO 战役六行（run1/run2/run2j/run2k/侧车 human_failure 5
+     + Gate2 accept 1b10ac8d rung=1，2026-10-26…27）；
      run7c key-collapse 塌到 24681e47 不增行仍登记）；
-     solution_chunks 独立第三表（首灌 82 块/4 方案），老三表对它恒只读。
+     solution_chunks 独立第三表（现 94 块/5 方案，Task0b 首灌 82 块/4 方案 +
+     Task7 攒批86 追加 03_libero 12 块），老三表对它恒只读。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
    禁止 `source ~/.bashrc`、禁止回显/入 URL/入日志/提交；git 认证用内存 extraheader 不落盘；
    fixture 不得像真密钥（scan_secrets.sh 10 条 + common.secrets Python 10 条严口径单一源）。
@@ -125,21 +130,24 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
   Task0b 起库默认 uri 为 `$KB_ROOT/data/lancedb`（软链 `/mnt/artifacts/embodied-kb/data`）；
   数据迁移只走 `scripts/kb/migrate_data_layer.py --apply`（同盘 st_dev 守卫 + 行数/召回快照对账）。
 - `phase1_learnings`（12 列含 vector，复用 mpnet 不二次下载）与 kb_chunks 同库独立；
-  当前 26 行（2026-10-26 对账：= M2 时 12——Task0a 授权 4→5 后的 5 行
+  当前 32 行（2026-10-27 对账：= M2 时 12——Task0a 授权 4→5 后的 5 行
   gate2_accepted_supplementary/rung=1 + Task6 run1–6 human_failure 6 行 + run7a 1 行
   （id 0ef64b94）——+ 升阶战役 10-25 十二条 human_failure + persist 首崩 020327ed
-  + Gate2 accept 行 66bafb1d（rung=3，evidence `@phase2/…summary.json`）；
+  + Gate2 accept 行 66bafb1d（rung=3，evidence `@phase2/…summary.json`）
+  + Task7 LIBERO 战役六行（run1/run2/run2j/run2k human_failure 4 + persist 侧车 1
+  + Gate2 accept 1b10ac8d rung=1，2026-10-26…27 攒批86）；
   run7c key-collapse 塌到 24681e47 不增行仍登记，f43d49 等旧行不重写；
   kb_chunks 恒 1542）。**生产召回 2026-10-26 已闭环**：555 行采纳遥测
   （Task6 线程 549 coding/6 direction，17 个学习 id 全为活表真实行），
   516 行经实际 req 证据逐字节互证 + 同线程 Gate2 accept 反证成功结果，
   机判 `scripts/verification/check_recall_closure.py` rc=0（报告
   recall/adoption_crosscheck_2026-10-26T021811Z.json）。
-- `solution_chunks`（Task0b 第三张表）：4 方案 README/manifest 原子块 + 脚本 code 块，
-  relpath 前缀 `solutions/`，首灌 82 块；`python -m memory_flywheel.scripts.ingest_solutions`
-  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=26 不变（fail-closed
-  期望值随活表基线，2026-10-26 活表基线对账；ingest_solutions CLI 历史默认
-  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传当前活表行数（现 26），
+- `solution_chunks`（Task0b 第三张表）：5 方案 README/manifest 原子块 + 脚本 code 块，
+  relpath 前缀 `solutions/`，现 94 块（Task0b 首灌 82 块/4 方案 + Task7 攒批86
+  追加 03_libero 12 块）；`python -m memory_flywheel.scripts.ingest_solutions`
+  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=32 不变（fail-closed
+  期望值随活表基线，2026-10-27 活表基线对账；ingest_solutions CLI 历史默认
+  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传当前活表行数（现 32），
   LOW 债务清理）。资产包：
   `scripts/kb/bundle_kb_asset.py --tier both` + `verify_bundle.py`（core=老两表，
   extended=全部表；sha256/行数/768 维/kb_sha/引擎 SHA 对账）。
@@ -154,7 +162,7 @@ bash scripts/verification/gate_static.sh                      # 六步静态门�
 # 真跑 test_04 批次须 SIMPRAXIS_ALLOW_PAID=1 且按规则 2 自批落 quota/approvals/
 # kb_integration（活 KB/活数据层）默认同构 skip；迁移/入库后显式跑：
 SIMPRAXIS_KB_INTEGRATION=1 /mnt/venvs/simpraxis/bin/python -m pytest tests -m kb_integration -q
-python scripts/kb/check_solutions.py                          # 内容层分层校验（4 方案+data 忽略）
+python scripts/kb/check_solutions.py                          # 内容层分层校验（5 方案+data 忽略）
 /mnt/venvs/simpraxis/bin/python -m memory_flywheel.scripts.validate_capability_matrix
 python scripts/verification/check_blueprint_evidence.py
 ```
@@ -170,12 +178,12 @@ Phase 2 Milestone 2（引擎侧，2026-10-17 Task1 起 → 2026-10-24 终验）�
 Q2 补沉淀+图外回写通路、Task0b 三层分离（已推送部分），Task1–9 三签提交本地攒批（51 条
 `2d83528..956dc22`）。终态：干净树两排除全套 **1086 passed/1 skipped/42 deselected/exit 0**；
 证据包 570 文件/20.2 MiB（manifest git_commit=956dc22）；M2 时点四表活库
-1542/12/82/不存在（phase2_learnings 未建表——gate2 accept 未发生；2026-10-26 后活表现为
-1542/26/82/1，见下 Task6 V2 段）；M2 时点 Phase 2 台账
+1542/12/82/不存在（phase2_learnings 未建表——gate2 accept 未发生；2026-10-27 攒批86 后活表现为
+1542/32/94/1，见下 Task6 V2 与 Task7 段）；M2 时点 Phase 2 台账
 120 次实呼（seq 1..120 连续、时间戳全严格 Z、82 ok/38 fail；by_task task4=24/task6=96；
 by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占批次不占实呼），
 .call_cache 17 条与 17 个 ok seq 配对，Phase 1 账 29 行封存只读；blueprint 4 项目 16 stage、
-能力矩阵 6 引擎 41 事实、check_solutions 4 方案全过；容器零残留、显存 14 MiB、/mnt 正常。
+能力矩阵 6 引擎 41 事实、check_solutions 5 方案全过；容器零残留、显存 14 MiB、/mnt 正常。
 - Q1 冰面 DR 与预注册方向相反：ice/normal=0.824 < 界 2.0，结论 contradiction_control_not_robust
   矛盾即结论，已冻结未翻案；V2 升阶在 M2 终验时五战未跨过代码出生/结构闸、Gate2 未建行
   （pareto_verdict=null 诚实留空），2026-10-26 run27 后已闭合——v2_summary 已生成、
@@ -186,10 +194,14 @@ by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占
   `check_recall_closure.py` rc=0，39 行证据缺口如实挂牌 provenance_limited 不计入通过。
 - Rung4 VLM 终态 **record_only**（min_agreement=0.8 但 defect_recall=0.0，D7 未达成，
   用户已签收；禁止调标签/换片/改阈翻案，active 只能以新付费批次重标定）。
-- Task7/8 只有 0 付费 Stage0：LIBERO outcome=compatible（隔离 venv 六步全 rc=0、
-  import libero.libero ok、numpy/torch/mujoco 三 pin 不漂移，五轮 QA 锁内适配）；
-  Genesis outcome=sph_ok（A800 1000 粒子 10 步坐标全 finite）。**Stage1+（含 Task6 后续 run）
-  必须经飞书真人 Gate1/Gate2，No Fake Approval，用户 AFK 未启动——不得声称完成这两个实战题。**
+- Task7 LIBERO Stage1 **战役收官**（2026-10-27，攢批85/86）：r26 官方判分抓取
+  成功 → Gate2 卡#3 真人 approve（14:47:24 CST，No Fake Approval 完好）→ persist
+  首崩（rungs 契约）→ 攢批85 修复 + checkpoint 手术 → r27 resume → phase1_learnings
+  accept 行 1b10ac8d（rung=1 核验级）→ 方案按计划 L166 回收 KB
+  solutions/track1_tools/03_libero（攢批86，94 块/5 方案）。Task8 Genesis 流体
+  只有 0 付费 Stage0（sph_ok，A800 1000 粒子 10 步坐标全 finite）；
+  **Stage1+ 必须经飞书真人 Gate1/Gate2，No Fake Approval，用户 AFK 未启动——
+  不得声称完成 Task8 实战题。**
 - coding_debug 换供 deepseek-v4.1-flash（commit 4df0e1d）经硬规则 1 两次用户裁决，为 M2 期间
   唯一模型变更；M2 收官后 2026-10-24 用户再直接裁决三阶段换供 mimo 家族（macro=mimo-v2.6-pro、
   coding_debug/visual_rollout=mimo-v2.6-flash，commit fa007c5，硬规则 1 全流程：inventory 404
@@ -203,11 +215,11 @@ phase2_learnings 首行落库（1 行）+ 五段式演化志；看板机判 Pare
 余 2 为 deepseek→mimo 过渡批已登记）、quota_pause schema v2 已签收、task8 stage0_wheels
 越界符号链接联合已拆除（M2-A6，cache 目标未动、stage0 报告保留）。
 
-仍待 Phase 2 余项：Task7/8 Stage1+——**开工前工作是 CLI 接线**（`--task 7` 现仍路由
-Phase 1 task7 工厂，task7_libero/task8_fluid 未接 orchestrator.graph.cli；task8_fluid
-execute_stage1 为显式拒跑合同桩），接线完成即发飞书真人 Gate1/Gate2 卡启动，No Fake Approval。
-Phase 3 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
+仍待 Phase 2 余项：Task8 Stage1（流体）——CLI 接线已完成（攢批74，task8_fluid
+execute_stage1 为显式拒跑合同桩已接 orchestrator.graph.cli），接线完成即发飞书
+真人 Gate1/Gate2 卡启动，No Fake Approval。Task7 已收官（见上）。Phase 3
+各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
 自演进、实跑四 tour、SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定
 （计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
-t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 26）、
+t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 32）、
 run7c key-collapse 覆写 created_at）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。

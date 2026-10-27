@@ -1,0 +1,26 @@
+schema: simpraxis.solution_manifest.v1
+solution_id: track1_tools/03_libero
+title: Fixture：LIBERO stage1 抓放（合成，非真实脚本）
+entrypoint: stage1_minimal.py
+args:
+- --out-dir <workdir>（必填，编排器注入）
+- --run-id <run_id>（必填，编排器注入）
+sim_engine:
+  slug: mujoco
+  min_version: 3.15.0
+dependencies:
+  python: '>=3.10'
+  pip: []
+  notes: 合成 fixture：无真实引擎依赖，空 pip 列表语义同正式 manifest。
+rung_thresholds:
+  ref: orchestrator/judge/rungs.py
+  constants: []
+frozen_inputs:
+- track: track1
+  index: 4
+files:
+- relpath: stage1_minimal.py
+  sha256: 43522171ac18e95fabe5e342e3506bae9cab040f987ec48ddd072b7805cf4ba2
+- relpath: README.md
+  sha256: c7f6229bb9f9c297e0a1a081504d64d868df7b0c098c244bff6c1fd15f945b40
+v1_run_relpath: null

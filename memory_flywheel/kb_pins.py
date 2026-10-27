@@ -75,12 +75,15 @@ KNOWLEDGE_BASELINE_FILES: dict[str, str] = {
 # 并把 "knowledge/...md": "<sha256>" 显式加到此表；未登记的额外 md 一律判失败。
 KNOWLEDGE_ADDITIONS: dict[str, str] = {}
 
-# Task0b QA（M2）：solution_chunks 规范方案全集（4 方案；单真值）。
+# Task0b QA（M2）：solution_chunks 规范方案全集（单真值）。
+# Task0b 时 4 方案；Task7 攒批85 后追加 track1_tools/03_libero（Gate2 accept
+# 回收，计划 L166），共 5 方案。
 # scripts/kb/check_solutions.py 树校验与 ingest_solutions strict 模式共同引用，
 # 缺/多方案或表内孤儿 solution_id 一律 fail-closed。
 EXPECTED_SOLUTION_IDS: tuple[str, ...] = (
     "track1_tools/01_maniskill_pushcube",
     "track1_tools/02_mujoco_contact_push",
+    "track1_tools/03_libero",
     "track2_questions/01_ice_floor_humanoid_dr",
     "track2_questions/02_lidar_weather",
 )

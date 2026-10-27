@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""把 KB solutions/ 四方案切块写入同库新表 solution_chunks（Task0b，0 付费 0 触网）。
+"""把 KB solutions/ 五方案切块写入同库新表 solution_chunks（Task0b，0 付费 0 触网）。
 
 与 kb_chunks 的关系：
 - 同库（SIMPRAXIS_LANCEDB_URI / $KB_ROOT/data/lancedb）同嵌入（mpnet 768，
@@ -64,7 +64,7 @@ def _chunks_for_file(rel: str, raw: bytes) -> list[tuple[int, str, str]]:
         yaml.safe_load(parsed)
         return [(0, "manifest", f"{HEADER_MANIFEST}{rel}\n" + parsed.strip())]
     if name.endswith(".md"):
-        # 计划：4 方案 README 各一个原子块（Q2 光学长 prose 必须整块可召回）。
+        # 计划：5 方案 README 各一个原子块（Q2 光学长 prose 必须整块可召回）。
         pieces = chunk_section(rel, raw.decode("utf-8").splitlines(), atomic=True)
         if len(pieces) != 1:  # atomic 捷径恒返回 0/1 块
             raise SolutionIngestError(f"{rel} README 原子切块异常：{len(pieces)} 块")

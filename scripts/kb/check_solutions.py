@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task0b 内容层分层校验：4 方案契约/sha/可解析 + data/ 不跟踪 + knowledge 哈希集。
+"""Task0b 内容层分层校验：5 方案契约/sha/可解析 + data/ 不跟踪 + knowledge 哈希集。
 
 用法：
   python scripts/kb/check_solutions.py [--kb-root $KB_ROOT]
@@ -7,8 +7,9 @@
 校验项（任一失败 exit 1）：
   1. knowledge/ 32-md sha256 集 == aac53313 基线（只增不改）且当前 HEAD 是
      Task0b 迁移提交（c5712e9f，solutions/ 首次写入）的后代（memory_flywheel.kb_pins）；
-  2. solutions/ 恰好 4 个迁移方案，每个 manifest 经解析器全量校验（schema/
-     solution_id/C4/逐件 sha256），方案内全部 *.py 通过 py_compile；
+  2. solutions/ 恰好 5 个规范方案（Task0b 迁移 4 + Task7 攒批86 回收 03_libero），
+     每个 manifest 经解析器全量校验（schema/solution_id/C4/逐件 sha256），
+     方案内全部 *.py 通过 py_compile；
   3. data/ 永不入库：git ls-files data 为空且 git check-ignore 命中 data/lancedb。
 
 只读检查，不触网、0 付费。
@@ -35,7 +36,8 @@ from orchestrator.solutions import (  # noqa: E402
     load_manifest,
 )
 
-# Task0b 从 Phase1 迁入的存量方案全集（6 脚本文件 / 4 方案目录）。
+# Task0b 从 Phase1 迁入的存量方案全集 + Task7 攒批86 回收 03_libero
+# （7 脚本文件 / 5 方案目录）。
 # 单真值在 kb_pins.EXPECTED_SOLUTION_IDS（ingest strict 模式共用）；
 # 保留本 list 别名以最小化本文件改动面。
 EXPECTED_SOLUTIONS = list(kb_pins.EXPECTED_SOLUTION_IDS)

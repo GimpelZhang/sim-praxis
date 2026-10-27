@@ -909,6 +909,10 @@ def test_live_four_table_counts():
     blk = BD.lance_tables_block()
     tmap = {t["table"]: t for t in blk["tables"]}
     assert tmap["kb_chunks"]["rows"] == 1542
-    assert tmap["phase1_learnings"]["rows"] == 12
-    assert tmap["solution_chunks"]["rows"] == 82
-    assert tmap["phase2_learnings"]["exists"] is False
+    assert tmap["phase1_learnings"]["rows"] == 32
+    assert tmap["solution_chunks"]["rows"] == 94
+    # 锁内适配（2026-10-27 攒批86 活表对账）：phase2_learnings 表已建——Task6
+    # Gate2 accept 后 persist 首行落库（66bafb1d，run27，rung=3），M2 时点
+    # 「未建表」断言随活表现实更新为恰 1 行。
+    assert tmap["phase2_learnings"]["exists"] is True
+    assert tmap["phase2_learnings"]["rows"] == 1
