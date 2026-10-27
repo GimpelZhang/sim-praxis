@@ -101,6 +101,8 @@ def stage_birth_contract(*, stage: str, script_name: str, n_episodes: int,
 
 ## 质量线（Gate2 真人按此对质，不达标即打回）
 - 接触/抓取真实发生：无穿透、无瞬移、无悬空；物体到位后停稳；
+- 控制器必须目标驱动（servo 闭环）：随机动作/无目标抖动已于 2026-10-26
+  被真人 Gate2 拒批（「夹爪在无序抖动，没有伸向任何一个物体」），再犯即拒；
 - 成功率如实计入 results.json（失败局 success=0，禁止挑拣局数）；
 - 视频与 results 同一次运行产出（禁止复用旧片）。"""
 
@@ -157,9 +159,10 @@ def stage0_facts_text(proposal: dict) -> str:
         "  - **无 gym API**：OffScreenRenderEnv 没有 action_space / "
         "action_spec / render()（实测全 AttributeError）。动作维数=7（传 8 报 "
         "AssertionError \"expected 7, got 8\"——7=delta 位姿 6 + 夹爪 1），"
-        "动作值域 [-1,1] 归一化；直接 `env.step(np.zeros(7))` 或随机 "
-        "`np.random.uniform(-1,1,7)`。step 返回经典 4 元组 "
-        "(obs: OrderedDict, reward: float, done: np.bool_, info: dict)。",
+        "动作值域 [-1,1] 归一化。step 返回经典 4 元组 "
+        "(obs: OrderedDict, reward: float, done: np.bool_, info: dict)。"
+        "**禁止随机动作脚本**（2026-10-26 Gate2 真人拒批实证：随机抖动无抓取"
+        "=必拒），控制器必须按下条 servo 真值写目标驱动闭环。",
         "  - 成功判据（官方）：`env.check_success()` → bool（容器实测可调；"
         "零动作返回 False）。逐局判分入口就是它，勿自造阈值。",
         "  - 视频帧来源：无 env.render()——帧在 obs 里："
@@ -172,4 +175,28 @@ def stage0_facts_text(proposal: dict) -> str:
         "无需自己 load）。`env.set_init_state(qpos)` 设置后返回新 obs "
         "（OrderedDict），随后 step 正常。每局可 set_init_state(init[i]) "
         "复现官方第 i 局初始状态。",
+        # —— run2k/r24 实证（2026-10-27，攢批82，锁内适配）：Gate2 首判拒批
+        # （随机动作无抓取）后，修复环把脚本叠成「env.step 包装层 + 未防护
+        # obs['object_positions'] 内联 phase 状态机」两套循环，5 轮补丁只修掉
+        # 一个 SyntaxError，exec6 撞 KeyError 'object_positions' 后 5 轮帽尽
+        # human_failure。以下为 0 付费容器探针 probe_obs_servo.py（2026-10-27，
+        # libero_spatial task0 黑碗，与 evaluate exec 同 env 口径）机器真值：
+        "  - **obs 键真值（容器实测 31 键）**：obs **没有** 'object_positions' "
+        "聚合键（下标直接 KeyError——r24 死因）。每个物体世界系位姿直接在 obs："
+        "<物体名>_pos (3,) float64 与 <物体名>_quat (4,) float64（如 "
+        "akita_black_bowl_1_pos、plate_1_pos、glazed_rim_porcelain_ramekin_1_pos"
+        "——物体全名以 bddl 为准）。另有 <物体名>_to_robot0_eef_pos/_quat "
+        "相对位姿、object-state (70,)、robot0_eef_pos/_quat、"
+        "robot0_gripper_qpos (2,)。",
+        "  - **servo 抓取控制器已实测可行（0 付费探针机器真值，非猜测）**："
+        "world-frame delta OSC P 控制——delta=clip(0.5*(target_pos-eef_pos), "
+        "±0.05)，action[:3]=delta/0.05，夹爪维 action[6]=-1 张开/+1 闭合——"
+        "60 步把 eef-物体距离 0.338m→0.022m；随后闭爪 5 步、保持闭爪抬升"
+        "（action[2]=+1）30 步，物体随爪上升 0.365m（真实抓取在场）。"
+        "放置类任务续：平移至目标物 _pos 上方→下放→开爪。整条 "
+        "reach→grasp→lift→place 链即 Gate2 质量线「接触/抓取真实发生」。",
+        "  - **单一控制循环纪律**：全脚本只允许一个 env.step 主循环（r24 "
+        "实证：模型曾把 env.step 包一层又另写一套内联 phase 状态机，两套互抢、"
+        "第二套未防护键读取直接崩）。物体位姿只从 <物体名>_pos 键读，禁止"
+        "发明聚合键、禁止第二套循环。",
     ])
