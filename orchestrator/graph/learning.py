@@ -106,6 +106,16 @@ def _rung_from_metrics(metrics: dict) -> "tuple[int, str | None]":
     """
     rungs = metrics.get("rungs") if isinstance(metrics, dict) else None
     if not isinstance(rungs, dict):
+        if (isinstance(metrics, dict) and metrics.get("rungs") is None
+                and metrics.get("rungs_not_judged") is True):
+            # 锁内适配（攢批85，2026-10-27 task7 首个 Gate2 accept persist
+            # 首崩取证）：WJ-Lite 多任务套件无逐帧遥测，Rung1–3 结构性
+            # 不可判——evaluate 接缝在机器取证（validate_telemetry 失败）
+            # 后显式写 rungs_not_judged=True+原因，非静默缺失。Gate2
+            # 真人验收行按核验级 rung=1 落表（Task0a 五条
+            # gate2_accepted_supplementary 同约定：核验级如实记 rung=1，
+            # 不得记 4）；Rung2+ 未判定不臆造。无标记的缺 rungs 仍硬失败。
+            return 1, None
         raise GraphStateError("persist：metrics 缺 rungs 结构，无法确定 rung")
     rule = 0
     for i in (1, 2, 3):

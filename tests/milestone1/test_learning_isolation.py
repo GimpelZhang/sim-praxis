@@ -615,5 +615,33 @@ def test_17_phase2_root_tagged_evidence_and_env(monkeypatch, roots, runs_root,
                        failure_symptom="越界探测", effective=True)
 
 
+def test_rung_from_metrics_not_judged_marker():
+    """攢批85（2026-10-27 task7 首个 Gate2 accept persist 首崩取证）：
+    evaluate 接缝显式标记 rungs_not_judged=True + rungs=None → 核验级
+    rung=1（Task0a 五条 gate2_accepted_supplementary 同约定）；
+    无标记的缺 rungs 仍硬失败（防静默丢判）。"""
+    from orchestrator.graph.learning import _rung_from_metrics
+    from orchestrator.graph.nodes import GraphStateError
+
+    # 显式标记路径 → (1, None)
+    rung, r4 = _rung_from_metrics({
+        "rungs": None, "rungs_not_judged": True,
+        "rungs_not_judged_reason": "套件遥测无逐帧数组"})
+    assert rung == 1 and r4 is None
+
+    # 缺 rungs 且无标记 → 仍 GraphStateError（原契约不放水）
+    with pytest.raises(GraphStateError, match="缺 rungs"):
+        _rung_from_metrics({"ok": True, "aggregate": {}})
+    # 标记存在但值非 True → 仍硬失败
+    with pytest.raises(GraphStateError, match="缺 rungs"):
+        _rung_from_metrics({"rungs": None, "rungs_not_judged": False})
+
+    # 真向量路径不变：最高非 null 层级
+    rung, _ = _rung_from_metrics({
+        "rungs": {"rung1": {"pass": True}, "rung2": {"pass": False},
+                  "rung3": None}})
+    assert rung == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

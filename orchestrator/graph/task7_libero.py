@@ -35,7 +35,7 @@ from orchestrator.agent_runner.runner import RunSpec
 from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.graph import task7_libero_prompts as prompts
 from orchestrator.graph.nodes import GraphStateError
-from orchestrator.judge.rungs import evaluate_rollout
+from orchestrator.judge.rungs import evaluate_rollout, validate_telemetry
 from orchestrator.solutions import SolutionError, resolve_solution, solutions_root
 
 TASK = 7
@@ -807,6 +807,37 @@ def make_evaluate_seam(thread_id: str) -> Callable[[dict], dict]:
             report = load_wj_report(path)
         except WjReportError as exc:
             raise GraphStateError(f"task7_libero evaluate：{exc}") from exc
+        # 锁内适配（攢批85，2026-10-27 task7 首个 Gate2 accept persist 首崩
+        # 取证：GraphStateError "metrics 缺 rungs 结构"）：persist 的
+        # _rung_from_metrics 要求 metrics 顶层 rungs 结构，而 WJ-Lite 套件
+        # wj_report 逐 task rungs 恒 null（仅 len==1 单 rollout 判定）。
+        # 机器取证（r26 run_1 2.9MB/run_2 5KB 双遥测）：套件遥测是逐 episode
+        # 摘要，无逐帧 ee_positions/penetrations/contact 数组——Rung1–3
+        # 规则判定结构性不可判。能判则判（最新 run 遥测过 validate_telemetry
+        # 即 evaluate_rollout 取真向量）；不可判则显式标记 rungs_not_judged
+        # +原因，persist 侧按核验级 rung=1 落行（Task0a 五条
+        # gate2_accepted_supplementary 同约定），Rung2+ 未判定不臆造。
+        rungs_vector = None
+        not_judged_reason = None
+        tele_uri = rec.get("telemetry_uri") or state.get("telemetry_uri")
+        if isinstance(tele_uri, str) and tele_uri:
+            tp = Path(tele_uri)
+            if tp.is_file():
+                try:
+                    tele = json.loads(tp.read_text(encoding="utf-8"))
+                    if not validate_telemetry(tele):
+                        judged = evaluate_rollout(tele)
+                        if judged.get("ok"):
+                            rungs_vector = judged["vector"]
+                except (ValueError, OSError):
+                    not_judged_reason = "遥测读取/解析失败，Rung1–3 未判"
+            else:
+                not_judged_reason = "telemetry 文件缺失，Rung1–3 未判"
+        if rungs_vector is None and not_judged_reason is None:
+            not_judged_reason = (
+                "stage1 套件遥测为逐 episode 摘要（无逐帧 "
+                "ee_positions/penetrations/contact 数组），Rung1–3 规则判定"
+                "结构性不可判（r26 run_1/run_2 双遥测机器取证）")
         return {
             "ok": True,
             "thread_id": thread_id,
@@ -816,6 +847,9 @@ def make_evaluate_seam(thread_id: str) -> Callable[[dict], dict]:
             "aggregate": report["aggregate"],
             "judge_sources_used": report["judge_sources_used"],
             "gate2_ready": report["gate2_ready"],
+            "rungs": rungs_vector,
+            "rungs_not_judged": rungs_vector is None,
+            "rungs_not_judged_reason": not_judged_reason,
             "provenance": f"file:{WJ_REPORT_STATE_KEY}",
         }
 

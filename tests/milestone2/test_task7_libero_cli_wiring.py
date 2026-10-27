@@ -331,7 +331,9 @@ def test_factory_unknown_stage_rejected():
 # ---------------------------------------------------------------------------
 
 _EVAL_FIELDS = {"ok", "thread_id", "wj_report_path", "schema", "stage",
-                "aggregate", "judge_sources_used", "gate2_ready", "provenance"}
+                "aggregate", "judge_sources_used", "gate2_ready", "provenance",
+                # 攒批85：persist rungs 契约对接（能判则判，不可判显式标记）
+                "rungs", "rungs_not_judged", "rungs_not_judged_reason"}
 
 
 def _workdir_with_results(tmp_path: Path, doc: dict | None,
@@ -348,7 +350,7 @@ def _workdir_with_results(tmp_path: Path, doc: dict | None,
 
 
 def test_evaluate_state_key_positive_frozen_fields(tmp_path):
-    """state 键正路径：9 字段冻结（与既有 seam 测试同口径回归）。"""
+    """state 键正路径：12 字段冻结（攢批85 +rungs 三键；与 seam 测试同口径）。"""
     wd = _workdir_with_results(tmp_path, _valid_results_doc())
     report = t7.build_wj_report(
         thread_id="t7l-wiring", stage=t7.STAGE1_SPATIAL,
@@ -412,6 +414,10 @@ def test_evaluate_assembles_from_results(tmp_path):
                                    "success_rate": 0.5}
     assert result["judge_sources_used"] == ["官方"]
     assert result["gate2_ready"] is True
+    # 攒批85：Rung1–3 套件摘要遥测结构性不可判 → 显式标记
+    # （persist._rung_from_metrics 依此按核验级 rung=1 落 Gate2 accept 行）
+    assert result["rungs"] is None
+    assert result["rungs_not_judged"] is True
     doc = json.loads(wj_path.read_text(encoding="utf-8"))
     assert doc["stage0_compat_ref"] == s0
     assert doc["tasks"][0]["metrics_ref"]["sha256"]  # 数字可回指到字节

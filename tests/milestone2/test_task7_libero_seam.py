@@ -1112,16 +1112,24 @@ def test_libero_wj_report_contract(tmp_path):
     with pytest.raises(t7.GraphStateError):
         seam(good)  # 路径不存在
 
-    # M5：正路径——合法 wj_report 落 tmp_path，接缝只读校验后返回九字段摘要。
+    # M5：正路径——合法 wj_report 落 tmp_path，接缝只读校验后返回十二字段摘要
+    # （攢批85：+rungs/rungs_not_judged/rungs_not_judged_reason，persist
+    # rungs 契约对接）。
     wj_path = tmp_path / "wj_report.json"
     wj_path.write_text(json.dumps(report, ensure_ascii=False),
                        encoding="utf-8")
     result = seam({t7.WJ_REPORT_STATE_KEY: str(wj_path)})
     assert set(result) == {
         "ok", "thread_id", "wj_report_path", "schema", "stage",
-        "aggregate", "judge_sources_used", "gate2_ready", "provenance"}
+        "aggregate", "judge_sources_used", "gate2_ready", "provenance",
+        "rungs", "rungs_not_judged", "rungs_not_judged_reason"}
     assert result["ok"] is True
     assert result["thread_id"] == "t7l-seam-test"
+    # 无 telemetry_uri → Rung1–3 结构性不可判：显式标记而非静默缺 key
+    # （persist._rung_from_metrics 依此按核验级 rung=1 落行）。
+    assert result["rungs"] is None
+    assert result["rungs_not_judged"] is True
+    assert "Rung1–3" in (result["rungs_not_judged_reason"] or "")
     assert result["wj_report_path"] == str(wj_path)
     assert result["schema"] == "simpraxis.wj_report.v1"
     assert result["stage"] == t7.STAGE1_SPATIAL
