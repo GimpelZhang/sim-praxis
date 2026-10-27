@@ -997,7 +997,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # 十三至十九次连续七提，176→190→205→220→235→250→265→290）后的值——前四次
     # 提顶均不动全局门，第五至十九次动 HARD_CAP。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 290
+    assert HARD_CAP == 310
+    assert HARD_CAP != 290                    # 十九次旧全局顶随第二十三次下线
     assert HARD_CAP != 265                    # 十八次旧全局顶随第十九次下线
     assert HARD_CAP != 250                    # 十七次旧全局顶随第十八次下线
     assert HARD_CAP != 235                    # 十六次旧全局顶随第十七次下线
@@ -1016,14 +1017,14 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # human_failure）；第十七次抬顶后预扩三轮修复帽 15（234+15=249≤265、
     # 210+15=225≤227）。第十八/十九次抬顶只动全局门与 task7 顶，task6 顶不动，
     # run27 算术继续成立（HARD_CAP 随第十九次到 290）。
-    assert 234 + 5 <= HARD_CAP == 290
+    assert 234 + 5 <= HARD_CAP == 310
     assert 210 + 5 <= TASK_HARD_CAPS[6] == 227
     # Task7 Stage1 run2k 修复环续窗信封算术（第二十二次，HARD_CAP 290 不动）：
     # 账实 int-seq 285/task7 51（断流坏窗拖过夜 seq268-285 十八连 GatewayError，
     # T7-C5/C6/C7 各 6/6 烧尽 + T7-C8 1/2）。续窗票 T7-C9（coding ≤5，全局门
-    # 是真瓶颈）。三门：全局 285+5=290≤290 恰顶、task7 51+5=56≤60 余 4、
-    # 批次 0+N 恰顶。
-    assert 285 + 5 <= HARD_CAP == 290
+    # 是真瓶颈）。三门（第二十三次抬 HARD_CAP 290→310 后口径）：全局
+    # 285+5=290≤310 余 20、task7 51+5=56≤60 余 4、批次 0+N 恰顶。
+    assert 285 + 5 <= HARD_CAP == 310
     assert 51 + 5 <= TASK_HARD_CAPS[7] == 60
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
