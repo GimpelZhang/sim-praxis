@@ -42,7 +42,23 @@ MAX_GATE1_REJECTS = 2       # D10：打回 2 次即 human_failure
 # （Anthropic 扩展思考形态），思考块与正文共享输出预算：2048 被思考耗尽（空响应）、
 # 8192 时 3 个长方案在 ~3.5KB 处被截断（Unterminated string）。预算提至 16384，
 # 并在系统提示中加逐字段长度上限防截断；thinking 块在 router 文本提取时丢弃。
-MAX_TOKENS = 16384
+#
+# 锁内适配（2026-10-27 Task8 fluid，取证 envelope T8-D1-glm53-thinking）：macro
+# 模型经硬规则 1 由用户逐字裁决换为 glm-5.3（commit b20c45e）。该模型在方舟
+# /api/coding anthropic-messages shim 下为**强制思考模型**：thinking.type=disabled
+# 被 HTTP 400 拒绝（"disabled is not supported by this model"）；budget_tokens
+# 被接受但不强制（2048 预算实发 63171 思考字符）；思考随输出预算扩张不收敛——
+# max_tokens=2048/8192/16384 逐字生产请求均 stop=max_tokens、text 0
+# （16384 时思考 51826 字符、output_tokens=16384）。max_tokens=32768 终判两探针
+# 均 stop=end_turn 且正文为方案 JSON：直连 319.5s（思考 80554 字符+正文 4455 字符、
+# output 31551）、经代理不传 thinking 键（保 D-8）208.5s（思考 55045+正文 3465、
+# output 20472；一次正文因模型在 question 回显里用 ASCII 引号致 JSON 非法，
+# 属既有 MAX_REPAIR_ASK=1 repair 回路覆盖的失败类）。故预算提至 32768；同时生产
+# 网关非流式默认 timeout=120s 远小于生成耗时（seq309/310 均 5×120s ReadTimeout
+# 全灭），macro 显式 timeout=600s。callcache 指纹并入 max_tokens，改预算自动 miss
+# 不命中旧缓存；req 证据 max_tokens 字段随常量自动更新。
+MAX_TOKENS = 32768
+MACRO_TIMEOUT_S = 600
 TEMPERATURE = 0.2
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -624,7 +640,8 @@ class DirectionSetter:
                 try:
                     raw, _usage = self.gateway.call(STAGE, messages,
                                                     max_tokens=MAX_TOKENS,
-                                                    temperature=TEMPERATURE)
+                                                    temperature=TEMPERATURE,
+                                                    timeout=MACRO_TIMEOUT_S)
                 except Exception as exc:
                     # 记账已在 call() 出口完成（成功一行 ok=true；任何越过 preflight 的
                     # 失败一行 ok=false，含 GatewayPausedError；StageUnresolvedError 在

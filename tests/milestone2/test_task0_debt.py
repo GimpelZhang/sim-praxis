@@ -765,7 +765,9 @@ CALL_CACHE_ALLOWLIST = {
     # Phase 2 Task1：S-5 有意关闭——macro 方向步加调用级重放
     # （key macro_{thread}_r{round}_a{attempt}，同一 phase1 .call_cache）。
     # Phase 2 Task2：ascent_claims 校验+批判段注入纯位移（422→506），落点不变。
-    ("orchestrator/direction/setter.py", 506),
+    # 攢批89：glm-5.3 强制思考锁内适配注释+MACRO_TIMEOUT_S 常量插入纯位移
+    # （506→522），0 新增落点。
+    ("orchestrator/direction/setter.py", 522),
 }
 
 
