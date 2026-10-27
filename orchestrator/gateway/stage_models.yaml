@@ -15,26 +15,32 @@ meta:
   endpoint: anthropic-messages
   base_url_env: ANTHROPIC_BASE_URL
 stage_models:
-  # 2026-10-24 硬规则 1 三阶段换供（用户直接裁决，逐字 ID）：网关 base URL 已随
-  # 用户环境迁移到小米 MiMo Anthropic 兼容端点（token-plan-cn.xiaomimimo.com/anthropic），
-  # 三阶段统一 mimo 家族：macro_ideation=mimo-v2.6-pro，coding_debug=mimo-v2.6-flash，
-  # visual_rollout=mimo-v2.6-flash。清点取证：GET /v1/models 在新端点 404（枚举不可用），
-  # 证据 runs/inventory/20261024-184407/inventory_404_evidence.json；latest 保持指向上一次
-  # 成功清点 20261020-205217。用户给出逐字 ID，无猜测环节；换供后 --validate-models
-  # 四 ping（3 文本+1 视觉）重验，账外路径（G-13 不占 seq，批次件 M2-V-mimo1 计数）。
-  # 前值 macro/coding=deepseek-v4.1-flash、visual=ark-code-latest（Phase 2 全程）。
+  # 2026-10-27 硬规则 1 三阶段混合换供（用户会话内逐字直接裁决）：端点为火山方舟
+  # /api/coding（env 实读），macro_ideation=glm-5.3，coding_debug=kimi-k3.1-pro，
+  # visual_rollout=deepseek-v4.1-flash。清点取证 runs/inventory/20261027-175140
+  # （GET /v1/models 200，138 条）：三浮动别名均不在册（清点非成员资格闸），
+  # 同家族日期版本在场 glm-5-3-flash-260828 / kimi-k3-1-pro-261024 /
+  # deepseek-v4-1-flash-261017；执行者不猜 ID、不按回显名分支，逐字配置。
+  # 换供后 --validate-models 重验（批次件 M2-V-mixed1，G-13 账外路径不占 seq）：
+  # 首轮 17:54 --max-tokens 8，macro glm-5.3 连续 5 次 HTTP200 空回答（思考前缀型，
+  # 同 M2-V-mimo1 先例），FAILURE 落 runs/model_validate/20261027-175406；
+  # 次轮 18:00:53 --max-tokens 64 四 ping 全绿（3 文本 pong + 视觉 Red 断言通过），
+  # 证据 runs/model_validate/20261027-180053/result.json（latest 指此），两轮共 9 个
+  # 账外实呼（5+4），ledger seq 恒 308 未增。
+  # 前值（2026-10-24…27）：mimo 家族 macro=mimo-v2.6-pro、coding/visual=mimo-v2.6-flash。
   macro_ideation:
-    model_id: mimo-v2.6-pro         # 2026-10-24 用户裁决；validate 全绿 20261024-184930
+    model_id: glm-5.3               # 2026-10-27 用户逐字裁决；mt=8 空回答，mt=64 全绿（latest=20261027-180053）
     capabilities: [text]
     purpose: "方向探索与可行性调研（Macro Ideation）"
   coding_debug:
     # 历史沿革：glm-5.3-flash（思考不可关阴性）→ 2026-10-20 用户两次裁决
-    # deepseek-v4.1-flash → 2026-10-24 用户裁决 mimo-v2.6-flash（见文件头注释）。
+    # deepseek-v4.1-flash → 2026-10-24 用户裁决 mimo-v2.6-flash → 2026-10-27 用户
+    # 逐字裁决 kimi-k3.1-pro（见文件头注释）。
     # 旧证据 runs/task6_ascent/coding_model_evidence_matrix.json seq42-47 保留可溯。
-    model_id: mimo-v2.6-flash
+    model_id: kimi-k3.1-pro
     capabilities: [text]
     purpose: "环境适配与代码编写（Coding & Debugging）"
   visual_rollout:
-    model_id: mimo-v2.6-flash       # 2026-10-24 用户裁决；vision ping Red 全绿 20261024-184930
+    model_id: deepseek-v4.1-flash   # 2026-10-27 用户逐字裁决；mt=64 文本+视觉 Red 全绿（latest=20261027-180053）
     capabilities: [text, vision]
     purpose: "闭环仿真评估与视频审阅（Visual & Rollout Evaluation）"
