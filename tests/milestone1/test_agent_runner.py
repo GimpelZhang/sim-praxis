@@ -1036,7 +1036,8 @@ def test_12_chunked_birth_six_calls_assemble_and_birth(tmp_path):
     assert rec["coding_round"] == 1 and rec["executions"] == 2
     assert len(gw.calls) == 6                       # 恰好 6 次顺序调用
     assert [c["kw"] for c in gw.calls] == [
-        {"max_tokens": 32768, "temperature": 0.1, "timeout": 600}] * 6
+        # 攢批90：kimi-k3.1-pro 供应侧硬约束 temperature=1（seq312 400）。
+        {"max_tokens": 32768, "temperature": 1, "timeout": 600}] * 6
     target = wd / _CHUNK_TARGET
     assert target.is_file()
     # run4：块间补恰好一个 LF（设计 §2.2 EBNF）；happy body 自带尾换行，
@@ -1301,15 +1302,16 @@ def test_15_bad_chunk_fails_whole_round_without_half_file(
 
 def test_16_chunk_fingerprint_includes_index_and_keys_safe():
     from orchestrator.common.callcache import request_fingerprint
+    # 攢批90：TEMPERATURE=1（kimi-k3.1-pro 供应侧硬约束，seq312 400）。
     fp = {i: request_fingerprint(
         "same-prompt", None,
-        {"max_tokens": 32768, "temperature": 0.1,
+        {"max_tokens": 32768, "temperature": 1,
          "chunk_index": i, "chunk_total": 6},
         stage="coding_debug", model="fake-model") for i in range(6)}
     assert len(set(fp.values())) == 6
     assert request_fingerprint(
         "same-prompt", None,
-        {"max_tokens": 32768, "temperature": 0.1,
+        {"max_tokens": 32768, "temperature": 1,
          "chunk_index": 1, "chunk_total": 6},
         stage="coding_debug", model="fake-model") == fp[1]
     for i in range(6):

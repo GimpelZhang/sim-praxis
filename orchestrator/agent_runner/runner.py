@@ -48,7 +48,14 @@ STAGE = "coding_debug"
 TOP_K = 6
 MAX_CODING_ROUNDS = 5          # D10 v1.1：每 run 最多 5 次 coding_debug
 MAX_TOKENS = 8192
-TEMPERATURE = 0.1
+# 锁内适配（2026-10-27 Task8 fluid，seq312 实呼取证）：coding 模型经硬规则 1
+# 用户逐字裁决换为 kimi-k3.1-pro（b20c45e）后，方舟 anthropic-messages shim
+# 对该模型硬约束 temperature 只允许 1——首发生成实呼被 HTTP 400 InvalidParameter
+# 拒绝（"`temperature` only 1 is allowed for this model"，NonRetryable 一行
+# ok=false，T8-C1 批次）。此为供应侧唯一接受值、无调参裁量，且不涉 model_id
+# 变更（硬规则 1 不触发、用户裁决的 kimi-k3.1-pro 不动），coding 唯一采样温度
+# 0.1→1。callcache 指纹并入 temperature，改值自动 miss 旧缓存，安全。
+TEMPERATURE = 1
 # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
 # Task6 V2 出生拆 4 个顺序小编排调用；网关 call 的 timeout 旧路径隐式吃
 # router 默认 120，现经 RunSpec 显式化（默认 120，行为不变）。

@@ -746,7 +746,9 @@ CALL_CACHE_ALLOWLIST = {
     # _SHIM_* 常量/helper、扫描接线与 ChunkSpec 分层 docstring 改述全在
     # 构造点之前，纯位移（1882→1921，+37+2 行）；修复环复用同一构造点，
     # 0 新增 CallReplay 落点。
-    ("orchestrator/agent_runner/runner.py", 1921),
+    # 攢批90：kimi-k3.1-pro 强制 temperature=1 锁内适配注释插入（+7 行）在
+    # 构造点之前，纯位移（1921→1928），0 新增落点。
+    ("orchestrator/agent_runner/runner.py", 1928),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
