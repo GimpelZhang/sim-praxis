@@ -668,7 +668,10 @@ def _ident_hits(path):
 
 
 def test_redline_gateway_kwargs_key_set_and_no_forbidden_identifiers():
-    # runner 对网关 call 的 kwargs 键集合恰为 {max_tokens,temperature,timeout}。
+    # runner 对网关 call 的 kwargs 键集合；攢批92 起加 thinking（T8-D2：
+    # kimi-k3.1-pro 强制思考，缺省=预算全耗思考零正文）；单补丁与拆块两路径
+    # 都经 _cached_coding_call 唯一调用点，键集恰为
+    # {max_tokens,temperature,thinking,timeout}。
     tree = ast.parse(_RUNNER_PY.read_text(encoding="utf-8"))
     call_kw = []
     for node in ast.walk(tree):
@@ -677,20 +680,35 @@ def test_redline_gateway_kwargs_key_set_and_no_forbidden_identifiers():
                 and isinstance(node.func.value, ast.Attribute) \
                 and node.func.value.attr == "gateway":
             call_kw.append(sorted(k.arg for k in node.keywords))
-    assert call_kw == [["max_tokens", "temperature", "timeout"]]
-    # router 内 completion 调用只允许既有 7 个 kwargs，且含上述三键。
+    assert call_kw == [
+        ["max_tokens", "temperature", "thinking", "timeout"]]
+    # router 内 completion 调用：命名 kwargs 只允许既有 7 个且含三必需键；
+    # thinking 唯一通道是 **thinking_kw 单星展开（攢批92 钦点形态）。
     rtree = ast.parse(_ROUTER_PY.read_text(encoding="utf-8"))
     allowed = {"model", "api_base", "api_key", "messages",
                "max_tokens", "temperature", "timeout"}
     for node in ast.walk(rtree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
                 and node.func.id == "completion":
-            keys = {k.arg for k in node.keywords}
+            named = [k for k in node.keywords if k.arg is not None]
+            keys = {k.arg for k in named}
             assert keys <= allowed and {"max_tokens", "temperature",
                                         "timeout"} <= keys
-    # 三生产文件 AST 零禁止标识符。
-    for path in _PROD3:
+            starred = [k for k in node.keywords if k.arg is None]
+            assert len(starred) == 1
+            assert isinstance(starred[0].value, ast.Name)
+            assert starred[0].value.id == "thinking_kw"
+    # 生产文件禁止标识符：Task6 V2 冻结两文件仍 AST 级零命中（thinking 只许
+    # 存在于 D-8 注释/账外诊断）。
+    for path in (_TASK6_PY, _PROMPTS_PY):
         assert _ident_hits(path) == [], (path.name, _ident_hits(path))
+    # 攢批92（T8-D2）：runner 是 thinking 透传的唯一生产通道，允许
+    # "thinking" 出现在 keyword/dict-key 位置（CODING_THINKING 常量名不命中）；
+    # budget_tokens/response_format/tool_choice/json_schema 在 runner 仍零命中
+    # （启用预算思考与 JSON mode 只许存在于账外诊断脚本，probe D 已证预算
+    # 不被 shim 强制，禁止生产复活该路径）。
+    runner_hits = _ident_hits(_RUNNER_PY)
+    assert {h[0] for h in runner_hits} == {"thinking"}, runner_hits
     # D-8 溯源注释必须存活（行位钉死；漂移时改测试并复核评审 MAJOR-3）。
     task6_lines = _TASK6_PY.read_text(encoding="utf-8").splitlines()
     prompt_lines = _PROMPTS_PY.read_text(encoding="utf-8").splitlines()

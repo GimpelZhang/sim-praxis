@@ -48,14 +48,24 @@ STAGE = "coding_debug"
 TOP_K = 6
 MAX_CODING_ROUNDS = 5          # D10 v1.1：每 run 最多 5 次 coding_debug
 MAX_TOKENS = 8192
-# 锁内适配（2026-10-27 Task8 fluid，seq312 实呼取证）：coding 模型经硬规则 1
-# 用户逐字裁决换为 kimi-k3.1-pro（b20c45e）后，方舟 anthropic-messages shim
-# 对该模型硬约束 temperature 只允许 1——首发生成实呼被 HTTP 400 InvalidParameter
-# 拒绝（"`temperature` only 1 is allowed for this model"，NonRetryable 一行
-# ok=false，T8-C1 批次）。此为供应侧唯一接受值、无调参裁量，且不涉 model_id
-# 变更（硬规则 1 不触发、用户裁决的 kimi-k3.1-pro 不动），coding 唯一采样温度
-# 0.1→1。callcache 指纹并入 temperature，改值自动 miss 旧缓存，安全。
-TEMPERATURE = 1
+# 锁内适配（2026-10-27 Task8 fluid；攢批90 立、攢批92 修订）：
+# 攢批90（seq312 实呼取证）：coding 模型经硬规则 1 用户逐字裁决换为
+# kimi-k3.1-pro（b20c45e）后，方舟 anthropic-messages shim 对【缺省思考】
+# 形态硬约束 temperature 只允许 1，故 0.1→1。
+# 攢批92（T8-D2 账外取证，2026-10-27 晚）：后续 seq313 楔死/seq314 五次
+# HTTP200 空回答证实缺省形态下该模型强制思考且预算不被强制——生产出生
+# prompt 流式实证 792s/32758 事件/正文 0 字/stop=max_tokens。供应侧约束
+# 矩阵补全（账外探针 C1/C2/C4/E）：thinking={"type","disabled"} 时
+# temperature 只允许 0.6，此时小调用 1.9s 出正文；但 probe E 实证完整出生
+# prompt 下该模型把全部规划独白改走 text 通道：605.1s/32759 事件/126682 字
+# 正文/stop=max_tokens（32768），JSON 补丁未开始即截断——单次出生对该模型
+# 结构性不可行，流体出生必须走 n=6 拆块通道（见 task8_fluid 工厂）。
+# 故 coding 唯一采样温度 1→0.6，并显式关思考（与温度成对，
+# 不可只改其一：C1 证实 disabled+1 被 400 拒）。不涉 model_id 变更
+# （硬规则 1 不触发、用户裁决的 kimi-k3.1-pro 不动）。callcache 指纹并入
+# temperature+thinking，改值自动 miss 旧缓存，安全。
+TEMPERATURE = 0.6
+CODING_THINKING = {"type": "disabled"}
 # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
 # Task6 V2 出生拆 4 个顺序小编排调用；网关 call 的 timeout 旧路径隐式吃
 # router 默认 120，现经 RunSpec 显式化（默认 120，行为不变）。
@@ -2246,9 +2256,11 @@ class AgentRunner:
                         cache_key=(f"coding_{spec.thread_id}_r{spec.run_idx}"
                                    f"_round{coding_calls}"),
                         fp_extra={"max_tokens": spec.coding_max_tokens,
-                                  "temperature": TEMPERATURE},
+                                  "temperature": TEMPERATURE,
+                                  "thinking": CODING_THINKING},
                         max_tokens=spec.coding_max_tokens,
-                        timeout=spec.coding_timeout_s)
+                        timeout=spec.coding_timeout_s,
+                        thinking=CODING_THINKING)
             except ChunkBirthError as exc:
                 # 任一块不符 → 整轮失败、不半成品落盘；机器原因进 decision
                 # 证据/时间线/下一轮块 0 反馈段，继续既有失败轮机制
@@ -2346,6 +2358,7 @@ class AgentRunner:
                             coding_round: int, learning_hits: list[dict],
                             cache_key: str, fp_extra: dict,
                             max_tokens: int, timeout: int,
+                            thinking: "dict | None" = None,
                             req_extra: "dict | None" = None,
                             resp_payload: "Callable[[str], dict] | None" = None
                             ) -> str:
@@ -2376,6 +2389,9 @@ class AgentRunner:
             "thread_id": spec.thread_id, "batch_id": spec.batch_id,
             "coding_round": coding_round, "gate2_notes_present":
                 bool(spec.gate2_notes and spec.gate2_notes.strip()),
+            # 攢批92：思考契约随证据落盘（温度/thinking 成对，见常量注释）。
+            "temperature": TEMPERATURE,
+            "thinking": thinking,
             "messages": json.loads(redact(json.dumps(
                 messages, ensure_ascii=False))),
         }
@@ -2389,7 +2405,8 @@ class AgentRunner:
             set_current_evidence(req_ref)
             raw, _usage = self.gateway.call(
                 STAGE, messages, max_tokens=max_tokens,
-                temperature=TEMPERATURE, timeout=timeout)
+                temperature=TEMPERATURE, timeout=timeout,
+                thinking=thinking)
         # Task1 采纳遥测（QA-1 M1）：唯一条件=call 成功返回；replay 不记，
         # 发网前失败 0 采纳行。必须先于 resp_payload 本地校验——拆块路径上
         # 网关已成功返回但本块围栏/ast 本地校验失败时，采纳语义与旧单次路径
@@ -2485,9 +2502,11 @@ class AgentRunner:
                            f"_round{coding_round}_chunk{i}"),
                 fp_extra={"max_tokens": spec.coding_max_tokens,
                           "temperature": TEMPERATURE,
+                          "thinking": CODING_THINKING,
                           "chunk_index": i, "chunk_total": cs.chunk_count},
                 max_tokens=spec.coding_max_tokens,
                 timeout=spec.coding_timeout_s,
+                thinking=CODING_THINKING,
                 req_extra={"chunk_index": i, "chunk_total": cs.chunk_count},
                 resp_payload=partial(
                     self._chunk_resp_payload, root, stem,

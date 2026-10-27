@@ -909,3 +909,118 @@ def test_hard_deadline_noop_off_main_thread(tmp_path):
     assert "e" not in out, out.get("e")
     assert out["v"][0] == "ok"
     assert dt >= 0.75, dt  # sleep(0.8) 完整跑完，没有 0.3s 告警截断
+
+# ---------- 攢批92：thinking 契约形状校验 + 透传（T8-D2 账外取证） ----------
+# kimi-k3.1-pro 在方舟 anthropic-messages shim 上为强制思考模型；litellm 1.99.4
+# 按模型成本图名门控 thinking 白名单，import 期 register_model 解锁别名。
+
+def _gw_capture(tmp_path, captured):
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def fake_completion(**kwargs):
+        captured.update(kwargs)
+        return _ok_response()
+
+    return R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                          transport=fake_completion, sleep=lambda s: None)
+
+
+def test_think_disabled_kwarg_passthrough(tmp_path):
+    """thinking={"type":"disabled"} 必须逐字到达 completion 调用 kwargs。"""
+    captured: dict = {}
+    gw = _gw_capture(tmp_path, captured)
+    out = gw.call("coding_debug", [{"role": "user", "content": "hi"}],
+                  temperature=0.6, thinking={"type": "disabled"})
+    assert out[0] == "ok"
+    assert captured["thinking"] == {"type": "disabled"}
+    assert captured["temperature"] == 0.6
+
+
+def test_think_enabled_budget_kwarg_passthrough(tmp_path):
+    captured: dict = {}
+    gw = _gw_capture(tmp_path, captured)
+    gw.call("coding_debug", [{"role": "user", "content": "hi"}],
+            thinking={"type": "enabled", "budget_tokens": 1024})
+    assert captured["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+
+
+def test_think_none_absent_from_completion_kwargs(tmp_path):
+    """不传 thinking 时 completion kwargs 不得出现该键（旧模型逐字节旧行为）。"""
+    captured: dict = {}
+    gw = _gw_capture(tmp_path, captured)
+    gw.call("coding_debug", [{"role": "user", "content": "hi"}])
+    assert "thinking" not in captured
+
+
+@pytest.mark.parametrize("bad", [
+    "disabled", 1, ["disabled"], {"type": "off"},
+    {"type": "disabled", "budget_tokens": 1024},
+    {"type": "enabled"},
+    {"type": "enabled", "budget_tokens": 0},
+    {"type": "enabled", "budget_tokens": -1},
+    {"type": "enabled", "budget_tokens": "1024"},
+    {"type": "enabled", "budget_tokens": True},
+    {"type": "enabled", "budget_tokens": 1024, "extra": 1},
+])
+def test_validate_thinking_illegal_shapes_rejected_pre_preflight(tmp_path, bad):
+    """非法 thinking 形状是编程错误：不触网、不调 transport、在 preflight 前拒。"""
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def must_not_call(**kw):
+        raise AssertionError("非法形状不得触达 transport")
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        transport=must_not_call, sleep=lambda s: None)
+    with pytest.raises(R.NonRetryableError):
+        gw.call("coding_debug", [{"role": "user", "content": "hi"}],
+                thinking=bad)
+
+
+def test_kimi_alias_reasoning_registered_for_litellm(tmp_path):
+    """register_model 后 kimi-k3.1-pro 支持 thinking；本测试直接打本地 mock HTTP，
+    零付费证明 thinking 真正进入请求体（防 register_model 回归静默丢 kwarg）。"""
+    import json as _json
+    import threading as _threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    import litellm
+
+    entry = litellm.model_cost.get("kimi-k3.1-pro")
+    assert entry is not None and entry.get("supports_reasoning") is True
+
+    captured = {}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: D401, ARG002
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("content-length", 0))
+            captured["body"] = _json.loads(self.rfile.read(n).decode("utf-8"))
+            # anthropic 转换层要求 type/role/stop_reason 齐备（mock_capture2 同形）。
+            resp = {"id": "m", "type": "message", "role": "assistant",
+                    "model": "kimi-k3.1-pro",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 1, "output_tokens": 1}}
+            body = _json.dumps(resp).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    _threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        litellm.completion(
+            model="anthropic/kimi-k3.1-pro",
+            api_base=f"http://127.0.0.1:{srv.server_port}",
+            api_key="x", messages=[{"role": "user", "content": "hi"}],
+            max_tokens=16, temperature=0.6, timeout=10,
+            thinking={"type": "disabled"})
+    finally:
+        srv.shutdown()
+    assert captured["body"]["thinking"] == {"type": "disabled"}

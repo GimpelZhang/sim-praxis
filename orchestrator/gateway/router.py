@@ -109,6 +109,35 @@ if not hasattr(_litellm_utils, "ChatCompletionReasoningSummaryTextBlock"):
     _litellm_utils.Message.model_rebuild(force=True)
     _litellm_utils.Delta.model_rebuild(force=True)
 
+# 锁内适配（2026-10-27 Task8 fluid，T8-D2 账外取证，攢批92）：
+# 方舟 /api/coding anthropic-messages shim 上的 kimi-k3.1-pro 为强制思考模型
+# ——不传 thinking 时全部输出预算耗在思考（生产出生 prompt 流式实证 792s/
+# 32758 事件/正文 0 字/stop=max_tokens；seq313 楔死、seq314 五次 HTTP200
+# 空回答）；thinking={"type":"disabled"} + temperature=0.6 时小调用 1.9s
+# 出正文，但完整出生 prompt 下模型把规划独白改走 text 通道（probe E：
+# 605.1s/126682 字/stop=max_tokens，补丁未开始即截断——单次出生结构性不可行，
+# 流体出生走 runner n=6 拆块通道；证据见
+# quota/approvals/T8-D2-kimi-wedge.json 与 task8_diag/kimi_probe/）。
+# litellm 1.99.4 按模型成本图名门控 thinking 透传白名单（get_supported_openai_params
+# →supports_reasoning），未在册别名收到 thinking= 会被静默丢弃（本地 mock
+# 抓包证实：裸 kwarg 上线体无 thinking）。register_model 是 litellm 官方
+# 自定义模型扩展点；注册后 mock 抓包确认 disabled/enabled 两形态均逐字上线。
+# 只登记能力位，不改任何 model_id（硬规则 1 不触发）。
+def _register_ark_reasoning_aliases() -> None:
+    litellm.register_model({
+        "kimi-k3.1-pro": {
+            "litellm_provider": "anthropic",
+            "mode": "chat",
+            "supports_reasoning": True,
+            "supports_function_calling": False,
+            "supports_vision": False,
+            "max_tokens": 32768,
+        },
+    })
+
+
+_register_ark_reasoning_aliases()
+
 from litellm.exceptions import (
     APIConnectionError,
     AuthenticationError,
@@ -548,6 +577,39 @@ def _messages_contain_image(messages: list[dict[str, Any]]) -> bool:
     return any(_node_contains_image(msg) for msg in (messages or []))
 
 
+def _validate_thinking(thinking: Any) -> None:
+    """thinking 契约形状校验（攢批92，T8-D2 取证）：非法形状是编程错误，
+    在 preflight 之前拒绝，不触网、不占 seq、不记账。
+
+    仅接受 Anthropic-Messages shim 两种形态：
+      {"type": "disabled"}（供应侧配 temperature 约束，如 kimi-k3.1-pro 0.6）
+      {"type": "enabled", "budget_tokens": <正整数>}（预算是否被 shim 强制
+      属供应侧行为，由取证批次逐模型实测——引擎只保证发出去的形状合法）。
+    """
+    if thinking is None:
+        return
+    if not isinstance(thinking, dict):
+        raise NonRetryableError(f"thinking 必须是 dict 或 None，收到 {type(thinking).__name__}")
+    ttype = thinking.get("type")
+    if ttype == "disabled":
+        extra = set(thinking) - {"type"}
+        if extra:
+            raise NonRetryableError(f"thinking disabled 不接受额外键：{sorted(extra)}")
+        return
+    if ttype == "enabled":
+        budget = thinking.get("budget_tokens")
+        if not (isinstance(budget, int) and not isinstance(budget, bool) and budget > 0):
+            raise NonRetryableError(
+                "thinking enabled 要求正整数 budget_tokens，"
+                f"收到 {budget!r}")
+        extra = set(thinking) - {"type", "budget_tokens"}
+        if extra:
+            raise NonRetryableError(f"thinking enabled 不接受额外键：{sorted(extra)}")
+        return
+    raise NonRetryableError(
+        f"thinking.type 只接受 enabled/disabled，收到 {ttype!r}")
+
+
 def _solid_png_b64(rgb: tuple[int, int, int] = (255, 0, 0), size: int = 32) -> str:
     """stdlib 生成 size×size 纯色 RGB PNG（无外部资产；视觉校验的确定性输入）。"""
     def chunk(tag: bytes, data: bytes) -> bytes:
@@ -738,7 +800,9 @@ class ModelGateway:
 
     def call(self, stage: str, messages: list[dict[str, Any]], *,
              max_tokens: int = 512, temperature: float = 0.2,
-             timeout: int = 120) -> tuple[str, "tuple[int | None, int | None]"]:
+             timeout: int = 120,
+             thinking: "dict | None" = None
+             ) -> tuple[str, "tuple[int | None, int | None]"]:
         """文本阶段统一入口（macro_ideation / coding_debug），返回 (text, (in_tok, out_tok))。
 
         Task3（§1.5/§6.3）计费契约：构造网关传 ledger= 即挂 BillingGate——
@@ -765,6 +829,8 @@ class ModelGateway:
             raise NonRetryableError(
                 f"{stage} 阶段禁止图像 block（硬规则1，含嵌套 tool_result）；"
                 "视觉请求只能走 call_visual()")
+        # (c) thinking 契约形状（攢批92 T8-D2）：编程错误不发网、不占 seq。
+        _validate_thinking(thinking)
         if self._billing is not None:
             self._billing.preflight(stage)
         completion = self._transport or litellm.completion
@@ -780,7 +846,8 @@ class ModelGateway:
             content, usage = self._chat_loop(
                 stage=stage, model_id=model_id, token=token, base_url=base_url,
                 completion=completion, messages=messages,
-                max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+                max_tokens=max_tokens, temperature=temperature, timeout=timeout,
+                thinking=thinking)
         except Exception as exc:  # noqa: BLE001 —— 越过 preflight 的任何出口恰好一行 ok=false
             if self._billing is not None:
                 self._billing.record(
@@ -827,7 +894,8 @@ class ModelGateway:
 
     def _chat_loop(self, *, stage: str, model_id: str, token: str, base_url: str,
                    completion: Callable[..., Any], messages: list[dict[str, Any]],
-                   max_tokens: int, temperature: float, timeout: int
+                   max_tokens: int, temperature: float, timeout: int,
+                   thinking: "dict | None" = None
                    ) -> tuple[str, "tuple[int | None, int | None, int | None, int | None]"]:
         """call() 的退避/熔断重试循环（不含计费；内部重试多少次都只算一次逻辑调用）。"""
         attempt = 0
@@ -840,6 +908,10 @@ class ModelGateway:
                 # 攢批91：litellm 的 timeout= 只管单次 recv，代理后 slowloris 类
                 # 零散字节可无限重置它（seq313 挂死 50 分钟）；外套与读活动无关的
                 # 单次尝试硬墙钟（=timeout 秒；健康慢调用不受影响，边界与原语义一致）。
+                # 攢批92（T8-D2 取证）：thinking 非 None 时透传（kimi-k3.1-pro
+                # 强制思考，缺省=预算全耗思考零正文；别名能力位在 import 期
+                # register_model 解锁，否则 litellm 白名单静默丢弃该 kwarg）。
+                thinking_kw = {"thinking": thinking} if thinking is not None else {}
                 with self._hard_deadline(timeout, stage):
                     resp = completion(
                         model=f"anthropic/{model_id}",
@@ -849,6 +921,7 @@ class ModelGateway:
                         max_tokens=max_tokens,
                         temperature=temperature,
                         timeout=timeout,
+                        **thinking_kw,
                     )
                 content = _litellm_text(resp)
                 # G-12：HTTP 200 但 content 为空（空串/仅 thinking block）不得记成功。

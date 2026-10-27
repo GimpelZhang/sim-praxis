@@ -37,6 +37,7 @@ from orchestrator.agent_runner.runner import (
     CHUNK_MAX_CODE_CHARS,
     CHUNK_MIN_ASSEMBLED_CHARS,
     CHUNK_MIN_CODE_CHARS,
+    CODING_THINKING,
     DEFAULT_CODING_TIMEOUT_S,
     MAX_TOKENS,
     TEMPERATURE,
@@ -1036,8 +1037,9 @@ def test_12_chunked_birth_six_calls_assemble_and_birth(tmp_path):
     assert rec["coding_round"] == 1 and rec["executions"] == 2
     assert len(gw.calls) == 6                       # 恰好 6 次顺序调用
     assert [c["kw"] for c in gw.calls] == [
-        # 攢批90：kimi-k3.1-pro 供应侧硬约束 temperature=1（seq312 400）。
-        {"max_tokens": 32768, "temperature": 1, "timeout": 600}] * 6
+        # 攢批92：kimi 强制思考契约 temperature=0.6 + thinking disabled（T8-D2）。
+        {"max_tokens": 32768, "temperature": TEMPERATURE, "timeout": 600,
+         "thinking": CODING_THINKING}] * 6
     target = wd / _CHUNK_TARGET
     assert target.is_file()
     # run4：块间补恰好一个 LF（设计 §2.2 EBNF）；happy body 自带尾换行，
@@ -1162,7 +1164,7 @@ def test_13_default_path_call_kwargs_8192_120(tmp_path):
     assert rec["status"] == "ok" and len(gw.calls) == 1
     assert gw.calls[0]["kw"] == {
         "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE,
-        "timeout": DEFAULT_CODING_TIMEOUT_S}
+        "timeout": DEFAULT_CODING_TIMEOUT_S, "thinking": CODING_THINKING}
     assert gw.calls[0]["kw"]["max_tokens"] == 8192
     assert gw.calls[0]["kw"]["timeout"] == 120
     assert "拆块交付" not in gw.calls[0]["messages"][1]["content"]
@@ -1302,18 +1304,27 @@ def test_15_bad_chunk_fails_whole_round_without_half_file(
 
 def test_16_chunk_fingerprint_includes_index_and_keys_safe():
     from orchestrator.common.callcache import request_fingerprint
-    # 攢批90：TEMPERATURE=1（kimi-k3.1-pro 供应侧硬约束，seq312 400）。
+    # 攢批92：TEMPERATURE=0.6 + thinking disabled 成对（kimi-k3.1-pro 供应侧
+    # 硬约束矩阵，T8-D2 账外探针 C1/C4/E）；thinking 入指纹，改约自动 miss。
     fp = {i: request_fingerprint(
         "same-prompt", None,
-        {"max_tokens": 32768, "temperature": 1,
+        {"max_tokens": 32768, "temperature": TEMPERATURE,
+         "thinking": CODING_THINKING,
          "chunk_index": i, "chunk_total": 6},
         stage="coding_debug", model="fake-model") for i in range(6)}
     assert len(set(fp.values())) == 6
     assert request_fingerprint(
         "same-prompt", None,
-        {"max_tokens": 32768, "temperature": 1,
+        {"max_tokens": 32768, "temperature": TEMPERATURE,
+         "thinking": CODING_THINKING,
          "chunk_index": 1, "chunk_total": 6},
         stage="coding_debug", model="fake-model") == fp[1]
+    # thinking 键缺席/变约必须是不同指纹（防透传回归把 kwarg 静默丢掉）。
+    assert request_fingerprint(
+        "same-prompt", None,
+        {"max_tokens": 32768, "temperature": TEMPERATURE,
+         "chunk_index": 1, "chunk_total": 6},
+        stage="coding_debug", model="fake-model") != fp[1]
     for i in range(6):
         assert re.fullmatch(
             r"[A-Za-z0-9_.-]{1,160}",

@@ -348,8 +348,20 @@ def _thinking_keys(fn: ast.FunctionDef) -> list[str]:
 
 
 def test_redline_production_transports_carry_no_thinking():
-    # 注释里允许出现 "thinking"（D-8 说明），但 kwarg/载荷键 AST 级必须为零。
-    assert _thinking_keys(_method_funcdef("ModelGateway", "_chat_loop")) == []
+    # D-8 旧红线：生产两传输路径 thinking 键 AST 级为零。
+    # 攢批92（T8-D2 账外取证，2026-10-27）修订为分路径不变量：kimi-k3.1-pro
+    # 在 shim 上强制思考（probe B 792s/0 正文；probe E disabled 后独白改走
+    # text 通道 605.1s/126682 字截断），litellm 文本路径 _chat_loop 允许且
+    # 只允许唯一钦点透传形态——thinking_kw 单键 dict 经 ** 展开进 completion，
+    # 不得在 completion(...) 上直接写 thinking= 字面 kwarg（防止第二形态分叉）。
+    loop = _method_funcdef("ModelGateway", "_chat_loop")
+    assert _thinking_keys(loop) == ["dict-key"]
+    starred = [kw for node in ast.walk(loop)
+               if isinstance(node, ast.Call) for kw in node.keywords
+               if kw.arg is None and isinstance(kw.value, ast.Name)
+               and kw.value.id == "thinking_kw"]
+    assert len(starred) == 1
+    # _post_messages（validate/视觉 raw 通道）仍逐字节旧红线：零 thinking。
     assert _thinking_keys(_method_funcdef("ModelGateway", "_post_messages")) == []
     # 正控：扫描器本身有效——diag_thinking 体内必须能找到 thinking 键。
     assert _thinking_keys(_method_funcdef("ModelGateway", "diag_thinking"))
