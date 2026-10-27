@@ -239,15 +239,23 @@ def test_factory_birth_mode_injects_contract(tmp_path, monkeypatch):
     assert spec.telemetry_relpath == t8f.RESULTS_NAME
     assert spec.billing_task == t8f.TASK == 8
     assert spec.batch_id == "b-code"
-    # 出生合同 + 已批准 macro 提案两段注入
-    titles = [t for t, _ in spec.extra_prompt_sections]
-    assert titles == ["Task8 Q5 流体出生合同", "已批准 macro 提案"]
-    body = spec.extra_prompt_sections[0][1]
+    # 攢批93：出生态固定挂 runner n=6 拆块规格（kimi-k3.1-pro 单次出生 probe E
+    # 605.1s/126682 字独白截断，T8-D2 取证）；单补丁 extra 段恒空。
+    assert spec.extra_prompt_sections == ()
+    cs = spec.chunked_birth
+    assert cs is not None
+    assert cs.target_path == t8f.FLUID_ENTRYPOINT
+    assert cs.chunk_count == 6
+    assert len(cs.chunk_titles) == 6 and len(cs.chunk_boundaries) == 6
+    titles = [t for t, _ in cs.per_call_sections]
+    assert titles == ["Task8 Q5 流体拆块出生合同", "已批准 macro 提案"]
+    body = cs.per_call_sections[0][1]
     assert t8f.FLUID_ENTRYPOINT in body
-    assert '"old":""' in body.replace(" ", "")  # 单次 JSON 补丁出生语义
+    assert "simpraxis.chunk.v1" in body        # sentinel 围栏交付协议
+    assert '"old":""' in body.replace(" ", "")  # 拼接后单补丁出生语义
     assert "0.85" in body and "trajectory.npz" in body
     assert "outcome=sph_ok" in body  # Stage0 事实嵌入合同
-    assert "Q5 厨房倒水最小闭环" in spec.extra_prompt_sections[1][1]
+    assert "Q5 厨房倒水最小闭环" in cs.per_call_sections[1][1]
     # 环境：Genesis/EGL 正确性开关 + 持久缓存 HOME（大文件只落 /mnt）
     assert spec.env_extra["GS_ENABLE_ZEROCOPY"] == "0"
     assert spec.env_extra["PYOPENGL_PLATFORM"] == "egl"
@@ -271,6 +279,7 @@ def test_factory_recycle_mode_no_contract(tmp_path, monkeypatch):
     factory = t8f.make_spec_factory(THREAD, "b-code")
     spec = factory(state)
     assert spec.extra_prompt_sections == ()
+    assert spec.chunked_birth is None
     # 回收件经 stage 落进 workdir：cmd 指向 workdir 内同名入口（出生/回收
     # 两态 cmd 相同，回收态不再注入出生合同）；cmd[0] 仍是 venv 解释器
     assert Path(spec.cmd[1]).name == t8f.FLUID_ENTRYPOINT
@@ -324,6 +333,8 @@ def test_factory_reentry_skips_contract(tmp_path, monkeypatch):
     state2 = dict(state, agent_runs=[{"status": "failed"}])
     spec2 = factory(state2)
     assert spec2.extra_prompt_sections == ()
+    # 攢批93：已出生后的修补轮同样不得挂拆块规格（runner 按磁盘现状选路）。
+    assert spec2.chunked_birth is None
 
 
 def test_factory_d5_degraded_zero_spec(tmp_path, monkeypatch):
@@ -725,6 +736,39 @@ def test_prompts_birth_contract_and_facts():
         "settling_window_s": 0.5})
     assert "outcome=sph_ok" in facts and "Weird.Liquid" in facts
     assert "A800" in facts and "genesis=1.3.3" in facts
+
+
+def test_prompts_chunk_contract_keeps_machine_requirements():
+    """攢批93：拆块版合同与单次版共享机检要求正文（防两版分叉）。"""
+    from orchestrator.graph import task8_fluid_prompts as prompts
+    kwargs = dict(
+        script_name="genesis_fluid_pour.py",
+        cmd_line="/mnt/venvs/simpraxis/bin/python genesis_fluid_pour.py",
+        stage0_facts_text="outcome=sph_ok",
+        particle_cap=20000, vram_abort_gb=35.0, max_reductions=2,
+        settling_window_s=0.5, cup_entry_target=0.85)
+    single = prompts.stage_birth_contract(**kwargs)
+    chunk = prompts.chunk_birth_contract(n_chunks=6, **kwargs)
+    # 导语不同（交付协议），导语之后的机检要求逐字同一份。
+    assert single.split("\n\n", 1)[1] == chunk.split("\n\n", 1)[1]
+    # 拆块版导语含围栏协议与 n=6、old 空串补丁语义。
+    head = chunk.split("\n\n", 1)[0]
+    assert "simpraxis.chunk.v1" in head and "6 个顺序调用" in head
+    assert '"old":""' in head.replace(" ", "")
+
+
+def test_fluid_chunk_titles_and_boundaries_frozen_shape():
+    """n=6 工厂规格：六标题/六边界等长非空、下标 fail-loud、边界互不重复。"""
+    from orchestrator.graph import task8_fluid_chunks as fc
+    assert fc.FLUID_CHUNK_COUNT == 6
+    assert len(fc.FLUID_CHUNK_TITLES) == 6
+    assert all(t.strip() for t in fc.FLUID_CHUNK_TITLES)
+    boundaries = tuple(fc.build_chunk_boundary(i) for i in range(6))
+    assert len(boundaries) == 6 and all("行数预算" in b for b in boundaries)
+    assert len(set(boundaries)) == 6
+    for bad in (-1, 6, True, False, "0"):
+        with pytest.raises(ValueError):
+            fc.build_chunk_boundary(bad)
 
 
 # ---------------------------------------------------------------------------

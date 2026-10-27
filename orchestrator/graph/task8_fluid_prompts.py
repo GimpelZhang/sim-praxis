@@ -5,13 +5,21 @@
 （零网络/零付费/零文件系统访问——stage0_facts_text 只吃 gate1_proposal
 已装载的机器事实）。
 
-出生语义（与 task7 libero 同构、task6 V2 家法、拆块改单次）：
+出生语义（与 task7 libero 同构、task6 V2 家法）：
 ``make_spec_factory`` 在方案尚未回收进 KB 内容层
 （``solutions_root()/track2_questions/03_kitchen_pour`` 不存在）时，cmd 指向
 出生时不存在的 ``genesis_fluid_pour.py``，首次 exec 必然「文件不存在」失败；
-coding 环按下方合同以单次 JSON 补丁（``old=""``）在付费 workdir 出生脚本——
-引擎仓/KB 仓在 Gate2 回收前都不持有该文件。回收后同工厂走 resolve+stage
-逐件 sha256 路径，合同不再注入。
+coding 环按合同在付费 workdir 出生脚本——引擎仓/KB 仓在 Gate2 回收前都不
+持有该文件。回收后同工厂走 resolve+stage 逐件 sha256 路径，合同不再注入。
+
+交付通道（攢批93，2026-10-27，T8-D2 账外取证后的锁内适配）：kimi-k3.1-pro
+在方舟 anthropic-messages shim 上对完整出生合同单次出活结构性不可行
+（probe E：thinking disabled+temp0.6 下 605.1s/126682 字规划独白走 text
+通道/stop=max_tokens，补丁未开始即截断；同源 probe B 默认形态 792s/0 正文）。
+故出生态固定走 runner n=6 拆块通道（``chunk_birth_contract`` +
+``task8_fluid_chunks`` 六标题/六边界），与 Task6 V2 run4 家法同形；
+``stage_birth_contract``（单次 JSON 补丁版）保留为契约文本与测试冻结件，
+工厂不再注入。两版共享 ``_requirement_blocks``，机检要求逐字同一份。
 
 85% 入杯语义（计划 L604-606，逐字进合同）：末 0.5s 沉降窗逐帧中位；严格
 几何 r < inner_radius 且 bottom_z < z < rim_z（贴壁/贴底/贴口不入杯）；
@@ -47,24 +55,36 @@ def _results_contract_json() -> str:
     return json.dumps(example, ensure_ascii=False, indent=2)
 
 
-def stage_birth_contract(*, script_name: str, cmd_line: str,
-                         stage0_facts_text: str,
-                         particle_cap: int, vram_abort_gb: float,
-                         max_reductions: int, settling_window_s: float,
-                         cup_entry_target: float) -> str:
-    """Stage1 出生合同正文（extra_prompt_sections 的 body）。
-
-    机检规则全部可被引擎侧复验（validate_wj_fluid_report / 组装器
-    fail-closed）：任何一条不符 → evaluate GraphStateError → 线程
-    human_failure 结案，出生脚本无第二次机会——故合同把每个必写产物与
-    每个字段界都写死。数值参数由工厂从探针单点常量传入（本模块零依赖）。
-    """
+def _single_patch_intro(script_name: str, cmd_line: str) -> str:
+    """单次 JSON 补丁交付导语（冻结件；工厂出生态自攢批93 起改走拆块版）。"""
     return f"""\
 本工作目录将出生 `{script_name}`（Q5 厨房倒水流固耦合，Genesis 粒子流体）。
 命令行已被外层固定：`{cmd_line}`。
 用一次 JSON 补丁创建该文件：`{{"patches":[{{"path":"{script_name}","old":"","new":"<完整源码>"}}]}}`
-（old 空串=新文件出生；path 是相对本工作目录的字面名）。
+（old 空串=新文件出生；path 是相对本工作目录的字面名）。"""
 
+
+def _chunk_intro(script_name: str, cmd_line: str, n_chunks: int) -> str:
+    """拆块交付导语（攢批93）：交付协议改 sentinel 围栏，机检要求不变。"""
+    return f"""\
+本工作目录将出生 `{script_name}`（Q5 厨房倒水流固耦合，Genesis 粒子流体）。
+命令行已被外层固定：`{cmd_line}`。
+完整源码由 {n_chunks} 个顺序调用拆块出生：你每次只输出《拆块交付》段分配给
+本块的 Python 原文，严格按该段 <<<<<<< simpraxis.chunk.v1 围栏三段结构
+（首行起始围栏、中间多行 Python 原文零转义、末行结束围栏；禁止 JSON、
+禁止 markdown 代码围栏、围栏外禁止任何解释或思考独白——起始围栏之前出现
+任何正文即本机校验失败）。引擎本地按序拼接六块后，以单个
+{{"patches":[{{"path":"{script_name}","old":"","new":<拼接后的完整源码>"}}]}}
+补丁（old 必须是空串）创建文件；以下机检要求针对拼接后的完整文件逐条生效，
+任何一条不符整线程结案。"""
+
+
+def _requirement_blocks(*, stage0_facts_text: str,
+                        particle_cap: int, vram_abort_gb: float,
+                        max_reductions: int, settling_window_s: float,
+                        cup_entry_target: float) -> str:
+    """单次/拆块两版合同共享的机检要求正文（唯一来源，禁止分叉）。"""
+    return f"""\
 ## 运行环境（已由引擎注入，勿改）
 - 解释器是共享 venv（genesis-world 1.3.3 / torch 2.4.1+cu124 已装）；
 - GS_ENABLE_ZEROCOPY=0（默认 zerocopy 路径 int32 gather 抛错的必需正确性开关）、
@@ -119,6 +139,48 @@ def stage_birth_contract(*, script_name: str, cmd_line: str,
 - 目标：入杯率中位数 ≥ {cup_entry_target}；守恒机判（总数恒定/边界
   溢出 ≤2%/末帧入杯 ≥80%）由引擎三查；
 - 视频与 results/trajectory 必须同一次运行产出（禁止复用旧片/旧轨迹）。"""
+
+
+def stage_birth_contract(*, script_name: str, cmd_line: str,
+                         stage0_facts_text: str,
+                         particle_cap: int, vram_abort_gb: float,
+                         max_reductions: int, settling_window_s: float,
+                         cup_entry_target: float) -> str:
+    """Stage1 出生合同正文·单次 JSON 补丁版（冻结件；工厂出生态走拆块版）。
+
+    机检规则全部可被引擎侧复验（validate_wj_fluid_report / 组装器
+    fail-closed）：任何一条不符 → evaluate GraphStateError → 线程
+    human_failure 结案，出生脚本无第二次机会——故合同把每个必写产物与
+    每个字段界都写死。数值参数由工厂从探针单点常量传入（本模块零依赖）。
+    """
+    return _single_patch_intro(script_name, cmd_line) + "\n\n" + \
+        _requirement_blocks(
+            stage0_facts_text=stage0_facts_text,
+            particle_cap=particle_cap, vram_abort_gb=vram_abort_gb,
+            max_reductions=max_reductions,
+            settling_window_s=settling_window_s,
+            cup_entry_target=cup_entry_target)
+
+
+def chunk_birth_contract(*, script_name: str, cmd_line: str,
+                         stage0_facts_text: str,
+                         particle_cap: int, vram_abort_gb: float,
+                         max_reductions: int, settling_window_s: float,
+                         cup_entry_target: float,
+                         n_chunks: int = 6) -> str:
+    """Stage1 出生合同正文·n 拆块版（攢批93 起工厂出生态注入此版）。
+
+    导语改 sentinel 围栏交付协议（runner._extract_chunk 解析），机检要求
+    与单次版逐字共享 _requirement_blocks——任何分叉都可能让模型面与机判
+    口径漂移。
+    """
+    return _chunk_intro(script_name, cmd_line, n_chunks) + "\n\n" + \
+        _requirement_blocks(
+            stage0_facts_text=stage0_facts_text,
+            particle_cap=particle_cap, vram_abort_gb=vram_abort_gb,
+            max_reductions=max_reductions,
+            settling_window_s=settling_window_s,
+            cup_entry_target=cup_entry_target)
 
 
 def stage0_facts_text(proposal: dict) -> str:

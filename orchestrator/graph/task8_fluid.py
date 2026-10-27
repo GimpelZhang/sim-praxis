@@ -51,9 +51,10 @@ from typing import Any, Callable
 
 import numpy as np
 
-from orchestrator.agent_runner.runner import RunSpec
+from orchestrator.agent_runner.runner import ChunkSpec, RunSpec
 from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.common.runtime_paths import phase2_runs_root
+from orchestrator.graph import task8_fluid_chunks as fchunks
 from orchestrator.graph import task8_fluid_prompts as prompts
 from orchestrator.graph.nodes import GraphStateError
 from orchestrator.graph.task8 import VENV_PY
@@ -507,8 +508,10 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
 
     三层分离闸：内容层尚无 ``track2_questions/03_kitchen_pour``（Gate2 后才
     回收）时走**出生态**——cmd 指向出生时不存在的入口文件，首次 exec 必然
-    「文件不存在」失败，coding 环按 ``stage_birth_contract`` 以单 JSON 补丁
-    出生脚本；回收后自动切 resolve+stage 逐件 sha256 态（清单损坏
+    「文件不存在」失败，coding 环按 ``chunk_birth_contract`` 以 runner n=6
+    sentinel 围栏拆块通道出生脚本（攢批93，T8-D2 取证：kimi-k3.1-pro 单次
+    出生 probe E 605.1s/126682 字独白截断，六块家法镜像 Task6 V2 run4）；
+    回收后自动切 resolve+stage 逐件 sha256 态（清单损坏
     SolutionError 包成 GraphStateError fail-closed，**绝不**回退出生把损坏
     当不存在）。
 
@@ -565,24 +568,37 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             "GS_ENABLE_ZEROCOPY": "0",
             "PYOPENGL_PLATFORM": "egl",
         }
-        extra: tuple[tuple[str, str], ...] = ()
+        # 攢批93（T8-D2 账外取证后的锁内适配，2026-10-27）：出生态固定挂
+        # runner n=6 拆块出生规格（sentinel 围栏，task6 V2 run4 家法）。
+        # kimi-k3.1-pro 对完整流体出生合同单次出活结构性不可行（probe E：
+        # thinking disabled+temp0.6 下 605.1s/126682 字规划独白走 text 通道、
+        # stop=max_tokens 截断）；n/标题/边界在 task8_fluid_chunks 起飞前
+        # 冻结。同 run 重入（文件已出生）不挂 spec，修补轮回单补丁通道；
+        # Gate2 打回后的新 run 目录 target 仍 absent → 重新挂六块规格。
+        chunked = None
         if birth and not target.exists():
-            # 仅首次出生注入合同；同 run 重入（文件已出生）不再注入，避免
-            # coding 环拿到「再建一遍」的误导指令（old="" 补丁对已存在文件
-            # 会 mismatch 失败）。
-            extra = (
-                ("Task8 Q5 流体出生合同",
-                 prompts.stage_birth_contract(
-                     script_name=FLUID_ENTRYPOINT,
-                     cmd_line=" ".join(contract.cmd),
-                     stage0_facts_text=prompts.stage0_facts_text(proposal),
-                     particle_cap=PARTICLE_CAP,
-                     vram_abort_gb=VRAM_ABORT_GB,
-                     max_reductions=MAX_REDUCTIONS,
-                     settling_window_s=SETTLING_WINDOW_S,
-                     cup_entry_target=CUP_ENTRY_TARGET)),
-                ("已批准 macro 提案",
-                 json.dumps(state["chosen"], ensure_ascii=False, indent=2)),
+            chunked = ChunkSpec(
+                target_path=FLUID_ENTRYPOINT,
+                chunk_count=fchunks.FLUID_CHUNK_COUNT,
+                chunk_titles=fchunks.FLUID_CHUNK_TITLES,
+                per_call_sections=(
+                    ("Task8 Q5 流体拆块出生合同",
+                     prompts.chunk_birth_contract(
+                         script_name=FLUID_ENTRYPOINT,
+                         cmd_line=" ".join(contract.cmd),
+                         stage0_facts_text=prompts.stage0_facts_text(proposal),
+                         particle_cap=PARTICLE_CAP,
+                         vram_abort_gb=VRAM_ABORT_GB,
+                         max_reductions=MAX_REDUCTIONS,
+                         settling_window_s=SETTLING_WINDOW_S,
+                         cup_entry_target=CUP_ENTRY_TARGET,
+                         n_chunks=fchunks.FLUID_CHUNK_COUNT)),
+                    ("已批准 macro 提案",
+                     json.dumps(state["chosen"], ensure_ascii=False, indent=2)),
+                ),
+                chunk_boundaries=tuple(
+                    fchunks.build_chunk_boundary(i)
+                    for i in range(fchunks.FLUID_CHUNK_COUNT)),
             )
         return RunSpec(
             thread_id=thread_id,
@@ -603,7 +619,7 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             manifest_relpath=MANIFEST_NAME,
             coding_max_tokens=CODING_MAX_TOKENS,
             coding_timeout_s=CODING_TIMEOUT_S,
-            extra_prompt_sections=extra,
+            chunked_birth=chunked,
         )
 
     return factory
