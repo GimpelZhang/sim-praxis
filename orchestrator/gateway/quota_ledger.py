@@ -394,7 +394,15 @@ PHASE1_TASK_CAPS = {2: 14, 4: 8, 5: 6, 7: 14, 8: 14, 9: 4}
 # 全局 285 余 5（290-285），故 task7 52→60 只解锁任务门、全局门仍是真瓶颈：
 # 下一批 T7-C9 至多 5（285+5=290 恰顶）。抬顶为窗口拖长留任务门余量，
 # 非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动。
-PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 68, 8: 16}   # 2026-10-27 第二十四次自批 task7 60→68
+# Task7 2026-10-27 r25 重生修复环第二十五次自批（HARD_CAP 310 不动）：攢批82
+# 倒带重生后 r25 round1 一次生出 servo 合同脚本（seq299），round2 整文件重生成
+# 撞 32768 输出顶被截断（transport reject），round3 围栏整替修好 BDDL goal 解析
+# （大写 On 谓词，seq301 applied）；exec2 跑出 7.3MB 视频后崩（无 results.json）
+# → round4 preflight 撞 T7-C11 8/8 批次熔断（preflight_blocked seq=null，
+# schema v2 pause 已写）。账实 int-seq 301/task7 67/T7-C11 8/8。续窗票
+# T7-C12（coding 8 beyond_normal）：task7 67+8=75≤76、全局 301+8=309≤310。
+# 非模型变更、硬规则 1 不触发；NORMAL_BUDGET 60、4/6/8 任务顶不动。
+PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 76, 8: 16}   # 2026-10-27 第二十五次自批 task7 68→76
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。

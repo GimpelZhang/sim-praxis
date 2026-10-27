@@ -216,4 +216,51 @@ def stage0_facts_text(proposal: dict) -> str:
         "更稳兜底：直接取 obj_of_interest 两名字配对。**禁止小写 (on 正则**"
         "（零命中即 RuntimeError 全崩，r25 round1 实证死因）；解析失败也要先"
         "构造 env 再逐任务兜底，禁止在 env 构造前因单任务 goal 解析崩掉全脚本。",
+        # —— r25 exec2 实证（2026-10-27，攢批84，锁内适配）：重生脚本 BDDL 修复后
+        # 容器 exec 真跑全套 10 任务，task8 处崩 "resource not found …
+        # link0_vis_2.obj"——文件在场（752808B ls 铁证），真因 = 默认
+        # RLIMIT_NOFILE=1024 下多 env EGL 套件在第 8 个 env 构造耗尽 fd（EMFILE），
+        # OS open() 失败被 mujoco 包装成 resource not found。0 付费 A/B：默认
+        # ulimit 崩 task8；`ulimit -n 65535`（hard 524288）全套 RC=0 五件产物齐。
+        # 以下为该 A/B 机器真值：
+        "  - **fd rlimit 真值（r25 exec2 A/B 定罪，2026-10-27）**：多任务 EGL "
+        "套件默认 RLIMIT_NOFILE=1024 会在约第 8 个 env 构造耗尽 fd，OS open() "
+        "失败被 mujoco 误报为 \"resource not found … <某 .obj>\"（文件其实在场）"
+        "——见此报错先怀疑 fd 耗尽而非缺文件。**脚本开头必须**："
+        "`import resource; resource.setrlimit(resource.RLIMIT_NOFILE, "
+        "(65535, resource.getrlimit(resource.RLIMIT_NOFILE)[1]))`。"
+        "A/B 机器证据：默认 ulimit 在 task8 崩；setrlimit 65535 后全套 10 任务 "
+        "RC=0（results/telemetry/video/cover/manifest 五件齐）。",
+        # —— 攢批84 十探收官（2026-10-27，0 付费探针机器真值）：init_states[0]
+        # 口径下 task0（黑碗→盘）全链机器验证 check_success=true。以下配方
+        # 每个数字都来自探针 JSON（probe_axis_push / probe_full_chain /
+        # probe_trail_place），非猜测。注入目的是让模型跳过几何摸索直写
+        # 可运行控制器，把付费轮次花在多任务泛化与修复上。
+        "  - **task0 init 几何真值（0 付费探针，2026-10-27）**：set_init_state"
+        "(init_states[0]) 后 akita_black_bowl_1 `_pos` 是**碗中心**（不是顶面），"
+        "中心 z≈0.898≈桌面 0.90；碗外半径 outer_r=0.056、rim_z≈0.951；"
+        "eef 原点到指尖 finger_drop=0.012（闭合态指尖 z = eef_z − 0.012）。"
+        "panda 两指 spread 轴初始沿 ±y（atan2 轴角 ≈ π/2）——**径向抓碗沿前"
+        "必须先绕 z 转腕把指轴对到 0**，否则壁不在两指间（深咬/浅咬都闭成"
+        "空爪 [0.011,-0.011] 或滑脱 [0.017,-0.017]）。",
+        "  - **抓取配方（机器验证 lifted=true、obj_rise=0.096）**：①沉降 10 步"
+        "（a[6]=-1）；②hover 至 [bowl_c+[0.056,0], bowl_c.z+0.16] 80 步；"
+        "③空中绕 z 对齐指轴 60 步：指轴角 = atan2(两 finger geom 世界位置差 "
+        "y, x)，误差按 π 周期包装 e=(ang+π/2)%π−π/2，a[5]=clip(−2e, ±0.5)、"
+        "a[6]=−1；④垂直下探至 [bowl_c+[0.056,0], 0.925] 60 步（指尖≈0.913，"
+        "壁重叠 ~3cm）；⑤闭爪 15 步——**闭后 qpos ≈ [0.005,-0.005] = 壁已咬住**"
+        "[0.011,-0.011]=空爪须回上一步重对 [0.017,-0.017]=浅咬会滑；"
+        "⑥保持闭爪抬升 +0.10/50 步（gripper=+1）→ 碗随爪升 0.096。",
+        "  - **放置配方（机器验证 check_success=true，xy_err=0.0095）**：碗垂爪下"
+        "沿 approach 轴拖尾 ~0.047（实测 trail=eef_xy−bowl_xy），**指令 eef = "
+        "plate_xy + trail 把碗而不是爪送到盘心**；分轴运输（先 x 后 y，各带 "
+        "30 步闭爪沉降杀摆动）；反应式下放：每步降 4mm，bowl_z−plate_z ≤ 0.012 "
+        "立即开爪与 eef 上提 +0.06/25 步**同步**（指竖直退出）。**反例禁令**："
+        "触盘后仍闭爪夹持会被残余伺服以触地点为轴把碗撬偏 ~2.4cm；开爪时指"
+        "横扫会把碗再踢 ~5cm——两者都是 check_success=false 死因（八/九探实证）。",
+        "  - **mj_ray 测距 API（robosuite 下）**：必须用原始指针 "
+        "env.sim.model._model / env.sim.data._data（binding_utils 包装对象会 "
+        "pybind 类型拒绝）；geomgroup 必须传 np.ones(6, dtype=np.uint8)（None "
+        "被拒）；碗 MuJoCo body 名是 akita_black_bowl_1_main（带 _main 后缀），"
+        "按 geom_bodyid 过滤邻物。",
     ])

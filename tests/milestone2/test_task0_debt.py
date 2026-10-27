@@ -971,11 +971,11 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 68, 8: 16}
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 76, 8: 16}
     # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批）；
-    # task=4 仍为 24（覆盖 Phase 1 的 8）；task=7 当前顶 68（第二十四次自批
-    # 60→68，2026-10-27 修复环续窗，run2k T7-C10 3/3 后 task7 触 60 即不可恢复）；
-    # 8 不动。
+    # task=4 仍为 24（覆盖 Phase 1 的 8）；task=7 当前顶 76（第二十五次自批
+    # 68→76，2026-10-27 r25 重生修复环续窗，T7-C11 8/8 熔断后续窗票 T7-C12
+    # 67+8=75≤76）；8 不动。
     assert TASK_HARD_CAPS[6] == 227
     assert TASK_HARD_CAPS[6] != 212           # 十六次旧顶随第十七次提顶下线
     assert TASK_HARD_CAPS[6] != 197           # 十五次旧顶随第十六次提顶下线
@@ -987,7 +987,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
-    assert TASK_HARD_CAPS[7] == 68 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] == 76 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] != 68            # 二十四次旧 task7 顶随第二十五次下线
     assert TASK_HARD_CAPS[7] != 60            # 二十二次旧 task7 顶随第二十四次下线
     assert TASK_HARD_CAPS[7] != 52            # 二十一次旧 task7 顶随第二十二次下线
     assert TASK_HARD_CAPS[7] != 44            # 二十次旧 task7 顶随第二十一次下线
@@ -1025,9 +1026,20 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # r23 T7-C10 三连 ok=291/292/293，seq293 applied 补丁脚本 12894→21052B；
     # r23 亡于 T7-C10 3/3 batch pause，非断流）。task7 触 60 即 task_hard_cap
     # 不可恢复（G-11），故先抬顶再续。续窗票 T7-C11（coding 8）。三门：全局
-    # 293+8=301≤310 余 9、task7 59+8=67≤68 余 1、批次 0+8 恰顶。
+    # 293+8=301≤310 余 9、task7 59+8=67≤76 余 10、批次 0+8 恰顶。
     assert 293 + 8 <= HARD_CAP == 310
-    assert 59 + 8 <= TASK_HARD_CAPS[7] == 68
+    assert 59 + 8 <= TASK_HARD_CAPS[7] == 76
+    # Task7 Stage1 r25 重生修复环续窗信封算术（第二十五次自批，task7 68→76，
+    # HARD_CAP 310 不动）：攢批82 倒带重生 r25——seq299 round1 一次生出 servo
+    # 合同脚本、round2 整文件重生成撞 32768 输出顶 transport reject、round3
+    # 围栏修好 BDDL goal 解析（seq301 applied）；exec2 跑 7.3MB 视频后 task8
+    # env 构造撞 MuJoCo "resource not found link0_vis_2.obj"（文件实存，真因
+    # =默认 RLIMIT_NOFILE=1024 fd 耗尽，0 付费容器 ulimit -n 65535 复现全套
+    # RC=0 五件套）。round4 preflight 撞 T7-C11 8/8 batch pause。账实
+    # int-seq 301/task7 67。续窗票 T7-C12（coding 8）。三门：全局
+    # 301+8=309≤310 余 1、task7 67+8=75≤76 余 1、批次 0+8 恰顶。
+    assert 301 + 8 <= HARD_CAP == 310
+    assert 67 + 8 <= TASK_HARD_CAPS[7] == 76
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
