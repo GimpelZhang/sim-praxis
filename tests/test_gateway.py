@@ -8,7 +8,10 @@ redact（test 15 含 n1 大写形态）+ 16 m9 信封 type/code 优先的瞬时�
 """
 import base64
 import json
+import signal
 import struct
+import threading
+import time
 import types
 
 import pytest
@@ -785,3 +788,124 @@ def test_g13_constructor_requires_ledger_or_explicit_unguarded(tmp_path):
         R.ModelGateway(stage_models_path=map_path, ledger=None)
     gw = R.ModelGateway(stage_models_path=map_path, unguarded=True)
     assert gw._billing is None
+
+
+# ---------- 攢批91：单次尝试硬墙钟（seq313 代理 slowloris 挂死取证） ----------
+
+def _ok_response():
+    return types.SimpleNamespace(
+        choices=[types.SimpleNamespace(
+            message=types.SimpleNamespace(content="ok"))],
+        model="anthropic/kimi-k3.1-pro",
+        usage=types.SimpleNamespace(input_tokens=3, output_tokens=1))
+
+
+def test_hard_deadline_aborts_stalled_read(tmp_path):
+    """SIGALRM 硬墙钟在 timeout 秒截断永不返回的 completion（哪怕 per-read 被重置）。"""
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def stall(**kw):
+        time.sleep(30)  # 模拟 ssl.read 被代理后零散字节无限续命
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        max_attempts=2, base_backoff=0.01,
+                        sleep=lambda s: None, transport=stall)
+    t0 = time.monotonic()
+    with pytest.raises(R.GatewayError) as ei:
+        gw.call("coding_debug",
+                [{"role": "user", "content": "hi"}], timeout=1)
+    dt = time.monotonic() - t0
+    # 两次尝试各 ≤ ~1s + 零退避，绝不能逼近 sleep(30)
+    assert dt < 5.0, dt
+    assert isinstance(ei.value.__cause__, R.HardDeadlineTimeout)
+    # 告警必须撤防：不残留 itimer
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_hard_deadline_retries_then_succeeds(tmp_path):
+    """硬墙钟截断后走既有 5xx 退避重试，后续尝试成功。"""
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+    attempts = {"n": 0}
+
+    def flaky(**kw):
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            time.sleep(30)
+        return _ok_response()
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        max_attempts=5, base_backoff=0.01,
+                        sleep=lambda s: None, transport=flaky)
+    t0 = time.monotonic()
+    text, usage = gw.call("coding_debug",
+                          [{"role": "user", "content": "hi"}], timeout=1)
+    dt = time.monotonic() - t0
+    assert text == "ok" and usage == (3, 1)
+    assert attempts["n"] == 3
+    assert dt < 6.0, dt
+    assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+
+def test_hard_deadline_restores_prior_signal_handler(tmp_path):
+    """成功/失败两路都还原调用方既有 SIGALRM 处理器，不残留 itimer。"""
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def _prior(signum, frame):  # noqa: ARG001
+        pass
+
+    gw_ok = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                           max_attempts=1, transport=lambda **kw: _ok_response())
+    old = signal.signal(signal.SIGALRM, _prior)
+    try:
+        assert gw_ok.call("coding_debug",
+                          [{"role": "user", "content": "hi"}], timeout=2)[0] == "ok"
+        assert signal.getsignal(signal.SIGALRM) is _prior
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+
+        def boom(**kw):
+            time.sleep(30)
+
+        gw_bad = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                                max_attempts=1, sleep=lambda s: None,
+                                transport=boom)
+        with pytest.raises(R.GatewayError):
+            gw_bad.call("coding_debug",
+                        [{"role": "user", "content": "hi"}], timeout=1)
+        assert signal.getsignal(signal.SIGALRM) is _prior
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    finally:
+        signal.signal(signal.SIGALRM, old)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
+def test_hard_deadline_noop_off_main_thread(tmp_path):
+    """非主线程无 SIGALRM 投递：降级为仅 litellm per-read，调用不被误杀。"""
+    map_path = tmp_path / "stage_models.yaml"
+    _write_map(map_path)
+
+    def slow_ok(**kw):
+        time.sleep(0.8)  # 长于传入 timeout=1? 否——故意超过 0.3 证明非主线程不告警
+        return _ok_response()
+
+    gw = R.ModelGateway(unguarded=True, stage_models_path=map_path,
+                        max_attempts=1, transport=slow_ok)
+    out = {}
+
+    def worker():
+        try:
+            out["v"] = gw.call("coding_debug",
+                               [{"role": "user", "content": "hi"}], timeout=0.3)
+        except Exception as exc:  # noqa: BLE001
+            out["e"] = exc
+
+    t = threading.Thread(target=worker)
+    t0 = time.monotonic()
+    t.start(); t.join(5.0)
+    dt = time.monotonic() - t0
+    assert not t.is_alive()
+    assert "e" not in out, out.get("e")
+    assert out["v"][0] == "ok"
+    assert dt >= 0.75, dt  # sleep(0.8) 完整跑完，没有 0.3s 告警截断

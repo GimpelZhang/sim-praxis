@@ -56,12 +56,15 @@ from __future__ import annotations
 import base64
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import os
 import random
 import re
+import signal
 import struct
 import sys
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -216,6 +219,24 @@ class EmptyResponseError(GatewayError):
     """HTTP 200 但正文为空（content 缺失/仅 thinking，G-12）：重试耗尽后显式失败，
     禁止按 ok=true 记账。关联 2026-10-16 test_04 空答事故（空答诱发额外实呼而
     上一轮账行显示成功，事后无法识别）。"""
+
+
+class HardDeadlineTimeout(GatewayError):
+    """单次尝试硬墙钟超时（攢批91，Task8 fluid 战役 seq313 取证）。
+
+    litellm/httpx 的 timeout 是**每次读操作**（read syscall）的截止：
+    2026-10-27 seq313 coding 实呼（kimi-k3.1-pro，timeout=600 透传经 py-spy
+    与黑盒探针双重确认）在 quickqservice :10900 代理后单次尝试挂死约 50 分钟，
+    直到对端 TCP 关闭才以 "Server disconnected without sending a response"
+    收尾——响应头未完整期间持续有零散字节到达时，每次成功 recv 都会把
+    per-read 计时器重置，600s 墙钟永不触发（slowloris 类）。
+    黑盒探针实证（/mnt/artifacts/simpraxis/phase2/task8_diag/，litellm 1.99.4
+    /httpcore 1.0.9/httpx 0.28.1）：完全静默（直连与 CONNECT 代理 TLS 各 5/5）
+    时 10.0s 精确触发；故补充一条与读活动无关的**整次尝试**墙钟，SIGALRM
+    直接在阻塞帧抛错（httpcore finally 照常关连接）。非主线程（生产 CLI
+    恒为主线程）无 SIGALRM 可用时降级为仅 per-read，不改变既有语义。
+    litellm anthropic 层会把它包成 AnthropicError(500) → InternalServerError，
+    走既有 5xx 退避重试，账本语义不变。"""
 
 
 # ---- 配额长熔断状态（与 v3 同契约，alias 字段改名 stage） ----
@@ -774,6 +795,36 @@ class ModelGateway:
         # 对外契约保持 (input, output) 二元组；cache 两列只入账不透出。
         return content, (usage[0], usage[1])
 
+    @contextmanager
+    def _hard_deadline(self, seconds: int, stage: str):
+        """单次尝试硬墙钟（攢批91，seq313 取证，详见 HardDeadlineTimeout 文档串）。
+
+        SIGALRM/setitimer 仅进程内可用且只在主线程投递；生产 CLI 的
+        graph.invoke 恒在主线程。非主线程静默降级（litellm per-read timeout
+        仍在），测试线程路径不被误杀。成功/异常两路都撤防并还原旧处理器，
+        告警期间不包裹退避 sleep（只包裹 completion 实呼本身）。
+        """
+        armed = (hasattr(signal, "SIGALRM")
+                 and threading.current_thread() is threading.main_thread()
+                 and seconds and seconds > 0)
+        if not armed:
+            yield
+            return
+        def _handler(signum, frame):  # noqa: ARG001
+            raise HardDeadlineTimeout(
+                f"stage={stage} 单次尝试硬墙钟 {seconds}s 到点（响应头未完整"
+                "但持续有零散字节，per-read timeout 被重置；攢批91 seq313）")
+        prev_handler = signal.signal(signal.SIGALRM, _handler)
+        prev_timer = signal.setitimer(signal.ITIMER_REAL, float(seconds))
+        try:
+            yield
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+            signal.signal(signal.SIGALRM, prev_handler)
+            # 还原调用方既有的定时器（正常路径 prev_timer=(0,0)）
+            if prev_timer[0] > 0:
+                signal.setitimer(signal.ITIMER_REAL, prev_timer[0], prev_timer[1])
+
     def _chat_loop(self, *, stage: str, model_id: str, token: str, base_url: str,
                    completion: Callable[..., Any], messages: list[dict[str, Any]],
                    max_tokens: int, temperature: float, timeout: int
@@ -786,15 +837,19 @@ class ModelGateway:
                 # D-8（A12 thinking 收口）：Task6 prompt-cache/thinking 诊断完成前，
                 # 两条传输路径一律不传 thinking 参数（Ark 浮动别名曾吃光输出预算，
                 # 见 test_04 事故）；开启时机与诊断证据见 Phase 2 计划 Task6。
-                resp = completion(
-                    model=f"anthropic/{model_id}",
-                    api_base=base_url,
-                    api_key=token,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=timeout,
-                )
+                # 攢批91：litellm 的 timeout= 只管单次 recv，代理后 slowloris 类
+                # 零散字节可无限重置它（seq313 挂死 50 分钟）；外套与读活动无关的
+                # 单次尝试硬墙钟（=timeout 秒；健康慢调用不受影响，边界与原语义一致）。
+                with self._hard_deadline(timeout, stage):
+                    resp = completion(
+                        model=f"anthropic/{model_id}",
+                        api_base=base_url,
+                        api_key=token,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        timeout=timeout,
+                    )
                 content = _litellm_text(resp)
                 # G-12：HTTP 200 但 content 为空（空串/仅 thinking block）不得记成功。
                 # 关联 2026-10-16 test_04 空回答事故：max_tokens=8 实呼返回空 content
@@ -841,7 +896,7 @@ class ModelGateway:
                 wait_total += wait
                 attempt += 1
             except (ServiceUnavailableError, InternalServerError, LiteLLMTimeout,
-                    APIConnectionError) as exc:
+                    APIConnectionError, HardDeadlineTimeout) as exc:
                 if attempt + 1 >= self.max_attempts:
                     raise GatewayError(f"{type(exc).__name__} 重试 {self.max_attempts} 次仍失败："
                                        f"{_error_text(exc)}") from exc
