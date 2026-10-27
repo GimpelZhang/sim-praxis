@@ -51,7 +51,8 @@ from typing import Any, Callable
 
 import numpy as np
 
-from orchestrator.agent_runner.runner import ChunkSpec, RunSpec
+from orchestrator.agent_runner.runner import (
+    ChunkSpec, CodingRecallSpec, RunSpec)
 from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.common.runtime_paths import phase2_runs_root
 from orchestrator.graph import task8_fluid_chunks as fchunks
@@ -172,6 +173,20 @@ _FORBIDDEN_DERIVED = (
 # 出生合同 coding 单次上限（task6 V2 / task7 libero CODING_* 同值家法）。
 CODING_MAX_TOKENS = 32768
 CODING_TIMEOUT_S = 600
+
+# 攢批94（锁内适配，2026-10-27 活库实测冻结，0 付费；取证脚本
+# phase2/task8_diag/recall_probe/probe94.py）：coding 站增补 capabilities
+# 检索路的查询串。run1–7 实测 coding 站只查 troubleshooting（top_k=6），
+# Genesis SPH API 金块 genesis_world/code_knowledge.md §3.5（stage4 三多
+# 物理场 demo 共用骨架：SPH.Liquid rho/stiffness/exponent/mu/gamma/sampler、
+# morphs.Box、SPH_DT=4e-4/28 substeps、LegacyCouplerOptions、Plastic 表面）
+# 永不可达。该串活库 mpnet 实测把 §3.5 钉到 #0（§6.3/#2.2 随附）；纯英文/
+# code-token 查询只能到 #4 开外。任何改动必须重新跑取证脚本实测排名，禁止
+# 凭感觉改串（断言不许放水，硬规则 7）。
+FLUID_CAPABILITY_QUERY = (
+    "genesis glass_water_demo 玻璃杯盛水 水被撞倒 "
+    "SPH.Liquid 材料参数 sampler Box morph")
+FLUID_CAPABILITY_TOP_K = 3
 # 倒水 batch：容器内 GS init/编译 + 粒子仿真 + 渲染；沿 task8 BATCH_TIMEOUT_S
 # 家法 2400 s（coding 重跑每轮都是完整实跑）。
 STAGE1_RUN_TIMEOUT_S = 2400
@@ -620,6 +635,14 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             coding_max_tokens=CODING_MAX_TOKENS,
             coding_timeout_s=CODING_TIMEOUT_S,
             chunked_birth=chunked,
+            # 攢批94（2026-10-27 锁内适配）：coding 站增强召回——
+            # troubleshooting 查询改错误签名清洗 + capabilities API 金块
+            # 额外检索路（查询串活库实测冻结，见 FLUID_CAPABILITY_QUERY）。
+            coding_recall=CodingRecallSpec(
+                clean_troubleshooting_hint=True,
+                extra_kb=(("capabilities", FLUID_CAPABILITY_TOP_K,
+                           FLUID_CAPABILITY_QUERY),),
+            ),
         )
 
     return factory

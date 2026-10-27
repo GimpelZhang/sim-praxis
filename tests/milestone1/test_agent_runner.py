@@ -44,6 +44,8 @@ from orchestrator.agent_runner.runner import (
     ChunkBirthError,
     ChunkPromptContext,
     ChunkSpec,
+    CodingRecallSpec,
+    _clean_coding_hint,
     _ENTRY_GUARD_REASON,
     _FRAME_RE,
     _RC0_MISSING_ARTIFACT_FMT,
@@ -4807,3 +4809,138 @@ def test_v14_transport_probe_run_hermetic(tmp_path):
         call_cache=CallReplay(tmp_path / "cache3"))
     assert r3["status"] == "fail" and r3["judge"]["stage"] == "fence_parse"
     assert "玩具契约" in r3["honesty"]
+
+
+# ---------------------------------------------------------------------------
+# 攢批94（2026-10-27 Task8 流体锁内适配）：coding 站增强召回
+# ---------------------------------------------------------------------------
+
+class _Z94Vector:
+    """按 namespace 应答的合成向量库（0 触网），记录全部检索参数。"""
+
+    def __init__(self):
+        self.queries: list[dict] = []
+
+    def query_kb(self, query, *, namespace, top_k):
+        self.queries.append({"q": query, "namespace": namespace,
+                             "top_k": top_k})
+        if namespace == "capabilities":
+            return [{"text": "夹具 API 金块：gs.materials.SPH.Liquid(...)",
+                     "evidence_refs": ["Z94"],
+                     "kb_relpath":
+                         "knowledge/projects/genesis_world/code_knowledge.md",
+                     "section_path": "3.5"} for _ in range(top_k)]
+        return []
+
+
+def test_z94_clean_coding_hint_signature_and_noise():
+    """错误签名清洗：torch/litellm 警告与 Traceback 帧行剥离，异常行保留。"""
+    tail = (
+        '  warnings.warn("torch<2.8.0 is not supported. Please upgrade '
+        'pytorch manually")\n'
+        "LiteLLM:WARNING register_model: model=x not in built-in cost map\n"
+        "Traceback (most recent call last):\n"
+        '  File "/workspace/genesis_fluid_pour.py", line 210, in <module>\n'
+        "genesis.utils.exceptions.GenesisException: Scene is already built. "
+        "Entities must be added before scene.build()\n")
+    hint = _clean_coding_hint(tail)
+    assert hint.startswith("仿真失败 ")
+    assert "Scene is already built" in hint
+    assert "torch" not in hint and "LiteLLM" not in hint
+    assert "Traceback" not in hint and "File " not in hint
+    assert len(hint) <= 300
+
+
+def test_z94_clean_coding_hint_unwraps_quoted_message():
+    """GenesisException 元组形：取引号内真实错误消息。"""
+    tail = ("FAILURE: artifact_or_initialization_failure: "
+            "('liquid entity was already created', \"context: {'oom': False}\")\n")
+    hint = _clean_coding_hint(tail)
+    assert hint == "仿真失败 liquid entity was already created"
+
+
+def test_z94_clean_coding_hint_fallback_when_only_noise():
+    """全是噪声/空 tail：退回旧形态切片（fail-safe，永不返回空串）。"""
+    assert _clean_coding_hint("\n") == "仿真失败 \n"
+    hint = _clean_coding_hint("LiteLLM:WARNING cost map fields default to 0")
+    assert hint.startswith("仿真失败 ") and hint
+
+
+def _z94_runner_spec(tmp_path, *, recall):
+    wd = tmp_path / "work"
+    wd.mkdir(parents=True, exist_ok=True)
+    # stderr 先吐 torch 警告再吐真实异常行（镜像 run7 真实 tail 结构）。
+    (wd / "script.py").write_text(
+        "import sys\n"
+        "sys.stderr.write('  warnings.warn(\"torch<2.8.0 please upgrade "
+        "pytorch manually\")\\n')\n"
+        "sys.stderr.write('GenesisException: Scene is already built.\\n')\n"
+        "sys.exit(1)\n", encoding="utf-8")
+    patch = json.dumps({"patches": [{
+        "path": "script.py", "old": "sys.exit(1)",
+        "new": "sys.exit(1)  # z94 round1"}]})
+    gw = FakeGateway([patch])
+    vec = _Z94Vector()
+    runner = AgentRunner(gw, vec, evidence_root=tmp_path / "ev")
+    spec = RunSpec(
+        thread_id="z94fluid", workdir=wd,
+        cmd=[sys.executable, str(wd / "script.py")],
+        telemetry_relpath="results.json", batch_id="T8-Z94",
+        billing_task=8, run_idx=1, max_coding_rounds=1,
+        coding_recall=recall)
+    return runner, spec, gw, vec
+
+
+def test_z94_enhanced_recall_queries_and_prompt_section(tmp_path):
+    """CodingRecallSpec 开启：troubleshooting 吃清洗串 + capabilities 额外路，
+    金块以独立段进 prompt（C 编号），troubleshooting 旧段保留。"""
+    runner, spec, gw, vec = _z94_runner_spec(
+        tmp_path,
+        recall=CodingRecallSpec(
+            clean_troubleshooting_hint=True,
+            extra_kb=(("capabilities", 3, "z94 冻结查询串 SPH.Liquid"),)))
+    rec = runner.run(spec)
+    assert rec["status"] == "failed" and len(gw.calls) == 1
+
+    ns_queries = {(q["namespace"], q["top_k"]): q["q"] for q in vec.queries}
+    ts_q = ns_queries[("troubleshooting", 6)]
+    assert ts_q.startswith("仿真失败 ")
+    assert "Scene is already built" in ts_q
+    assert "torch" not in ts_q                      # 警告噪声已剥离
+    assert ns_queries[("capabilities", 3)] == "z94 冻结查询串 SPH.Liquid"
+
+    user_msg = gw.calls[0]["messages"][1]["content"]
+    assert "## troubleshooting 知识库命中（namespaces=troubleshooting, " \
+        "top_k=6）" in user_msg
+    assert "## capabilities 知识库命中（API 参考；namespace=capabilities, " \
+        "top_k=3）" in user_msg
+    assert "[C1 来源:" in user_msg
+    assert "夹具 API 金块：gs.materials.SPH.Liquid" in user_msg
+    p_ts = user_msg.index("## troubleshooting")
+    p_cap = user_msg.index("## capabilities")
+    assert p_ts < p_cap                            # 段次序钉死
+
+
+def test_z94_default_off_byte_identical_path(tmp_path):
+    """coding_recall=None（Task6/7 与全部既有任务）：只有一条 troubleshooting
+    旧查询、无 capabilities 调用、prompt 无新段。"""
+    runner, spec, gw, vec = _z94_runner_spec(tmp_path, recall=None)
+    rec = runner.run(spec)
+    assert rec["status"] == "failed"
+    assert [q["namespace"] for q in vec.queries] == ["troubleshooting"]
+    assert vec.queries[0]["q"] == "仿真失败 " + \
+        rec["timeline"][0]["stderr_tail"][-500:]
+    user_msg = gw.calls[0]["messages"][1]["content"]
+    assert "capabilities 知识库命中" not in user_msg
+
+
+def test_z94_failed_seam_record_carries_timeline(tmp_path):
+    """失败 seam 记录回灌 timeline/executions（learning._fix_actions 不再恒无）。"""
+    runner, spec, gw, _ = _z94_runner_spec(tmp_path, recall=None)
+    seam = agent_run_seam(runner, lambda state: spec)
+    record = seam({})
+    assert record["status"] == "failed"
+    assert isinstance(record["timeline"], list) and record["timeline"]
+    # 初始 exec + 补丁后再 exec（帽 1）→ 2 条时间线
+    assert record["executions"] == len(record["timeline"]) == 2
+    assert record["failure_json"] and record["reason"]

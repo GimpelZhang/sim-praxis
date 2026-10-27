@@ -366,6 +366,25 @@ class ChunkPromptContext:
     round_feedback: str = ""
 
 
+@dataclass(frozen=True)
+class CodingRecallSpec:
+    """攢批94 锁内适配（Task8 Genesis 流体两战役实测墙，2026-10-27）：
+    coding 站增强召回。默认不开（RunSpec.coding_recall=None 时所有任务检索
+    query/namespace/top_k 与 prompt 逐字节旧行为，Task6/7 路径零变化）。
+
+    - ``clean_troubleshooting_hint``：True 时 troubleshooting 主路查询串由
+      ``"仿真失败 " + tail[-500:]`` 改为错误签名清洗串（剥离 Genesis/torch/
+      litellm 警告噪声与 Traceback 帧行；实测 run1–5 真实 tail 下 Q17
+      「Scene is already built」被警告挤出 top-6，清洗后回到 #0）。
+    - ``extra_kb``：额外 KB 检索路 ``(namespace, top_k, query)`` 元组序列。
+      coding 站历史只查 troubleshooting；Genesis SPH API 金块在 capabilities
+      的 code_knowledge §3.5，旧路径永不可达。查询串必须在活库实测冻结
+      （见 task8_fluid.FLUID_CAPABILITY_QUERY 取证注释），禁止凭感觉填。
+    """
+    clean_troubleshooting_hint: bool = False
+    extra_kb: tuple[tuple[str, int, str], ...] = ()
+
+
 @dataclass
 class RunSpec:
     thread_id: str
@@ -409,6 +428,10 @@ class RunSpec:
     # 9-2 契约单真值），违例跳过 ok 短路并注入编码修复轮——run25 结构性停机
     #（拓扑墙反馈永不进模型环 → 重挂 delta=0）的反馈通路；帽仍 max_coding_rounds。
     shim_topology_check: bool = False
+    # 攢批94 锁内适配（2026-10-27 Task8 流体 run1–7 实测墙）：None 时检索与
+    # prompt 与 Phase 1 以来逐字节一致；仅 task8_fluid 工厂显式给增强召回
+    # （troubleshooting 错误签名清洗 + capabilities 额外检索路）。
+    coding_recall: "CodingRecallSpec | None" = None
 
 
 @dataclass
@@ -1361,18 +1384,66 @@ def _classify_closed_body(code: str, index: int) -> "dict | None":
 # prompt
 # ---------------------------------------------------------------------------
 
-def _kb_block(hits: list[dict]) -> str:
+def _kb_block(hits: list[dict], *, label: str = "S",
+              empty_ns: str = "troubleshooting") -> str:
+    # 攢批94：label/empty_ns 参数化（额外 capabilities 路用 C 前缀，避免与
+    # troubleshooting 的 S1..S6 编号混淆）；默认值与旧模板逐字节一致。
     if not hits:
-        return "（troubleshooting 检索 0 行；不得据此编造 KB 引用）"
+        return f"（{empty_ns} 检索 0 行；不得据此编造 KB 引用）"
     lines = []
     for i, h in enumerate(hits, 1):
         src = f"{h.get('kb_relpath') or '?'}#{h.get('section_path') or ''}"
         refs = h.get("evidence_refs") or []
         ref_str = (f" | evidence_refs: {', '.join(map(str, refs))}"
                    if refs else "")
-        lines.append(f"[S{i} 来源: {src}{ref_str}]\n"
+        lines.append(f"[{label}{i} 来源: {src}{ref_str}]\n"
                      f"{(h.get('text') or '').strip()}")
     return "\n\n".join(lines)
+
+
+# 攢批94 锁内适配：coding 站检索串错误签名清洗。run1–7 实测 tail[-500:] 被
+# Genesis/torch 版本警告、litellm 注册噪声与 Traceback 帧行主导，相关 KB
+# （如 Q17 Scene is already built）掉出 troubleshooting top-6；剥离噪声后
+# 以异常签名行做 embedding 查询，活库实测 Q17 回到 #0（取证：
+# phase2/task8_diag/recall_probe/probe94.py，0 付费）。
+_CODING_HINT_NOISE_RE = re.compile(
+    r"(litellm|provider list|register_model|cost map|cost fields|"
+    r"pendingdeprecation|deprecation|future version|warnings?\.warn\(|"
+    r"upgrade pytorch|torch<[0-9]|tqdm|[0-9]+%\|)", re.I)
+
+
+def _clean_coding_hint(tail: str) -> str:
+    """从 exec tail 提取错误签名拼 ``仿真失败 <sig>``（≤300 字符）。
+
+    纯函数、确定性：丢弃空行、``File ``/``Traceback`` 帧行与警告噪声行；
+    取最后一条含 Error/Exception/Fatal/Failure/assert 的行；该行把真实
+    错误消息包在引号内时（GenesisException 元组形）取最像错误签名的引号
+    串。无任何可用行时退回旧形态 tail 切片（fail-safe，不改检索语义）。
+    """
+    kept: list[str] = []
+    for raw in (tail or "").splitlines():
+        ln = raw.strip()
+        if not ln or ln.startswith(("File ", "Traceback", "During handling")):
+            continue
+        if _CODING_HINT_NOISE_RE.search(ln):
+            continue
+        kept.append(ln)
+    sig = ""
+    for ln in reversed(kept):
+        if re.search(r"Error|Exception|Fatal|Failure|assert", ln):
+            sig = ln
+            break
+    if not sig:
+        if kept:
+            sig = kept[-1]
+        else:
+            return "仿真失败 " + (tail or "")[-200:]
+    quotes = re.findall(r"['\"]([^'\"]{8,200})['\"]", sig)
+    if quotes:
+        sig = next((s for s in quotes if re.search(
+            r"already|missing|not |no |failed|error|invalid|unexpected|must|"
+            r"cannot", s, re.I)), quotes[0])
+    return ("仿真失败 " + sig)[:300]
 
 
 def _learning_block(learning_hits: "list[dict] | None") -> str:
@@ -1476,6 +1547,10 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                     # 2026-10-20 裁决）：两新参 None/空时输出与旧版逐字一致。
                     extra_sections: "tuple[tuple[str, str], ...] | None" = None,
                     chunk_context: "ChunkPromptContext | None" = None,
+                    # 攢批94 锁内适配（Task8 流体，2026-10-27）：额外 KB
+                    # 检索路段 ``(namespace, top_k, hits)``；None 时 prompt
+                    # 与旧版逐字一致（字符级快照测试锁定）。
+                    extra_kb_sections: "tuple[tuple[str, int, list[dict]], ...] | None" = None,
                     ) -> list[dict[str, str]]:
     # v1.4 §2.5 条件拼装：出生轮（chunk_context 非 None）system 逐字保持
     # 现行原文（出生环连续四跑成功路径零变化，快照测试锁逐字不变）；修复轮
@@ -1528,13 +1603,24 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
         for title, body in extra_sections:
             extra_block += f"## {title}\n{body}\n\n"
     chunk_block = _chunk_section(chunk_context) + "\n" if chunk_context else ""
+    # 攢批94：额外 KB 路（capabilities API 参考）紧随 troubleshooting 段、
+    # 避坑段之前；None 时整段为 ""，与旧模板逐字节一致。
+    extra_kb_section = ""
+    if extra_kb_sections:
+        rendered = []
+        for ns, ns_top_k, ns_hits in extra_kb_sections:
+            rendered.append(
+                f"## {ns} 知识库命中（API 参考；namespace={ns}, "
+                f"top_k={ns_top_k}）\n"
+                + _kb_block(ns_hits, label="C", empty_ns=ns))
+        extra_kb_section = "\n\n" + "\n\n".join(rendered)
     user = (
         f"{notes_block}{extra_block}{chunk_block}"
         "## 失败命令\n" + " ".join(cmd) + "\n\n"
         "## traceback / 日志尾部\n" + traceback_tail + "\n\n"
         "## 相关源文件片段（仅限运行工作目录）\n" + snippet_block + "\n\n"
         "## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n"
-        + _kb_block(hits) + learning_section)
+        + _kb_block(hits) + extra_kb_section + learning_section)
     return [{"role": "system", "content": system},
             {"role": "user", "content": user}]
 
@@ -2145,16 +2231,31 @@ class AgentRunner:
             # Phase 2 Task1：recall 注入时 kb 路由 ProductionRecall 同参查询
             # （query_kb(namespace=troubleshooting, top_k=TOP_K)），
             # ret["kb_hits"] 与原 hits 同源同语义；learning 路只查真实学习表。
+            # 攢批94 锁内适配（Task8 流体，2026-10-27）：spec.coding_recall
+            # 非 None 时 troubleshooting 主路改用错误签名清洗查询串，并按
+            # 工厂冻结的 (namespace, top_k, query) 增补 KB 检索路；None 时
+            # 查询串/namespace/top_k 与旧行为逐字节一致。
+            recall_cfg = spec.coding_recall
+            if recall_cfg is not None and recall_cfg.clean_troubleshooting_hint:
+                coding_hint = _clean_coding_hint(tail)
+            else:
+                coding_hint = "仿真失败 " + tail[-500:]
             learning_hits: list[dict] = []
             if self.recall is not None:
-                ret = self.recall.retrieve(
-                    "仿真失败 " + tail[-500:], site="coding")
+                ret = self.recall.retrieve(coding_hint, site="coding")
                 hits = ret["kb_hits"]
                 learning_hits = ret["learning_hits"]
             else:
                 hits = self.vector_engine.query_kb(
-                    "仿真失败 " + tail[-500:], namespace="troubleshooting",
+                    coding_hint, namespace="troubleshooting",
                     top_k=TOP_K)
+            extra_kb_sections: "tuple[tuple[str, int, list[dict]], ...]" = ()
+            if recall_cfg is not None:
+                secs = []
+                for ns, ns_top_k, ns_query in recall_cfg.extra_kb:
+                    secs.append((ns, ns_top_k, self.vector_engine.query_kb(
+                        ns_query, namespace=ns, top_k=ns_top_k)))
+                extra_kb_sections = tuple(secs)
             # run6 §15.7-H4（D2）：rc=0 且缺约定产物时把机器核验真值句追加进
             # 模型侧 tail；严格在 snippets/recall 收集之后、_build_messages 之前。
             # recall 查询串/snippets/timeline/_fail 继续用未注入 tail。
@@ -2204,7 +2305,8 @@ class AgentRunner:
                 gate2_notes=spec.gate2_notes, traceback_tail=model_tail,
                 snippets=snippets, hits=hits, cmd=spec.cmd,
                 learning_hits=learning_hits or None,
-                extra_sections=spec.extra_prompt_sections or None)
+                extra_sections=spec.extra_prompt_sections or None,
+                extra_kb_sections=extra_kb_sections or None)
             # 硬规则1：runner 永不构造 image block（双保险，网关入口亦拒）
             for mm in messages:
                 if not isinstance(mm.get("content"), str):
@@ -2231,7 +2333,8 @@ class AgentRunner:
                         coding_round=coding_calls, tail=model_tail,
                         snippets=snippets,
                         hits=hits, learning_hits=learning_hits,
-                        round_feedback=chunk_feedback)
+                        round_feedback=chunk_feedback,
+                        extra_kb_sections=extra_kb_sections)
                     # 设计 §2.2 EBNF：begin 行后/end 行前的 LF 是语法分隔符，
                     # _extract_chunk 逐字保留 body（自然上线形态每块 code 不带
                     # 尾换行），拼接必须补回恰好一个块间 LF；"".join 会让上块
@@ -2454,7 +2557,9 @@ class AgentRunner:
                                  model: str, coding_round: int,
                                  tail: str, snippets: list[dict],
                                  hits: list[dict], learning_hits: list[dict],
-                                 round_feedback: str
+                                 round_feedback: str,
+                                 extra_kb_sections:
+                                 "tuple[tuple[str, int, list[dict]], ...]" = ()
                                  ) -> "tuple[list[str], list[dict | None]]":
         """一个 coding 轮内顺序完成 n 次出生调用，返回 (各块原文, 各块 record)。
 
@@ -2488,7 +2593,8 @@ class AgentRunner:
                 gate2_notes=spec.gate2_notes, traceback_tail=tail,
                 snippets=snippets, hits=hits, cmd=spec.cmd,
                 learning_hits=learning_hits or None,
-                extra_sections=cs.per_call_sections, chunk_context=ctx)
+                extra_sections=cs.per_call_sections, chunk_context=ctx,
+                extra_kb_sections=extra_kb_sections or None)
             # 硬规则1：逐块消息同样只允许纯文本（网关入口另有递归守卫）。
             for mm in messages:
                 if not isinstance(mm.get("content"), str):
@@ -2586,5 +2692,11 @@ def agent_run_seam(runner: AgentRunner, spec_factory: "Callable[[dict], RunSpec]
         return {"telemetry_uri": "", "status": "failed",
                 "coding_round": record["coding_round"],
                 "failure_json": record["failure_json"],
-                "reason": record["reason"]}
+                "reason": record["reason"],
+                # 攢批94：失败 run 同样回灌 timeline。旧实现只在 ok 记录带，
+                # learning._fix_actions 读 run["timeline"].applied，失败结案
+                # 学习行恒为「修复动作：（无）」，五轮真实补丁无证据；与 ok
+                # 路径同源（runner._fail 返回值含 timeline）。
+                "timeline": record.get("timeline", []),
+                "executions": record.get("executions")}
     return seam

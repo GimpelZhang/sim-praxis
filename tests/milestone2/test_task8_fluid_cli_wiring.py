@@ -260,6 +260,13 @@ def test_factory_birth_mode_injects_contract(tmp_path, monkeypatch):
     assert spec.env_extra["GS_ENABLE_ZEROCOPY"] == "0"
     assert spec.env_extra["PYOPENGL_PLATFORM"] == "egl"
     assert spec.env_extra["SIMPRAXIS_USE_PROXY"] == "0"
+    # 攢批94：coding 站增强召回（错误签名清洗 + capabilities API 金块路）
+    cr = spec.coding_recall
+    assert cr is not None and cr.clean_troubleshooting_hint is True
+    assert cr.extra_kb == (("capabilities", t8f.FLUID_CAPABILITY_TOP_K,
+                            t8f.FLUID_CAPABILITY_QUERY),)
+    assert "SPH.Liquid" in t8f.FLUID_CAPABILITY_QUERY
+    assert t8f.FLUID_CAPABILITY_TOP_K == 3
     # cmd 与出生合同同源（build_stage1_contract 单点）
     contract = t8f.build_stage1_contract(
         stage0_outcome="sph_ok", workdir=spec.workdir, thread_id=THREAD)

@@ -752,7 +752,12 @@ CALL_CACHE_ALLOWLIST = {
     # 截断取证）+ CODING_THINKING 常量（+10 行）全在构造点之前，纯位移
     # （1928→1938）；thinking 只改调用 kwargs/指纹，0 新增落点。
     # 攢批93：task8_fluid 挂 ChunkSpec 是 graph 侧改动，runner 本体零位移。
-    ("orchestrator/agent_runner/runner.py", 1938),
+    # 攢批94（Task8 流体 coding 站增强召回）：CodingRecallSpec dataclass +
+    # RunSpec.coding_recall 字段、_kb_block 参数化、_CODING_HINT_NOISE_RE/
+    # _clean_coding_hint、_build_messages extra_kb 段与 run() 检索/透传接线
+    # 全在构造点之前（含 docstring/注释，净 +86 行），纯位移（1938→2024）；
+    # 额外检索是 VectorEngine.query_kb 本地嵌入调用，0 新增 CallReplay 落点。
+    ("orchestrator/agent_runner/runner.py", 2024),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
