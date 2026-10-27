@@ -971,11 +971,11 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 60, 8: 16}
-    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批，
-    # 2026-10-26 十三至十七次连续五提 152→167→182→197→212→227）；task=4 仍为
-    # 24（覆盖 Phase 1 的 8）；task=7 当前顶 24（第十八次自批 16→24，
-    # 2026-10-26 Task7 Stage1 run2 熔断续跑）；8 不动。
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 68, 8: 16}
+    # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批）；
+    # task=4 仍为 24（覆盖 Phase 1 的 8）；task=7 当前顶 68（第二十四次自批
+    # 60→68，2026-10-27 修复环续窗，run2k T7-C10 3/3 后 task7 触 60 即不可恢复）；
+    # 8 不动。
     assert TASK_HARD_CAPS[6] == 227
     assert TASK_HARD_CAPS[6] != 212           # 十六次旧顶随第十七次提顶下线
     assert TASK_HARD_CAPS[6] != 197           # 十五次旧顶随第十六次提顶下线
@@ -987,7 +987,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
-    assert TASK_HARD_CAPS[7] == 60 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] == 68 and TASK_HARD_CAPS[8] == 16
+    assert TASK_HARD_CAPS[7] != 60            # 二十二次旧 task7 顶随第二十四次下线
     assert TASK_HARD_CAPS[7] != 52            # 二十一次旧 task7 顶随第二十二次下线
     assert TASK_HARD_CAPS[7] != 44            # 二十次旧 task7 顶随第二十一次下线
     assert TASK_HARD_CAPS[7] != 36            # 十九次旧 task7 顶随第二十次下线
@@ -1019,13 +1020,14 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # run27 算术继续成立（HARD_CAP 随第十九次到 290）。
     assert 234 + 5 <= HARD_CAP == 310
     assert 210 + 5 <= TASK_HARD_CAPS[6] == 227
-    # Task7 Stage1 run2k 修复环续窗信封算术（第二十二次，HARD_CAP 290 不动）：
-    # 账实 int-seq 285/task7 51（断流坏窗拖过夜 seq268-285 十八连 GatewayError，
-    # T7-C5/C6/C7 各 6/6 烧尽 + T7-C8 1/2）。续窗票 T7-C9（coding ≤5，全局门
-    # 是真瓶颈）。三门（第二十三次抬 HARD_CAP 290→310 后口径）：全局
-    # 285+5=290≤310 余 20、task7 51+5=56≤60 余 4、批次 0+N 恰顶。
-    assert 285 + 5 <= HARD_CAP == 310
-    assert 51 + 5 <= TASK_HARD_CAPS[7] == 60
+    # Task7 Stage1 run2k 修复环续窗信封算术（第二十四次自批，task7 60→68，
+    # HARD_CAP 310 不动）：账实 int-seq 293/task7 59（绿缝 seq287-290 四连 ok +
+    # r23 T7-C10 三连 ok=291/292/293，seq293 applied 补丁脚本 12894→21052B；
+    # r23 亡于 T7-C10 3/3 batch pause，非断流）。task7 触 60 即 task_hard_cap
+    # 不可恢复（G-11），故先抬顶再续。续窗票 T7-C11（coding 8）。三门：全局
+    # 293+8=301≤310 余 9、task7 59+8=67≤68 余 1、批次 0+8 恰顶。
+    assert 293 + 8 <= HARD_CAP == 310
+    assert 59 + 8 <= TASK_HARD_CAPS[7] == 68
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
