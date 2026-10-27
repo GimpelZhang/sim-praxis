@@ -199,4 +199,21 @@ def stage0_facts_text(proposal: dict) -> str:
         "实证：模型曾把 env.step 包一层又另写一套内联 phase 状态机，两套互抢、"
         "第二套未防护键读取直接崩）。物体位姿只从 <物体名>_pos 键读，禁止"
         "发明聚合键、禁止第二套循环。",
+        # —— r25 round1 实证（2026-10-27，攢批83，锁内适配）：重生脚本唯一
+        # exec 死因 = 模型自写 parse_bddl_goal_pairs 用**小写**正则
+        # r"\((on|inside)\s+...\)" 匹配 goal，但 LIBERO bddl 真实 goal 谓词是
+        # **首字母大写**且外层 And 包裹——task0 文件逐字：
+        #   (:goal\n    (And (On akita_black_bowl_1 plate_1))\n)
+        # 小写 (on 零命中 → RuntimeError "no (on|inside movable receptacle)
+        # predicate in goal" → env 从未构造（main() 先解析后建 env，解析崩即全崩）。
+        # 以下为该 bddl 文件机器真值（0 付费读取，2026-10-27）：
+        "  - **bddl goal 块真值（task0 文件逐字，2026-10-27 读取）**：goal 形态是 "
+        "`(:goal (And (On <物体> <目标>)))`——**谓词首字母大写**（On/Inside 等，"
+        "不是小写 on），外层 And 包裹。task0 逐字 = `(On akita_black_bowl_1 "
+        "plate_1)`（抓黑碗放到盘上）；同文件 `(:obj_of_interest akita_black_bowl_1 "
+        "plate_1)` 列出两个交互物体。goal 解析用 **case-sensitive 大写**正则 "
+        r"`\((On|Inside)\s+([A-Za-z0-9_\-]+)\s+([A-Za-z0-9_\-]+)\)`；"
+        "更稳兜底：直接取 obj_of_interest 两名字配对。**禁止小写 (on 正则**"
+        "（零命中即 RuntimeError 全崩，r25 round1 实证死因）；解析失败也要先"
+        "构造 env 再逐任务兜底，禁止在 env 构造前因单任务 goal 解析崩掉全脚本。",
     ])
