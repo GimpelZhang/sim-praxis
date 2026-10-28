@@ -854,6 +854,80 @@ def test_kinematic_contract_precheck_allocated_in_chunk_boundaries():
     assert "kinematic_precheck" not in fc.build_chunk_boundary(4)
 
 
+def test_vessel_structure_contract_v2_present_and_shared():
+    """攢批102：卡#4 后强化的合同 v2——单体刚体壶/慢动力学/物理爆炸护栏，
+    单次/拆块两版共享同一机检正文（唯一来源，防分叉）；阈值只允许来自常量。"""
+    from orchestrator.graph import task8_fluid_prompts as prompts
+    kwargs = dict(
+        script_name="genesis_fluid_pour.py",
+        cmd_line="/mnt/venvs/simpraxis/bin/python genesis_fluid_pour.py",
+        stage0_facts_text="outcome=sph_ok",
+        particle_cap=20000, vram_abort_gb=35.0, max_reductions=2,
+        settling_window_s=0.5, cup_entry_target=0.85)
+    single = prompts.stage_birth_contract(**kwargs)
+    chunk = prompts.chunk_birth_contract(n_chunks=6, **kwargs)
+    assert single.split("\n\n", 1)[1] == chunk.split("\n\n", 1)[1]
+    for body in (single, chunk):
+        # 合同 v2 标题与第 5 条单体刚体壶
+        assert "源容器结构与慢动力学构造性合同 v2" in body
+        assert "单体刚体壶（严禁散件）" in body
+        assert "trimesh" in body and "gs.morphs.Mesh" in body
+        assert "decompose_nonconvex=True" in body
+        # 明确禁止 run_4 的五 Box 散拼与部分驱动
+        assert "多个独立 Box" in body and "恰一次" in body
+        # 第 6 条绕嘴铰链/慢动力学（f-string 渲染后的数值形态）
+        assert "绕壶嘴尖点铰链" in body
+        assert "≤0.01m" in body and "≤0.2 m/s" in body and "≤80°/s" in body
+        assert "≥0.3s" in body and "≥1.5s" in body
+        # 第 7 条爆炸护栏：结构化 FAILURE，且只认物理爆炸
+        assert "sim_blowout" in body and 'kind="sim_blowout"' in body
+        assert "‖position‖>2.5m" in body and ">2%" in body
+        assert "严禁以入杯率高低" in body
+        # 第 8 条 precheck 扩验（仍先于 gs.init/scene.build）
+        assert "gs.init/scene.build" in body
+    # 阈值常量单点钉死（合同正文只能从常量派生，禁止字面量漂移）
+    assert prompts.VESSEL_LIP_DRIFT_MAX_M == 0.010
+    assert prompts.VESSEL_LIP_SPEED_MAX_MPS == 0.20
+    assert prompts.VESSEL_TILT_ANG_SPEED_MAX_DPS == 80
+    assert prompts.VESSEL_SETTLE_MIN_S == 0.3
+    assert prompts.VESSEL_TILT_MIN_S == 1.5
+    assert prompts.SIM_BLOWOUT_R_M == 2.5
+    assert prompts.SIM_BLOWOUT_FRAC_MAX == 0.02
+    # v1 合同仍在（v2 是追加强化，不是替换）；85% 判据未动
+    assert "倾倒运动学构造性合同" in single
+    assert "0.85" in single
+
+
+def test_vessel_contract_v2_allocated_in_chunk_boundaries():
+    """攢批102：合同 v2 在六块边界中的落点——b0 阈值、b1 单体壶、b2 双自检、
+    b5 main 先护栏后渲染；b3/b4 不被 sim_blowout 污染，n 仍 6。"""
+    from orchestrator.graph import task8_fluid_chunks as fc
+    assert fc.FLUID_CHUNK_COUNT == 6
+    b0, b1, b2 = (fc.build_chunk_boundary(i) for i in (0, 1, 2))
+    b3, b4, b5 = (fc.build_chunk_boundary(i) for i in (3, 4, 5))
+    # b0：v2 全部阈值常量逐字（起飞前冻结，数值必须取自合同）
+    for needle in ("0.010m", "0.20m/s", "80°/s", "0.3s", "1.5s", "2.5m", "2%"):
+        assert needle in b0, needle
+    # b1：单体刚体壶构造路径唯一（trimesh 一体网格 + 一次 Mesh add_entity）
+    assert "单体刚体" in b1 and "trimesh" in b1
+    assert "gs.morphs.Mesh(file=" in b1 and "decompose_nonconvex=True" in b1
+    assert "add_entity" in b1
+    # 非凸分解 API 只许出现在 b1（其余块不得另开壶实体路径）
+    assert "decompose_nonconvex" not in b0
+    assert "decompose_nonconvex" not in b2 and "decompose_nonconvex" not in b5
+    # b2：双自检都在运动学块（扩验 precheck + 爆炸护栏），只认物理爆炸
+    assert "kinematic_precheck" in b2 and "sim_blowout" in b2
+    assert "2.5m" in b2 and "2%" in b2
+    assert "严禁按入杯率触发" in b2
+    # b5：main 顺序——precheck 最先，步进结束立即护栏，护栏过后才渲染
+    assert "kinematic_precheck()" in b5 and "sim_blowout()" in b5
+    assert b5.index("sim_blowout()") < b5.index("渲染→落盘")
+    assert "最先" in b5
+    # b3/b4（步进/渲染块）不被 sim_blowout 条款污染
+    assert "sim_blowout" not in b0 and "sim_blowout" not in b1
+    assert "sim_blowout" not in b3 and "sim_blowout" not in b4
+
+
 def test_fluid_chunk_titles_and_boundaries_frozen_shape():
     """n=6 工厂规格：六标题/六边界等长非空、下标 fail-loud、边界互不重复。"""
     from orchestrator.graph import task8_fluid_chunks as fc

@@ -49,6 +49,18 @@ CUP_INNER_RADIUS = 0.045
 CUP_BOTTOM_Z = 0.92
 CUP_RIM_Z = 1.02
 
+# 构造性合同 v2（攢批102，2026-10-28 run_4 真人卡#4 否决后）：run_4 运动学
+# 不等式全过但壶=五个独立非 fixed Box、驱动器只驱动到一块，自由壶壁被 SPH
+# 打飞（真人「红薄板飞起/插入杯中」）、粒子 98% 越界。下列阈值把「单体
+# 刚体壶 + 绕嘴铰链慢动力学」改成出生前纯 CPU 可验/跑完后近零成本护栏。
+VESSEL_LIP_DRIFT_MAX_M = 0.010      # 倾斜段壶嘴世界位置漂移上界（绕嘴铰链）
+VESSEL_LIP_SPEED_MAX_MPS = 0.20     # 倾斜段壶嘴合速度上界
+VESSEL_TILT_ANG_SPEED_MAX_DPS = 80  # 俯仰角速度上界（度/秒）
+VESSEL_SETTLE_MIN_S = 0.3           # 起倒前重力静置最短时长
+VESSEL_TILT_MIN_S = 1.5             # θ=0→≥120° 转动历时下界
+SIM_BLOWOUT_R_M = 2.5               # 爆炸护栏：粒子离台面世界原点范数上界
+SIM_BLOWOUT_FRAC_MAX = 0.02         # NaN/超界粒子比例上界（与 85% 判据无关）
+
 
 def _results_contract_json() -> str:
     """results.json 形态示例 + 机检规则（嵌入出生合同正文）。"""
@@ -131,6 +143,57 @@ def _kinematic_contract_block() -> str:
    后才允许开始。"""
 
 
+def _vessel_structure_contract_block() -> str:
+    """源容器结构与慢动力学构造性合同 v2（攢批102，run_4 卡#4 后强化）。
+
+    run_4 终态脚本逐行取证：上一合同的壶嘴轨迹不等式全过（纯 CPU precheck
+    真开火拦住了 3.6mm 超调），但壶被实现为五个独立非 fixed 动态 Box、
+    1.3.3 无 gs.constraints 可焊，逐帧驱动器靠不存在的 .parts 属性取集合，
+    实际只驱动一块，其余壶壁作为自由刚体被 SPH 打飞（真人见「红薄板飞起/
+    插入杯中」）；粒子在 lift/slide 段失去容纳，98% 越界、1.1% 入杯。
+    本块同样**不含任何 Genesis 实现代码**（硬规则 3），只把结构完整性与
+    慢动力学改成构造要求 + 出生前纯 CPU 自检/跑完后近零成本 numpy 护栏。
+    """
+    return f"""\
+## 源容器结构与慢动力学构造性合同 v2（run_4 卡#4 后强化；与上一运动学合同同优先级）
+上一合同的轨迹不等式在 run_4 全部通过，但实跑散架：壶是五个独立非固定
+Box、驱动器只驱动到其中一块，自由壶壁被流体打飞、粒子在壶平移阶段就失控。
+以下要求必须**由构造满足**，并纳入出生前自检：
+5. **单体刚体壶（严禁散件）**：壶必须是**单一刚体实体**——用程序化
+   trimesh（venv 已装 trimesh 5.1.1）在当前工作目录生成开口空心壶网格
+   （壁+底一体、watertight，STL 或 OBJ 落本 workdir），经**一次**
+   scene.add_entity(morph=gs.morphs.Mesh(file=<该网格>, fixed=True,
+   decompose_nonconvex=True)) 创建（coacd 非凸分解已装，凹面盛水必须开，
+   凸包化会封死壶口）；脚本里壶只允许这一个实体句柄（自检断言壶 add_entity
+   恰一次）。**严禁**用多个独立 Box/Cylinder/实体拼壶，严禁一组实体只驱动
+   其中几个。目标杯五壁保持 fixed=True 世界静止（run_4 杯结构正确，沿用）。
+6. **运动学驱动 + 绕嘴铰链 + 慢动力学**：壶作为 fixed 运动学壁逐帧
+   set_pos/set_quat 下发位姿；倾斜必须**绕壶嘴尖点铰链**——整个倾斜与
+   流出停留窗内壶嘴世界位置漂移 ≤{VESSEL_LIP_DRIFT_MAX_M}m、合速度
+   ≤{VESSEL_LIP_SPEED_MAX_MPS} m/s；起倒前先在直立姿态重力静置
+   ≥{VESSEL_SETTLE_MIN_S}s（粒子在壶内收敛，禁止边出生边运动/先平移后
+   粒子就位）；θ=0 到 θ≥120° 转动历时 ≥{VESSEL_TILT_MIN_S}s、
+   smoothstep 类平滑、角速度 ≤{VESSEL_TILT_ANG_SPEED_MAX_DPS}°/s，
+   禁止瞬移与逐帧大跳。仅当实测 fixed 运动学壁不与 SPH 碰撞耦合时，允许
+   把这**同一个单体实体**改 fixed=False 并逐帧同变换驱动（此备选为本合同
+   明文许可，禁止临场发明第三种壶结构或驱动法）。
+7. **物理爆炸护栏 sim_blowout()（近零成本，与 85% 判据无关）**：仿真
+   结束后用纯 numpy 读 trajectory positions，若 NaN/Inf 粒子或
+   ‖position‖>{SIM_BLOWOUT_R_M}m（台面世界原点）的粒子比例
+   >{SIM_BLOWOUT_FRAC_MAX:.0%}，立即写结构化 FAILURE
+   （simpraxis.task8.fluid_failure.v1，kind="sim_blowout"，见证值=坏粒子
+   比例与最大范数）并非零退出。此护栏**只**认物理爆炸：严禁以入杯率高低
+   触发、严禁据此调任何物理/几何阈值（85% 目标冻结，矛盾即结论）。
+8. **kinematic_precheck() 必须扩验第 5/6 条可静态验证部分**：用 trimesh
+   加载第 5 条网格文件（不建 gs 场景、不用 GPU）确认文件存在、三角面数 >0
+   且开口/壁厚几何可读；再按位姿解析式在整条时间轴数值求导，逐条核验
+   壶嘴漂移 ≤{VESSEL_LIP_DRIFT_MAX_M}m、合速度 ≤{VESSEL_LIP_SPEED_MAX_MPS}
+   m/s、角速度 ≤{VESSEL_TILT_ANG_SPEED_MAX_DPS}°/s、静置 ≥{VESSEL_SETTLE_MIN_S}s、
+   转动历时 ≥{VESSEL_TILT_MIN_S}s；任一不过写 kind="kinematic_precheck"
+   结构化 FAILURE（见证值：面数/漂移 max/速度 max/角速度 max/静置/历时），
+   仍在任何 gs.init/scene.build 之前、非零退出。"""
+
+
 def _requirement_blocks(*, stage0_facts_text: str,
                         particle_cap: int, vram_abort_gb: float,
                         max_reductions: int, settling_window_s: float,
@@ -192,7 +255,9 @@ def _requirement_blocks(*, stage0_facts_text: str,
   溢出 ≤2%/末帧入杯 ≥80%）由引擎三查；
 - 视频与 results/trajectory 必须同一次运行产出（禁止复用旧片/旧轨迹）。
 
-{_kinematic_contract_block()}"""
+{_kinematic_contract_block()}
+
+{_vessel_structure_contract_block()}"""
 
 
 def stage_birth_contract(*, script_name: str, cmd_line: str,
