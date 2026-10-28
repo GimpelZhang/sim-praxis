@@ -47,8 +47,11 @@ from orchestrator.agent_runner.runner import (
     CodingRecallSpec,
     FULL_SOURCE_PER_FILE_CHARS,
     FULL_SOURCE_TOTAL_CHARS,
+    PRIOR_REF_PER_FILE_CHARS,
+    PRIOR_REF_TOTAL_CHARS,
     _clean_coding_hint,
     _collect_full_source,
+    _collect_prior_refs,
     _ENTRY_GUARD_REASON,
     _FRAME_RE,
     _RC0_MISSING_ARTIFACT_FMT,
@@ -5058,3 +5061,68 @@ def test_z95_runner_injects_full_source_when_flag_on(tmp_path):
     user_off = gw_off.calls[0]["messages"][1]["content"]
     assert "目标脚本全文" not in user_off
     assert "z95-line-beyond-frame-window" not in user_off
+
+
+# ---------------------------------------------------------------------------
+# 攢批97：跨 workdir 上一 run 只读参考注入（Task8 流体 run_2 信息墙）
+# ---------------------------------------------------------------------------
+
+def test_z97_collect_prior_refs_renders_skips_and_bad_paths(tmp_path):
+    prior = tmp_path / "run_1"
+    prior.mkdir()
+    (prior / "genesis_fluid_pour.py").write_text("p1\np2\n", encoding="utf-8")
+    refs = [
+        ("上一 run 最终脚本 genesis_fluid_pour.py", prior / "genesis_fluid_pour.py"),
+        ("缺失件", prior / "missing.json"),
+        ("相对路径件", Path("relative.py")),
+    ]
+    out = _collect_prior_refs(tuple(refs))
+    assert [r["file"] for r in out] == [refs[0][0], refs[1][0], refs[2][0]]
+    assert out[0]["n_lines"] == 2
+    assert out[0]["listing"].splitlines()[1].startswith("    2| p2")
+    assert out[1]["listing"] is None and "不存在" in out[1]["skipped"]
+    assert out[2]["listing"] is None and "非绝对路径" in out[2]["skipped"]
+
+
+def test_z97_collect_prior_refs_budget_never_half_file(tmp_path, monkeypatch):
+    big = tmp_path / "big.py"
+    small = tmp_path / "small.json"
+    big.write_text("x = 1\n" * 20, encoding="utf-8")
+    small.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "orchestrator.agent_runner.runner.PRIOR_REF_TOTAL_CHARS", 10)
+    refs = (("小遥测", small), ("大脚本", big))
+    out = _collect_prior_refs(refs)
+    # small 完整注入（4 字符）后总预算耗尽，big 整条跳过带注记而非半截。
+    assert out[0]["listing"] is not None
+    assert out[1]["listing"] is None and "总预算" in out[1]["skipped"]
+    # 常量存在且与全文预算同量级（防误改成 0）。
+    assert PRIOR_REF_PER_FILE_CHARS == FULL_SOURCE_PER_FILE_CHARS
+    assert PRIOR_REF_TOTAL_CHARS == FULL_SOURCE_TOTAL_CHARS
+
+
+def test_z97_build_messages_section_position_and_default_absent():
+    """参考段在当前 workdir 全文之后、troubleshooting 之前；默认段不存在。"""
+    base = dict(gate2_notes=None, traceback_tail="boom",
+                snippets=[{"file": "s.py", "line": 1, "snippet": "1| x"}],
+                hits=[], cmd=["python", "s.py"])
+    msgs_off = _build_messages(**base)
+    assert "同线程上一 run 参考产物" not in msgs_off[1]["content"]
+
+    cur = [{"file": "s.py", "n_lines": 1, "listing": "    1| x",
+            "skipped": None}]
+    refs = [{"file": "上一 run 最终脚本 genesis_fluid_pour.py（5 行）",
+             "n_lines": 5,
+             "listing": "    1| PRIOR_LINE_Z97", "skipped": None}]
+    content = _build_messages(**base, full_source_files=cur,
+                              prior_refs=refs)[1]["content"]
+    p_snip = content.index("## 相关源文件片段")
+    p_full = content.index("## 运行工作目录目标脚本全文")
+    p_prior = content.index("## 同线程上一 run 参考产物")
+    p_ts = content.index("## troubleshooting")
+    assert p_snip < p_full < p_prior < p_ts
+    assert "PRIOR_LINE_Z97" in content
+    assert "补丁" in content and "严禁指向这些路径" in content
+    # 显式 None 与默认调用逐字节一致。
+    assert _build_messages(**base, prior_refs=None)[1]["content"] == \
+        msgs_off[1]["content"]

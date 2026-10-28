@@ -761,7 +761,11 @@ CALL_CACHE_ALLOWLIST = {
     # _collect_full_source、RunSpec.repair_full_source、_build_messages 全文段
     # 与 run() 收集/透传接线全在构造点之前（净 +81 行），纯位移（2024→2105）；
     # 全文是 workdir 内只读注入，0 新增 CallReplay 落点/网关调用。
-    ("orchestrator/agent_runner/runner.py", 2105),
+    # 攢批97（Task8 流体 run_2 跨 workdir 信息墙）：PRIOR_REF_* 预算常量、
+    # _collect_prior_refs、RunSpec.repair_prior_refs、_build_messages 上一 run
+    # 只读参考段与 run() 收集/透传接线全在构造点之前（净 +83 行），纯位移
+    # （2105→2188）；跨 workdir 只读，0 新增落点/网关调用，补丁仍锁 workdir。
+    ("orchestrator/agent_runner/runner.py", 2188),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。

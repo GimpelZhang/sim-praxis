@@ -583,6 +583,30 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             thread_id=thread_id, run_idx=run_idx)
         ev = _last_event(state, "gate2_rejected")
         notes = ev["human_notes"] if ev else None
+        # 攢批97 锁内适配（run_2 seq354–360 实测墙，2026-10-28）：Gate2 reject
+        # 回流/重挂时新 workdir 看不到模型自己上一 run 的已验证产物——run_2
+        # 在「采样器实建 990 vs 期望 20000」上两轮补丁字节级重复（同 sha
+        # ×3/×2），而 run10 已用 post-build 实读 liquid.n_particles 跑通
+        # rc0。只读引用最近一条 agent_run 的最终脚本与机器遥测（存在才给），
+        # 不做内容改写；补丁目标仍被 runner 锁在当前 workdir。
+        prior_refs: tuple[tuple[str, Path], ...] = ()
+        if run_idx >= 2:
+            prev_runs = state.get("agent_runs") or []
+            if prev_runs:
+                prev = prev_runs[-1]
+                tel = prev.get("telemetry_uri") if isinstance(prev, dict) else None
+                if tel:
+                    prev_dir = Path(tel).parent
+                    prev_script = prev_dir / FLUID_ENTRYPOINT
+                    if prev_script.is_file() and prev_dir != workdir:
+                        prior_refs += (
+                            (f"上一 run 最终脚本 {FLUID_ENTRYPOINT}（rc=0 API "
+                             "已验证；运动学被 Gate2 否决，禁止照抄运动学）",
+                             prev_script),)
+                    if Path(tel).is_file():
+                        prior_refs += (
+                            ("上一 run 机器遥测 results.json（派生量真值由"
+                             "引擎现算，此件仅事实参考）", Path(tel)),)
         env_extra = {
             # GS_ENABLE_ZEROCOPY=0：默认 zerocopy 路径 int32 gather 抛错的
             # 必需正确性开关（task8 Track2 生产脚本同款）；HOME 指向持久缓存
@@ -661,6 +685,8 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             # 在不可见语义下空转。修复轮注入涉案脚本当前全文（预算闸在
             # runner.FULL_SOURCE_*，出生脚本 1127 行 ≈43KB 恒完整注入）。
             repair_full_source=True,
+            # 攢批97：跨 workdir 上一 run 只读参考（run_idx>=2 且文件在场）。
+            repair_prior_refs=prior_refs,
         )
 
     return factory

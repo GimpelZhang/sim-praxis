@@ -148,6 +148,14 @@ SNIPPET_TOTAL_CHARS = 4096
 # 恒为完整注入；调预算必须经新取证，禁止为塞内容临时放宽。
 FULL_SOURCE_PER_FILE_CHARS = 150_000
 FULL_SOURCE_TOTAL_CHARS = 200_000
+# 攢批97 锁内适配（Task8 流体 run_2 实测墙，2026-10-28）：同线程上一 run
+# 参考脚本（跨 workdir）注入预算。run_2 seq354–360 实测：模型在
+# 「粒子帧 990 vs 期望 20000」上两轮补丁字节级重复（sha ae15abf1×3、
+# 2c2001df×2），而它自己 run10（run_1 workdir）已用「post-build 读
+# liquid.n_particles 实际计数」rc0 过——Gate2 reject 回流新 workdir 后
+# 自己的旧工作产物不可见，是信息墙而非能力墙。预算与 FULL_SOURCE_* 同值。
+PRIOR_REF_PER_FILE_CHARS = 150_000
+PRIOR_REF_TOTAL_CHARS = 200_000
 RUN_TIMEOUT_S = 1800
 FAILURE_JSON = "FAILURE.json"
 
@@ -444,6 +452,12 @@ class RunSpec:
     # 涉案脚本当前全文段（预算见 FULL_SOURCE_*，每轮读补丁后磁盘现态）。
     # 仅 task8_fluid 工厂显式开；Task6/7 及其它任务零变化。
     repair_full_source: bool = False
+    # 攢批97 锁内适配（2026-10-28 Task8 流体 run_2 跨 workdir 信息墙）：
+    # 同线程上一 run 的已验证产物（最终脚本/机器遥测），(显示名, 绝对路径)
+    # 元组。空元组时 prompt 与旧版逐字节一致。只读参考：渲染段固定声明补丁
+    # 严禁指向这些路径；仅 task8_fluid 工厂在 run_idx>=2 时从 agent_runs[-1]
+    # 的 telemetry_uri 邻位收集（文件实际存在才给）。
+    repair_prior_refs: "tuple[tuple[str, Path], ...]" = ()
 
 
 @dataclass
@@ -557,6 +571,54 @@ def _collect_full_source(workdir: Path, snippets: "list[dict]") -> list[dict]:
             continue
         total += len(listing)
         out.append({"file": rel, "n_lines": len(lines),
+                    "listing": listing, "skipped": None})
+    return out
+
+
+def _collect_prior_refs(
+        refs: "tuple[tuple[str, Path], ...]") -> list[dict]:
+    """攢批97 锁内适配（Task8 流体 run_2 实测墙，2026-10-28）：跨 workdir
+    只读参考注入。
+
+    run_2 seq354–360 实测（证据 coding_round{1..7}.resp 字节 sha）：模型在
+    采样器实建 990 粒子 vs 期望 20000 的错误上两轮补丁字节级重复（同 sha
+    三次/两次），而它自己上一 run（Gate2 reject 前 rc0 版）已用 post-build
+    读 ``liquid.n_particles`` 实际计数跑通——新 workdir 让自家居果不可见。
+    refs 为工厂显式给的 (显示名, 绝对路径)；仅读不改、不做 workdir 包含
+    校验（参考件本就不在当前 workdir）。超预算/不可读跳过并注记，绝不静默
+    截断文件内容（禁止半文件误导模型）。
+    """
+    out: list[dict] = []
+    total = 0
+    for label, raw_path in refs:
+        path = Path(raw_path)
+        if not path.is_absolute() or not path.is_file():
+            out.append({"file": str(label), "n_lines": 0, "listing": None,
+                        "skipped": "参考件不存在或非绝对路径，未注入"})
+            continue
+        try:
+            lines = path.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            out.append({"file": str(label), "n_lines": 0, "listing": None,
+                        "skipped": f"参考件读取失败（{exc.__class__.__name__}），未注入"})
+            continue
+        listing = "\n".join(
+            f"{i+1:5d}| {lines[i]}" for i in range(len(lines)))
+        if len(listing) > PRIOR_REF_PER_FILE_CHARS:
+            out.append({"file": str(label), "n_lines": len(lines),
+                        "listing": None,
+                        "skipped": f"参考件 {len(listing)} 字符超单文件预算 "
+                                   f"{PRIOR_REF_PER_FILE_CHARS}，未注入"})
+            continue
+        if total + len(listing) > PRIOR_REF_TOTAL_CHARS:
+            out.append({"file": str(label), "n_lines": len(lines),
+                        "listing": None,
+                        "skipped": f"参考件 {len(listing)} 字符将超总预算 "
+                                   f"{PRIOR_REF_TOTAL_CHARS}，未注入"})
+            continue
+        total += len(listing)
+        out.append({"file": str(label), "n_lines": len(lines),
                     "listing": listing, "skipped": None})
     return out
 
@@ -1619,6 +1681,10 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                     # 全文段（_collect_full_source 产物）；None/空时 prompt
                     # 与旧版逐字节一致。
                     full_source_files: "list[dict] | None" = None,
+                    # 攢批97 锁内适配（Task8 流体 run_2，2026-10-28）：同线程
+                    # 上一 run 只读参考段（_collect_prior_refs 产物）；
+                    # None/空时 prompt 与旧版逐字节一致。
+                    prior_refs: "list[dict] | None" = None,
                     ) -> list[dict[str, str]]:
     # v1.4 §2.5 条件拼装：出生轮（chunk_context 非 None）system 逐字保持
     # 现行原文（出生环连续四跑成功路径零变化，快照测试锁逐字不变）；修复轮
@@ -1694,12 +1760,29 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
             else:
                 parts.append(head + "\n（" + fs["skipped"] + "）")
         full_source_section = "\n\n".join(parts)
+    # 攢批97：同线程上一 run 只读参考段紧随当前 workdir 全文之后、
+    # troubleshooting 之前；None/空列表时整段为 ""，旧模板逐字节不变。
+    prior_refs_section = ""
+    if prior_refs:
+        parts = [
+            "\n\n## 同线程上一 run 参考产物（只读，不在当前工作目录；补丁"
+            "严禁指向这些路径）\n"
+            "上一 run 的 Genesis API 用法（实体生命周期、采样器实建粒子数、"
+            "产物结构）已被 rc=0 执行验证，但其倾倒运动学被 Gate2 真人否决；"
+            "学其 API 用法，运动学必须重做。"]
+        for ref in prior_refs:
+            head = f"### {ref['file']}（{ref['n_lines']} 行）"
+            if ref.get("listing") is not None:
+                parts.append(head + "\n" + ref["listing"])
+            else:
+                parts.append(head + "\n（" + ref["skipped"] + "）")
+        prior_refs_section = "\n\n".join(parts)
     user = (
         f"{notes_block}{extra_block}{chunk_block}"
         "## 失败命令\n" + " ".join(cmd) + "\n\n"
         "## traceback / 日志尾部\n" + traceback_tail + "\n\n"
         "## 相关源文件片段（仅限运行工作目录）\n" + snippet_block
-        + full_source_section + "\n\n"
+        + full_source_section + prior_refs_section + "\n\n"
         "## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n"
         + _kb_block(hits) + extra_kb_section + learning_section)
     return [{"role": "system", "content": system},
@@ -2314,6 +2397,10 @@ class AgentRunner:
             # False 时恒为 None，_build_messages 输出与旧版逐字节一致。
             full_source_files = (_collect_full_source(workdir, snippets)
                                  if spec.repair_full_source else None)
+            # 攢批97：跨 workdir 上一 run 只读参考（工厂显式 opt-in；
+            # 空元组恒 None，_build_messages 输出与旧版逐字节一致）。
+            prior_refs = (_collect_prior_refs(spec.repair_prior_refs)
+                          if spec.repair_prior_refs else None)
             # Phase 2 Task1：recall 注入时 kb 路由 ProductionRecall 同参查询
             # （query_kb(namespace=troubleshooting, top_k=TOP_K)），
             # ret["kb_hits"] 与原 hits 同源同语义；learning 路只查真实学习表。
@@ -2393,7 +2480,8 @@ class AgentRunner:
                 learning_hits=learning_hits or None,
                 extra_sections=spec.extra_prompt_sections or None,
                 extra_kb_sections=extra_kb_sections or None,
-                full_source_files=full_source_files)
+                full_source_files=full_source_files,
+                prior_refs=prior_refs)
             # 硬规则1：runner 永不构造 image block（双保险，网关入口亦拒）
             for mm in messages:
                 if not isinstance(mm.get("content"), str):

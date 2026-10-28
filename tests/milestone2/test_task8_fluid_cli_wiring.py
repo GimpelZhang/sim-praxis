@@ -272,6 +272,8 @@ def test_factory_birth_mode_injects_contract(tmp_path, monkeypatch):
     # 攢批96：流体题每 run 修复帽 5→8（四连战役均触 5 帽且错误单调推进；
     # runner.MAX_CODING_ROUNDS 默认 5 不动，仅本工厂提帽）
     assert spec.max_coding_rounds == t8f.FLUID_CODING_ROUNDS == 8
+    # 攢批97：首 run 无跨 workdir 参考（旧行为字节级不变）
+    assert spec.repair_prior_refs == ()
     # cmd 与出生合同同源（build_stage1_contract 单点）
     contract = t8f.build_stage1_contract(
         stage0_outcome="sph_ok", workdir=spec.workdir, thread_id=THREAD)
@@ -349,6 +351,39 @@ def test_factory_reentry_skips_contract(tmp_path, monkeypatch):
     assert spec2.extra_prompt_sections == ()
     # 攢批93：已出生后的修补轮同样不得挂拆块规格（runner 按磁盘现状选路）。
     assert spec2.chunked_birth is None
+
+
+def test_factory_prior_run_refs_after_gate2_loop(tmp_path, monkeypatch):
+    """攢批97：run_idx>=2 时只读引用上一 run 最终脚本+遥测；首 run 恒空。"""
+    s0 = _write_s0(tmp_path)
+    state = _factory_env(tmp_path, monkeypatch, s0)
+    factory = t8f.make_spec_factory(THREAD, "b-code")
+    first = factory(state)
+    assert first.repair_prior_refs == ()
+
+    prior_dir = tmp_path / "run_x_1"
+    prior_dir.mkdir()
+    prior_script = prior_dir / t8f.FLUID_ENTRYPOINT
+    prior_script.write_text("# prior rc0\n", encoding="utf-8")
+    prior_results = prior_dir / "results.json"
+    prior_results.write_text("{}", encoding="utf-8")
+    work2 = tmp_path / "run_x_2"
+    work2.mkdir()
+    monkeypatch.setattr(t8f, "fluid_run_dir", lambda tid, idx: work2)
+    state2 = _state(s0, agent_runs=[{"status": "ok",
+                                     "telemetry_uri": str(prior_results)}],
+                    events=[{"type": "gate2_rejected",
+                             "human_notes": "无倾倒"}])
+    spec2 = factory(state2)
+    refs = spec2.repair_prior_refs
+    assert len(refs) == 2
+    assert Path(refs[0][1]) == prior_script and refs[0][1].is_file()
+    assert t8f.FLUID_ENTRYPOINT in refs[0][0]
+    assert Path(refs[1][1]) == prior_results
+    # 遥测文件缺失时只挂脚本一件（不崩、不挂死链）。
+    prior_results.unlink()
+    spec3 = factory(state2)
+    assert [Path(p) for _, p in spec3.repair_prior_refs] == [prior_script]
 
 
 def test_factory_d5_degraded_zero_spec(tmp_path, monkeypatch):
