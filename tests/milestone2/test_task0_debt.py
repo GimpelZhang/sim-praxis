@@ -992,7 +992,7 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 76, 8: 66}
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 76, 8: 72}
     # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批）；
     # task=4 仍为 24（覆盖 Phase 1 的 8）；task=7 当前顶 76（第二十五次自批
     # 68→76，2026-10-27 r25 重生修复环续窗，T7-C11 8/8 熔断后续窗票 T7-C12
@@ -1008,7 +1008,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
-    assert TASK_HARD_CAPS[7] == 76 and TASK_HARD_CAPS[8] == 66
+    assert TASK_HARD_CAPS[7] == 76 and TASK_HARD_CAPS[8] == 72
+    assert TASK_HARD_CAPS[8] != 66            # 第二十八次旧顶随第三十一次自批下线（D10 真人还案 run_3 续窗 66→72）
     assert TASK_HARD_CAPS[8] != 40            # 第二十七次旧顶随第二十八次自批下线（攢批95 续窗 40→66）
     assert TASK_HARD_CAPS[8] != 16            # task8 M2 原始顶随第二十七次自批下线（fluid Stage1 16→40）
     assert TASK_HARD_CAPS[7] != 68            # 二十四次旧 task7 顶随第二十五次下线
@@ -1074,7 +1075,18 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # T8-C2-stage1（coding 24 beyond_normal）。三门：全局 334+24=358≤380
     # 余 22、task8 26+24=50≤66 余 16、批次 0+24 恰顶。
     assert 334 + 24 <= HARD_CAP == 380
-    assert 26 + 24 <= TASK_HARD_CAPS[8] == 66
+    assert 26 + 24 <= TASK_HARD_CAPS[8] == 72
+    # Task8 fluid D10 真人还案 run_3 续窗信封算术（第三十一次自批，task8
+    # 66→72，HARD_CAP 380 不动，2026-10-28）：Gate2 连续 2 次真人打回 D10
+    # 熔断（run10 静止 0.003、C4 真倾倒 0.258 未达 0.85 + 壶杯穿模/漏桌）→
+    # 用户 AskUserQuestion 显式裁决「带约束续跑 run_3」→ update_state(as_node=
+    # gate2) 还案（探针 /tmp/remand_probe PASS：反事实 fork，不删任何 reject
+    # 事件/真人 notes，counter 2→1 重路由 agent_run；下次再 reject 仍 D10）。
+    # 新 workdir run_3 走 n=6 出生 + 8 修复最坏 14。账实 int-seq 365/task8 57。
+    # 续窗票 T8-C5-stage1（coding 14 beyond_normal）。三门：全局
+    # 365+14=379≤380 余 1、task8 57+14=71≤72 余 1、批次 0+14 恰顶。
+    assert 365 + 14 <= HARD_CAP == 380
+    assert 57 + 14 <= TASK_HARD_CAPS[8] == 72
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动
