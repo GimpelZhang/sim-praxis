@@ -42,6 +42,13 @@ import json
 
 RESULTS_SCHEMA = "simpraxis.task8.fluid_results.v1"
 
+# 目标杯冻结几何（Q5 厨房倒水场景原始常量；results 契约示例与运动学构造性
+# 合同同一单点，禁止他处再写字面量）。出生脚本块 1 必须把这三个数定义为
+# 自身的原始几何常量并原样自报；机判按同几何从轨迹复算。
+CUP_INNER_RADIUS = 0.045
+CUP_BOTTOM_Z = 0.92
+CUP_RIM_Z = 1.02
+
 
 def _results_contract_json() -> str:
     """results.json 形态示例 + 机检规则（嵌入出生合同正文）。"""
@@ -50,7 +57,8 @@ def _results_contract_json() -> str:
         "solver_api": "SPH.Liquid",
         "n_particles": 12000,
         "frame_dt_s": 0.02,
-        "cup": {"inner_radius": 0.045, "bottom_z": 0.92, "rim_z": 1.02},
+        "cup": {"inner_radius": CUP_INNER_RADIUS, "bottom_z": CUP_BOTTOM_Z,
+                "rim_z": CUP_RIM_Z},
     }
     return json.dumps(example, ensure_ascii=False, indent=2)
 
@@ -77,6 +85,50 @@ def _chunk_intro(script_name: str, cmd_line: str, n_chunks: int) -> str:
 {{"patches":[{{"path":"{script_name}","old":"","new":<拼接后的完整源码>"}}]}}
 补丁（old 必须是空串）创建文件；以下机检要求针对拼接后的完整文件逐条生效，
 任何一条不符整线程结案。"""
+
+
+def _kinematic_contract_block() -> str:
+    """倾倒运动学构造性合同（三次真人 Gate2 否决后，2026-10-28 强化）。
+
+    三次失败：run10 全程静止（壶不倾、0 入杯）；run_2 真倾倒但壶杯穿模、
+    74% 粒子漏桌（0.258 入杯）；run_3 为避穿模把壶拉开→又回到壶杯不动、
+    98.7% 漏桌（0 入杯，真人「甚至不如上一轮」）。共性是模型自由发挥的
+    倾倒几何不可靠。本块**不提供任何 Genesis 实现代码**（硬规则 3：引擎层
+    不携带解题脚本），只把「真倒 / 不穿模 / 水入杯口」改写成出生脚本必须
+    在**场景构建之前**用纯 CPU 解析自检的数值不等式，违规即结构化 FAILURE，
+    给修复轮近零成本的确定性反馈，而不是烧 GPU + 真人眼才发现。
+    """
+    lip_r = round(CUP_INNER_RADIUS - 0.010, 3)      # 流出窗壶嘴水平半径上界 0.035
+    z_lo = round(CUP_RIM_Z + 0.005, 3)             # 壶嘴最低 1.025（不入杯腔）
+    z_hi = round(CUP_RIM_Z + 0.05, 3)              # 壶嘴最高 1.07（水柱短、抑飞溅）
+    return f"""\
+## 倾倒运动学构造性合同（三次真人否决后强化；最高优先级，仅次于人工评审意见）
+目标杯冻结几何：杯口平面 z={CUP_RIM_Z}、内壁半径 R={CUP_INNER_RADIUS}、杯轴竖直、
+杯底 z={CUP_BOTTOM_Z}。源容器（壶）设「倾倒俯仰角」θ=壶体轴与竖直方向夹角
+（直立 θ=0°），壶嘴尖点记 P(t)。你的倾倒运动学必须让下面全部不等式**由构造
+满足**，而不是寄望物理把水溅进杯子：
+1. **真倾倒（禁静止）**：θ(t) 必须连续非恒常——全程 max θ−min θ ≥ 120°，
+   最大俯仰角 θ_max ≥ 120°；且存在长度 ≥0.5s 的连续「流出停留窗」整段
+   θ(t) ≥ 105°（壶嘴低于液面、水可持续流出）；θ 单调平滑变化（分段线性/
+   平滑插值，禁止瞬时跳变/瞬移），起倒与回正对称收尾。
+2. **壶嘴对准杯口（禁漏桌）**：在整个流出停留窗内，壶嘴尖点 P(t) 的水平投影
+   到杯轴距离 ρ(t) 必须 ≤ {lip_r}（=R−0.010，留 1cm 贴壁余量），使水流柱
+   全程落进口面；壶嘴高度必须满足 {z_lo} ≤ z_P(t) ≤ {z_hi}（始终在杯口平面
+   上方 0.5–5cm：水柱短以抑飞溅，且壶嘴绝不探进杯口平面以下）。
+3. **壶杯不穿模（构造性间隙）**：除壶嘴尖点 P 外，壶体任何部分在任何时刻都
+   不得进入柱体「ρ<R 且 z<{CUP_RIM_Z}+0.005」（杯口平面以下的杯内腔与杯壁
+   同柱）；在流出窗每个采样点，壶体包围体与杯壁圆柱面/杯口平面的解析最小
+   间隙 ≥0.012m。实现时把壶与杯各表示为简单原始体（盒/圆柱），用解析式算
+   有符号距离，不得依赖渲染或物理碰撞事后发现。
+4. **出生前强制自检**：必须实现 `kinematic_precheck()`——**不建 gs 场景、不
+   初始化 SPH、不用 GPU**，仅按你的 θ(t)/位姿解析式在整条时间轴上密集采样
+   （50Hz 全程，至少每个子步一个点），逐条数值核验上述 1/2/3；任一不满足
+   立即写结构化 FAILURE（沿用 simpraxis.task8.fluid_failure.v1，
+   kind="kinematic_precheck"，error 写明违反第几条与见证数值，如
+   min 间隙/ρ_max/θ_max/停留窗时长）并非零退出。自检在 main 中、任何
+   scene.build/实体创建**之前**执行；它不产生任何产物、**禁止**把这些中间
+   量写进 results.json（衍生比率仍一律由引擎现算）。物理仿真只有在自检全过
+   后才允许开始。"""
 
 
 def _requirement_blocks(*, stage0_facts_text: str,
@@ -138,7 +190,9 @@ def _requirement_blocks(*, stage0_facts_text: str,
   贴口粒子不入杯；飞溅（z ≥ rim_z）与越界（侧壁外 + 杯底以下）分列单报；
 - 目标：入杯率中位数 ≥ {cup_entry_target}；守恒机判（总数恒定/边界
   溢出 ≤2%/末帧入杯 ≥80%）由引擎三查；
-- 视频与 results/trajectory 必须同一次运行产出（禁止复用旧片/旧轨迹）。"""
+- 视频与 results/trajectory 必须同一次运行产出（禁止复用旧片/旧轨迹）。
+
+{_kinematic_contract_block()}"""
 
 
 def stage_birth_contract(*, script_name: str, cmd_line: str,

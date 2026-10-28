@@ -806,6 +806,51 @@ def test_prompts_chunk_contract_keeps_machine_requirements():
     assert '"old":""' in head.replace(" ", "")
 
 
+def test_kinematic_constructive_contract_present_and_shared():
+    """攢批99：三次真人 Gate2 否决后强化的运动学构造性合同——单次/拆块两版
+    共享（不分叉），且把三次失败模式都改成出生前 CPU 自检的数值不等式。"""
+    from orchestrator.graph import task8_fluid_prompts as prompts
+    kwargs = dict(
+        script_name="genesis_fluid_pour.py",
+        cmd_line="/mnt/venvs/simpraxis/bin/python genesis_fluid_pour.py",
+        stage0_facts_text="outcome=sph_ok",
+        particle_cap=20000, vram_abort_gb=35.0, max_reductions=2,
+        settling_window_s=0.5, cup_entry_target=0.85)
+    single = prompts.stage_birth_contract(**kwargs)
+    chunk = prompts.chunk_birth_contract(n_chunks=6, **kwargs)
+    assert single.split("\n\n", 1)[1] == chunk.split("\n\n", 1)[1]
+    for body in (single, chunk):
+        # 合同标题与四条构造性约束的关键针
+        assert "倾倒运动学构造性合同" in body
+        assert "kinematic_precheck" in body
+        assert "θ_max ≥ 120°" in body and "≥ 105°" in body and "0.5s" in body
+        # 壶嘴对口（R−0.010=0.035）与嘴高（1.025–1.07）
+        assert "≤ 0.035" in body and "1.025 ≤ z_P(t) ≤ 1.07" in body
+        # 构造性不穿模间隙
+        assert "≥0.012m" in body
+        # 自检必须先于建场景、纯 CPU、不写衍生比率产物
+        assert "scene.build" in body and "不用 GPU" in body
+        assert 'kind="kinematic_precheck"' in body
+    # 冻结杯几何单点：合同走廊由常量派生，results 示例同值
+    assert prompts.CUP_INNER_RADIUS == 0.045
+    assert prompts.CUP_RIM_Z == 1.02 and prompts.CUP_BOTTOM_Z == 0.92
+
+
+def test_kinematic_contract_precheck_allocated_in_chunk_boundaries():
+    """攢批99：块 2（运动学）实现自检、块 5（main）在建场景前调用；n 仍 6。"""
+    from orchestrator.graph import task8_fluid_chunks as fc
+    assert fc.FLUID_CHUNK_COUNT == 6
+    b2 = fc.build_chunk_boundary(2)
+    b5 = fc.build_chunk_boundary(5)
+    assert "kinematic_precheck" in b2 and "ρ≤0.035" in b2
+    assert "kinematic_precheck" in b5 and "scene.build" in b5
+    # 其余块不被运动学条款污染
+    assert "kinematic_precheck" not in fc.build_chunk_boundary(0)
+    assert "kinematic_precheck" not in fc.build_chunk_boundary(1)
+    assert "kinematic_precheck" not in fc.build_chunk_boundary(3)
+    assert "kinematic_precheck" not in fc.build_chunk_boundary(4)
+
+
 def test_fluid_chunk_titles_and_boundaries_frozen_shape():
     """n=6 工厂规格：六标题/六边界等长非空、下标 fail-loud、边界互不重复。"""
     from orchestrator.graph import task8_fluid_chunks as fc

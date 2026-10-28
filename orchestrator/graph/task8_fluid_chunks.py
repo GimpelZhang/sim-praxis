@@ -73,7 +73,10 @@ _CHUNK_BOUNDARIES: tuple[str, ...] = (
     "（在源容器内腔体积内布粒子，粒子数受 CLI 粒子预算约束、绝不超硬天花板）；"
     "液体实体创建与初始静置；源容器**倾倒运动学**——时间→俯仰角的函数"
     "（起始直立、匀速/平滑加速倾斜、液体流出、回正），把位姿下发给源容器"
-    "刚体的驱动方式；倾倒起止时刻常量。"
+    "刚体的驱动方式；倾倒起止时刻常量。**必须在本块实现"
+    "「倾倒运动学构造性合同」要求的 kinematic_precheck()（纯 CPU、不建场景，"
+    "按 θ(t)/位姿解析式全程采样，逐条数值核验真倾倒/壶嘴对口 ρ≤0.035 与"
+    "嘴高 1.025–1.07/壶杯间隙≥0.012，违规结构化 FAILURE）。**"
     "不得重复块 0/1 的常量、初始化与几何定义；不得写步进主循环与 VRAM 看门狗"
     "（属块 3）、相机帧渲染与视频编码（属块 4）、results/trajectory 落盘与"
     "main（属块 5）。",
@@ -101,8 +104,10 @@ _CHUNK_BOUNDARIES: tuple[str, ...] = (
     "out_of_bounds_ratio/conservation/cup_entry_rate 等任何衍生比率字段，"
     "出现即整线程结案）；trajectory.npz 用 np.savez_compressed(positions="
     "<float32 (F,N,3)>)；manifest.json 为 {n_frames, frame_dt_s} 且 "
-    "frame_dt_s 与 results.json 一致；main 依次接线初始化→（降级重试）→"
-    "步进→渲染→落盘，缺任何一件产物 rc 必须非零，全部成功才打印 SUCCESS 行"
+    "frame_dt_s 与 results.json 一致；main 必须**最先**调用块 2 的 "
+    "kinematic_precheck()（在任何 gs.init/scene.build/实体创建之前；不通过即"
+    "非零退出），随后依次接线初始化→（降级重试）→步进→渲染→落盘，缺任何"
+    "一件产物 rc 必须非零，全部成功才打印 SUCCESS 行"
     "并 rc=0；禁止联网/写 workdir 外路径/改 site-packages/改外层环境变量。"
     "不得重复块 0-4 的场景、采样、控制、步进与渲染实现，只允许调用它们。",
 )
