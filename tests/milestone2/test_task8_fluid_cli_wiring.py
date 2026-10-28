@@ -269,6 +269,9 @@ def test_factory_birth_mode_injects_contract(tmp_path, monkeypatch):
     assert t8f.FLUID_CAPABILITY_TOP_K == 3
     # 攢批95：修复轮全文可见（run8 非帧根因函数不可见实测墙）
     assert spec.repair_full_source is True
+    # 攢批101：空 traceback（结构化 kinematic_precheck FAILURE）时入口播种，
+    # 全文段/锚点白名单不致缺席
+    assert spec.full_source_relpaths == (t8f.FLUID_ENTRYPOINT,)
     # 攢批96：流体题每 run 修复帽 5→8（四连战役均触 5 帽且错误单调推进；
     # runner.MAX_CODING_ROUNDS 默认 5 不动，仅本工厂提帽）
     assert spec.max_coding_rounds == t8f.FLUID_CODING_ROUNDS == 8

@@ -5182,3 +5182,29 @@ def test_z100_collect_full_source_attaches_anchor_whitelist(tmp_path):
                "listing": "    1| x", "skipped": None}]
     legacy_text = _build_messages(**base, full_source_files=legacy)[1]["content"]
     assert "replace 围栏锚点白名单" not in legacy_text
+
+# ---------------------------------------------------------------------------
+# 攢批101（Task8 fluid run_4，2026-10-28）：空 traceback 帧时入口播种
+# ---------------------------------------------------------------------------
+
+def test_z101_collect_full_source_extra_relpaths_seed_without_frames(tmp_path):
+    """snippets 为空时 extra_relpaths 播种入口脚本；非 .py/重复不重入。"""
+    wd = tmp_path / "work"
+    wd.mkdir()
+    (wd / "entry.py").write_text(
+        "def spout_position_at(t):\n    return t\n", encoding="utf-8")
+    (wd / "notes.txt").write_text("x\n", encoding="utf-8")
+    # 空帧（结构化 FAILURE 无 Python 栈）+ 显式播种。
+    files = _collect_full_source(
+        wd, [], extra_relpaths=("entry.py",))
+    assert [f["file"] for f in files] == ["entry.py"]
+    assert files[0]["listing"] is not None
+    assert "spout_position_at" in files[0]["anchors"]
+    # 非 .py 不播种；已在 snippets 中的不重复（首现序：帧件在前）。
+    (wd / "b.py").write_text("def beta():\n    pass\n", encoding="utf-8")
+    snippets = [{"file": "b.py", "line": 1}]
+    files = _collect_full_source(
+        wd, snippets, extra_relpaths=("entry.py", "b.py", "notes.txt"))
+    assert [f["file"] for f in files] == ["b.py", "entry.py"]
+    # 空元组 + 空帧 = 空列表（旧行为逐字节）。
+    assert _collect_full_source(wd, []) == []

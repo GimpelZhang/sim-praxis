@@ -685,6 +685,10 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             # 在不可见语义下空转。修复轮注入涉案脚本当前全文（预算闸在
             # runner.FULL_SOURCE_*，出生脚本 1127 行 ≈43KB 恒完整注入）。
             repair_full_source=True,
+            # 攢批101（2026-10-28 run_4 实测墙）：kinematic_precheck 的结构化
+            # FAILURE traceback 为空，帧枚举为空会使全文段/锚点白名单缺席；
+            # 显式播种入口 relpath，空栈帧时修复轮仍可见当前脚本与合法锚点。
+            full_source_relpaths=(FLUID_ENTRYPOINT,),
             # 攢批97：跨 workdir 上一 run 只读参考（run_idx>=2 且文件在场）。
             repair_prior_refs=prior_refs,
         )

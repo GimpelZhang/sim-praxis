@@ -458,6 +458,11 @@ class RunSpec:
     # 严禁指向这些路径；仅 task8_fluid 工厂在 run_idx>=2 时从 agent_runs[-1]
     # 的 telemetry_uri 邻位收集（文件实际存在才给）。
     repair_prior_refs: "tuple[tuple[str, Path], ...]" = ()
+    # 攢批101 锁内适配（2026-10-28 Task8 流体 run_4 空 traceback 墙）：修复轮
+    # 全文枚举的显式播种 relpath（相对 workdir 的 .py）。结构化 FAILURE 无
+    # Python 栈帧时 snippets 为空，靠它保证入口脚本全文+锚点白名单在场。
+    # 空元组时行为逐字节不变；仅 task8_fluid 工厂给 (FLUID_ENTRYPOINT,)。
+    full_source_relpaths: "tuple[str, ...]" = ()
 
 
 @dataclass
@@ -523,7 +528,8 @@ def _collect_snippets(workdir: Path, text: str) -> list[dict]:
     return out
 
 
-def _collect_full_source(workdir: Path, snippets: "list[dict]") -> list[dict]:
+def _collect_full_source(workdir: Path, snippets: "list[dict]",
+                         extra_relpaths: "tuple[str, ...]" = ()) -> list[dict]:
     """攢批95 锁内适配（Task8 流体 run8 实测墙，2026-10-27）：修复轮全文注入。
 
     run8 实测（证据 phase1/task4_runner/t8q5-fluid-stage1-20261027a/
@@ -535,12 +541,25 @@ def _collect_full_source(workdir: Path, snippets: "list[dict]") -> list[dict]:
     枚举 snippets 已验入 workdir 的 .py 涉案文件，按 snippet 首现序去重，
     每轮从磁盘读「上一轮补丁后」的当前版本。超预算跳过/截断并注记，
     绝不静默截断文件内容（禁止半文件误导模型）。
+
+    攢批101 锁内适配（Task8 流体 run_4，2026-10-28）：extra_relpaths 播种。
+    run_4 seq390–393 实测：攢批99 kinematic_precheck 的结构化 FAILURE
+    traceback 为空串（设计上近零成本、无 Python 栈），_collect_snippets
+    据此枚举到空列表，全文段/攢批100 锚点白名单整段缺席，模型只看见
+    攢批97 上一 run 参考脚本→继续抄异名锚点四连拒。工厂可显式给入口
+    relpath 播种（帧枚举之后序、同 .py/workdir/预算纪律），空元组行为
+    逐字节不变。
     """
     workdir_r = workdir.resolve()
     out: list[dict] = []
     seen: set[str] = set()
     total = 0
-    for s in snippets:
+    seed_snippets = list(snippets)
+    for rel in extra_relpaths:
+        if isinstance(rel, str) and rel.endswith(".py") \
+                and rel not in {s.get("file") for s in seed_snippets}:
+            seed_snippets.append({"file": rel, "line": 1})
+    for s in seed_snippets:
         rel = s.get("file")
         if not isinstance(rel, str) or rel in seen or not rel.endswith(".py"):
             continue
@@ -2443,7 +2462,9 @@ class AgentRunner:
             # 攢批95 锁内适配（Task8 流体 run8，2026-10-27）：opt-in 修复轮
             # 全文可见。每轮在补丁应用+重跑之后收集，吃磁盘当前版本；
             # False 时恒为 None，_build_messages 输出与旧版逐字节一致。
-            full_source_files = (_collect_full_source(workdir, snippets)
+            full_source_files = (_collect_full_source(
+                                    workdir, snippets,
+                                    spec.full_source_relpaths)
                                  if spec.repair_full_source else None)
             # 攢批97：跨 workdir 上一 run 只读参考（工厂显式 opt-in；
             # 空元组恒 None，_build_messages 输出与旧版逐字节一致）。
