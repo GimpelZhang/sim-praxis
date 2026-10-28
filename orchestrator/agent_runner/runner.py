@@ -141,6 +141,13 @@ _WORKDIR_HOOK_BASENAMES = (
 _WORKDIR_HOOK_STEMS = ("sitecustomize", "shim_core", "usercustomize")
 SNIPPET_CTX_LINES = 8
 SNIPPET_TOTAL_CHARS = 4096
+# 攢批95 锁内适配（Task8 流体 run8 实测墙，2026-10-27）：修复轮全文可见性
+# 的逐文件/总字符硬预算。涉案脚本（traceback 帧落在 workdir 内的 .py）在
+# 预算内逐行号全文注入；单文件超 PER_FILE 跳过该文件并注记，合计超 TOTAL
+# 截断后续文件（已注入件不撤）。出生脚本现态 1127 行 ≈ 43KB，两预算对其
+# 恒为完整注入；调预算必须经新取证，禁止为塞内容临时放宽。
+FULL_SOURCE_PER_FILE_CHARS = 150_000
+FULL_SOURCE_TOTAL_CHARS = 200_000
 RUN_TIMEOUT_S = 1800
 FAILURE_JSON = "FAILURE.json"
 
@@ -432,6 +439,11 @@ class RunSpec:
     # prompt 与 Phase 1 以来逐字节一致；仅 task8_fluid 工厂显式给增强召回
     # （troubleshooting 错误签名清洗 + capabilities 额外检索路）。
     coding_recall: "CodingRecallSpec | None" = None
+    # 攢批95 锁内适配（2026-10-27 Task8 流体 run8 实测墙）：False 时修复轮
+    # prompt 与旧版逐字节一致（只带 ±8 行 traceback 帧片段）；True 时追加
+    # 涉案脚本当前全文段（预算见 FULL_SOURCE_*，每轮读补丁后磁盘现态）。
+    # 仅 task8_fluid 工厂显式开；Task6/7 及其它任务零变化。
+    repair_full_source: bool = False
 
 
 @dataclass
@@ -494,6 +506,58 @@ def _collect_snippets(workdir: Path, text: str) -> list[dict]:
         total += len(block)
         out.append({"file": str(resolved.relative_to(workdir_r)),
                     "line": ln, "snippet": block})
+    return out
+
+
+def _collect_full_source(workdir: Path, snippets: "list[dict]") -> list[dict]:
+    """攢批95 锁内适配（Task8 流体 run8 实测墙，2026-10-27）：修复轮全文注入。
+
+    run8 实测（证据 phase1/task4_runner/t8q5-fluid-stage1-20261027a/
+    coding_round{1..5}，seq330–334）：根因函数 ``build_kitchen_scene``
+    不在任何 traceback 帧上（它是帧 L764 的被调方），±8 行帧片段永远不
+    可见；模型两轮只输出「先读文件」散文（通道拒收），三轮在不可见函数
+    语义下空转。帧片段是设计上的 token 闸，不是信息隔离闸——修复者理当
+    能读自己要修的当前脚本。opt-in（RunSpec.repair_full_source），仅
+    枚举 snippets 已验入 workdir 的 .py 涉案文件，按 snippet 首现序去重，
+    每轮从磁盘读「上一轮补丁后」的当前版本。超预算跳过/截断并注记，
+    绝不静默截断文件内容（禁止半文件误导模型）。
+    """
+    workdir_r = workdir.resolve()
+    out: list[dict] = []
+    seen: set[str] = set()
+    total = 0
+    for s in snippets:
+        rel = s.get("file")
+        if not isinstance(rel, str) or rel in seen or not rel.endswith(".py"):
+            continue
+        seen.add(rel)
+        target = (workdir_r / rel).resolve(strict=False)
+        try:
+            target.relative_to(workdir_r)
+        except ValueError:
+            continue
+        try:
+            lines = target.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        listing = "\n".join(
+            f"{i+1:5d}| {lines[i]}" for i in range(len(lines)))
+        if len(listing) > FULL_SOURCE_PER_FILE_CHARS:
+            out.append({"file": rel, "n_lines": len(lines),
+                        "listing": None,
+                        "skipped": f"文件 {len(listing)} 字符超单文件预算 "
+                                   f"{FULL_SOURCE_PER_FILE_CHARS}，未注入"})
+            continue
+        if total + len(listing) > FULL_SOURCE_TOTAL_CHARS:
+            out.append({"file": rel, "n_lines": len(lines),
+                        "listing": None,
+                        "skipped": f"文件 {len(listing)} 字符将超总预算 "
+                                   f"{FULL_SOURCE_TOTAL_CHARS}，未注入"})
+            continue
+        total += len(listing)
+        out.append({"file": rel, "n_lines": len(lines),
+                    "listing": listing, "skipped": None})
     return out
 
 
@@ -1551,6 +1615,10 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                     # 检索路段 ``(namespace, top_k, hits)``；None 时 prompt
                     # 与旧版逐字一致（字符级快照测试锁定）。
                     extra_kb_sections: "tuple[tuple[str, int, list[dict]], ...] | None" = None,
+                    # 攢批95 锁内适配（Task8 流体 run8，2026-10-27）：涉案脚本
+                    # 全文段（_collect_full_source 产物）；None/空时 prompt
+                    # 与旧版逐字节一致。
+                    full_source_files: "list[dict] | None" = None,
                     ) -> list[dict[str, str]]:
     # v1.4 §2.5 条件拼装：出生轮（chunk_context 非 None）system 逐字保持
     # 现行原文（出生环连续四跑成功路径零变化，快照测试锁逐字不变）；修复轮
@@ -1614,11 +1682,24 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
                 f"top_k={ns_top_k}）\n"
                 + _kb_block(ns_hits, label="C", empty_ns=ns))
         extra_kb_section = "\n\n" + "\n\n".join(rendered)
+    # 攢批95：涉案脚本全文段紧随帧片段之后、troubleshooting 之前；None/空
+    # 列表时整段为 ""，与旧模板逐字节一致（快照回归锁定）。
+    full_source_section = ""
+    if full_source_files:
+        parts = ["\n\n## 运行工作目录目标脚本全文（修复前当前版本；机器注入，含行号）"]
+        for fs in full_source_files:
+            head = f"### {fs['file']}（{fs['n_lines']} 行）"
+            if fs.get("listing") is not None:
+                parts.append(head + "\n" + fs["listing"])
+            else:
+                parts.append(head + "\n（" + fs["skipped"] + "）")
+        full_source_section = "\n\n".join(parts)
     user = (
         f"{notes_block}{extra_block}{chunk_block}"
         "## 失败命令\n" + " ".join(cmd) + "\n\n"
         "## traceback / 日志尾部\n" + traceback_tail + "\n\n"
-        "## 相关源文件片段（仅限运行工作目录）\n" + snippet_block + "\n\n"
+        "## 相关源文件片段（仅限运行工作目录）\n" + snippet_block
+        + full_source_section + "\n\n"
         "## troubleshooting 知识库命中（namespaces=troubleshooting, top_k=6）\n"
         + _kb_block(hits) + extra_kb_section + learning_section)
     return [{"role": "system", "content": system},
@@ -2228,6 +2309,11 @@ class AgentRunner:
 
             tail = _tb_tail(result)
             snippets = _collect_snippets(workdir, tail)
+            # 攢批95 锁内适配（Task8 流体 run8，2026-10-27）：opt-in 修复轮
+            # 全文可见。每轮在补丁应用+重跑之后收集，吃磁盘当前版本；
+            # False 时恒为 None，_build_messages 输出与旧版逐字节一致。
+            full_source_files = (_collect_full_source(workdir, snippets)
+                                 if spec.repair_full_source else None)
             # Phase 2 Task1：recall 注入时 kb 路由 ProductionRecall 同参查询
             # （query_kb(namespace=troubleshooting, top_k=TOP_K)），
             # ret["kb_hits"] 与原 hits 同源同语义；learning 路只查真实学习表。
@@ -2306,7 +2392,8 @@ class AgentRunner:
                 snippets=snippets, hits=hits, cmd=spec.cmd,
                 learning_hits=learning_hits or None,
                 extra_sections=spec.extra_prompt_sections or None,
-                extra_kb_sections=extra_kb_sections or None)
+                extra_kb_sections=extra_kb_sections or None,
+                full_source_files=full_source_files)
             # 硬规则1：runner 永不构造 image block（双保险，网关入口亦拒）
             for mm in messages:
                 if not isinstance(mm.get("content"), str):

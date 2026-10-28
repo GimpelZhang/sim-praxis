@@ -757,7 +757,11 @@ CALL_CACHE_ALLOWLIST = {
     # _clean_coding_hint、_build_messages extra_kb 段与 run() 检索/透传接线
     # 全在构造点之前（含 docstring/注释，净 +86 行），纯位移（1938→2024）；
     # 额外检索是 VectorEngine.query_kb 本地嵌入调用，0 新增 CallReplay 落点。
-    ("orchestrator/agent_runner/runner.py", 2024),
+    # 攢批95（Task8 流体 run8 非帧根因不可见实测墙）：FULL_SOURCE_* 预算常量、
+    # _collect_full_source、RunSpec.repair_full_source、_build_messages 全文段
+    # 与 run() 收集/透传接线全在构造点之前（净 +81 行），纯位移（2024→2105）；
+    # 全文是 workdir 内只读注入，0 新增 CallReplay 落点/网关调用。
+    ("orchestrator/agent_runner/runner.py", 2105),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
@@ -984,7 +988,7 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert CHUNK_MAX_CODE_CHARS != 26000       # run3 旧窗随 n=6 接缝下线
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 36000
     assert CHUNK_CLOSED_SPLIT_MAX_CHARS == 2 * CHUNK_MAX_CODE_CHARS
-    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 76, 8: 40}
+    assert PHASE2_TASK_CAPS == {4: 24, 6: 227, 7: 76, 8: 66}
     # Phase 2 字典覆盖 Phase 1 并集语义：task=6 当前顶 227（第十七次自批）；
     # task=4 仍为 24（覆盖 Phase 1 的 8）；task=7 当前顶 76（第二十五次自批
     # 68→76，2026-10-27 r25 重生修复环续窗，T7-C11 8/8 熔断后续窗票 T7-C12
@@ -1000,7 +1004,8 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[6] != 106           # run8 首跑旧顶保持下线
     assert TASK_HARD_CAPS[6] != 98            # run5 旧顶保持下线
     assert TASK_HARD_CAPS[4] == 24
-    assert TASK_HARD_CAPS[7] == 76 and TASK_HARD_CAPS[8] == 40
+    assert TASK_HARD_CAPS[7] == 76 and TASK_HARD_CAPS[8] == 66
+    assert TASK_HARD_CAPS[8] != 40            # 第二十七次旧顶随第二十八次自批下线（攢批95 续窗 40→66）
     assert TASK_HARD_CAPS[8] != 16            # task8 M2 原始顶随第二十七次自批下线（fluid Stage1 16→40）
     assert TASK_HARD_CAPS[7] != 68            # 二十四次旧 task7 顶随第二十五次下线
     assert TASK_HARD_CAPS[7] != 60            # 二十二次旧 task7 顶随第二十四次下线
@@ -1009,13 +1014,13 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     assert TASK_HARD_CAPS[7] != 36            # 十九次旧 task7 顶随第二十次下线
     assert TASK_HARD_CAPS[7] != 24            # 十八次旧 task7 顶随第十九次下线
     assert TASK_HARD_CAPS[7] != 16            # 十七次旧 task7 顶随第十八次下线
-    # 顺带钉死全局双门：常态 60 始终未动；硬顶 350 是第二十七次自批
-    # （2026-10-27 Task8 fluid Stage1 启动，310→350；此前 310 为第二十三次，
-    # 290 为第十九次，2026-10-26 十三至十九次连续七提
-    # 176→190→205→220→235→250→265→290）后的值——前四次提顶均不动全局门，
-    # 第五次起动 HARD_CAP。
+    # 顺带钉死全局双门：常态 60 始终未动；硬顶 380 是第二十八次自批
+    # （2026-10-28 Task8 fluid run8 帽尽 + 攢批95 全文可见续窗，350→380；
+    # 此前 350 为第二十七次，310 为第二十三次，290 为第十九次，2026-10-26
+    # 十三至十九次连续七提 176→190→205→220→235→250→265→290）后的值。
     assert NORMAL_BUDGET == 60
-    assert HARD_CAP == 350
+    assert HARD_CAP == 380
+    assert HARD_CAP != 350                    # 二十七次旧全局顶随第二十八次下线（攢批95 续窗 350→380）
     assert HARD_CAP != 310                    # 二十三次旧全局顶随第二十七次下线（Task8 fluid 310→350）
     assert HARD_CAP != 290                    # 十九次旧全局顶随第二十三次下线
     assert HARD_CAP != 265                    # 十八次旧全局顶随第十九次下线
@@ -1036,7 +1041,7 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # human_failure）；第十七次抬顶后预扩三轮修复帽 15（234+15=249≤265、
     # 210+15=225≤227）。第十八/十九次抬顶只动全局门与 task7 顶，task6 顶不动，
     # run27 算术继续成立（HARD_CAP 随第十九次到 290）。
-    assert 234 + 5 <= HARD_CAP == 350
+    assert 234 + 5 <= HARD_CAP == 380
     assert 210 + 5 <= TASK_HARD_CAPS[6] == 227
     # Task7 Stage1 run2k 修复环续窗信封算术（第二十四次自批，task7 60→68，
     # HARD_CAP 310 不动）：账实 int-seq 293/task7 59（绿缝 seq287-290 四连 ok +
@@ -1044,7 +1049,7 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # r23 亡于 T7-C10 3/3 batch pause，非断流）。task7 触 60 即 task_hard_cap
     # 不可恢复（G-11），故先抬顶再续。续窗票 T7-C11（coding 8）。三门：全局
     # 293+8=301≤310 余 9、task7 59+8=67≤76 余 10、批次 0+8 恰顶。
-    assert 293 + 8 <= HARD_CAP == 350
+    assert 293 + 8 <= HARD_CAP == 380
     assert 59 + 8 <= TASK_HARD_CAPS[7] == 76
     # Task7 Stage1 r25 重生修复环续窗信封算术（第二十五次自批，task7 68→76，
     # HARD_CAP 310 不动）：攢批82 倒带重生 r25——seq299 round1 一次生出 servo
@@ -1055,8 +1060,17 @@ def test_task6_cap_98_to_106_and_hard_cap_122_to_128_phase2():
     # RC=0 五件套）。round4 preflight 撞 T7-C11 8/8 batch pause。账实
     # int-seq 301/task7 67。续窗票 T7-C12（coding 8）。三门：全局
     # 301+8=309≤310 余 1、task7 67+8=75≤76 余 1、批次 0+8 恰顶。
-    assert 301 + 8 <= HARD_CAP == 350
+    assert 301 + 8 <= HARD_CAP == 380
     assert 67 + 8 <= TASK_HARD_CAPS[7] == 76
+    # Task8 fluid run8 帽尽 + 攢批95 全文可见续窗信封算术（第二十八次自批，
+    # HARD_CAP 350→380、task8 40→66，2026-10-28）：run8 seq330–334 五轮
+    # 空转（三轮重复守卫补丁+两轮「先读文件」散文被通道拒），根因函数
+    # build_kitchen_scene 非 traceback 帧、±8 行片段永不可见；攢批95
+    # opt-in 修复轮全文注入后续窗。账实 int-seq 334/task8 26。续窗票
+    # T8-C2-stage1（coding 24 beyond_normal）。三门：全局 334+24=358≤380
+    # 余 22、task8 26+24=50≤66 余 16、批次 0+24 恰顶。
+    assert 334 + 24 <= HARD_CAP == 380
+    assert 26 + 24 <= TASK_HARD_CAPS[8] == 66
 
     # run5 钉死 task6.py/task6_v2_prompts.py 两图文件零改动；run6 引擎提交
     # 额外钉死证据包脚本 build_evidence_pack.py 零改动（引擎面只许动

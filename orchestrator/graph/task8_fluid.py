@@ -643,6 +643,12 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
                 extra_kb=(("capabilities", FLUID_CAPABILITY_TOP_K,
                            FLUID_CAPABILITY_QUERY),),
             ),
+            # 攢批95（2026-10-27 锁内适配）：run8 seq330–334 证据——根因函数
+            # build_kitchen_scene 非 traceback 帧函数（L764 被调方），±8 行
+            # 帧片段永不可见，模型两轮只输出「先读文件」散文被通道拒收、三轮
+            # 在不可见语义下空转。修复轮注入涉案脚本当前全文（预算闸在
+            # runner.FULL_SOURCE_*，出生脚本 1127 行 ≈43KB 恒完整注入）。
+            repair_full_source=True,
         )
 
     return factory

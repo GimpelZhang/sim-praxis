@@ -45,7 +45,10 @@ from orchestrator.agent_runner.runner import (
     ChunkPromptContext,
     ChunkSpec,
     CodingRecallSpec,
+    FULL_SOURCE_PER_FILE_CHARS,
+    FULL_SOURCE_TOTAL_CHARS,
     _clean_coding_hint,
+    _collect_full_source,
     _ENTRY_GUARD_REASON,
     _FRAME_RE,
     _RC0_MISSING_ARTIFACT_FMT,
@@ -4944,3 +4947,114 @@ def test_z94_failed_seam_record_carries_timeline(tmp_path):
     # 初始 exec + 补丁后再 exec（帽 1）→ 2 条时间线
     assert record["executions"] == len(record["timeline"]) == 2
     assert record["failure_json"] and record["reason"]
+
+
+# ---------------------------------------------------------------------------
+# 攢批95：修复轮全文可见性（Task8 流体 run8 实测墙；锁内适配 2026-10-27）
+# ---------------------------------------------------------------------------
+
+def test_z95_collect_full_source_dedup_order_and_listing(tmp_path):
+    """涉案 .py 按 snippet 首现序去重、逐行号全文、非 .py 不枚举。"""
+    wd = tmp_path / "work"
+    wd.mkdir()
+    (wd / "a.py").write_text("a1\na2\na3\n", encoding="utf-8")
+    (wd / "b.py").write_text("b1\nb2\n", encoding="utf-8")
+    (wd / "notes.txt").write_text("x\n", encoding="utf-8")
+    snippets = [
+        {"file": "a.py", "line": 2, "snippet": "..."},
+        {"file": "a.py", "line": 3, "snippet": "..."},   # 同件去重
+        {"file": "notes.txt", "line": 1, "snippet": "..."},  # 非 py 跳过
+        {"file": "b.py", "line": 1, "snippet": "..."},
+    ]
+    files = _collect_full_source(wd, snippets)
+    assert [f["file"] for f in files] == ["a.py", "b.py"]
+    assert files[0]["n_lines"] == 3 and files[1]["n_lines"] == 2
+    assert files[0]["listing"].splitlines()[1].startswith("    2| a2")
+    assert all(f["skipped"] is None for f in files)
+
+
+def test_z95_collect_full_source_budget_skips_with_never_half_file(tmp_path,
+                                                                   monkeypatch):
+    """超单文件预算跳过并注记（绝不注入半文件）；超总预算截断后续。"""
+    wd = tmp_path / "work"
+    wd.mkdir()
+    (wd / "big.py").write_text("x = 1\n" * 20, encoding="utf-8")
+    monkeypatch.setattr(
+        "orchestrator.agent_runner.runner.FULL_SOURCE_PER_FILE_CHARS", 30)
+    files = _collect_full_source(wd, [{"file": "big.py", "line": 1}])
+    assert files[0]["listing"] is None and "预算" in files[0]["skipped"]
+
+    (wd / "small.py").write_text("s\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "orchestrator.agent_runner.runner.FULL_SOURCE_PER_FILE_CHARS",
+        FULL_SOURCE_PER_FILE_CHARS)
+    monkeypatch.setattr(
+        "orchestrator.agent_runner.runner.FULL_SOURCE_TOTAL_CHARS", 20)
+    files = _collect_full_source(
+        wd, [{"file": "small.py", "line": 1},
+             {"file": "big.py", "line": 1}])
+    # small（9 字符）完整注入后总预算耗尽，big 必须整条跳过而非半截。
+    assert files[0]["file"] == "small.py" and files[0]["listing"] == "    1| s"
+    assert files[1]["file"] == "big.py" and files[1]["listing"] is None
+    assert "总预算" in files[1]["skipped"]
+
+
+def test_z95_build_messages_section_position_and_default_absent():
+    """全文段在帧片段之后、troubleshooting 之前；默认 None 时段不存在。"""
+    base = dict(gate2_notes=None, traceback_tail="boom",
+                snippets=[{"file": "s.py", "line": 1, "snippet": "1| x"}],
+                hits=[], cmd=["python", "s.py"])
+    msgs_off = _build_messages(**base)
+    assert "目标脚本全文" not in msgs_off[1]["content"]
+
+    files = [{"file": "s.py", "n_lines": 3,
+              "listing": "    1| a\n    2| HIDDEN_LINE_Z95\n    3| c",
+              "skipped": None}]
+    msgs_on = _build_messages(**base, full_source_files=files)
+    content = msgs_on[1]["content"]
+    assert "## 运行工作目录目标脚本全文" in content
+    assert "HIDDEN_LINE_Z95" in content
+    p_snip = content.index("## 相关源文件片段")
+    p_full = content.index("## 运行工作目录目标脚本全文")
+    p_ts = content.index("## troubleshooting")
+    assert p_snip < p_full < p_ts
+    # None 与默认调用逐字节一致。
+    assert _build_messages(**base, full_source_files=None)[1]["content"] == \
+        msgs_off[1]["content"]
+
+
+def test_z95_runner_injects_full_source_when_flag_on(tmp_path):
+    """端到端：repair_full_source=True 时帧窗口外的行也进 prompt；False 不进。"""
+    def _make_runner(flag: bool):
+        wd = tmp_path / f"work_{flag}"
+        wd.mkdir(parents=True)
+        body = ["import sys",
+                "MARKER_Z95 = 'z95-line-beyond-frame-window'",  # 行 2
+                "sys.stderr.write('noise\\n')"]
+        body += [f"_pad_{i} = {i}" for i in range(20)]      # 行 4..23
+        body.append("raise RuntimeError('z95 boom')")       # 行 24
+        (wd / "script.py").write_text("\n".join(body) + "\n", encoding="utf-8")
+        patch = json.dumps({"patches": [{
+            "path": "script.py",
+            "old": "raise RuntimeError('z95 boom')",
+            "new": "raise RuntimeError('z95 boom round1')"}]})
+        gw = FakeGateway([patch])
+        runner = AgentRunner(gw, _Z94Vector(), evidence_root=tmp_path / "ev")
+        spec = RunSpec(
+            thread_id=f"z95{flag}", workdir=wd,
+            cmd=[sys.executable, str(wd / "script.py")],
+            telemetry_relpath="results.json", batch_id="T8-Z95",
+            billing_task=8, run_idx=1, max_coding_rounds=1,
+            repair_full_source=flag)
+        return runner.run(spec), gw
+
+    rec_on, gw_on = _make_runner(True)
+    assert rec_on["status"] == "failed" and len(gw_on.calls) == 1
+    user_on = gw_on.calls[0]["messages"][1]["content"]
+    assert "## 运行工作目录目标脚本全文（修复前当前版本" in user_on
+    assert "z95-line-beyond-frame-window" in user_on       # 帧窗外的行可见
+
+    rec_off, gw_off = _make_runner(False)
+    user_off = gw_off.calls[0]["messages"][1]["content"]
+    assert "目标脚本全文" not in user_off
+    assert "z95-line-beyond-frame-window" not in user_off

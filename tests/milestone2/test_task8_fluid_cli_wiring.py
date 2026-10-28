@@ -267,6 +267,8 @@ def test_factory_birth_mode_injects_contract(tmp_path, monkeypatch):
                             t8f.FLUID_CAPABILITY_QUERY),)
     assert "SPH.Liquid" in t8f.FLUID_CAPABILITY_QUERY
     assert t8f.FLUID_CAPABILITY_TOP_K == 3
+    # 攢批95：修复轮全文可见（run8 非帧根因函数不可见实测墙）
+    assert spec.repair_full_source is True
     # cmd 与出生合同同源（build_stage1_contract 单点）
     contract = t8f.build_stage1_contract(
         stage0_outcome="sph_ok", workdir=spec.workdir, thread_id=THREAD)
