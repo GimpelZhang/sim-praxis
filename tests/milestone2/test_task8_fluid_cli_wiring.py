@@ -856,7 +856,8 @@ def test_kinematic_contract_precheck_allocated_in_chunk_boundaries():
 
 def test_vessel_structure_contract_v2_present_and_shared():
     """攢批102：卡#4 后强化的合同 v2——单体刚体壶/慢动力学/物理爆炸护栏，
-    单次/拆块两版共享同一机检正文（唯一来源，防分叉）；阈值只允许来自常量。"""
+    单次/拆块两版共享同一机检正文（唯一来源，防分叉）；阈值只允许来自常量。
+    攢批103（C6，用户裁决）：第 5/8 条追加边流形判据（只给 what 不给 how）。"""
     from orchestrator.graph import task8_fluid_prompts as prompts
     kwargs = dict(
         script_name="genesis_fluid_pour.py",
@@ -885,6 +886,12 @@ def test_vessel_structure_contract_v2_present_and_shared():
         assert "严禁以入杯率高低" in body
         # 第 8 条 precheck 扩验（仍先于 gs.init/scene.build）
         assert "gs.init/scene.build" in body
+        # C6（攢批103，用户裁决「C6合同强化后再战」）：边流形判据——
+        # 只给验收 what（每无向边恰两面 + 计数见证），不给拓扑做法
+        assert "每条无向边恰被两个三角形引用" in body
+        assert "边界边" in body and "非流形边" in body
+        assert "边界边数/非流形边数/is_watertight" in body
+        assert "自行重构" in body
     # 阈值常量单点钉死（合同正文只能从常量派生，禁止字面量漂移）
     assert prompts.VESSEL_LIP_DRIFT_MAX_M == 0.010
     assert prompts.VESSEL_LIP_SPEED_MAX_MPS == 0.20
@@ -900,7 +907,8 @@ def test_vessel_structure_contract_v2_present_and_shared():
 
 def test_vessel_contract_v2_allocated_in_chunk_boundaries():
     """攢批102：合同 v2 在六块边界中的落点——b0 阈值、b1 单体壶、b2 双自检、
-    b5 main 先护栏后渲染；b3/b4 不被 sim_blowout 污染，n 仍 6。"""
+    b5 main 先护栏后渲染；b3/b4 不被 sim_blowout 污染，n 仍 6。
+    攢批103（C6）：边流形判据只落 b1（构造）/b2（自检+计数见证）。"""
     from orchestrator.graph import task8_fluid_chunks as fc
     assert fc.FLUID_CHUNK_COUNT == 6
     b0, b1, b2 = (fc.build_chunk_boundary(i) for i in (0, 1, 2))
@@ -912,6 +920,9 @@ def test_vessel_contract_v2_allocated_in_chunk_boundaries():
     assert "单体刚体" in b1 and "trimesh" in b1
     assert "gs.morphs.Mesh(file=" in b1 and "decompose_nonconvex=True" in b1
     assert "add_entity" in b1
+    # C6（攢批103）：watertight 从布尔口号升级为边流形判据（只给 what）
+    assert "每条无向边恰被两个三角形引用" in b1
+    assert "自行重构拓扑" in b1
     # 非凸分解 API 只许出现在 b1（其余块不得另开壶实体路径）
     assert "decompose_nonconvex" not in b0
     assert "decompose_nonconvex" not in b2 and "decompose_nonconvex" not in b5
@@ -919,6 +930,15 @@ def test_vessel_contract_v2_allocated_in_chunk_boundaries():
     assert "kinematic_precheck" in b2 and "sim_blowout" in b2
     assert "2.5m" in b2 and "2%" in b2
     assert "严禁按入杯率触发" in b2
+    # C6（攢批103）：边流形逐边判据 + 计数见证落在 b2，禁止自检跳过
+    assert "每个无向边被多少个三角形引用" in b2
+    assert "边界边" in b2 and "非流形边" in b2
+    assert "面数/边界边数/非流形边数/is_watertight" in b2
+    assert "禁止自检里跳过" in b2
+    # 流形判据只许落在 b1/b2（定义/自检），其余块不得携带
+    assert "每条无向边恰被两个三角形引用" not in b0
+    assert "非流形边" not in b0 and "非流形边" not in b3
+    assert "非流形边" not in b4 and "非流形边" not in b5
     # b5：main 顺序——precheck 最先，步进结束立即护栏，护栏过后才渲染
     assert "kinematic_precheck()" in b5 and "sim_blowout()" in b5
     assert b5.index("sim_blowout()") < b5.index("渲染→落盘")

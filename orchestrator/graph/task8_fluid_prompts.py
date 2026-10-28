@@ -153,6 +153,12 @@ def _vessel_structure_contract_block() -> str:
     插入杯中」）；粒子在 lift/slide 段失去容纳，98% 越界、1.1% 入杯。
     本块同样**不含任何 Genesis 实现代码**（硬规则 3），只把结构完整性与
     慢动力学改成构造要求 + 出生前纯 CPU 自检/跑完后近零成本 numpy 护栏。
+
+    C6（攢批103，用户裁决「C6合同强化后再战」）：run_5 首战出生脚本壶
+    网格非流形（is_watertight=False：边被 3 面引用），出生前自检 8 轮帽
+    熔断、零 GPU 未发卡#5；rehang 后被 callcache 字节级重放（0 实呼）。
+    强化只加判据不给拓扑做法：第 5/8 条新增「每无向边恰两面」边流形判据
+    + 边界边/非流形边计数见证（指纹变化自然失配重放缓存）。
     """
     return f"""\
 ## 源容器结构与慢动力学构造性合同 v2（run_4 卡#4 后强化；与上一运动学合同同优先级）
@@ -161,7 +167,9 @@ Box、驱动器只驱动到其中一块，自由壶壁被流体打飞、粒子�
 以下要求必须**由构造满足**，并纳入出生前自检：
 5. **单体刚体壶（严禁散件）**：壶必须是**单一刚体实体**——用程序化
    trimesh（venv 已装 trimesh 5.1.1）在当前工作目录生成开口空心壶网格
-   （壁+底一体、watertight，STL 或 OBJ 落本 workdir），经**一次**
+   （壁+底一体、watertight：**每条无向边恰被两个三角形引用**、无边界边、
+   无重复面、法向一致；自检不过即由生成代码自行重构网格拓扑直到满足，
+   STL 或 OBJ 落本 workdir），经**一次**
    scene.add_entity(morph=gs.morphs.Mesh(file=<该网格>, fixed=True,
    decompose_nonconvex=True)) 创建（coacd 非凸分解已装，凹面盛水必须开，
    凸包化会封死壶口）；脚本里壶只允许这一个实体句柄（自检断言壶 add_entity
@@ -186,11 +194,16 @@ Box、驱动器只驱动到其中一块，自由壶壁被流体打飞、粒子�
    触发、严禁据此调任何物理/几何阈值（85% 目标冻结，矛盾即结论）。
 8. **kinematic_precheck() 必须扩验第 5/6 条可静态验证部分**：用 trimesh
    加载第 5 条网格文件（不建 gs 场景、不用 GPU）确认文件存在、三角面数 >0
-   且开口/壁厚几何可读；再按位姿解析式在整条时间轴数值求导，逐条核验
+   且开口/壁厚几何可读；**并逐边核验网格边流形——对全部无向边统计每个边
+   被多少个三角形引用，恰为 2 才通过，引用数为 1 的是边界边、≥3 的是非
+   流形边，两类都计数，任一存在连同 mesh.is_watertight=False 即不通过**
+   （只给判据：必须自行重构生成拓扑，禁止在自检里跳过/放宽该判据）；
+   再按位姿解析式在整条时间轴数值求导，逐条核验
    壶嘴漂移 ≤{VESSEL_LIP_DRIFT_MAX_M}m、合速度 ≤{VESSEL_LIP_SPEED_MAX_MPS}
    m/s、角速度 ≤{VESSEL_TILT_ANG_SPEED_MAX_DPS}°/s、静置 ≥{VESSEL_SETTLE_MIN_S}s、
    转动历时 ≥{VESSEL_TILT_MIN_S}s；任一不过写 kind="kinematic_precheck"
-   结构化 FAILURE（见证值：面数/漂移 max/速度 max/角速度 max/静置/历时），
+   结构化 FAILURE（见证值：面数/边界边数/非流形边数/is_watertight/
+   漂移 max/速度 max/角速度 max/静置/历时），
    仍在任何 gs.init/scene.build 之前、非零退出。"""
 
 
