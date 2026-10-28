@@ -571,8 +571,47 @@ def _collect_full_source(workdir: Path, snippets: "list[dict]") -> list[dict]:
             continue
         total += len(listing)
         out.append({"file": rel, "n_lines": len(lines),
-                    "listing": listing, "skipped": None})
+                    "listing": listing, "skipped": None,
+                    # 攢批100：现存锚点白名单（仅随成功注入的全文计算）。
+                    "anchors": _replace_anchor_manifest("\n".join(lines))})
     return out
+
+
+# 攢批100 锁内适配（Task8 流体 run_4，2026-10-28）：replace 围栏锚点白名单。
+# run_4 seq388/389 两轮实测（coding_round3/4.decision 均「replace 围栏 func
+# 锚 0 命中（begin 行 1）」+ JSON 通道同时非法）：模型把攢批97 注入的上一
+# run 只读参考脚本（异架构名 create_scene/set_source_pose）当成 func= 锚点，
+# 而磁盘当前脚本用 build_kitchen_scene/vessel_pose_at 等名——补丁格式合法、
+# 函数名 0 命中被整体拒绝。修复轮全文段既已在场，机器即可从磁盘当前版本
+# 确定性抽取现存定义名，显式圈定合法锚点；仅 ast 不可解析时退回顶层正则，
+# 抽不到返回 None（不渲染该句）。
+def _replace_anchor_manifest(src: str) -> "str | None":
+    funcs: list[str] = []
+    methods: list[str] = []
+    try:
+        tree = ast.parse(src)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                funcs.append(node.name)
+            elif isinstance(node, ast.ClassDef):
+                mnames = [n.name for n in node.body
+                          if isinstance(n, (ast.FunctionDef,
+                                            ast.AsyncFunctionDef))]
+                if mnames:
+                    methods.append(
+                        f"类 {node.name} 的方法 "
+                        + "/".join(mnames)
+                        + f"（func=方法名 class={node.name}）")
+    except SyntaxError:
+        funcs = re.findall(r"^(?:async[ \t]+)?def[ \t]+([A-Za-z_]\w*)",
+                           src, re.M)
+    parts: list[str] = []
+    if funcs:
+        parts.append("模块级函数 " + "、".join(funcs))
+    parts.extend(methods)
+    if not parts:
+        return None
+    return "；".join(parts)
 
 
 def _collect_prior_refs(
@@ -1756,7 +1795,16 @@ def _build_messages(*, gate2_notes: Optional[str], traceback_tail: str,
         for fs in full_source_files:
             head = f"### {fs['file']}（{fs['n_lines']} 行）"
             if fs.get("listing") is not None:
-                parts.append(head + "\n" + fs["listing"])
+                block = head + "\n" + fs["listing"]
+                # 攢批100：run_4 实测异名锚点 0 命中两连拒；白名单紧随该件
+                # 全文（None 件不渲染；非 full_source 调用方整段仍不存在）。
+                if fs.get("anchors"):
+                    block += (
+                        "\nreplace 围栏锚点白名单（机器从磁盘当前版本抽取，"
+                        f"func= 只接受这些现存名字）：{fs['anchors']}。"
+                        "上一 run 只读参考脚本里的函数名不是本文件锚点，"
+                        "逐字使用必 0 命中、该轮补丁整体被拒。")
+                parts.append(block)
             else:
                 parts.append(head + "\n（" + fs["skipped"] + "）")
         full_source_section = "\n\n".join(parts)

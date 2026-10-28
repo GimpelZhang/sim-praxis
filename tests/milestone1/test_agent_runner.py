@@ -5126,3 +5126,59 @@ def test_z97_build_messages_section_position_and_default_absent():
     # 显式 None 与默认调用逐字节一致。
     assert _build_messages(**base, prior_refs=None)[1]["content"] == \
         msgs_off[1]["content"]
+
+# ---------------------------------------------------------------------------
+# 攢批100（Task8 fluid run_4，2026-10-28）：replace 围栏现存锚点白名单
+# ---------------------------------------------------------------------------
+
+def test_z100_replace_anchor_manifest_module_and_methods():
+    """ast 抽取模块级函数与类方法；无定义返回 None。"""
+    from orchestrator.agent_runner.runner import _replace_anchor_manifest
+    src = (
+        "import os\n"
+        "def alpha():\n    return 1\n"
+        "async def beta(x):\n    return x\n"
+        "class Calc:\n"
+        "    def m1(self):\n        return 1\n"
+        "    def m2(self):\n        return 2\n"
+        "top = 3\n")
+    out = _replace_anchor_manifest(src)
+    assert "模块级函数 alpha、beta" in out
+    assert "类 Calc 的方法 m1/m2（func=方法名 class=Calc）" in out
+    assert _replace_anchor_manifest("x = 1\n") is None
+
+
+def test_z100_replace_anchor_manifest_syntax_error_fallback():
+    """ast 不可解析时退回顶层正则，只抓模块级 def。"""
+    from orchestrator.agent_runner.runner import _replace_anchor_manifest
+    out = _replace_anchor_manifest(
+        "def real_one():\n    pass\n"
+        "def broken(:\n"
+        "    class Inner:\n        def hidden(self):\n            pass\n")
+    assert "real_one" in out and "broken" in out
+    assert "hidden" not in out  # 退回正则不猜类方法
+
+
+def test_z100_collect_full_source_attaches_anchor_whitelist(tmp_path):
+    """端到端：collector 给成功注入件带 anchors；渲染进全文段且指向异名警告。"""
+    wd = tmp_path / "work"
+    wd.mkdir()
+    (wd / "a.py").write_text(
+        "def build_kitchen_scene():\n    return 1\n"
+        "def vessel_pose_at(t):\n    return t\n", encoding="utf-8")
+    files = _collect_full_source(wd, [{"file": "a.py", "line": 1}])
+    assert files[0]["anchors"] is not None
+    assert "build_kitchen_scene" in files[0]["anchors"]
+    base = dict(gate2_notes=None, traceback_tail="boom",
+                snippets=[{"file": "a.py", "line": 1, "snippet": "1| x"}],
+                hits=[], cmd=["python", "a.py"])
+    content = _build_messages(**base, full_source_files=files)[1]["content"]
+    assert "replace 围栏锚点白名单" in content
+    assert "build_kitchen_scene" in content and "vessel_pose_at" in content
+    # run_4 实测墙：上一 run 参考脚本异名不是锚点。
+    assert "上一 run 只读参考脚本里的函数名不是本文件锚点" in content
+    # 手工构造无 anchors 的旧形态 dict：不渲染白名单句（向后兼容）。
+    legacy = [{"file": "a.py", "n_lines": 2,
+               "listing": "    1| x", "skipped": None}]
+    legacy_text = _build_messages(**base, full_source_files=legacy)[1]["content"]
+    assert "replace 围栏锚点白名单" not in legacy_text
