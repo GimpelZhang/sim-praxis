@@ -8,8 +8,12 @@ Phase 0（8 commits 至 `99b3adf`）、Phase 1 Task0–9 + Q2 补点验（11 com
 评审 P1/P2 修复批次（2026-10-16 晚，47+1 项 0 付费，三独立评审全 APPROVE，
 7 commits `b9ba5f9..8b83193`，341 测全绿，详见 Complete 附 B，余 LOW 在 Phase 2）。
 Phase 2 Milestone 2 引擎侧：Task0/0a/0b 六提交已随 2026-10-17 推送窗口在 origin/main
-（至 `38ae3e4`），Task1–9 三签提交 51 条本地攒批未推送（M2 终验 HEAD `956dc22`；用户常设指令
-「暂不推送，攒批」覆盖计划 L632 里程碑推送，锁内适配 M2-A2）；终态干净树
+（至 `38ae3e4`）；**2026-10-28 推送窗口经用户指示已将攒批 106 条全部推送**
+（`38ae3e4..b21d72b`，origin/main 至 `b21d72b`＝攢批106；含 Task1–9 三签 51 条
+M2 提交 `2d83528..956dc22` 与 Task6 V2/Task7/Task8 战役攢批87–106；推送前密钥扫描
+0 命中、无 >10MB 文件，内存 extraheader 不留盘。此前「暂不推送，攒批」常设指令
+覆盖计划 L632 里程碑推送，锁内适配 M2-A2；本次为用户逐次指示，新提交恢复攒批）；
+M2 终态干净树
 1086 passed/1 skipped/42 deselected，Phase 2 台账 120 实呼（82 ok/38 fail）
 +6 preflight_blocked。Task7 LIBERO Stage1 战役已收官（2026-10-27 Gate2 真人 accept
 + phase1_learnings accept 行 1b10ac8d + 方案回收 KB，攢批85/86）；Task8 Genesis
@@ -189,8 +193,9 @@ Rung1–4 分级（Rung4 VLM 为 record_only，用户签收）、四 track 平�
 + RSI 看板、Task9 真人 HITL 抽验 6/6 一致；评审 P1/P2 47+1 项已修（Complete 附 B）。
 
 Phase 2 Milestone 2（引擎侧，2026-10-17 Task1 起 → 2026-10-24 终验）已完成：Task0a
-Q2 补沉淀+图外回写通路、Task0b 三层分离（已推送部分），Task1–9 三签提交本地攒批（51 条
-`2d83528..956dc22`）。终态：干净树两排除全套 **1086 passed/1 skipped/42 deselected/exit 0**；
+Q2 补沉淀+图外回写通路、Task0b 三层分离（已推送部分），Task1–9 三签提交 51 条
+`2d83528..956dc22`（M2 终验时本地攒批，**已随 2026-10-28 推送窗口全部上 origin/main**）。
+终态：干净树两排除全套 **1086 passed/1 skipped/42 deselected/exit 0**；
 证据包 570 文件/20.2 MiB（manifest git_commit=956dc22）；M2 时点四表活库
 1542/12/82/不存在（phase2_learnings 未建表——gate2 accept 未发生；2026-10-27 攒批86 后活表现为
 1542/32/94/1，见下 Task6 V2 与 Task7 段）；M2 时点 Phase 2 台账
