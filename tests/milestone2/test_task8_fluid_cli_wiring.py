@@ -892,6 +892,13 @@ def test_vessel_structure_contract_v2_present_and_shared():
         assert "边界边" in body and "非流形边" in body
         assert "边界边数/非流形边数/is_watertight" in body
         assert "自行重构" in body
+        # C7（攢批104，用户裁决「C7合同强化后再战」）：测量哨兵拒伪值 +
+        # 角速度峰值口径（只给判据，不给修法）
+        assert "严禁返回 -1/None/NaN 或任何哨兵占位值" in body
+        assert "哨兵值（如 -1）、None、NaN、inf" in body
+        assert "按逐帧数值导数的峰值判" in body
+        assert "间隙 min（真实有限值）" in body
+        assert "禁止用「总角度/" in body
     # 阈值常量单点钉死（合同正文只能从常量派生，禁止字面量漂移）
     assert prompts.VESSEL_LIP_DRIFT_MAX_M == 0.010
     assert prompts.VESSEL_LIP_SPEED_MAX_MPS == 0.20
@@ -935,6 +942,13 @@ def test_vessel_contract_v2_allocated_in_chunk_boundaries():
     assert "边界边" in b2 and "非流形边" in b2
     assert "面数/边界边数/非流形边数/is_watertight" in b2
     assert "禁止自检里跳过" in b2
+    # C7（攢批104）：间隙探针禁哨兵 + 角速度峰值口径落在 b2
+    assert "哨兵" in b2 and "真实有限最近" in b2
+    assert "逐帧数值导数" in b2 and "峰值" in b2
+    assert "禁调参绕过" in b2
+    # C7 哨兵/峰值口径只落 b2（其余块不被自检条款污染）
+    for bx in (b0, b1, b3, b4, b5):
+        assert "哨兵" not in bx
     # 流形判据只许落在 b1/b2（定义/自检），其余块不得携带
     assert "每条无向边恰被两个三角形引用" not in b0
     assert "非流形边" not in b0 and "非流形边" not in b3
