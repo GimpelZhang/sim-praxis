@@ -174,6 +174,17 @@ _FORBIDDEN_DERIVED = (
 CODING_MAX_TOKENS = 32768
 CODING_TIMEOUT_S = 600
 
+# 攢批96（锁内适配，2026-10-28）：流体题每 run coding_debug 上限 5→8。
+# 证据（四连战役均被 5 帽结案、且每轮错误类单调推进无重复空转）：
+#   run8 seq330–334：根因函数不可见墙（→攢批95 全文注入修复）；
+#   run9 seq335–339：出生/生命周期 API 逐轮新错（ParticleSet 等）；
+#   run10 seq340–343：4 轮 rc0 但无倾倒运动学 → 真人 Gate2 02:04:37Z reject；
+#   run_2 seq344–353：6 拆块出生 + 4 修复轮实现 apply_pour_pose 后，末轮仅
+#     差 cuda tensor→numpy .cpu() 一行，未及仿真倾倒物理即触帽结案。
+# runner.MAX_CODING_ROUNDS 默认 5 不动，仅本工厂 task8 流体提帽；不弱化任何
+# 断言/阈值（85% 入杯、WJ 几何机判、5 轮结案语义对其他任务原样）。
+FLUID_CODING_ROUNDS = 8
+
 # 攢批94（锁内适配，2026-10-27 活库实测冻结，0 付费；取证脚本
 # phase2/task8_diag/recall_probe/probe94.py）：coding 站增补 capabilities
 # 检索路的查询串。run1–7 实测 coding 站只查 troubleshooting（top_k=6），
@@ -634,6 +645,7 @@ def make_spec_factory(thread_id: str, coding_batch: str, *,
             manifest_relpath=MANIFEST_NAME,
             coding_max_tokens=CODING_MAX_TOKENS,
             coding_timeout_s=CODING_TIMEOUT_S,
+            max_coding_rounds=FLUID_CODING_ROUNDS,
             chunked_birth=chunked,
             # 攢批94（2026-10-27 锁内适配）：coding 站增强召回——
             # troubleshooting 查询改错误签名清洗 + capabilities API 金块

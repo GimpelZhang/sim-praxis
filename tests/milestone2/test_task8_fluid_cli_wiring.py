@@ -269,6 +269,9 @@ def test_factory_birth_mode_injects_contract(tmp_path, monkeypatch):
     assert t8f.FLUID_CAPABILITY_TOP_K == 3
     # 攢批95：修复轮全文可见（run8 非帧根因函数不可见实测墙）
     assert spec.repair_full_source is True
+    # 攢批96：流体题每 run 修复帽 5→8（四连战役均触 5 帽且错误单调推进；
+    # runner.MAX_CODING_ROUNDS 默认 5 不动，仅本工厂提帽）
+    assert spec.max_coding_rounds == t8f.FLUID_CODING_ROUNDS == 8
     # cmd 与出生合同同源（build_stage1_contract 单点）
     contract = t8f.build_stage1_contract(
         stage0_outcome="sph_ok", workdir=spec.workdir, thread_id=THREAD)
@@ -295,6 +298,8 @@ def test_factory_recycle_mode_no_contract(tmp_path, monkeypatch):
     assert Path(spec.cmd[1]).parent == Path(spec.workdir)
     assert spec.cmd[0] == t8f.VENV_PY
     assert t8f.CODING_MAX_TOKENS == spec.coding_max_tokens  # 双态同值
+    # 攢批96：回收态同样挂 8 轮帽（与出生态同位）
+    assert spec.max_coding_rounds == t8f.FLUID_CODING_ROUNDS == 8
 
 
 def test_factory_recycle_integrity_failclosed(tmp_path, monkeypatch):
