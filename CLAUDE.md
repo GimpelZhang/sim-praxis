@@ -89,13 +89,18 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
      `.gitignore` 必须用锚定 `/data`（尾斜杠 `data/` 不匹配软链本身），
      闸口打 `git check-ignore data`（穿越软链的 data/lancedb pathspec 会 fatal）。
    - **KB 首次 push 是人工 STOP 门**：push 前向用户呈 diff 清单 + 密钥扫描（公开不可回收）。
-   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 32 行（2026-10-27 活表对账
+   - 行数口径：kb_chunks 1542 行/104 Q 块；phase1_learnings 当前 44 行（2026-10-28
+     Task8 结案活表对账；2026-10-27 时点为 32 行，对账
      =M2 时 12（Task0a 后 5 + Task6 run1–6 human_failure 6 + run7a 1，id 0ef64b94）；
      + 升阶战役 10-25 十二条诚实 human_failure 回写 + persist 首崩 020327ed + Gate2
      accept 行 66bafb1d（gate2_accepted/rung=3，evidence `@phase2/` 第三根）
      + Task7 LIBERO 战役六行（run1/run2/run2j/run2k/侧车 human_failure 5
      + Gate2 accept 1b10ac8d rung=1，2026-10-26…27）；
-     run7c key-collapse 塌到 24681e47 不增行仍登记）；
+     run7c key-collapse 塌到 24681e47 不增行仍登记；
+     + Task8 流体战役十二行（2026-10-28：D10 三熔 human_failure_gate2 3 行
+     de8910c9/c19b5c0d/b267d1d4 + human_failure_agent_run 9 行；run_5 三机判墙
+     是三个独立新行 54b27b59/b6eb36a2/1b5db0a5——曾误记「key-collapse 不增行」，
+     结案活库查询复核更正；仅 54b27b59 的 created_at 在重放事故被覆写））；
      solution_chunks 独立第三表（现 94 块/5 方案，Task0b 首灌 82 块/4 方案 +
      Task7 攒批86 追加 03_libero 12 块），老三表对它恒只读。
 4. **凭据纪律**：只从 `~/access/` 与 `~/.bashrc` 的 `ANTHROPIC_*` 按 export 名等值读取；
@@ -134,13 +139,18 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
   Task0b 起库默认 uri 为 `$KB_ROOT/data/lancedb`（软链 `/mnt/artifacts/embodied-kb/data`）；
   数据迁移只走 `scripts/kb/migrate_data_layer.py --apply`（同盘 st_dev 守卫 + 行数/召回快照对账）。
 - `phase1_learnings`（12 列含 vector，复用 mpnet 不二次下载）与 kb_chunks 同库独立；
-  当前 32 行（2026-10-27 对账：= M2 时 12——Task0a 授权 4→5 后的 5 行
+  当前 44 行（2026-10-28 Task8 结案活表对账＝32+Task8 十二行；2026-10-27 对账
+  32 行＝ M2 时 12——Task0a 授权 4→5 后的 5 行
   gate2_accepted_supplementary/rung=1 + Task6 run1–6 human_failure 6 行 + run7a 1 行
   （id 0ef64b94）——+ 升阶战役 10-25 十二条 human_failure + persist 首崩 020327ed
   + Gate2 accept 行 66bafb1d（rung=3，evidence `@phase2/…summary.json`）
   + Task7 LIBERO 战役六行（run1/run2/run2j/run2k human_failure 4 + persist 侧车 1
   + Gate2 accept 1b10ac8d rung=1，2026-10-26…27 攒批86）；
   run7c key-collapse 塌到 24681e47 不增行仍登记，f43d49 等旧行不重写；
+  + Task8 流体战役十二行（2026-10-28：D10 三熔 human_failure_gate2 3 行
+  de8910c9/c19b5c0d/b267d1d4 + human_failure_agent_run 9 行；run_5 三机判墙
+  为三个独立新行 54b27b59/b6eb36a2/1b5db0a5，非 key-collapse——曾误记不增行，
+  结案活库复核更正；仅 54b27b59 created_at 在 callcache 重放事故被覆写）；
   kb_chunks 恒 1542）。**生产召回 2026-10-26 已闭环**：555 行采纳遥测
   （Task6 线程 549 coding/6 direction，17 个学习 id 全为活表真实行），
   516 行经实际 req 证据逐字节互证 + 同线程 Gate2 accept 反证成功结果，
@@ -149,9 +159,9 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
 - `solution_chunks`（Task0b 第三张表）：5 方案 README/manifest 原子块 + 脚本 code 块，
   relpath 前缀 `solutions/`，现 94 块（Task0b 首灌 82 块/4 方案 + Task7 攒批86
   追加 03_libero 12 块）；`python -m memory_flywheel.scripts.ingest_solutions`
-  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=32 不变（fail-closed
-  期望值随活表基线，2026-10-27 活表基线对账；ingest_solutions CLI 历史默认
-  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传当前活表行数（现 32），
+  幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=44 不变（fail-closed
+  期望值随活表基线，2026-10-28 Task8 结案活表基线对账；ingest_solutions CLI 历史默认
+  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传当前活表行数（现 44），
   LOW 债务清理）。资产包：
   `scripts/kb/bundle_kb_asset.py --tier both` + `verify_bundle.py`（core=老两表，
   extended=全部表；sha256/行数/768 维/kb_sha/引擎 SHA 对账）。
@@ -213,7 +223,9 @@ by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占
   攢批104 deae146）。**不发成功白皮书、不回收 KB（无 Gate2 approve）、不抬
   85%/轮帽/模型翻案**；报告 `~/文档/Task8_fluid_stage1_negative_closeout_
   2026-10-28.md`，证据 closed/evidence-run5c{,6,7}-* 四包；线程 human_failure
-  封存（rejects=1，rung=0 行 54b27b59 保留）。重启仅经未来显式裁决：修复帽
+  封存（rejects=1；活表 44 行，run_5 三机判墙各写独立 rung=0 行
+  54b27b59/b6eb36a2/1b5db0a5 均 append-only 保留——曾误记「key-collapse 不增行」，
+  2026-10-28 活库复核更正）。重启仅经未来显式裁决：修复帽
   8→12 同 workdir 续修，或硬规则 1 换模型。
 - coding_debug 换供 deepseek-v4.1-flash（commit 4df0e1d）经硬规则 1 两次用户裁决，为 M2 期间
   唯一模型变更；M2 收官后 2026-10-24 用户再直接裁决三阶段换供 mimo 家族（macro=mimo-v2.6-pro、
@@ -237,5 +249,5 @@ Task7 已收官**——计划内 Phase 2 余项全部有终态（完成或诚实
 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
 自演进、实跑四 tour、SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定
 （计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
-t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 32）、
-run7c key-collapse 覆写 created_at）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
+t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 44）、
+run7c key-collapse 覆写 created_at、54b27b59 同类覆写）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
