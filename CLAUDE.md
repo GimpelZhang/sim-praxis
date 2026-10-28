@@ -12,9 +12,13 @@ Phase 2 Milestone 2 引擎侧：Task0/0a/0b 六提交已随 2026-10-17 推送窗
 「暂不推送，攒批」覆盖计划 L632 里程碑推送，锁内适配 M2-A2）；终态干净树
 1086 passed/1 skipped/42 deselected，Phase 2 台账 120 实呼（82 ok/38 fail）
 +6 preflight_blocked。Task7 LIBERO Stage1 战役已收官（2026-10-27 Gate2 真人 accept
-+ phase1_learnings accept 行 1b10ac8d + 方案回收 KB，攢批85/86）；Task8 Genesis 流体
-仅完成 0 付费 Stage0 能力探针（sph_ok），Stage1+ 必须经飞书真人 Gate1/Gate2
-（No Fake Approval），用户 AFK 未启动，不得声称完成该实战题。
++ phase1_learnings accept 行 1b10ac8d + 方案回收 KB，攢批85/86）；Task8 Genesis
+流体 **Stage1 已以诚实负结果结案（2026-10-28 用户裁决）**：五战役（四次真人
+Gate2 reject 卡#1–#4 + run_5 三次机判 8 轮帽：非流形网格→哨兵/峰值测量墙→
+铰链耦合运动学），85% 目标从未接近，Task8 实呼 128（seq309–436），不发成功
+白皮书/不回收 KB/不抬阈值翻案；详见 `~/文档/Task8_fluid_stage1_negative_closeout_
+2026-10-28.md`。Stage0 sph_ok 探针结论独立成立；重启（修复帽 8→12 或硬规则 1
+换模型）须未来用户显式裁决。
 规范与执行记录在仓库外（与 Plan 冲突时以 Complete 为准）：
 `~/文档/Phase_0_Plan.md`（v4.2）+ `Phase_0_Plan_Complete.md`；
 `~/文档/Phase_1_Plan_detailed.md`（v1.2）+ `Phase_1_Plan_Complete.md`（偏差 A1–A24、坑 P1–P10）；
@@ -198,14 +202,26 @@ by_stage macro=3/coding=93/visual=24）+6 次 preflight_blocked（seq=null，占
   成功 → Gate2 卡#3 真人 approve（14:47:24 CST，No Fake Approval 完好）→ persist
   首崩（rungs 契约）→ 攢批85 修复 + checkpoint 手术 → r27 resume → phase1_learnings
   accept 行 1b10ac8d（rung=1 核验级）→ 方案按计划 L166 回收 KB
-  solutions/track1_tools/03_libero（攢批86，94 块/5 方案）。Task8 Genesis 流体
-  只有 0 付费 Stage0（sph_ok，A800 1000 粒子 10 步坐标全 finite）；
-  **Stage1+ 必须经飞书真人 Gate1/Gate2，No Fake Approval，用户 AFK 未启动——
-  不得声称完成 Task8 实战题。**
+  solutions/track1_tools/03_libero（攢批86，94 块/5 方案）。
+- Task8 Genesis 流体 **Stage1 诚实负结果结案**（2026-10-28 用户 AskUserQuestion
+  裁决）：Stage0 sph_ok 探针（A800 1000 粒子 10 步坐标全 finite）独立成立；
+  Stage1 五战役——run_1..4 四次真人 Gate2 reject（静止液体/穿模漏桌/壶杯不动/
+  散件壶飞脱，卡#1–#4 逐字在 checkpoint），run_5 合同 v2+C6+C7 三次机判 8 轮帽
+  （非流形网格→哨兵 -1/角速均值折算→铰链耦合运动学 speed/clearance 平台），
+  卡#5 未发、85% 从未接近。Task8 实呼 128（seq309–436，macro3/coding125）+
+  blocked 2；终态全局 436/450、task8 128/140（HARD_CAP/任务顶第 37 次自批值，
+  攢批104 deae146）。**不发成功白皮书、不回收 KB（无 Gate2 approve）、不抬
+  85%/轮帽/模型翻案**；报告 `~/文档/Task8_fluid_stage1_negative_closeout_
+  2026-10-28.md`，证据 closed/evidence-run5c{,6,7}-* 四包；线程 human_failure
+  封存（rejects=1，rung=0 行 54b27b59 保留）。重启仅经未来显式裁决：修复帽
+  8→12 同 workdir 续修，或硬规则 1 换模型。
 - coding_debug 换供 deepseek-v4.1-flash（commit 4df0e1d）经硬规则 1 两次用户裁决，为 M2 期间
   唯一模型变更；M2 收官后 2026-10-24 用户再直接裁决三阶段换供 mimo 家族（macro=mimo-v2.6-pro、
   coding_debug/visual_rollout=mimo-v2.6-flash，commit fa007c5，硬规则 1 全流程：inventory 404
-  取证→用户逐字裁决→改 stage_models.yaml→validate 四请求全绿，账外批次 M2-V-mimo1）。
+  取证→用户逐字裁决→改 stage_models.yaml→validate 四请求全绿，账外批次 M2-V-mimo1）；
+  2026-10-27 用户再逐字裁决三阶段换供（commit b20c45e 攢批87，硬规则 1 全流程）：
+  macro=glm-5.3、coding_debug=kimi-k3.1-pro、visual_rollout=deepseek-v4.1-flash，
+  Task8 流体五战役即在 kimi coding 下完成（负结果，见下）。
 
 Task6 V2 升阶闭环已达成（2026-10-26 攒批第 68/69 条）：run27 机器侧全通 + Gate2 真人 accept
 （decision=approve "V2通过"，首次 accept）+ @phase2/ 第三证据根修复后 persist 成功，
@@ -215,9 +231,9 @@ phase2_learnings 首行落库（1 行）+ 五段式演化志；看板机判 Pare
 余 2 为 deepseek→mimo 过渡批已登记）、quota_pause schema v2 已签收、task8 stage0_wheels
 越界符号链接联合已拆除（M2-A6，cache 目标未动、stage0 报告保留）。
 
-仍待 Phase 2 余项：Task8 Stage1（流体）——CLI 接线已完成（攢批74，task8_fluid
-execute_stage1 为显式拒跑合同桩已接 orchestrator.graph.cli），接线完成即发飞书
-真人 Gate1/Gate2 卡启动，No Fake Approval。Task7 已收官（见上）。Phase 3
+Phase 2 余项状态：**Task8 Stage1（流体）已诚实负结果结案（2026-10-28，见上，
+CLI 接线攢批74 task8_fluid execute_stage1 合同桩仍在 orchestrator.graph.cli）；
+Task7 已收官**——计划内 Phase 2 余项全部有终态（完成或诚实负结果）。Phase 3
 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
 自演进、实跑四 tour、SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定
 （计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
