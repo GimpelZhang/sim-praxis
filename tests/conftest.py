@@ -46,3 +46,6 @@ def pytest_configure(config):
     # Task0b：读活 KB 仓/活数据层的测试打 kb_integration 标记，与 paid 同构——
     # 裸跑自行 skip，需显式 SIMPRAXIS_KB_INTEGRATION=1 且活 KB 在场才执行（非放水）。
     config.addinivalue_line("markers", "kb_integration: 活 KB 仓/活数据层测试，需显式开关（SIMPRAXIS_KB_INTEGRATION=1）")
+    # Phase 2.5 Task1：读活账本（phase1/phase2/phase25 三账）的集成测试，
+    # 裸跑自行 skip，需显式 SIMPRAXIS_LEDGER_INTEGRATION=1 才执行。
+    config.addinivalue_line("markers", "ledger_integration: 需要活账本（phase1/phase2/phase25 三账）的集成测试，裸跑默认 deselect")
