@@ -217,3 +217,66 @@ _sp_writable_probe "$SIMPRAXIS_RUN_DIR" || return 1
 _sp_writable_probe "$HF_HOME" || return 1
 _sp_writable_probe "$SIMPRAXIS_PHASE2_ROOT/quota" || return 1
 echo "[00_env] Phase2：新账根=$SIMPRAXIS_PHASE2_ROOT（quota/state 700）；容器身份=${SIMPRAXIS_UID}:${SIMPRAXIS_GID}；G-4 可写探针通过；v2 签收件=$([ -e "$_sp_pause_signed" ] && echo present || echo missing)"
+
+# ---- Phase 2.5 Task0：独立新账根与私目录族（D-1；纯加法，Phase1/2 行零改动）----
+# phase25 台账与 phase1（29 行封存）/phase2（455 行封存）同盘不同根，
+# seq 从 0 起；目录族全部 0700；容器实跑产物仍在 $SIMPRAXIS_RUN_DIR/phase25。
+export SIMPRAXIS_PHASE25_ROOT="${SIMPRAXIS_PHASE25_ROOT:-$SIMPRAXIS_DATA_ROOT/phase25}"
+# M-B（2026-10-29 评审修单）：三根互异互斥的 shell 镜像检查，必须在任何
+# mkdir/写之前。Python 侧三个卡口（QuotaLedger.__init__/write_approval/resume
+# → runtime_paths.assert_phase25_roots_isolated）管不到 runs/ 与非 Python
+# 消费者，这里是最早也唯一全覆盖的点；readlink -f 与 resolve(strict=False)
+# 同口径（不存在也归一）。
+_sp25_root="$(readlink -f "$SIMPRAXIS_PHASE25_ROOT")"
+_sp2_root="$(readlink -f "$SIMPRAXIS_PHASE2_ROOT")"
+_sp1_root="$(readlink -f "$SIMPRAXIS_PHASE1_ROOT")"
+for _sp_sealed in "$_sp1_root" "$_sp2_root"; do
+  if [ "$_sp25_root" = "$_sp_sealed" ]; then
+    echo "[00_env STOP] SIMPRAXIS_PHASE25_ROOT 与封存根同体：$_sp25_root（phase1=$_sp1_root phase2=$_sp2_root）" >&2
+    return 1
+  fi
+  case "$_sp25_root" in
+    "$_sp_sealed"/*)
+      echo "[00_env STOP] SIMPRAXIS_PHASE25_ROOT 嵌套在封存根内：$_sp25_root（封存根=$_sp_sealed；phase1=$_sp1_root phase2=$_sp2_root）" >&2
+      return 1
+      ;;
+  esac
+  case "$_sp_sealed" in
+    "$_sp25_root"/*)
+      echo "[00_env STOP] 封存根嵌套在 SIMPRAXIS_PHASE25_ROOT 内：$_sp_sealed（phase25=$_sp25_root）" >&2
+      return 1
+      ;;
+  esac
+done
+mkdir -p "$SIMPRAXIS_PHASE25_ROOT"/quota/approvals \
+         "$SIMPRAXIS_PHASE25_ROOT"/quota/gateway_state \
+         "$SIMPRAXIS_PHASE25_ROOT"/estimates \
+         "$SIMPRAXIS_PHASE25_ROOT"/watchdog/incidents \
+         "$SIMPRAXIS_PHASE25_ROOT"/watchdog/triage_bundles \
+         "$SIMPRAXIS_PHASE25_ROOT"/probes \
+         "$SIMPRAXIS_PHASE25_ROOT"/agentic_traces \
+         "$SIMPRAXIS_PHASE25_ROOT"/walls \
+         "$SIMPRAXIS_PHASE25_ROOT"/task10_milestone \
+         "$SIMPRAXIS_PHASE25_ROOT"/runs \
+         "$SIMPRAXIS_RUN_DIR/phase25"
+# 对 lead 预建目录同样收敛权限（幂等）；ledger 只 touch 不截断（已有账行绝不丢）。
+chmod 700 "$SIMPRAXIS_PHASE25_ROOT" \
+          "$SIMPRAXIS_PHASE25_ROOT/quota" \
+          "$SIMPRAXIS_PHASE25_ROOT/quota/approvals" \
+          "$SIMPRAXIS_PHASE25_ROOT/quota/gateway_state" \
+          "$SIMPRAXIS_PHASE25_ROOT/estimates" \
+          "$SIMPRAXIS_PHASE25_ROOT/watchdog" \
+          "$SIMPRAXIS_PHASE25_ROOT/watchdog/incidents" \
+          "$SIMPRAXIS_PHASE25_ROOT/watchdog/triage_bundles" \
+          "$SIMPRAXIS_PHASE25_ROOT/probes" \
+          "$SIMPRAXIS_PHASE25_ROOT/agentic_traces" \
+          "$SIMPRAXIS_PHASE25_ROOT/walls" \
+          "$SIMPRAXIS_PHASE25_ROOT/task10_milestone" \
+          "$SIMPRAXIS_PHASE25_ROOT/runs" \
+          "$SIMPRAXIS_RUN_DIR/phase25" 2>/dev/null || true
+if [ ! -e "$SIMPRAXIS_PHASE25_ROOT/quota/ledger.jsonl" ]; then
+  ( umask 077 && : > "$SIMPRAXIS_PHASE25_ROOT/quota/ledger.jsonl" )
+fi
+chmod 600 "$SIMPRAXIS_PHASE25_ROOT/quota/ledger.jsonl" 2>/dev/null || true
+_sp_writable_probe "$SIMPRAXIS_PHASE25_ROOT/quota" || return 1
+echo "[00_env] Phase2.5：独立新账根=$SIMPRAXIS_PHASE25_ROOT（私目录族 700；空账 ledger.jsonl 600，seq 从 0；Phase1/2 账封存只读）"

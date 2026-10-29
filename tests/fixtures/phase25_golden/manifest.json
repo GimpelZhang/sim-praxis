@@ -1,0 +1,430 @@
+{
+  "schema": "simpraxis.phase25.t0_golden.v1",
+  "generated_at_iso": "2026-10-29T03:46:31Z",
+  "build_root": "/tmp/simpraxis_phase25_golden_build",
+  "fixed_inputs": {
+    "model_literal": "golden-oldpath-model",
+    "stage": "coding_debug",
+    "temperature": 0.6,
+    "thinking": {
+      "type": "disabled"
+    },
+    "traceback_tail": "[golden-freeze] 出生前首轮 exec 失败（确定性冻结输入）：入口脚本尚不存在，等待 coding_debug 出生。",
+    "snippets": [],
+    "hits": [],
+    "learning_hits": null,
+    "gate2_notes": null,
+    "note": "出生轮无前序模型输出；chunk i>0 的 previous_code 用确定性占位（生产为同轮前块提取码，出生前不可得）；冻结对象是prompt 构造管线与键/指纹形状，不是模型响应。"
+  },
+  "task4_usage": "Task 4 agentic 层接入后，以 out_dir=临时目录重跑 build_golden()，与入库快照逐字节比对 manifest.factories[*].records 与 prompts/ 全文；只允许在出生合同有意变更时经评审重新入库。",
+  "factories": {
+    "task6_ascent": {
+      "thread_id": "t6-golden-ascent-20261029a",
+      "billing_task": 6,
+      "run_idx": 1,
+      "birth_mode": "chunked",
+      "chunk_count": 6,
+      "target_entrypoint": "genesis_humanoid_dr_v2.py",
+      "coding_max_tokens": 32768,
+      "records": [
+        {
+          "factory": "task6_ascent",
+          "thread_id": "t6-golden-ascent-20261029a",
+          "batch_id": "P25-GOLDEN-T6",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 0,
+          "cache_key": "coding_t6-golden-ascent-20261029a_r1_round1_chunk0",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task6_ascent/prompts/round1_chunk0.prompt.json",
+          "prompt_chars": 13058,
+          "prompt_sha256": "91c7019e1942532513153a18db45c74d3a8472aa7117a2d39763027137992229",
+          "request_fingerprint": "a044c7a2af9ecefd55f6cc336e6b082bf9fe19f3d14c9df3dcc53bc814e903ee",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 0,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task6_ascent",
+          "thread_id": "t6-golden-ascent-20261029a",
+          "batch_id": "P25-GOLDEN-T6",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 1,
+          "cache_key": "coding_t6-golden-ascent-20261029a_r1_round1_chunk1",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task6_ascent/prompts/round1_chunk1.prompt.json",
+          "prompt_chars": 13161,
+          "prompt_sha256": "4ac4c1ce45dc2104f48972ea91b03872dcf501753d442d3ea7a3652f8db972f3",
+          "request_fingerprint": "c01c8bda4c8256004c2cb102c18afbdb302259f44aee0dfee18abb9e5bac4e48",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 1,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task6_ascent",
+          "thread_id": "t6-golden-ascent-20261029a",
+          "batch_id": "P25-GOLDEN-T6",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 2,
+          "cache_key": "coding_t6-golden-ascent-20261029a_r1_round1_chunk2",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task6_ascent/prompts/round1_chunk2.prompt.json",
+          "prompt_chars": 13260,
+          "prompt_sha256": "de82f49a3aa06579f672d5085620b5e7726c5ac9ca3b27f16820be22269d456b",
+          "request_fingerprint": "bcab0f617cfadef16b8253288b7bb71a12586b5df83b3d400cb4a7b0a8dc6c57",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 2,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task6_ascent",
+          "thread_id": "t6-golden-ascent-20261029a",
+          "batch_id": "P25-GOLDEN-T6",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 3,
+          "cache_key": "coding_t6-golden-ascent-20261029a_r1_round1_chunk3",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task6_ascent/prompts/round1_chunk3.prompt.json",
+          "prompt_chars": 13553,
+          "prompt_sha256": "1c8a88f42c8056236773053e593de23a80793fe71ad84df3f48b378b62a31435",
+          "request_fingerprint": "ed79409b43153114cfc76a03f4906c8fe999c0f6a3ef97ba71742706a57916d8",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 3,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task6_ascent",
+          "thread_id": "t6-golden-ascent-20261029a",
+          "batch_id": "P25-GOLDEN-T6",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 4,
+          "cache_key": "coding_t6-golden-ascent-20261029a_r1_round1_chunk4",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task6_ascent/prompts/round1_chunk4.prompt.json",
+          "prompt_chars": 13590,
+          "prompt_sha256": "11ed80ec7b7d3f68ca8601035843fb5d5278b481f20768a067e15841f67ac123",
+          "request_fingerprint": "49d1f7686059d5417a216e1394f9b7847f18c0c4e88b31cc28db0e70907e2c49",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 4,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task6_ascent",
+          "thread_id": "t6-golden-ascent-20261029a",
+          "batch_id": "P25-GOLDEN-T6",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 5,
+          "cache_key": "coding_t6-golden-ascent-20261029a_r1_round1_chunk5",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task6_ascent/prompts/round1_chunk5.prompt.json",
+          "prompt_chars": 13537,
+          "prompt_sha256": "1f66b7252ad0c40083f186d102cdc8f9350937ece62c7a0bef74f33dca4c4b9f",
+          "request_fingerprint": "304e157958eb256f0f33123d4897317fbc828421e68a4b5deec3022b578e43c4",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 5,
+            "chunk_total": 6
+          }
+        }
+      ]
+    },
+    "task7_libero": {
+      "thread_id": "t7l-golden-20261029a",
+      "billing_task": 7,
+      "run_idx": 1,
+      "birth_mode": "single_patch",
+      "chunk_count": 1,
+      "target_entrypoint": "stage1_minimal.py",
+      "coding_max_tokens": 32768,
+      "records": [
+        {
+          "factory": "task7_libero",
+          "thread_id": "t7l-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T7",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": null,
+          "cache_key": "coding_t7l-golden-20261029a_r1_round1",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task7_libero/prompts/round1.prompt.json",
+          "prompt_chars": 9210,
+          "prompt_sha256": "cb666b39207b92679c2897aad583df2f0c95ae118272b1409204f704e9b20c49",
+          "request_fingerprint": "ed48ce3cae661e8df68315a773ccfcb58cd9d8394d79c3b981f1328085d303da",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            }
+          }
+        }
+      ]
+    },
+    "task8_fluid": {
+      "thread_id": "t8f-golden-20261029a",
+      "billing_task": 8,
+      "run_idx": 1,
+      "birth_mode": "chunked",
+      "chunk_count": 6,
+      "target_entrypoint": "genesis_fluid_pour.py",
+      "coding_max_tokens": 32768,
+      "records": [
+        {
+          "factory": "task8_fluid",
+          "thread_id": "t8f-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T8",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 0,
+          "cache_key": "coding_t8f-golden-20261029a_r1_round1_chunk0",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task8_fluid/prompts/round1_chunk0.prompt.json",
+          "prompt_chars": 12944,
+          "prompt_sha256": "e7d30eb4ef2363e62fb56241dc7544399229d0c38024c0e4f7caca10dd70ba68",
+          "request_fingerprint": "7ca434501f178b5901aa8dc0c800c81527d4082bc327767496a1a62932bd85cb",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 0,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task8_fluid",
+          "thread_id": "t8f-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T8",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 1,
+          "cache_key": "coding_t8f-golden-20261029a_r1_round1_chunk1",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task8_fluid/prompts/round1_chunk1.prompt.json",
+          "prompt_chars": 13308,
+          "prompt_sha256": "2f6c6e134e08b63f3d5cf8ab9dcc51fe0539a63fe94012eb0fc856aaedf480d1",
+          "request_fingerprint": "cea6b4647e8f8a3073603cc60c034eace4259c04e57e27240ca155422969e159",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 1,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task8_fluid",
+          "thread_id": "t8f-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T8",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 2,
+          "cache_key": "coding_t8f-golden-20261029a_r1_round1_chunk2",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task8_fluid/prompts/round1_chunk2.prompt.json",
+          "prompt_chars": 13690,
+          "prompt_sha256": "923403d678767ebe60d61843de92b453604411ec54b92adacb39dfc6e54056e9",
+          "request_fingerprint": "f56d553dff1d6a69fa10f06164a90d4b387ad5749da5293f4b44b10367d1cdfd",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 2,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task8_fluid",
+          "thread_id": "t8f-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T8",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 3,
+          "cache_key": "coding_t8f-golden-20261029a_r1_round1_chunk3",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task8_fluid/prompts/round1_chunk3.prompt.json",
+          "prompt_chars": 13175,
+          "prompt_sha256": "2855da72f180454a4fc60329d1371370dc8f5d2447c4d2be9e3ee938c6797a86",
+          "request_fingerprint": "939d7faca9e0ba5e328f3fbc5be67e44087ef2e868b958fa635d88db80d3282f",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 3,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task8_fluid",
+          "thread_id": "t8f-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T8",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 4,
+          "cache_key": "coding_t8f-golden-20261029a_r1_round1_chunk4",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task8_fluid/prompts/round1_chunk4.prompt.json",
+          "prompt_chars": 13096,
+          "prompt_sha256": "f39ec6afae3f4bf6b84a56226d35330ce00d85075b3f010010973452c1809da0",
+          "request_fingerprint": "aa1164be9c26f7c5c4175b696efde58a570a3e443e6d1faeaea2b3660f1402e9",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 4,
+            "chunk_total": 6
+          }
+        },
+        {
+          "factory": "task8_fluid",
+          "thread_id": "t8f-golden-20261029a",
+          "batch_id": "P25-GOLDEN-T8",
+          "run_idx": 1,
+          "round": 1,
+          "chunk_index": 5,
+          "cache_key": "coding_t8f-golden-20261029a_r1_round1_chunk5",
+          "stage": "coding_debug",
+          "model": "golden-oldpath-model",
+          "temperature": 0.6,
+          "thinking": {
+            "type": "disabled"
+          },
+          "max_tokens": 32768,
+          "prompt_canonical_json": "task8_fluid/prompts/round1_chunk5.prompt.json",
+          "prompt_chars": 13472,
+          "prompt_sha256": "ea0f5a43bd9f8f3ff911095cf90b0dc4a6c1d300da97dc87db06c4edd5ac65a5",
+          "request_fingerprint": "5c7ab1403ee0ea00a5c143147c2086b0c511c42a9b95c11ea6bd5cb5c74516ae",
+          "fp_extra": {
+            "max_tokens": 32768,
+            "temperature": 0.6,
+            "thinking": {
+              "type": "disabled"
+            },
+            "chunk_index": 5,
+            "chunk_total": 6
+          }
+        }
+      ]
+    }
+  }
+}

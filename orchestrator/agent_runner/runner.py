@@ -66,6 +66,23 @@ MAX_TOKENS = 8192
 # temperature+thinking，改值自动 miss 旧缓存，安全。
 TEMPERATURE = 0.6
 CODING_THINKING = {"type": "disabled"}
+
+
+def coding_call_cache_key(thread_id: str, run_idx: int, round_idx: int, *,
+                          chunk_index: "int | None" = None) -> str:
+    """callcache coding 调用键的唯一构造源（M-A，2026-10-29 评审修单）。
+
+    形状 ``coding_<thread>_r<run_idx>_round<round_idx>``；拆块出生追加
+    ``_chunk<i>``。生产两处调用点（单补丁/拆块）与 golden 冻结器都必须调
+    本函数，禁止再写同形 f-string——单侧漂移不会红 golden。历史键形状逐字
+    不变（.call_cache 17 条旧键继续命中）。
+    """
+    key = f"coding_{thread_id}_r{run_idx}_round{round_idx}"
+    if chunk_index is not None:
+        key += f"_chunk{chunk_index}"
+    return key
+
+
 # 锁内适配（计划 v1.2 外，seq42-47 拆块出生，用户 2026-10-20 裁决）：
 # Task6 V2 出生拆 4 个顺序小编排调用；网关 call 的 timeout 旧路径隐式吃
 # router 默认 120，现经 RunSpec 显式化（默认 120，行为不变）。
@@ -2600,8 +2617,8 @@ class AgentRunner:
                         spec=spec, root=root, stem=stem, model=model,
                         messages=messages, coding_round=coding_calls,
                         learning_hits=learning_hits,
-                        cache_key=(f"coding_{spec.thread_id}_r{spec.run_idx}"
-                                   f"_round{coding_calls}"),
+                        cache_key=coding_call_cache_key(
+                            spec.thread_id, spec.run_idx, coding_calls),
                         fp_extra={"max_tokens": spec.coding_max_tokens,
                                   "temperature": TEMPERATURE,
                                   "thinking": CODING_THINKING},
@@ -2848,8 +2865,9 @@ class AgentRunner:
                 spec=spec, root=root, stem=stem, model=model,
                 messages=messages, coding_round=coding_round,
                 learning_hits=learning_hits,
-                cache_key=(f"coding_{spec.thread_id}_r{spec.run_idx}"
-                           f"_round{coding_round}_chunk{i}"),
+                cache_key=coding_call_cache_key(
+                    spec.thread_id, spec.run_idx, coding_round,
+                    chunk_index=i),
                 fp_extra={"max_tokens": spec.coding_max_tokens,
                           "temperature": TEMPERATURE,
                           "thinking": CODING_THINKING,

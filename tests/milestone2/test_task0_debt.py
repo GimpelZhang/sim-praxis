@@ -771,7 +771,10 @@ CALL_CACHE_ALLOWLIST = {
     # 攢批101（run_4 空 traceback 墙）：RunSpec.full_source_relpaths +
     # collector extra_relpaths 播种 + task8 工厂入口播种（净 +19 行），
     # 纯位移（2236→2255）；0 新增落点/网关调用。
-    ("orchestrator/agent_runner/runner.py", 2255),
+    # 2026-10-29 评审修单 M-A：coding_call_cache_key 键形单一源纯函数
+    # （含 docstring）插在常量区、构造点之前，纯位移（2255→2272，+17 行）；
+    # 两处 cache_key f-string 改调同一函数，0 新增落点/网关调用，键串逐字节不变。
+    ("orchestrator/agent_runner/runner.py", 2272),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。

@@ -279,14 +279,18 @@ def _state_path() -> Path:
     return gateway_state_path()
 
 
-def load_pause_state() -> dict | None:
+def load_pause_state(state_path: "Path | None" = None) -> dict | None:
     """读熔断态：文件不存在返回 None；文件损坏（G-14）抛 PauseStateCorruptError。
 
     历史上损坏被等同「不存在」处理，熔断态文件一旦被截断就 fail-open 触网
     （m9 30 分钟窗口内尤甚），与 ledger 坏行 fail-closed 口径不对称。损坏与
     缺失必须区分：调用方一律拒绝触网并提示人工核查，--ignore-pause 也不删损坏件。
+
+    state_path 缺省走全局 $SIMPRAXIS_GATEWAY_STATE（Phase 1/2 口径，零行为变更）；
+    Phase 2.5 独立账命名空间显式传入 phase25 quota/gateway_state/quota_pause.json
+    （锁内适配（Phase 2.5 D-1）：暂停态随台账命名空间隔离，逻辑不复制）。
     """
-    p = _state_path()
+    p = state_path if state_path is not None else _state_path()
     if not p.exists():
         return None
     try:
@@ -301,8 +305,10 @@ def load_pause_state() -> dict | None:
     return state
 
 
-def is_paused(stage: str | None = None, now: float | None = None) -> dict | None:
-    state = load_pause_state()
+def is_paused(stage: str | None = None, now: float | None = None,
+              *, state_path: "Path | None" = None) -> dict | None:
+    p = state_path if state_path is not None else _state_path()
+    state = load_pause_state(p)
     if not state:
         return None
     if stage and state.get("stage") not in (stage, "*"):
@@ -317,11 +323,11 @@ def is_paused(stage: str | None = None, now: float | None = None) -> dict | None
         except (TypeError, ValueError) as exc:
             raise PauseStateCorruptError(
                 "熔断状态文件 resume_at_epoch 非数值，人工核查（fail-closed 禁止触网）："
-                f"{_state_path()}：{resume!r}") from exc
+                f"{p}：{resume!r}") from exc
         if resume_at != resume_at:  # NaN：永不成立的过期比较同样按损坏处理
             raise PauseStateCorruptError(
                 "熔断状态文件 resume_at_epoch=NaN（永不恢复），人工核查："
-                f"{_state_path()}")
+                f"{p}")
         if now >= resume_at:
             return None
     return state

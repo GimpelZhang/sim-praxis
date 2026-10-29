@@ -43,6 +43,7 @@ import json
 import os
 import sys
 import time
+import types
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -50,12 +51,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from orchestrator.common.clock import utc_now_iso_z
+from collections.abc import Callable, Mapping
+
+from orchestrator.common.clock import parse_ts_iso_strict, utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.common.runtime_paths import (
     gateway_state_dir as router_state_dir,  # 统一入口：暂停态目录
     gateway_state_path as router_state_path,
+    assert_phase25_roots_isolated,  # M-B：三根别名/嵌套 fail-fast
+    open_ledger_append,  # Phase 2.5：带封存守卫的唯一追加写入口
     phase1_root as phase1_root,  # 转出：外部只读使用者取 Phase 1 封存账根
+    phase25_approvals_dir,
+    phase25_counters_path,
+    phase25_gateway_state_dir,
+    phase25_gateway_state_path,
+    phase25_ledger_path,
+    phase25_quota_dir,
     phase2_approvals_dir,
     phase2_counters_path,
     phase2_ledger_path,
@@ -452,9 +463,34 @@ PHASE2_TASK_CAPS = {4: 24, 6: 227, 7: 76, 8: 140}  # 2026-10-28 第三十七次�
 # 执行口径：并集，Phase 2 字典对重复 task（4）生效；approve CLI 的 --task
 # choices 同样取并集，Phase 1 编号仍可开凭据（全局 60/128 双门：常态门 60
 # 始终未动，硬顶 2026-10-21 80→104→112、2026-10-22 112→122→128，见上溯源）。
-TASK_HARD_CAPS = {**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS}
+# M-caps（2026-10-29 评审修单）：命名空间持有的任务帽封成 MappingProxyType，
+# 任何原地提顶（TASK_HARD_CAPS[k]=...）立即 TypeError——提顶只能改源码常量
+# +注释溯源并随提交走（全仓 grep 已确认零原地突变依赖，身份断言 is 仍成立）。
+TASK_HARD_CAPS = types.MappingProxyType({**PHASE1_TASK_CAPS, **PHASE2_TASK_CAPS})
 CONSECUTIVE_QUOTA_LIMIT = 3
 LOCK_NAME = ".ledger.lock"
+
+# ---- Phase 2.5：D-1 独立新账（task 编号空间与 Phase1/2 碰撞但永不并表） ----
+LEDGER_PHASE25 = 25       # phase25 批准件/恢复流水的 phase 断言标记
+# 初始估算帽（Plan §11，AC-T0-5）：
+#   T3=6 / T5=28 是预注册【科学硬帽】（预算完全自治也不得抬——呼量算术
+#   P1≤2/P2≤3/P3≤1 与两墙共享池 28；见 PHASE25_SCIENTIFIC_TASKS）；
+#   T9=160 是占位【预算帽】（非科学值，Task 1 方法学 v2 在 G3 前以
+#   P50/P90 区间替换）；T10=2 收官机判。
+# task 3/5/9/10 与 Phase1/2 编号碰撞（9 在 PHASE1_TASK_CAPS 为 4）：
+# 本字典【禁止】并入 TASK_HARD_CAPS，闸门/CLI 一律按 ledger 期各取各字典。
+# M-caps：同样封 MappingProxyType（科学帽 3/5 只能经预注册改，见
+# PHASE25_SCIENTIFIC_TASKS；运行时原地改一律 TypeError）。
+PHASE25_TASK_CAPS = types.MappingProxyType({3: 6, 5: 28, 9: 160, 10: 2})
+# 科学硬帽任务子集：这些 cap 只能经预注册改，预算自批不含提帽（§0.1/R13）。
+PHASE25_SCIENTIFIC_TASKS = frozenset({3, 5})
+# 全局兜底硬门 = 四任务帽之和 6+28+160+2=196（与 §11「含 T9 占位约 54–196」
+# 上沿一致；T9 帽被方法学值替换后本常量随提顶 SOP 自批调整并留溯源注释）。
+PHASE25_HARD_CAP = sum(PHASE25_TASK_CAPS.values())
+# Phase 2.5 批次全部自批（2026-10-28 预算完全自治授权），不存在 60→硬顶的
+# beyond_normal 分层票：常态门等于硬门，preflight 常态闸永不先于全局硬闸触发，
+# 任务帽/批次帽/全局帽三道硬计数门不变。
+PHASE25_NORMAL_BUDGET = PHASE25_HARD_CAP
 
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
 # 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
@@ -470,6 +506,10 @@ QUOTA_PAUSE_SCHEMA_V2_KEYS: tuple[str, ...] = (
 
 class QuotaError(RuntimeError):
     """账本/凭据自身错误（区别于 GatewayPausedError 的预算熔断）。"""
+
+
+class LedgerSequenceError(QuotaError):
+    """台账机判失败（AC-T0-7）：整数 seq 跳号/重号、int/null 混列或 ts 非严格 UTC Z。"""
 
 
 class LedgerDegradedError(QuotaError):
@@ -500,6 +540,57 @@ def approvals_dir() -> Path:
     return phase2_approvals_dir()
 
 
+# ---- 台账命名空间（Phase 2.5 D-1）：路径/暂停态/caps/预算门整组绑定， ----
+# ---- Phase2 与 Phase25 两套实例，task 编号碰撞也绝不串账/并表。       ----
+
+@dataclass(frozen=True)
+class _LedgerNamespace:
+    """一套账的全部解析点与预算门：QuotaLedger 经本对象间接寻址。
+
+    frozen + 纯函数字段：默认 PHASE2_NAMESPACE 的行为与命名空间化之前逐字节
+    一致（路径仍读 SIMPRAXIS_PHASE2_ROOT、暂停态仍读全局 GATEWAY_STATE）；
+    PHASE25_NAMESPACE 全部指向 phase25 私目录族（含独立 quota/gateway_state）。
+    """
+
+    phase: int
+    quota_dir_fn: Callable[[], Path]
+    ledger_path_fn: Callable[[], Path]
+    counters_path_fn: Callable[[], Path]
+    approvals_dir_fn: Callable[[], Path]
+    pause_dir_fn: Callable[[], Path]
+    pause_path_fn: Callable[[], Path]
+    task_caps: Mapping[int, int]
+    hard_cap: int
+    normal_budget: int
+
+
+PHASE2_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_PHASE,
+    quota_dir_fn=quota_dir,
+    ledger_path_fn=ledger_path,
+    counters_path_fn=counters_path,
+    approvals_dir_fn=approvals_dir,
+    pause_dir_fn=router_state_dir,
+    pause_path_fn=router_state_path,
+    task_caps=TASK_HARD_CAPS,
+    hard_cap=HARD_CAP,
+    normal_budget=NORMAL_BUDGET,
+)
+
+PHASE25_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_PHASE25,
+    quota_dir_fn=phase25_quota_dir,
+    ledger_path_fn=phase25_ledger_path,
+    counters_path_fn=phase25_counters_path,
+    approvals_dir_fn=phase25_approvals_dir,
+    pause_dir_fn=phase25_gateway_state_dir,
+    pause_path_fn=phase25_gateway_state_path,
+    task_caps=PHASE25_TASK_CAPS,
+    hard_cap=PHASE25_HARD_CAP,
+    normal_budget=PHASE25_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -508,8 +599,10 @@ def _now_iso() -> str:
 class _FileLock:
     """ledger 跨线程/跨进程互斥（fcntl 建议锁；单机单盘 /mnt）。"""
 
-    def __init__(self) -> None:
-        self._fh = open(quota_dir() / LOCK_NAME, "a+")  # noqa: SIM115
+    def __init__(self, dir_path: "Path | None" = None) -> None:
+        # 缺省=Phase 2 quota 目录（旧行为）；phase25 传本命名空间 quota 目录。
+        lock_dir = dir_path if dir_path is not None else quota_dir()
+        self._fh = open(lock_dir / LOCK_NAME, "a+")  # noqa: SIM115
 
     def __enter__(self) -> "_FileLock":
         fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
@@ -520,8 +613,9 @@ class _FileLock:
         self._fh.close()
 
 
-def read_lines() -> list[dict[str, Any]]:
-    p = ledger_path()
+def read_lines(path: "Path | None" = None) -> list[dict[str, Any]]:
+    # 缺省=Phase 2 账（外部只读脚本/单测旧行为不变）；phase25 显式传本账路径。
+    p = path if path is not None else ledger_path()
     if not p.exists():
         return []
     rows: list[dict[str, Any]] = []
@@ -543,13 +637,16 @@ def call_lines(rows: "list[dict[str, Any]] | None" = None) -> list[dict[str, Any
             if isinstance(r.get("seq"), int)]
 
 
-def load_approval(batch_id: str) -> dict[str, Any]:
+def load_approval(batch_id: str,
+                  approvals_path: "Path | None" = None) -> dict[str, Any]:
     # G-9：batch_id 是路径段，读法先过字符集白名单（拒绝 ../、斜杠等遍历形态）。
+    # approvals_path 缺省=Phase 2 凭据目录（旧行为）；phase25 传本命名空间目录。
     try:
         validate_batch_id(batch_id)
     except (TypeError, ValueError) as exc:
         raise QuotaError(f"batch_id 非法：{exc}") from exc
-    p = approvals_dir() / f"{batch_id}.json"
+    base = approvals_path if approvals_path is not None else approvals_dir()
+    p = base / f"{batch_id}.json"
     if not p.exists():
         raise QuotaError(f"批次批准凭据不存在：{p}（实呼前必须有书面批次批准）")
     try:
@@ -574,7 +671,8 @@ def load_approval(batch_id: str) -> dict[str, Any]:
 
 def _write_budget_pause(reason: str, trigger: dict[str, Any], *,
                         stage: str = "*", scope: str = "global",
-                        affected_stages: "list[str] | None" = None
+                        affected_stages: "list[str] | None" = None,
+                        ns: "_LedgerNamespace | None" = None
                         ) -> dict[str, Any]:
     """写 v2 超集暂停态：前 7 键名/原义与 router._write_pause_state 完全一致，
     resume_at_epoch=null 表示不自动恢复（§6.1）。
@@ -606,27 +704,34 @@ def _write_budget_pause(reason: str, trigger: dict[str, Any], *,
         raise AssertionError(
             f"quota_pause 键集漂移：{tuple(state)} != {QUOTA_PAUSE_SCHEMA_V2_KEYS}"
         )
-    ensure_private_dir(router_state_dir())
-    atomic_write_text(router_state_path(),
+    namespace = ns or PHASE2_NAMESPACE
+    ensure_private_dir(namespace.pause_dir_fn())
+    atomic_write_text(namespace.pause_path_fn(),
                       json.dumps(state, ensure_ascii=False, indent=2))
     return state
 
 
 def _append_line(row: dict[str, Any]) -> None:
+    # L2（2026-10-29 评审修单）：本函数仅为封存期 Phase 2 历史路径保留，
+    # 禁止新增调用方；新代码（Phase 2.5 起）一律走 QuotaLedger.phase25()
+    # 的 _append（open_ledger_append 带封存守卫/0600 收敛）。
     p = ledger_path()
     with open(p, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
     os.chmod(p, 0o600)
 
 
-def _write_degraded_alert(exc: BaseException, meta: dict[str, Any]) -> "Path | None":
+def _write_degraded_alert(exc: BaseException, meta: dict[str, Any],
+                          quota_path: "Path | None" = None) -> "Path | None":
     """G-4：ledger 追加失败时落独立 .degraded 告警件（原子 0600），绝不假装成功。
 
     告警件本身写入失败不得顶掉原始异常（告警是辅助证据，调用失败语义不变）。
+    quota_path 缺省=Phase 2 quota 目录；phase25 传本命名空间 quota 目录。
     """
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    p = quota_dir() / (f"ledger.degraded.{stamp}.{os.getpid()}."
-                       f"{uuid.uuid4().hex[:8]}.json")
+    qdir = quota_path if quota_path is not None else quota_dir()
+    p = qdir / (f"ledger.degraded.{stamp}.{os.getpid()}."
+                f"{uuid.uuid4().hex[:8]}.json")
     doc = {"ts_iso": _now_iso(),
            "exception_type": type(exc).__name__,
            "exception": redact(str(exc))[:500],
@@ -638,17 +743,17 @@ def _write_degraded_alert(exc: BaseException, meta: dict[str, Any]) -> "Path | N
     return p
 
 
-def _read_counters() -> dict[str, Any]:
-    p = counters_path()
+def _read_counters(path: "Path | None" = None) -> dict[str, Any]:
+    p = path if path is not None else counters_path()
     if not p.exists():
         return {"consecutive_quota_errors": 0}
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _quarantine_counters() -> dict[str, Any]:
+def _quarantine_counters(path: "Path | None" = None) -> dict[str, Any]:
     """G-4：counters.json 损坏（不可解析/非对象/IO 错误）时把原件改名隔离，
     回退零值——成功追加的账行绝不允许被计数件读失败反向抹掉。"""
-    cp = counters_path()
+    cp = path if path is not None else counters_path()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup = cp.with_name(f"counters.corrupt.{stamp}.{os.getpid()}."
                           f"{uuid.uuid4().hex[:8]}.json")
@@ -661,10 +766,11 @@ def _quarantine_counters() -> dict[str, Any]:
     return {"consecutive_quota_errors": 0}
 
 
-def _write_counters(c: dict[str, Any]) -> None:
+def _write_counters(c: dict[str, Any], path: "Path | None" = None) -> None:
     # G-7：原子 0600 tmp+replace（唯一 tmp 名，杜绝固定 .json.tmp 互踩与权限窗口）。
     c["updated_at_iso"] = _now_iso()
-    atomic_write_text(counters_path(),
+    cp = path if path is not None else counters_path()
+    atomic_write_text(cp,
                       json.dumps(c, ensure_ascii=False, indent=2))
 
 
@@ -677,18 +783,59 @@ def _is_quota_err(err: "str | None") -> bool:
 
 
 class QuotaLedger:
-    """批次闸门 + 记账（方向 setter/runner 在每次实呼前后各调一次）。"""
+    """批次闸门 + 记账（方向 setter/runner 在每次实呼前后各调一次）。
 
-    def __init__(self) -> None:
-        self.quota_dir = quota_dir()
+    namespace 缺省 PHASE2_NAMESPACE：Phase 1/2 路径/暂停态/caps 逐字节保留；
+    Phase 2.5 用 QuotaLedger(PHASE25_NAMESPACE) 或 QuotaLedger.phase25()，
+    账/锁/凭据/暂停态/任务帽全部落在 phase25 命名空间（D-1，两账绝不串写）。
+    """
+
+    def __init__(self, namespace: "_LedgerNamespace | None" = None) -> None:
+        ns = namespace or PHASE2_NAMESPACE
+        if ns.phase == LEDGER_PHASE25:
+            # M-B：任何 mkdir/写系统调用之前先查三根互异互斥（防
+            # SIMPRAXIS_PHASE25_ROOT 别名/嵌套封存根时把 approvals/
+            # degraded/gateway_state/lock/runs 落进封存树）。
+            assert_phase25_roots_isolated()
+        self.ns = ns
+        self.quota_dir = self.ns.quota_dir_fn()
+
+    @classmethod
+    def phase25(cls) -> "QuotaLedger":
+        """Phase 2.5 独立账构造入口（D-1）。"""
+        return cls(PHASE25_NAMESPACE)
+
+    # ---- 命名空间内寻址（所有 IO 经 ns 间接，函数每次调用读 env） ----
+
+    def _ledger_path(self) -> Path:
+        return self.ns.ledger_path_fn()
+
+    def _read_rows(self) -> "list[dict[str, Any]]":
+        return read_lines(self._ledger_path())
+
+    def _call_rows(self) -> "list[dict[str, Any]]":
+        return call_lines(self._read_rows())
+
+    def _is_paused(self, stage: str) -> "dict[str, Any] | None":
+        # 复用 router.is_paused 逻辑，仅把暂停件路径换成本命名空间路径。
+        return is_paused(stage, state_path=self.ns.pause_path_fn())
+
+    def _append(self, row: "dict[str, Any]") -> None:
+        if self.ns.phase == LEDGER_PHASE25:
+            # Phase 2.5：带封存守卫的唯一追加入口（Phase 1/2 账写打开即拒，0600）。
+            with open_ledger_append(self._ledger_path()) as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        else:
+            # Phase 2：模块级 _append_line 旧路径，行为逐字节不变。
+            _append_line(row)
 
     # ---------- 调用前：不发网拦截（命中另写一行 ok=false err=preflight_blocked） ----------
 
     def preflight(self, stage: str, *, task: int, batch_id: str) -> dict[str, Any]:
-        with _FileLock():
+        with _FileLock(self.ns.quota_dir_fn()):
             # 1) router 既有暂停态（m9 长熔断/人工暂停）——复用 is_paused，不复制逻辑
             try:
-                paused = is_paused(stage)
+                paused = self._is_paused(stage)
             except PauseStateCorruptError:
                 # G-14：暂停件损坏 fail-closed——不触网、不覆盖/删除损坏件，
                 # 留 seq=null blocked 审计行后原样抛，交人工核查。
@@ -706,7 +853,7 @@ class QuotaLedger:
             # 只做当次不发网拦截 + 审计行（内存态、不落 quota_pause.json）；
             # 凭据补齐后下一次 preflight 自然放行，无需 resume ticket。
             try:
-                approval = load_approval(batch_id)
+                approval = load_approval(batch_id, self.ns.approvals_dir_fn())
             except QuotaError as exc:
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: {redact(str(exc))[:200]}")
@@ -727,18 +874,22 @@ class QuotaLedger:
                                 "approval_stage": approval["stage"]},
                 })
 
-            rows = call_lines()
+            rows = self._call_rows()
             global_used = max((r["global_used_after"] for r in rows), default=0)
-            batch_used = sum(1 for r in rows if r.get("batch_id") == batch_id)
             task_used = sum(1 for r in rows if r.get("task") == task)
+            # Phase 2.5：null-seq blocked 占批次（§11/AC-T0-7）——批次用量统计
+            # 全部行；Phase 2 旧口径只数整数 seq 行，逐字节保留。
+            batch_source = self._read_rows() if self.ns.phase == LEDGER_PHASE25 else rows
+            batch_used = sum(1 for r in batch_source
+                             if r.get("batch_id") == batch_id)
 
             trigger = {"stage": stage, "task": task, "batch_id": batch_id,
                        "batch_approved": approval["approved"], "batch_used": batch_used,
-                       "global_used": global_used, "global_cap": HARD_CAP}
+                       "global_used": global_used, "global_cap": self.ns.hard_cap}
 
-            # 3) 全局硬门 48（先到先停，与单任务列无关）
-            if global_used >= HARD_CAP:
-                state = _write_budget_pause("global_hard_cap", trigger)
+            # 3) 全局硬门（先到先停，与单任务列无关；phase25=196 兜底）
+            if global_used >= self.ns.hard_cap:
+                state = _write_budget_pause("global_hard_cap", trigger, ns=self.ns)
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: global_hard_cap {global_used}")
                 raise GatewayPausedError(state)
@@ -746,27 +897,30 @@ class QuotaLedger:
             # 4) 单任务局部硬上限。G-11：独立 reason=task_hard_cap + scope=task +
             # 实际 stage（历史误写 global_hard_cap 导致 resume 把任务顶当全局顶处理；
             # 任务顶是该任务绝对上限，批次扩展不能恢复——resume() 见 reason 直接拒绝）。
-            cap = TASK_HARD_CAPS.get(task)
+            # phase25 只查 PHASE25_TASK_CAPS（3/5/9/10），绝不回退旧字典。
+            cap = self.ns.task_caps.get(task)
             if cap is not None and task_used >= cap:
                 state = _write_budget_pause(
                     "task_hard_cap",
                     {**trigger, "task_used": task_used, "task_hard_cap": cap},
-                    stage=stage, scope="task", affected_stages=[stage])
+                    stage=stage, scope="task", affected_stages=[stage], ns=self.ns)
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: task{task}_hard_cap {task_used}>={cap}")
                 raise GatewayPausedError(state)
 
-            # 5) 常态 36：越过区间必须持单独书面批准的 beyond_normal 凭据
-            if global_used >= NORMAL_BUDGET and not approval.get("beyond_normal"):
-                state = _write_budget_pause("batch_budget_reached", trigger)
+            # 5) 常态门：越过区间必须持单独书面批准的 beyond_normal 凭据。
+            # phase25 normal==hard（预算全自治、无分层票），本闸永不先于全局硬闸触发。
+            if global_used >= self.ns.normal_budget and not approval.get("beyond_normal"):
+                state = _write_budget_pause("batch_budget_reached", trigger, ns=self.ns)
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: normal budget {global_used}"
                                      " without beyond_normal approval")
                 raise GatewayPausedError(state)
 
-            # 6) 本批次计数
+            # 6) 本批次计数（暂停态同样落本命名空间——phase25 不得写 phase2 state）
             if batch_used >= approval["approved"]:
-                state = _write_budget_pause("batch_budget_reached", trigger)
+                state = _write_budget_pause("batch_budget_reached", trigger,
+                                            ns=self.ns)
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: batch {batch_id} used "
                                      f"{batch_used}>={approval['approved']}")
@@ -783,18 +937,25 @@ class QuotaLedger:
                tokens_cache_read: "int | None" = None,
                tokens_cache_create: "int | None" = None,
                err: "str | None" = None, evidence: "str | None" = None) -> dict[str, Any]:
-        with _FileLock():
-            rows = call_lines()
+        with _FileLock(self.ns.quota_dir_fn()):
+            rows = self._call_rows()
             seq = max((int(r["seq"]) for r in rows), default=0) + 1
             global_after = max((r["global_used_after"] for r in rows), default=0) + 1
             try:
-                approval = load_approval(batch_id)
+                approval = load_approval(batch_id, self.ns.approvals_dir_fn())
                 batch_approved = approval["approved"]
                 approval_ref = f"quota/approvals/{batch_id}.json"
             except QuotaError:
                 # 正常不会发生（preflight 已拦）；记账不允许因凭据缺失而丢失
                 batch_approved, approval_ref = None, None
-            batch_after = sum(1 for r in rows if r.get("batch_id") == batch_id) + 1
+            if self.ns.phase == LEDGER_PHASE25:
+                # blocked 占批次：含 null-seq 行（§11/AC-T0-7）。
+                batch_prior = sum(1 for r in self._read_rows()
+                                  if r.get("batch_id") == batch_id)
+            else:
+                batch_prior = sum(1 for r in rows
+                                  if r.get("batch_id") == batch_id)
+            batch_after = batch_prior + 1
             row = {
                 "ts_iso": _now_iso(), "event": "call",
                 "stage": stage, "model": model, "thread_id": thread_id,
@@ -813,7 +974,7 @@ class QuotaLedger:
             # G-4：账行追加失败（磁盘满/IO 错误）禁止假装成功——落独立 .degraded
             # 告警件后抛 LedgerDegradedError；调用方必须按失败处理，不得账外放行。
             try:
-                _append_line(row)
+                self._append(row)
             except Exception as exc:  # noqa: BLE001
                 alert = _write_degraded_alert(exc, {
                     "time": _now_iso(), "stage": stage, "task": task,
@@ -823,7 +984,7 @@ class QuotaLedger:
                     "tokens_cache_read": tokens_cache_read,
                     "tokens_cache_create": tokens_cache_create,
                     "err": redact(err)[:300] if err else None,
-                })
+                }, self.ns.quota_dir_fn())
                 where = f"，告警件 {alert}" if alert is not None else "（告警件同样写入失败）"
                 raise LedgerDegradedError(
                     f"ledger 账行追加失败（seq={seq}，{type(exc).__name__}）{where}："
@@ -832,29 +993,30 @@ class QuotaLedger:
             # 连续配额错误计数（成功归零；连续 3 次 → 长熔断，§6 阈值）
             # G-4：counters.json 损坏时改名隔离 + 零值回退——已成功追加的账行
             # 绝不允许被计数件读失败反向抹掉（调用方已付费，账必须算成功）。
+            counters_p = self.ns.counters_path_fn()
             try:
-                counters = _read_counters()
+                counters = _read_counters(counters_p)
                 if not isinstance(counters, dict):
                     raise TypeError("counters.json 顶层不是 JSON 对象")
             except (json.JSONDecodeError, TypeError, OSError):
-                counters = _quarantine_counters()
+                counters = _quarantine_counters(counters_p)
             if ok:
                 counters["consecutive_quota_errors"] = 0
             elif _is_quota_err(err):
                 counters["consecutive_quota_errors"] = \
                     int(counters.get("consecutive_quota_errors", 0)) + 1
-            _write_counters(counters)
+            _write_counters(counters, counters_p)
             if counters.get("consecutive_quota_errors", 0) >= CONSECUTIVE_QUOTA_LIMIT:
                 # G-14：暂停件已损坏时不覆盖（损坏件优先交人工核查）。
                 try:
-                    already_paused = is_paused(stage)
+                    already_paused = self._is_paused(stage)
                 except PauseStateCorruptError:
                     already_paused = True
                 if already_paused is None:
                     _write_budget_pause("consecutive_quota_errors",
                                         {"consecutive_errors":
                                          counters["consecutive_quota_errors"],
-                                         "stage": stage})
+                                         "stage": stage}, ns=self.ns)
             return row
 
     def _record_blocked(self, stage: str, task: int, batch_id: str,
@@ -865,9 +1027,18 @@ class QuotaLedger:
         语义不变（调用方紧接着抛 GatewayPausedError，本次本就不发网），故告警
         后吞掉写入异常，避免顶掉真正的拦截异常。
         """
-        rows = call_lines()
-        global_used = max((r["global_used_after"] for r in rows), default=0)
-        batch_used = sum(1 for r in rows if r.get("batch_id") == batch_id)
+        call_rows = self._call_rows()
+        all_rows = self._read_rows()
+        global_used = max((r["global_used_after"] for r in call_rows), default=0)
+        if self.ns.phase == LEDGER_PHASE25:
+            # Phase 2.5（Plan §11/AC-T0-7）：blocked 占批次不占实呼——批次计数
+            # 必须同时数整数 seq 行与 null-seq blocked 行；global/task 只数实呼。
+            batch_rows = all_rows
+        else:
+            # Phase 2 旧口径逐字节保留（call_rows；拦截即写暂停态，进程退出）。
+            batch_rows = call_rows
+        batch_used = sum(1 for r in batch_rows
+                         if r.get("batch_id") == batch_id)
         row = {
             "ts_iso": _now_iso(), "event": "preflight_blocked",
             "stage": stage, "model": None, "thread_id": thread_id,
@@ -879,13 +1050,14 @@ class QuotaLedger:
             "ok": False, "err": err, "approval_ref": None, "evidence": None,
         }
         try:
-            _append_line(row)
+            self._append(row)
         except Exception as exc:  # noqa: BLE001 —— LOW-5：见 docstring
             _write_degraded_alert(exc, {"degraded": True,
                                         "audit_event": "preflight_blocked",
                                         "time": _now_iso(), "stage": stage,
                                         "task": task, "batch_id": batch_id,
-                                        "err": redact(err)[:300]})
+                                        "err": redact(err)[:300]},
+                                  self.ns.quota_dir_fn())
 
 
 # ---------- Task3：调用方记账上下文 + 网关统一记账门 ----------
@@ -986,11 +1158,131 @@ class BillingGate:
             f"preflight_blocked: {reason}", thread_id=ctx.thread_id)
 
 
+# ---------- Phase 2.5 AC-T0-7：台账机判（seq 连续 + blocked 分列） ----------
+
+def validate_ledger_rows(rows: "list[dict[str, Any]]", *,
+                         label: str = "phase25 ledger") -> None:
+    """机判台账行：
+
+    1. 整数 seq 行（event=call）从空账 0 次实呼起，首行 seq=1，排序后必须恰为
+       1..n——跳号、重号必红；
+    2. null seq 行必须且只能是 event=preflight_blocked；整数行 event 必须是 call
+       （int/null 混列必红，bool 是 int 子类，显式拒）；
+    3. 每行 ts_iso 必须是严格 UTC Z（clock.parse_ts_iso_strict，吸取 +0000/+0800
+       混写教训）。
+
+    只用于 phase25 新账机判；Phase 1/2 历史账封存，不拿本判据回溯。
+    """
+    errors: list[str] = []
+    int_seqs: list[int] = []
+    for idx, row in enumerate(rows):
+        seq = row.get("seq")
+        event = row.get("event")
+        if isinstance(seq, bool):
+            errors.append(f"第 {idx} 行 seq 不得为 bool：{seq!r}")
+        elif isinstance(seq, int):
+            if event != "call":
+                errors.append(
+                    f"第 {idx} 行 seq={seq}：整数 seq 行 event 必须为 call，"
+                    f"收到 {event!r}")
+            int_seqs.append(seq)
+        elif seq is None:
+            if event != "preflight_blocked":
+                errors.append(
+                    f"第 {idx} 行：null-seq 行 event 必须为 preflight_blocked，"
+                    f"收到 {event!r}")
+        else:
+            errors.append(
+                f"第 {idx} 行：seq 必须为 int 或 null，收到 {type(seq).__name__}")
+        try:
+            parse_ts_iso_strict(row.get("ts_iso"))
+        except (TypeError, ValueError):
+            errors.append(
+                f"第 {idx} 行 ts_iso 非严格 UTC Z（YYYY-MM-DDTHH:MM:SSZ）："
+                f"{row.get('ts_iso')!r}")
+    ordered = sorted(int_seqs)
+    expected = list(range(1, len(int_seqs) + 1))
+    if ordered != expected:
+        if not ordered:
+            detail = "无整数 seq 行"
+        else:
+            missing = sorted(set(expected) - set(ordered))
+            dups = sorted({s for s in ordered if ordered.count(s) > 1})
+            detail = (f"实际 {ordered}（跳号 {missing or '无'}，"
+                      f"重号 {dups or '无'}）")
+        errors.append(f"整数 seq 必须从 1 严格连续（空账=0 次实呼、首行 seq=1）：{detail}")
+    if errors:
+        raise LedgerSequenceError(
+            f"{label} 机判失败（{len(errors)} 项）：" + "；".join(errors))
+
+
+def ledger_summary(rows: "list[dict[str, Any]]", *,
+                   validate: bool = True) -> dict[str, Any]:
+    """两栏并陈汇总：整数 seq 实呼行 / null-seq preflight_blocked 行。
+
+    blocked 占批次不占实呼：batches.<id>.rows = calls + blocked，与 preflight
+    批次门的计数口径一致；call_rows 永不把 blocked 计入。
+    """
+    if validate:
+        validate_ledger_rows(rows)
+
+    def _is_call(r: dict[str, Any]) -> bool:
+        seq = r.get("seq")
+        return isinstance(seq, int) and not isinstance(seq, bool)
+
+    calls = [r for r in rows if _is_call(r)]
+    blocked = [r for r in rows
+               if r.get("seq") is None and r.get("event") == "preflight_blocked"]
+
+    def _tally(key: str) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in calls:
+            k = str(r.get(key))
+            out[k] = out.get(k, 0) + 1
+        return dict(sorted(out.items()))
+
+    batches: dict[str, dict[str, int]] = {}
+    for r in rows:
+        bid = r.get("batch_id")
+        if bid is None:
+            continue
+        cell = batches.setdefault(bid, {"calls": 0, "blocked": 0, "rows": 0})
+        cell["rows"] += 1
+        if _is_call(r):
+            cell["calls"] += 1
+        elif r.get("event") == "preflight_blocked":
+            cell["blocked"] += 1
+    ok_true = sum(1 for r in calls if r.get("ok") is True)
+    return {
+        "call_rows": len(calls),
+        "blocked_rows": len(blocked),
+        "total_rows": len(rows),
+        "seq_first": 1 if calls else None,
+        "seq_last": len(calls) if calls else None,
+        "calls_by_task": _tally("task"),
+        "calls_by_stage": _tally("stage"),
+        "calls_ok": {"true": ok_true, "false": len(calls) - ok_true},
+        "batches": dict(sorted(batches.items())),
+    }
+
+
 # ---------- 批次批准凭据 / 恢复（只接受显式参数的 CLI） ----------
 
 def write_approval(*, batch_id: str, task: int, stage: str, approved: int,
-                   beyond_normal: bool, note: str) -> Path:
+                   beyond_normal: bool, note: str,
+                   namespace: "_LedgerNamespace | None" = None) -> Path:
     # G-9：写侧与读侧同一字符集白名单（路径段不可信）。
+    ns = namespace or PHASE2_NAMESPACE
+    if ns.phase == LEDGER_PHASE25:
+        # M-B：模块级 CLI 直连函数不经 QuotaLedger.__init__，卡口单设；
+        # 必须在 caps 校验/读账/approvals_dir_fn() 建目录之前。
+        assert_phase25_roots_isolated()
+    # 任务编号必须在【本命名空间】caps 字典内——phase25 的 3/5/9/10 与旧编号
+    # 碰撞，绝不回退 TASK_HARD_CAPS（D-1 严格隔离）。
+    if task not in ns.task_caps:
+        raise QuotaError(
+            f"task {task} 不属于 ledger 期 {ns.phase} 的任务帽命名空间"
+            f"（合法任务：{sorted(ns.task_caps)}）")
     try:
         validate_batch_id(batch_id)
     except (TypeError, ValueError) as exc:
@@ -998,33 +1290,49 @@ def write_approval(*, batch_id: str, task: int, stage: str, approved: int,
     # G-9：bool 是 int 子类，显式拒绝 approved=True/False。
     if isinstance(approved, bool) or not isinstance(approved, int) or approved <= 0:
         raise QuotaError("approved 必须为正整数（不接受 bool）")
-    if beyond_normal:
-        rows = call_lines()
-        used = max((r["global_used_after"] for r in rows), default=0)
-        if used < NORMAL_BUDGET:
+    rows = call_lines(read_lines(ns.ledger_path_fn()))
+    used = max((r["global_used_after"] for r in rows), default=0)
+    if ns.normal_budget < ns.hard_cap:
+        # Phase 2 旧口径（逐字节保留）：beyond_normal 分层票只能在越过常态门后
+        # 开，且 used+approved 不得越过全局硬顶。
+        if beyond_normal:
+            if used < ns.normal_budget:
+                raise QuotaError(
+                    f"beyond_normal 凭据只允许在全局已用 >= {ns.normal_budget} 时开具"
+                    f"（当前 {used}）；{ns.normal_budget}→{ns.hard_cap} 每批单独书面批准（D1）")
+            if used + approved > ns.hard_cap:
+                raise QuotaError(
+                    f"本批 {approved} 次将越过全局硬顶 {ns.hard_cap}（当前已用 {used}）")
+    else:
+        # Phase 2.5：预算全自批、无分层票；全局硬门对所有票生效（T9 占位帽 160
+        # 在内，科学帽 task 3/5 的提顶另由预注册禁止，不靠本函数）。
+        if used + approved > ns.hard_cap:
             raise QuotaError(
-                f"beyond_normal 凭据只允许在全局已用 >= {NORMAL_BUDGET} 时开具"
-                f"（当前 {used}）；36→48 每批单独书面批准（D1）")
-        if used + approved > HARD_CAP:
-            raise QuotaError(
-                f"本批 {approved} 次将越过全局硬顶 {HARD_CAP}（当前已用 {used}）")
-    p = approvals_dir() / f"{batch_id}.json"
+                f"本批 {approved} 次将越过 phase25 全局硬门 {ns.hard_cap}"
+                f"（当前已用 {used}）")
+    p = ns.approvals_dir_fn() / f"{batch_id}.json"
     if p.exists():
         raise QuotaError(f"批次凭据已存在，禁止覆盖：{p}")
     doc = {"batch_id": batch_id, "task": task, "stage": stage,
            "approved": int(approved), "beyond_normal": bool(beyond_normal),
-           "ledger_phase": LEDGER_PHASE,
+           "ledger_phase": ns.phase,
            "created_at_iso": _now_iso(), "note": redact(note)[:1000]}
-    # G-7：0600 tmp+replace 原子写（approvals 目录已由 approvals_dir() 收敛 0700）。
+    # G-7：0600 tmp+replace 原子写（approvals 目录已由 approvals_dir_fn() 收敛 0700）。
     atomic_write_text(p, json.dumps(doc, ensure_ascii=False, indent=2))
     return p
 
 
-def resume(*, ticket: str, batch_id: "str | None" = None) -> Path:
+def resume(*, ticket: str, batch_id: "str | None" = None,
+           namespace: "_LedgerNamespace | None" = None) -> Path:
     """唯一恢复路径：显式 uuid 票 + 预算暂停时须带新批次凭据（§6.2）。"""
+    ns = namespace or PHASE2_NAMESPACE
+    if ns.phase == LEDGER_PHASE25:
+        # M-B：同上，resume 也是模块级 CLI 直连；须在 pause_path_fn()
+        # （phase25 侧会 ensure_private_dir）与 resume_audit 写之前。
+        assert_phase25_roots_isolated()
     if not ticket or len(ticket) < 8:
         raise QuotaError("--ticket 必须是非空 uuid（>=8 字符）")
-    pause = router_state_path()
+    pause = ns.pause_path_fn()
     if not pause.exists():
         raise QuotaError("无暂停态文件，无需 resume")
     # G-14：暂停件损坏 fail-closed——resume 绝不删除损坏件，交人工核查。
@@ -1047,19 +1355,21 @@ def resume(*, ticket: str, batch_id: "str | None" = None) -> Path:
             f"上限 {trig.get('task_hard_cap')}）：任务局部硬顶是绝对上限，"
             "不能用 --batch-id 批次扩展恢复；请人工核查（必要时调整 TASK_HARD_CAPS"
             "并重开审批），暂停件保留不删。")
-    rows = call_lines()
+    rows = call_lines(read_lines(ns.ledger_path_fn()))
     used = max((r["global_used_after"] for r in rows), default=0)
-    if reason in ("batch_budget_reached", "global_hard_cap") or used >= NORMAL_BUDGET:
+    if reason in ("batch_budget_reached", "global_hard_cap") or used >= ns.normal_budget:
         if not batch_id:
             raise QuotaError("预算类恢复必须同时给 --batch-id 指向新批次批准凭据")
-        approval = load_approval(batch_id)
-        if used >= NORMAL_BUDGET and not approval.get("beyond_normal"):
+        approval = load_approval(batch_id, ns.approvals_dir_fn())
+        if (ns.normal_budget < ns.hard_cap
+                and used >= ns.normal_budget
+                and not approval.get("beyond_normal")):
             raise QuotaError(
-                f"{NORMAL_BUDGET}→{HARD_CAP} 区间恢复：新批次凭据必须 "
+                f"{ns.normal_budget}→{ns.hard_cap} 区间恢复：新批次凭据必须 "
                 "--beyond-normal 开具")
-    audit = quota_dir() / "resume_audit.jsonl"
+    audit = ns.quota_dir_fn() / "resume_audit.jsonl"
     with open(audit, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"ts_iso": _now_iso(), "ledger_phase": LEDGER_PHASE,
+        fh.write(json.dumps({"ts_iso": _now_iso(), "ledger_phase": ns.phase,
                              "ticket": ticket,
                              "reason": reason, "batch_id": batch_id,
                              "global_used": used}, ensure_ascii=False) + "\n")
@@ -1068,12 +1378,26 @@ def resume(*, ticket: str, batch_id: "str | None" = None) -> Path:
     return audit
 
 
+def _namespace_for_cli(phase: int) -> _LedgerNamespace:
+    if phase == LEDGER_PHASE25:
+        return PHASE25_NAMESPACE
+    return PHASE2_NAMESPACE
+
+
 def main(argv: "list[str] | None" = None) -> int:
-    p = argparse.ArgumentParser(description="Phase 2 配额账本（批准凭据/恢复/计数；Phase 1 账已封存）")
+    p = argparse.ArgumentParser(
+        description="配额账本（批准凭据/恢复/计数；Phase 1/2 账已封存；"
+                    "--ledger-phase 25 走 Phase 2.5 独立新账）")
+    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25 为 Phase 2.5 独立账。
+    p.add_argument("--ledger-phase", type=int, default=LEDGER_PHASE,
+                   choices=(LEDGER_PHASE, LEDGER_PHASE25),
+                   help="台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 独立新账")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Task0：--task choices 取 Phase1/Phase2 caps 并集（编号沿用 Stage 账套）。
-    all_tasks = sorted(set(PHASE1_TASK_CAPS) | set(PHASE2_TASK_CAPS))
+    # Task0：--task choices 取两期 caps 并集仅为通过 argparse；写侧 write_approval
+    # 再按 --ledger-phase 的本命名空间严格校验（task 9 在两期 cap 不同，绝不并表）。
+    all_tasks = sorted(set(PHASE1_TASK_CAPS) | set(PHASE2_TASK_CAPS)
+                       | set(PHASE25_TASK_CAPS))
     pa = sub.add_parser("approve", help="写入一批书面批准凭据（显式参数，无默认值）")
     pa.add_argument("--batch-id", required=True)
     pa.add_argument("--task", type=int, required=True, choices=all_tasks)
@@ -1081,7 +1405,7 @@ def main(argv: "list[str] | None" = None) -> int:
                     choices=("macro_ideation", "coding_debug", "visual_rollout"))
     pa.add_argument("--approved", type=int, required=True)
     pa.add_argument("--beyond-normal", action="store_true",
-                    help="36→48 缓冲区间批次（全局已用>=36 才允许开具）")
+                    help="分层缓冲区间批次（仅 Phase 2 旧口径生效）")
     pa.add_argument("--note", required=True, help="书面批准出处/要点（必填）")
 
     pr = sub.add_parser("resume", help="凭显式 uuid 票解除暂停态")
@@ -1091,35 +1415,44 @@ def main(argv: "list[str] | None" = None) -> int:
     st = sub.add_parser("status", help="打印当前计数与暂停态，不触网不写账")
 
     args = p.parse_args(argv)
+    ns = _namespace_for_cli(args.ledger_phase)
     try:
         if args.cmd == "approve":
             path = write_approval(batch_id=args.batch_id, task=args.task,
                                   stage=args.stage, approved=args.approved,
-                                  beyond_normal=args.beyond_normal, note=args.note)
-            print(f"[quota] 批次凭据已写（0600）：{path}")
+                                  beyond_normal=args.beyond_normal, note=args.note,
+                                  namespace=ns)
+            print(f"[quota] 批次凭据已写（0600，ledger 期 {ns.phase}）：{path}")
             return 0
         if args.cmd == "resume":
-            path = resume(ticket=args.ticket, batch_id=args.batch_id)
+            path = resume(ticket=args.ticket, batch_id=args.batch_id, namespace=ns)
             print(f"[quota] 暂停已解除，恢复流水：{path}")
             return 0
     except QuotaError as exc:
         # G-11/G-14：任务硬顶/损坏件/凭据问题给明确文案 + 退出码 2（不打 traceback）。
         print(f"[quota ERROR] {exc}", file=sys.stderr)
         return 2
-    rows = read_lines()
-    calls = call_lines(rows)
-    used = max((r["global_used_after"] for r in calls), default=0)
-    blocked = sum(1 for r in rows if r.get("event") == "preflight_blocked")
+    rows = read_lines(ns.ledger_path_fn())
+    # 严格机判只用于 phase25 新账（validate_ledger_rows 契约：Phase 1/2 封存账
+    # 不拿本判据回溯）；旧账 status 只汇总、不判序。
+    summary = ledger_summary(rows, validate=(ns.phase == LEDGER_PHASE25))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:
-        pause_view = is_paused()
+        pause_view = is_paused(state_path=ns.pause_path_fn())
     except PauseStateCorruptError as exc:
         pause_view = {"corrupt": str(exc)}
-    print(json.dumps({"ledger_phase": LEDGER_PHASE,
-                      "ledger_path": str(ledger_path()),
-                      "global_used": used, "normal_budget": NORMAL_BUDGET,
-                      "hard_cap": HARD_CAP, "blocked_lines": blocked,
+    print(json.dumps({"ledger_phase": ns.phase,
+                      "ledger_path": str(ns.ledger_path_fn()),
+                      "global_used": summary["seq_last"] or 0,
+                      "normal_budget": ns.normal_budget,
+                      "hard_cap": ns.hard_cap,
+                      "task_caps": dict(sorted(ns.task_caps.items())),
+                      "call_rows": summary["call_rows"],
+                      "blocked_rows": summary["blocked_rows"],
+                      # blocked_lines 为旧键名别名（Phase 2 status 输出兼容）。
+                      "blocked_lines": summary["blocked_rows"],
+                      "calls_by_task": summary["calls_by_task"],
                       "paused": pause_view}, ensure_ascii=False, indent=2))
     return 0
 
