@@ -480,6 +480,41 @@ class RunSpec:
     # Python 栈帧时 snippets 为空，靠它保证入口脚本全文+锚点白名单在场。
     # 空元组时行为逐字节不变；仅 task8_fluid 工厂给 (FLUID_ENTRYPOINT,)。
     full_source_relpaths: "tuple[str, ...]" = ()
+    # Phase 2.5 Task4（AC-T4-11；LEAD 2026-10-29 裁决方案 A）：agentic
+    # 内层循环 opt-in 五字段，纯加法。默认值下旧路径的 prompt 构造/序列化/
+    # 缓存指纹/账行零变化——旧代码从不按名读取这五字段（全包无 asdict/反射
+    # 式序列化 RunSpec）；唯一读者是图组合根的引擎分派器（懒加载 agentic
+    # 内环包，engine_for 单点判定，见 graph/cli.py）。
+    agentic: bool = False
+    # Gate1 工具授予串元组（授予串语法/解析的单真值在内环包 wiring 件）。
+    tool_grants: "tuple[str, ...]" = ()
+    step_cap: int = 0          # 每 run 工具步数帽（0=不显式限，轮帽兜底）
+    token_cap: int = 0         # 每 run 累计 token 帽（0=不显式限）
+    # trace 线程目录相对 workdir 的 relpath；None=约定 agentic_traces/<thread>。
+    agentic_trace_relpath: "str | None" = None
+
+    def __post_init__(self) -> None:
+        # fail-closed：agentic 五字段非法值在出生时即拒（0/None/()＝未设置）。
+        if type(self.agentic) is not bool:
+            raise ValueError("RunSpec.agentic 必须是 bool")
+        if type(self.tool_grants) is not tuple or not all(
+                type(g) is str and g for g in self.tool_grants):
+            raise ValueError(
+                "RunSpec.tool_grants 必须是非空字符串的元组（()=未授予）")
+        for _name in ("step_cap", "token_cap"):
+            _v = getattr(self, _name)
+            if type(_v) is not int or _v < 0:
+                raise ValueError(f"RunSpec.{_name} 必须是非负整数（0=未设置）")
+        _rel = self.agentic_trace_relpath
+        if _rel is not None:
+            if type(_rel) is not str or not _rel:
+                raise ValueError(
+                    "RunSpec.agentic_trace_relpath 必须是非空 str 或 None")
+            if "\x00" in _rel or Path(_rel).is_absolute() \
+                    or ".." in Path(_rel).parts:
+                raise ValueError(
+                    "RunSpec.agentic_trace_relpath 必须是不含 '..' 的 "
+                    "workdir 相对路径")
 
 
 @dataclass

@@ -1,0 +1,28 @@
+{
+  "schema": "simpraxis.agentic_image_evidence.v1",
+  "ts_iso": "2026-10-29T21:12:46Z",
+  "image_tag": "sim-praxis/agentic:phase25-t4",
+  "image_ref_digest": "sim-praxis/agentic:phase25-t4@sha256:abf96496a6d72cf4f61c37a3cfe7d657013c1a567fcc88b04ac2b616d012fed7",
+  "image_id": "sha256:abf96496a6d72cf4f61c37a3cfe7d657013c1a567fcc88b04ac2b616d012fed7",
+  "base_ref": "sim-praxis/sandbox@sha256:50b6e10df854db40ea41e33f3ed9731a9d5d35b2d9d2ccf9b9f178d8565e4bfe",
+  "base_image_id": "sha256:50b6e10df854db40ea41e33f3ed9731a9d5d35b2d9d2ccf9b9f178d8565e4bfe",
+  "build_plane": {
+    "simpraxis_use_proxy": "0",
+    "network": "none",
+    "pull": "false (--network=none --pull=false)",
+    "wheels_installed": 0
+  },
+  "runtime_plane": {
+    "network": "--network=none",
+    "read_only_root": true,
+    "cap_drop": "ALL",
+    "no_new_privileges": true,
+    "venv_mount": "/mnt/venvs/simpraxis:/opt/venv:ro"
+  },
+  "runtime_smoke": {
+    "rc": 0,
+    "output": "PY 3.10.12\nSM 1.26.0"
+  },
+  "dockerfile_sha256": "7594cef01406fcbd17246074f7c44f02ce7132e36fa793709b4d695d107476e3",
+  "wheel_manifest_sha256": "9a6d81a142ba13076c828d565bda79a77636415ea3f5662f551ecb5e88b97b32"
+}

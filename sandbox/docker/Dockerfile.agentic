@@ -1,0 +1,20 @@
+# Phase 2.5 Task4 AC-T4-18：agentic run_cmd 兄弟容器镜像（零 wheel 安装）。
+#
+# 来源精确 pin：基础镜像以 @sha256 digest 钉死（本机已存；构建期
+# --network=none --pull=false，不拉取、不走代理，SIMPRAXIS_USE_PROXY=0）。
+# 运行期解释器与全部 Python 依赖来自只读挂载 /opt/venv（主 venv；
+# D-3 落位判决＝主 venv 形态：t0_dependency_verdict.json branch=main_venv，
+# smolagents==1.26.0 以 --no-deps 零 extra 装入主 venv），镜像内不安装任何
+# wheel，故 wheel 哈希清单为零项——理由与挂载面见
+# sandbox/docker/agentic_wheel_manifest.json（构建脚本校验本文件与其一致）。
+FROM sim-praxis/sandbox@sha256:50b6e10df854db40ea41e33f3ed9731a9d5d35b2d9d2ccf9b9f178d8565e4bfe
+
+LABEL simpraxis.phase="phase25" \
+      simpraxis.task="4" \
+      simpraxis.agentic-run="1"
+
+# 运行期 user/workdir/network/cap-drop/只读根 由 build_docker_argv 在宿主
+# 侧逐 flag 强制（orchestrator/agentic/tools/run.py，配置级测试逐段锁）；
+# 镜像不声明入口指令——argv 经白名单后以 `<image> -- <argv>` 传入。
+USER 1000:1000
+WORKDIR /work

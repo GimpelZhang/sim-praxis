@@ -266,6 +266,27 @@ def _initial_state(args: argparse.Namespace, payload: dict) -> dict:
     return state
 
 
+class _AgentEngineDispatcher:
+    """AC-T4-13 组合根单点分派：duck ``AgentRunner.run(spec)`` 的唯一引擎闸。
+
+    ``spec.agentic`` 默假时逐字等价旧 ``runner.run``（agentic 包零加载，
+    golden 子进程 import 测试锁死）；为真时才懒导入 agentic.wiring——
+    故本方法体不能 import ``loop.engine_for``（那会让旧路径每条 run 都
+    加载 agentic 框架依赖）；下面的鸭子判定与 ``engine_for`` 逐位同义，
+    等价性由 tests/milestone25/test_task4_context_dispatch.py 锁定。
+    """
+
+    def __init__(self, legacy_runner: Any, gateway: Any):
+        self._legacy = legacy_runner
+        self._gateway = gateway
+
+    def run(self, spec: Any) -> dict:
+        if not bool(getattr(spec, "agentic", False)):
+            return self._legacy.run(spec)
+        from orchestrator.agentic.wiring import run_agentic_for_runspec
+        return run_agentic_for_runspec(spec, gateway=self._gateway)
+
+
 def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     libero = getattr(args, "variant", None) == TASK7_VARIANT_LIBERO
     fluid = getattr(args, "variant", None) == TASK8_VARIANT_FLUID
@@ -442,6 +463,8 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
                 make_evaluate_seam, make_spec_factory,
             )
         runner = AgentRunner(gateway, vector_engine, recall=recall)
+        # AC-T4-13：新旧双引擎单点分派（旧工厂 agentic 默认 False，行为逐字不变）。
+        agentic_dispatch = _AgentEngineDispatcher(runner, gateway)
         if libero:
             # Task7 B 线（LIBERO 第五平台）：出生/回收双态工厂 + WJ-Lite
             # evaluate（推导 wj_report 路径，缺件时由 results.json 引擎现算
@@ -449,7 +472,7 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             from orchestrator.graph import task7_libero as t7l
             spec_factory = t7l.make_spec_factory(
                 thread, args.coding_batch_id, task_title=title)
-            agent_run_seam_impl = _agent_run_seam(runner, spec_factory)
+            agent_run_seam_impl = _agent_run_seam(agentic_dispatch, spec_factory)
             evaluate_seam_impl = t7l.make_evaluate_seam(thread)
         elif fluid:
             # Task8 C 线（Q5 厨房倒水流体）：出生/回收双态工厂 + 几何机判
@@ -459,12 +482,12 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             from orchestrator.graph import task8_fluid as t8f
             spec_factory = t8f.make_spec_factory(
                 thread, args.coding_batch_id, task_title=title)
-            agent_run_seam_impl = _agent_run_seam(runner, spec_factory)
+            agent_run_seam_impl = _agent_run_seam(agentic_dispatch, spec_factory)
             evaluate_seam_impl = t8f.make_evaluate_seam(thread)
         else:
             spec_factory = make_spec_factory(
                 thread, args.coding_batch_id, task_title=title)
-            agent_run_seam_impl = _agent_run_seam(runner, spec_factory)
+            agent_run_seam_impl = _agent_run_seam(agentic_dispatch, spec_factory)
             evaluate_seam_impl = make_evaluate_seam(
                 gateway, args.visual_batch_id, thread)
 

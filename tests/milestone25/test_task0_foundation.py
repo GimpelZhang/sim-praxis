@@ -708,10 +708,15 @@ def test_golden_snapshots_byte_regression(tmp_path):
 # 9) RunSpec 字段集冻结：Task0 红线——agentic 字段不得进旧路径出生契约
 # ---------------------------------------------------------------------------
 
-def test_runspec_field_set_frozen_no_agentic_fields():
+def test_runspec_field_set_frozen_with_five_optin_agentic_fields():
+    # MINOR 7（2026-10-30 评审）：原函数名 no_agentic_fields 在方案 A
+    # 纯加法改判后已失真——集合现为原 25 字段 + 末尾 5 个 agentic 字段。
     fields = {f.name for f in dataclasses.fields(golden_mod.runner_mod.RunSpec)}
-    # 2026-10-29 Task0 时点的 25 字段完整集合。Task 4 接入 agentic 层若必须新增，
-    # 本测试会先红——按交接件 STOP 并上报，不得在 Task0 静默扩字段。
+    # 2026-10-29 Task0 时点的 25 字段完整集合。
+    # Phase 2.5 Task4 AC-T4-11（LEAD 2026-10-29 裁决方案 A，单 hunk 改判）：
+    # 末尾纯加法 5 个 agentic opt-in 字段（默认 False/()/0/0/None，旧路径
+    # prompt/序列化/缓存指纹/账行四不进）；同批改判的配套 STOP 指针测试在
+    # tests/milestone25/test_task4_golden_regression.py（逐字节 golden 仍红即回退）。
     frozen_fields = {
         "thread_id", "workdir", "cmd", "telemetry_relpath", "batch_id",
         "run_idx", "billing_task", "gate2_notes", "env_extra",
@@ -720,6 +725,8 @@ def test_runspec_field_set_frozen_no_agentic_fields():
         "coding_timeout_s", "extra_prompt_sections", "chunked_birth",
         "batch_schema_check", "shim_topology_check", "coding_recall",
         "repair_full_source", "repair_prior_refs", "full_source_relpaths",
+        "agentic", "tool_grants", "step_cap", "token_cap",
+        "agentic_trace_relpath",
     }
     assert fields == frozen_fields
 

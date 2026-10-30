@@ -1,0 +1,27 @@
+{
+  "schema": "simpraxis.agentic_wheel_manifest.v1",
+  "base_image": "sim-praxis/sandbox@sha256:50b6e10df854db40ea41e33f3ed9731a9d5d35b2d9d2ccf9b9f178d8565e4bfe",
+  "wheels": [],
+  "zero_wheels_rationale": "D-3 落位判决＝主 venv 形态（t0_dependency_verdict.json: branch=main_venv，smolagents==1.26.0 --no-deps 零 extra 装入主 venv，五个关键 pin 零漂移）。兄弟容器运行期解释器与全部 Python 依赖经只读挂载取得，镜像构建期不执行 pip/apt 安装任何 wheel；故 wheel 哈希清单零项不是遗漏：可安装面只存在于宿主 /mnt/venvs（闭源数据层，永不入镜像），镜像内无可哈希 wheel。若未来 D-3 翻转或镜像内需要预装件，必须改本清单为非空并逐 wheel 列 sha256，不得静默安装。",
+  "mounted_python": {
+    "host_path": "/mnt/venvs/simpraxis",
+    "container_path": "/opt/venv",
+    "mount_mode": "ro",
+    "interpreter": "/opt/venv/bin/python -> /usr/bin/python3.10 (基础镜像内)",
+    "smolagents_version": "1.26.0",
+    "smolagents_install_mode": "pip --no-deps（零 extra，见 T0 依赖探针裁决）"
+  },
+  "build": {
+    "network": "none",
+    "pull_policy": "never（--pull=false，仅允许本机已存基础镜像）",
+    "proxy_env_required": "SIMPRAXIS_USE_PROXY=0",
+    "script": "scripts/phase25/build_agentic_image.sh",
+    "evidence": "sandbox/docker/agentic_build_evidence.json"
+  },
+  "runtime": {
+    "network_default": "--network=none",
+    "rootfs": "--read-only",
+    "capabilities": "--cap-drop ALL + --security-opt no-new-privileges",
+    "docker_socket": "禁止挂载（build_docker_argv _check_no_docker_sock 断言）"
+  }
+}

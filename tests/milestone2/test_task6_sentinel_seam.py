@@ -867,8 +867,11 @@ _RUN6_NAME_CLOSURE = {
 # F2/F3/F4×4 + 三闸 F5/F6/F7×3 + J9 前置捕获×1 + 组合反馈×2；+1 bare：
 # _parse_replace_and_apply 的 P1 `except PatchSafetyError: raise` 透传，
 # 下面 pin 63；三签 MAJOR-2 再 +1 bare：JSON 回退 except 首行 type-is
-# 裸 PatchSafetyError 透传，bare 3→4）；raise ChunkBirthError 站点 22→23
-# （M1 pin_23，v1.4 不变），规格「22→23」指后者、有效，两口径各自独立反钉。
+# 裸 PatchSafetyError 透传，bare 3→4）；Phase 2.5 Task4（LEAD 方案 A
+# 2026-10-29）RunSpec.__post_init__ fail-closed 五字段校验 +5 带 exc
+# （63→68＝64 带 exc+4 bare，守卫三函数闭包不变）；raise ChunkBirthError
+# 站点 22→23（M1 pin_23，v1.4/T4 不变），规格「22→23」指后者、有效，
+# 两口径各自独立反钉。
 _RUN6_UNION_ATTRS = {
     "body", "comparators", "ctx", "func", "id", "iter_child_nodes", "left",
     "ops", "test", "value"}
@@ -915,11 +918,12 @@ def test_run6_entry_guard_redline_structure_and_closures():
     # +2 bare；run6 新增 :712 ChunkBirthError(_ENTRY_GUARD_REASON) 恰 1
     # 条带 exc → 46=44+2；v1.4 修复环双通道 → 63=59+4（三签 MAJOR-2
     # JSON 回退 type-is 透传 +1 bare），见上方闭包注释与交付报告偏离
-    # 申报 (c)）。ChunkBirthError(...) 调用站点另在 M1 钉 23。
+    # 申报 (c)；Phase 2.5 Task4 RunSpec.__post_init__ +5 带 exc fail-closed
+    # 校验 → 68=64+4，守卫三函数仍 1/0/0）。ChunkBirthError(...) 站点 M1 钉 23。
     raises_all = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
-    assert len(raises_all) == 63
+    assert len(raises_all) == 68
     assert sum(1 for n in raises_all if n.exc is None) == 4
-    assert sum(1 for n in raises_all if n.exc is not None) == 59
+    assert sum(1 for n in raises_all if n.exc is not None) == 64
     want_raises = {"_validate_entry_guard": 1,
                    "_entry_guard_body_calls_main": 0,
                    "_entry_guard_contains": 0}

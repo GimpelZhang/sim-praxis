@@ -49,3 +49,7 @@ def pytest_configure(config):
     # Phase 2.5 Task1：读活账本（phase1/phase2/phase25 三账）的集成测试，
     # 裸跑自行 skip，需显式 SIMPRAXIS_LEDGER_INTEGRATION=1 才执行。
     config.addinivalue_line("markers", "ledger_integration: 需要活账本（phase1/phase2/phase25 三账）的集成测试，裸跑默认 deselect")
+    # Phase 2.5 Task4 返修（M2/M3/M4）：真起兄弟容器的集成测试，与
+    # kb_integration 同构——裸跑自行 skip，需显式 SIMPRAXIS_DOCKER_INTEGRATION=1
+    # 且本机 docker daemon 在场才执行（非放水；Task 5 首次付费前必须真跑录证）。
+    config.addinivalue_line("markers", "docker_integration: 真 docker 兄弟容器测试，需显式开关（SIMPRAXIS_DOCKER_INTEGRATION=1）")

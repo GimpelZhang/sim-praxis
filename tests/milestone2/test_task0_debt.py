@@ -774,7 +774,9 @@ CALL_CACHE_ALLOWLIST = {
     # 2026-10-29 评审修单 M-A：coding_call_cache_key 键形单一源纯函数
     # （含 docstring）插在常量区、构造点之前，纯位移（2255→2272，+17 行）；
     # 两处 cache_key f-string 改调同一函数，0 新增落点/网关调用，键串逐字节不变。
-    ("orchestrator/agent_runner/runner.py", 2272),
+    # Phase 2.5 Task4（LEAD 方案 A）：RunSpec 五字段 + __post_init__ 插入
+    # （+35 行）纯位移 2272→2307，构造表达式逐字未改；agentic 第六落点见下。
+    ("orchestrator/agent_runner/runner.py", 2307),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
@@ -796,6 +798,14 @@ CALL_CACHE_ALLOWLIST = {
     # 攢批89：glm-5.3 强制思考锁内适配注释+MACRO_TIMEOUT_S 常量插入纯位移
     # （506→522），0 新增落点。
     ("orchestrator/direction/setter.py", 522),
+    # Phase 2.5 Task4（AC-T4-13，LEAD 2026-10-29 方案 A 裁决）：agentic
+    # 组合根适配器的默认缓存落点——同一 phase1_root()/.call_cache 目录，
+    # 键空间独立（agentic-v2- 前缀，与 coding_/macro_ 零交集）；测试注入
+    # tmp CallReplay 零触生产缓存。第六落点。同批未提交窗口内模块头 docstring
+    # 措辞修订纯位移（151→152，+1 行），构造表达式逐字未改，0 新增落点。
+    # 2026-10-30 T4 评审返修 M5：只读 seq 读取器 build_seq_provider +
+    # quota_ledger 导入块插入，纯位移（152→190，+38 行），0 新增落点。
+    ("orchestrator/agentic/wiring.py", 190),
 }
 
 
@@ -811,9 +821,9 @@ def test_s10_call_cache_landing_sites_enumerated():
                     and node.func.id == "CallReplay":
                 found[(rel, node.lineno)] = ast.unparse(node.args[0])
     assert set(found) == CALL_CACHE_ALLOWLIST, (
-        "生产 CallReplay 落点只允许这五处："
+        "生产 CallReplay 落点只允许这六处："
         f"{sorted(set(found) ^ CALL_CACHE_ALLOWLIST)}")
-    # 五处必须显式落在 Phase 1 封存的 phase1_root()/.call_cache（禁新开第二落点）
+    # 六处必须显式落在 Phase 1 封存的 phase1_root()/.call_cache（禁新开第二落点）
     for arg_src in found.values():
         assert "phase1_root()" in arg_src and ".call_cache" in arg_src, arg_src
 
