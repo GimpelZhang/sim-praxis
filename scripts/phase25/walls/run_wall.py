@@ -54,7 +54,20 @@ from scripts.phase25.walls.verdict import (
 
 WALLS = (WALL_A, WALL_B)
 BASELINES = {WALL_A: 60, WALL_B: 30}
+# 实验批次：g2＝Task 5 原始批次（历史默认，票据/线程前缀冻结不动）；
+# 5b＝协议加固新批次（task5b_spec.md 攢批115 af2df49 预注册；九件冻结墙、
+# 同帽 16/9、模型不换；G2「不成立」不翻案）。
+EXPERIMENTS = ("g2", "5b")
 BATCH_IDS = {WALL_A: "P25-B2", WALL_B: "P25-B3"}
+BATCH_IDS_5B = {WALL_A: "P25-B4", WALL_B: "P25-B5"}
+BATCH_BY_EXPERIMENT = {"g2": BATCH_IDS, "5b": BATCH_IDS_5B}
+THREAD_PREFIX = {"g2": "t5", "5b": "t5b"}
+PRIOR_G2_VERDICT = {
+    "file": "verdict-20261030T092635Z.json",
+    "verdict": "不成立",
+    "note": ("Task 5 G2 三态结论（硬规则 7 不翻案）；5b 是用户 D-4 裁决"
+             "（2026-10-30）授权的独立新实验，见 task5b_spec.md"),
+}
 SUBCAPS = {WALL_A: 16, WALL_B: 9}      # compute_subcaps(60,30) 冻结值
 GPU_CLOSEOUT_MIB = 200                 # 硬规则 5：收尾显存 ≤200 MiB
 FENCE_RE = re.compile(r"```\n(.*?)```", re.DOTALL)
@@ -213,19 +226,20 @@ def ledger_identity_rows(ledger: QuotaLedger, *, task: int,
 
 # ------------------------------------------------------------ 子命令
 
-def cmd_preflight(wall: str) -> int:
+def cmd_preflight(wall: str, experiment: str = "g2") -> int:
     root = fc.freeze_root()
     manifest = verify_freeze(root)
     grants = grants_from_gate(wall)
     if grants != FROZEN_GRANTS:
         raise SystemExit(f"GATE.md 白名单与冻结授予串不符：\n{grants}")
     parse_grant_strings(grants)          # 形态闸：偷渡授予串直接抛
+    batch_id = BATCH_BY_EXPERIMENT[experiment][wall]
     ledger = QuotaLedger.phase25()
     ledger_p = ledger.ns.ledger_path_fn()
     before = len(call_lines(read_lines(ledger_p)))
     try:
         pf = ledger.preflight("coding_debug", task=5,
-                              batch_id=BATCH_IDS[wall])
+                              batch_id=batch_id)
     except Exception as exc:  # noqa: BLE001 - 任何拦截都是预检失败
         raise SystemExit(f"票据 preflight 被拦：{type(exc).__name__}: {exc}")
     after = len(call_lines(read_lines(ledger_p)))
@@ -255,7 +269,8 @@ def cmd_preflight(wall: str) -> int:
     print(json.dumps({
         "preflight": "ok", "wall": wall,
         "manifest_sections": list(manifest["sections"]),
-        "grants": list(grants), "ticket": BATCH_IDS[wall],
+        "grants": list(grants), "ticket": batch_id,
+        "experiment": experiment,
         "preflight_usage": pf,
         "smoke_stdout": res.stdout.decode().strip(),
         "ledger_call_rows_before_after": [before, after],
@@ -334,11 +349,12 @@ def _forensics(wall: str, trace_dir: Path,
     }
 
 
-def cmd_run(wall: str) -> int:
+def cmd_run(wall: str, experiment: str = "g2") -> int:
     if os.environ.get("SIMPRAXIS_ALLOW_PAID") != "1":
         print("拒绝裸跑付费墙：需要 SIMPRAXIS_ALLOW_PAID=1（见硬规则 2 双守卫）",
               file=sys.stderr)
         return 2
+    batch_id = BATCH_BY_EXPERIMENT[experiment][wall]
     root = fc.freeze_root()
     verify_freeze(root)
     grants = grants_from_gate(wall)
@@ -347,8 +363,7 @@ def cmd_run(wall: str) -> int:
     grant_table = parse_grant_strings(grants)
 
     stamp = utc_stamp()
-    batch_id = BATCH_IDS[wall]
-    thread_id = f"t5-{wall.lower()}-{stamp}"
+    thread_id = f"{THREAD_PREFIX[experiment]}-{wall.lower()}-{stamp}"
     run_dir = fc.ensure_dir(root / "runs" / wall / stamp)
     work = fc.ensure_dir(run_dir / "work")
     write_lock(root, wall, batch_id, thread_id)
@@ -358,7 +373,8 @@ def cmd_run(wall: str) -> int:
                           task_text.encode("utf-8"))
     meta = {
         "schema": "simpraxis.phase25.t5_run_meta.v1",
-        "wall": wall, "batch_id": batch_id, "thread_id": thread_id,
+        "wall": wall, "experiment": experiment,
+        "batch_id": batch_id, "thread_id": thread_id,
         "started_iso": utc_iso(), "subcap": SUBCAPS[wall],
         "baseline_s": BASELINES[wall],
         "task_prompt_sha256": fc.sha256_file(run_dir / "task_prompt.txt"),
@@ -458,7 +474,7 @@ def cmd_run(wall: str) -> int:
         b_cap_passed=b_cap_passed)
     result_rec = {
         "schema": "simpraxis.phase25.t5_wall_result.v1",
-        "wall": wall, "ts_iso": utc_iso(),
+        "wall": wall, "experiment": experiment, "ts_iso": utc_iso(),
         "passed": passed, "rc": scored["rc"],
         "scorer_timed_out": scored["timed_out"],
         "verdict": score_json.get("verdict"),
@@ -517,6 +533,11 @@ def cmd_combine(root: Path) -> int:
             cap_exhausted=r.get("cap_exhausted", False),
             b_cap_passed=r.get("b_cap_passed"))
 
+    exp_a = ra.get("experiment", "g2")
+    exp_b = rb.get("experiment", "g2")
+    if exp_a != exp_b:
+        raise SystemExit(
+            f"两墙结果分属不同实验：{exp_a} vs {exp_b}，拒绝跨实验聚合")
     wa, wb = to_wall(ra), to_wall(rb)
     verdict = engineering_verdict(
         wa, wb, baselines={WALL_A: BASELINES[WALL_A],
@@ -525,6 +546,7 @@ def cmd_combine(root: Path) -> int:
     out = {
         "schema": "simpraxis.phase25.t5_combined_verdict.v1",
         "ts_iso": utc_iso(),
+        "experiment": exp_a,
         "wall_a_run": ra["run_dir"], "wall_b_run": rb["run_dir"],
         "wall_a": {"passed": ra["passed"], "calls": ra["paid_calls"],
                    "subcap": ra["subcap"], "kind": ra["loop_kind"]},
@@ -535,6 +557,8 @@ def cmd_combine(root: Path) -> int:
         "b_cap_axis": bcap,
         "d4_stop_required": (
             verdict["verdict"] == "不成立" or bcap["d4_stop"]),
+        # 5b：只读指针，不参与 engineering_verdict 计算（报告连续性）。
+        "prior_g2_verdict": PRIOR_G2_VERDICT if exp_a == "5b" else None,
     }
     p = root / "runs" / f"verdict-{utc_stamp()}.json"
     fc.write_json(p, out)
@@ -546,6 +570,8 @@ def cmd_combine(root: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--wall", choices=list(WALLS))
+    ap.add_argument("--experiment", choices=list(EXPERIMENTS),
+                    default="g2", help="g2=Task5 历史批次（默认）；5b=协议加固批次")
     ap.add_argument("--preflight", action="store_true")
     ap.add_argument("--combine", action="store_true")
     args = ap.parse_args(argv)
@@ -555,8 +581,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.wall:
         ap.error("非 --combine 模式必须给 --wall")
     if args.preflight:
-        return cmd_preflight(args.wall)
-    return cmd_run(args.wall)
+        return cmd_preflight(args.wall, args.experiment)
+    return cmd_run(args.wall, args.experiment)
 
 
 if __name__ == "__main__":

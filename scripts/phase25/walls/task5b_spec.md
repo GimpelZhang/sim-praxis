@@ -147,6 +147,48 @@ verdict.py（不编辑、不解释扩张）：双墙帽内干净 pass = 成立�
   （提示变了就必须新指纹新出生——实测断言新提示指纹 ≠ 旧提示指纹）；
 - 编辑 gates/ 任何文件（T5-LOW-1 冻结措辞只登记不修，继续挂账）。
 
+## 3.3 实现缝细化（2026-10-30，实现前补记，先于任何产品代码冻结）
+
+规格 §3.1 原写「逐字复制 _step_stream 127 行 + 唯一 hunk」。实现前复核
+1.26.0 源码确认存在更小等价缝，改采之（行为不变、表面更小）：
+
+- 事实锚：`memory_step.model_output = output_text`（agents.py:1697）
+  在 parse 块（1702-1711）**之前**赋值，含 auto-close 补闭栏后的
+  实际入解析文本；`AgentParsingError`（smolagents.utils:104，
+  AgentError 子类）是 parse 块唯一异常类型。
+- 子类 override 改为 ~10 行**生成器包装**：`yield from
+  super()._step_stream(memory_step)` 捕获 AgentParsingError，从
+  `memory_step.model_output` 取被解析原文，重抛经
+  build_parse_feedback 精确化的**新** AgentParsingError（同
+  (message, logger) 构造形状，from exc 保留链）；成功路径逐字透传，
+  parse 失败在 yield 任何工具调用之前发生故零重复副作用。
+- 因此不复制上游方法体、零全局名漂移面；§4 第 3 项 golden anchor
+  调整为双锚：①上游 `CodeAgent._step_stream` 安装源 sha256 前缀
+  `e027f0eaa32a8d94` 钉死（版本漂移即红，硬规则 8 已 pin 1.26.0）；
+  ②行为锚——用 ScriptedGateway 对**库存 CodeAgent** 喂畸形输出，
+  断言抛 AgentParsingError 且 memory_step.model_output 已就位
+  （包装缝依赖的两个上游事实任一被上游改坏即红）；另测子类包装
+  成功路径零改写（透传 ActionOutput/final answer 不变）。
+- 规格其余各节（记账语义、黑白名单、H1/H2、批次设计）一字不变。
+
+补记②（同日，写产品件时核实，先于付费批次冻结）：
+1. agents.py:1693-1695 在解析前自动为不以 ``` 结尾的输出补一个结尾
+   ```，于是 parse 失败后「Thought 散文」与「残缺裸 ```」文本上不可
+   区分（末尾都恰有一个无开栏的 ```），纠正动作相同——分类器合并为
+   单一 `no_code_fence` 标签，文案点破「自动补的闭栏不能替代开栏」；
+   `fence_unclosed`/`empty_code_block` 仅对纯函数直接调用可达（行为锚
+   测试锁此不可达性：缺闭栏的输出会被 auto-close 补成可解析）。
+2. smolagents max-steps 时 `provide_final_answer` 会再发一次 generate
+   （agents.py:625-637），该次在 model.generate 入口先撞
+   budget.add_round 抛 CapExceeded、不触网，故「干净触帽」的账是
+   付费呼=帽（16/9）、终局 kind=round_cap——与 G2 实测一致，hermetic
+   触帽剧本按此断言（calls==cap、steps==0）。
+3. run_wall 增 `--experiment {g2,5b}` 选择器（默认 g2 历史路径
+   逐字不动）：5b 选票据 P25-B4/B5、线程前缀 t5b-、run_meta/
+   wall_result 加 experiment 字段；combine 从两墙结果派生实验名、
+   拒跨实验聚合，5b 输出挂 prior_g2_verdict 只读指针。LOCK 重入仍只
+   认九件哈希（B4/B5 新批次不改锁，是「同冻结墙」的物证）。
+
 ## 4. Hermetic 测试设计（0 付费，先红后绿）
 
 新件 `tests/milestone25/test_task5b_protocol_hardening.py`，全部

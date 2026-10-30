@@ -24,8 +24,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from smolagents import CodeAgent
 from smolagents.agents import AgentGenerationError
+
+# Task 5b：协议反馈包装子类替换库存 CodeAgent（唯一换装点；冻结规格
+# scripts/phase25/walls/task5b_spec.md §3.1/§3.3，攢批115 af2df49）。
+from .agent_code import ProtocolHardenedCodeAgent as CodeAgent
 from smolagents.memory import ActionStep
 from smolagents.monitoring import LogLevel
 from smolagents.tools import Tool
@@ -117,8 +120,22 @@ _SYSTEM_CONTRACT = """\
 4. 所有路径都是 workdir 相对路径；``..`` 逃逸、绝对路径、软链外跳一律拒绝。
 5. 被 POLICY DENY 拒绝时零副作用已保证：读懂拒绝原因，换合法做法或 fail。
 
-输出格式：每轮只输出一个 ```python 围栏代码块，块内是调用工具的 Python 代码；
-不要输出围栏以外的解释文本。终局轮调用 finish(...) 或 fail(...)。
+输出格式（每轮必须严格遵守；框架要求 Thought 与代码块成对出现，二者缺一
+即失败）：
+- 每轮输出恰好两部分，顺序固定：第一行 `Thought: ` 一句话动作，下一行
+  立即开始一个闭合的 ```python 围栏，块内只放调用工具的 Python 代码。
+- 只有 Thought 没有围栏＝空转：不执行任何工具，但**照样计 1 次付费调用、
+  占 1 轮轮帽**。裸 ```、未闭合围栏、空块、多围栏均按空转换账。
+- 围栏之外禁止任何其他文本；每轮至多一个围栏。
+- 正例：
+  Thought: 先看工作目录里有什么。
+  ```python
+  print(list_dir("."))
+  ```
+- 反例（错误，0 个工具调用且计费轮照占）：
+  Thought: I will inspect the directory.
+  （这行之后必须紧跟闭合 ```python 围栏，不能什么都没有）
+- 终局轮保持同一形状，在围栏内调用 finish(...) 或 fail(...)。
 """
 
 
