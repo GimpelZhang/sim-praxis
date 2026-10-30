@@ -1,0 +1,479 @@
+{
+  "schema": "simpraxis.phase25.wall_b_seq_split.v1",
+  "wall": "B（Task8 run_5 机判战役；M7 B-eng/B-cap 二分）",
+  "frozen_scope": "首呼前冻结；Task 5 子帽公式分母只取 B-eng",
+  "seq_range": [
+    398,
+    436
+  ],
+  "run5_clarification": "合同措辞「run_5 seq309–436」以活账更正：run_5 机判战役＝T8-C9/C10/C11＝seq398–436（结案报告同）；seq309–397 属 run_1..4 四次真人 Gate2 reject 战役，不在墙 B 工程/能力二分内。",
+  "classifier": {
+    "method": "仅对 ## traceback / 日志尾部 段做短语机判，不对整 req grep（完整合同每呼注入，整 req 必双中）",
+    "eng_patterns": [
+      "empty or not watertight",
+      "not a two-manifold watertight solid",
+      "AttributeError"
+    ],
+    "cap_patterns": [
+      "contract 2 spout",
+      "contract 3",
+      "contract 6"
+    ],
+    "precedence": "B-eng 优先；见证量字典里 nonmanifold_edges=0/is_watertight=true 为拓扑已过，不作 eng 信号",
+    "birth_rule": "出生 6 分片全归 B-eng（双条件：批次名 + chunk0 工程合同增量关键词）"
+  },
+  "counts": {
+    "total": 39,
+    "B_eng": 30,
+    "B_cap": 9,
+    "birth": 18,
+    "repair": 21,
+    "by_batch": {
+      "T8-C9-stage1": {
+        "B_eng": 13,
+        "B_cap": 0
+      },
+      "T8-C10-stage1": {
+        "B_eng": 10,
+        "B_cap": 3
+      },
+      "T8-C11-stage1": {
+        "B_eng": 7,
+        "B_cap": 6
+      }
+    }
+  },
+  "sB_eng": 30,
+  "sB_cap": 9,
+  "entries": [
+    {
+      "seq": 398,
+      "batch_id": "T8-C9-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 0,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk0；批次 T8-C9-stage1 且 chunk0 含工程合同增量关键词 'watertight'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round1.chunk0.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 399,
+      "batch_id": "T8-C9-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 1,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk1；批次 T8-C9-stage1 且 chunk0 含工程合同增量关键词 'watertight'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round1.chunk1.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 400,
+      "batch_id": "T8-C9-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 2,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk2；批次 T8-C9-stage1 且 chunk0 含工程合同增量关键词 'watertight'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round1.chunk2.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 401,
+      "batch_id": "T8-C9-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 3,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk3；批次 T8-C9-stage1 且 chunk0 含工程合同增量关键词 'watertight'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round1.chunk3.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 402,
+      "batch_id": "T8-C9-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 4,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk4；批次 T8-C9-stage1 且 chunk0 含工程合同增量关键词 'watertight'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round1.chunk4.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 403,
+      "batch_id": "T8-C9-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 5,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk5；批次 T8-C9-stage1 且 chunk0 含工程合同增量关键词 'watertight'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round1.chunk5.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 404,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 2,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round2 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round2.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 405,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 3,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round3 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round3.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 406,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 4,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round4 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round4.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 407,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 5,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round5 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round5.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 408,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 6,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round6 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round6.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 409,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 7,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round7 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round7.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 410,
+      "batch_id": "T8-C9-stage1",
+      "phase": "repair",
+      "round": 8,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C9-stage1 round8 driving failure：precheck: 源壶为空或不水密",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5-cap-watertight-20261028T0821Z/runner_evidence/coding_round8.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 411,
+      "batch_id": "T8-C10-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 0,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk0；批次 T8-C10-stage1 且 chunk0 含工程合同增量关键词 '边界边'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round1.chunk0.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 412,
+      "batch_id": "T8-C10-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 1,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk1；批次 T8-C10-stage1 且 chunk0 含工程合同增量关键词 '边界边'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round1.chunk1.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 413,
+      "batch_id": "T8-C10-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 2,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk2；批次 T8-C10-stage1 且 chunk0 含工程合同增量关键词 '边界边'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round1.chunk2.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 414,
+      "batch_id": "T8-C10-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 3,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk3；批次 T8-C10-stage1 且 chunk0 含工程合同增量关键词 '边界边'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round1.chunk3.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 415,
+      "batch_id": "T8-C10-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 4,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk4；批次 T8-C10-stage1 且 chunk0 含工程合同增量关键词 '边界边'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round1.chunk4.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 416,
+      "batch_id": "T8-C10-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 5,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk5；批次 T8-C10-stage1 且 chunk0 含工程合同增量关键词 '边界边'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round1.chunk5.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 417,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 2,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C10-stage1 round2 driving failure：trimesh API 漂移（remove_duplicate_faces）",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round2.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 418,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 3,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C10-stage1 round3 driving failure：合同 5/8：非二流形水密实体判负",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round3.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 419,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 4,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C10-stage1 round4 driving failure：合同 5/8：非二流形水密实体判负",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round4.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 420,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 5,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C10-stage1 round5 driving failure：合同 5/8：非二流形水密实体判负",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round5.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 421,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 6,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C10-stage1 round6 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round6.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 422,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 7,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C10-stage1 round7 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round7.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 423,
+      "batch_id": "T8-C10-stage1",
+      "phase": "repair",
+      "round": 8,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C10-stage1 round8 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c6-cap-clearance-20261028T0912Z/runner_evidence/coding_round8.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 424,
+      "batch_id": "T8-C11-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 0,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk0；批次 T8-C11-stage1 且 chunk0 含工程合同增量关键词 '哨兵'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round1.chunk0.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 425,
+      "batch_id": "T8-C11-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 1,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk1；批次 T8-C11-stage1 且 chunk0 含工程合同增量关键词 '哨兵'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round1.chunk1.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 426,
+      "batch_id": "T8-C11-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 2,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk2；批次 T8-C11-stage1 且 chunk0 含工程合同增量关键词 '哨兵'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round1.chunk2.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 427,
+      "batch_id": "T8-C11-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 3,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk3；批次 T8-C11-stage1 且 chunk0 含工程合同增量关键词 '哨兵'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round1.chunk3.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 428,
+      "batch_id": "T8-C11-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 4,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk4；批次 T8-C11-stage1 且 chunk0 含工程合同增量关键词 '哨兵'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round1.chunk4.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 429,
+      "batch_id": "T8-C11-stage1",
+      "phase": "birth",
+      "round": 1,
+      "chunk": 5,
+      "wall": "B-eng",
+      "reason": "出生分片 chunk5；批次 T8-C11-stage1 且 chunk0 含工程合同增量关键词 '哨兵'",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round1.chunk5.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 430,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 2,
+      "chunk": null,
+      "wall": "B-eng",
+      "reason": "T8-C11-stage1 round2 driving failure：trimesh API 漂移（remove_duplicate_faces）",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round2.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 431,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 3,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C11-stage1 round3 driving failure：合同 2 spout rho/z 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round3.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 432,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 4,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C11-stage1 round4 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round4.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 433,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 5,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C11-stage1 round5 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round5.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 434,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 6,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C11-stage1 round6 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round6.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 435,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 7,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C11-stage1 round7 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round7.req.json",
+      "evidence_level": "byte_confirmed"
+    },
+    {
+      "seq": 436,
+      "batch_id": "T8-C11-stage1",
+      "phase": "repair",
+      "round": 8,
+      "chunk": null,
+      "wall": "B-cap",
+      "reason": "T8-C11-stage1 round8 driving failure：合同 3 pitcher/cup clearance 运动学违约",
+      "evidence": "/mnt/artifacts/simpraxis/phase2/closed/evidence-run5c7-cap-clearance-20261028T0944Z/runner_evidence/coding_round8.req.json",
+      "evidence_level": "byte_confirmed"
+    }
+  ]
+}

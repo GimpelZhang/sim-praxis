@@ -1,0 +1,122 @@
+{
+ "schema": "simpraxis.phase25.wall_a_expected.v1",
+ "benchmark": "libero_spatial",
+ "task_index": 0,
+ "task_name": "pick_up_the_black_bowl_between_the_plate_and_the_ramekin_and_place_it_on_the_plate",
+ "n_tasks": 10,
+ "numpy": "1.26.4",
+ "mujoco": "3.1.6",
+ "robosuite": "1.4.0",
+ "pit1_joints": [
+  {
+   "name": "robot0_joint1",
+   "addr": 0,
+   "type": 3
+  },
+  {
+   "name": "robot0_joint2",
+   "addr": 1,
+   "type": 3
+  },
+  {
+   "name": "robot0_joint3",
+   "addr": 2,
+   "type": 3
+  },
+  {
+   "name": "robot0_joint4",
+   "addr": 3,
+   "type": 3
+  },
+  {
+   "name": "robot0_joint5",
+   "addr": 4,
+   "type": 3
+  },
+  {
+   "name": "robot0_joint6",
+   "addr": 5,
+   "type": 3
+  },
+  {
+   "name": "robot0_joint7",
+   "addr": 6,
+   "type": 3
+  },
+  {
+   "name": "gripper0_finger_joint1",
+   "addr": 7,
+   "type": 2
+  },
+  {
+   "name": "gripper0_finger_joint2",
+   "addr": 8,
+   "type": 2
+  },
+  {
+   "name": "wooden_cabinet_1_top_level",
+   "addr": 44,
+   "type": 2
+  },
+  {
+   "name": "wooden_cabinet_1_middle_level",
+   "addr": 45,
+   "type": 2
+  },
+  {
+   "name": "wooden_cabinet_1_bottom_level",
+   "addr": 46,
+   "type": 2
+  },
+  {
+   "name": "flat_stove_1_button",
+   "addr": 47,
+   "type": 3
+  }
+ ],
+ "pit2": {
+  "nv": 43,
+  "qM_len": 153,
+  "mass_matrix_shape": [
+   7,
+   7
+  ]
+ },
+ "qvel_index_len": 7,
+ "obs_keys": [
+  "akita_black_bowl_1_pos",
+  "akita_black_bowl_1_quat",
+  "akita_black_bowl_1_to_robot0_eef_pos",
+  "akita_black_bowl_1_to_robot0_eef_quat",
+  "akita_black_bowl_2_pos",
+  "akita_black_bowl_2_quat",
+  "akita_black_bowl_2_to_robot0_eef_pos",
+  "akita_black_bowl_2_to_robot0_eef_quat",
+  "cookies_1_pos",
+  "cookies_1_quat",
+  "cookies_1_to_robot0_eef_pos",
+  "cookies_1_to_robot0_eef_quat",
+  "glazed_rim_porcelain_ramekin_1_pos",
+  "glazed_rim_porcelain_ramekin_1_quat",
+  "glazed_rim_porcelain_ramekin_1_to_robot0_eef_pos",
+  "glazed_rim_porcelain_ramekin_1_to_robot0_eef_quat",
+  "object-state",
+  "plate_1_pos",
+  "plate_1_quat",
+  "plate_1_to_robot0_eef_pos",
+  "plate_1_to_robot0_eef_quat",
+  "robot0_eef_pos",
+  "robot0_eef_quat",
+  "robot0_gripper_qpos",
+  "robot0_gripper_qvel",
+  "robot0_joint_pos",
+  "robot0_joint_pos_cos",
+  "robot0_joint_pos_sin",
+  "robot0_joint_vel",
+  "robot0_proprio-state"
+ ],
+ "steps": 3,
+ "reward": 0.0,
+ "done": false,
+ "check_success": false
+}
