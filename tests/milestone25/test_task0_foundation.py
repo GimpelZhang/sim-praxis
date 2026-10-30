@@ -6,7 +6,8 @@
      SIMPRAXIS_PHASE25_ROOT、文件树仅多 phase25 目录族）、0700/0600、幂等
      （已存在 ledger 不截断）、可写探针；
   2. runtime_paths phase25 路径族 + Phase1/2 封存账写守卫（SealedLedgerError）；
-  3. PHASE25_TASK_CAPS={3:6,5:28,9:160,10:2} 常量/算术/命名空间永不并表；
+  3. PHASE25_TASK_CAPS={3:6,5:53,9:160,10:2} 常量/算术/命名空间永不并表
+     （R1 2026-10-30 用户裁决 28→53，Task 5b 第二实验批次，见 task5b_spec.md §7）；
   4. phase25 独立账：空账首行 seq=1、严格 UTC Z、任务帽/全局门/暂停态隔离、
      blocked（null seq）占批次不占实呼、CLI --ledger-phase；
   5. AC-T0-7 机判：合成正账 + 跳号/重号/混列/bool/非 Z 五负例必红 + 两栏汇总；
@@ -257,10 +258,11 @@ def test_sealed_ledgers_reject_write_open(p25_env):
 # ---------------------------------------------------------------------------
 
 def test_phase25_caps_constants():
-    assert ql.PHASE25_TASK_CAPS == {3: 6, 5: 28, 9: 160, 10: 2}
+    # R1（2026-10-30 用户裁决）：task5 28→53（G2 25 + 5b 25 + 储备 3）。
+    assert ql.PHASE25_TASK_CAPS == {3: 6, 5: 53, 9: 160, 10: 2}
     assert ql.PHASE25_SCIENTIFIC_TASKS == frozenset({3, 5})
-    assert ql.PHASE25_HARD_CAP == 196
-    assert ql.PHASE25_NORMAL_BUDGET == 196  # 预算全自批：无 beyond_normal 分层
+    assert ql.PHASE25_HARD_CAP == 221      # R1：6+53+160+2
+    assert ql.PHASE25_NORMAL_BUDGET == 221  # 预算全自批：无 beyond_normal 分层
     # 碰撞 task（3/5/9/10）绝不并表：phase2 caps 不含 3/10，task9 旧帽=4。
     assert 3 not in ql.TASK_HARD_CAPS
     assert 10 not in ql.TASK_HARD_CAPS
@@ -268,7 +270,7 @@ def test_phase25_caps_constants():
     assert ql.TASK_HARD_CAPS[9] != ql.PHASE25_TASK_CAPS[9]
     assert ql.PHASE2_NAMESPACE.task_caps is ql.TASK_HARD_CAPS
     assert PHASE25_NAMESPACE.task_caps is ql.PHASE25_TASK_CAPS
-    assert PHASE25_NAMESPACE.hard_cap == 196
+    assert PHASE25_NAMESPACE.hard_cap == 221  # R1
     assert ql.PHASE2_NAMESPACE.ledger_path_fn() == rp.phase2_ledger_path()
     assert PHASE25_NAMESPACE.ledger_path_fn() == rp.phase25_ledger_path()
     # 暂停态分别走全局入口与 phase25 私有目录。
@@ -334,10 +336,10 @@ def test_phase25_approval_namespace_membership(p25_ledger):
     with pytest.raises(ql.QuotaError, match="不属于 ledger 期 2"):
         ql.write_approval(batch_id="bad-new-task", task=10, stage=STAGE,
                           approved=1, beyond_normal=False, note="x")
-    # 全局硬门 196：首批 197 直接拒（used=0）。
-    with pytest.raises(ql.QuotaError, match="196"):
+    # 全局硬门 221（R1）：首批 222 直接拒（used=0）。
+    with pytest.raises(ql.QuotaError, match="221"):
         ql.write_approval(batch_id="too-big", task=9, stage=STAGE,
-                          approved=197, beyond_normal=False, note="x",
+                          approved=222, beyond_normal=False, note="x",
                           namespace=PHASE25_NAMESPACE)
 
 
@@ -430,8 +432,8 @@ def test_cli_phase25_status_and_approve(p25_ledger, capsys):
     assert ql.main(["--ledger-phase", "25", "status"]) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["ledger_phase"] == 25
-    assert out["hard_cap"] == 196 and out["normal_budget"] == 196
-    assert out["task_caps"] == {"3": 6, "5": 28, "9": 160, "10": 2}
+    assert out["hard_cap"] == 221 and out["normal_budget"] == 221  # R1
+    assert out["task_caps"] == {"3": 6, "5": 53, "9": 160, "10": 2}
     assert out["ledger_path"].endswith("phase25/quota/ledger.jsonl")
     assert out["call_rows"] == 0 and out["blocked_rows"] == 0
 

@@ -246,3 +246,44 @@ ScriptedGateway/禁网：
   reviewer / verifier 再三签；verifier 独立重放墙 B 评分器、
   重算空轮率与 seq/token 账。
 - 任何门不过：停，报用户，不带病呼下一轮。
+
+## 附录 A. 预注册修订 R1（2026-10-30，呼前三签门产出，用户逐字裁决）
+
+门 1 三 lane（lead/verifier/reviewer）独立一致判定 **BLOCKER-1**：
+§5 批次在现行 task5 科学硬帽 28 下不可执行——G2 已用 25（B2 墙A
+16+B3 墙B 9，零 blocked），余量仅 3；B4 呼1-3 写 seq32-34 后呼4
+preflight 即撞门4 `task_hard_cap`（quota_ledger.py 门4，scope=task，
+resume 对该 reason 无条件硬拒、新批次凭据不能恢复），且杀伤链为
+GatewayPausedError→SupplierModelError→KIND_SUPPLIER_ERROR：墙 A 3 呼
+即 supplier_error 死、task5 命名空间持久冻死、墙 B 在更早 is_paused
+门被拦，唯一批次报废且 H1（25 轮 parse 率）无样本。`write_approval`
+只查全局 196（31+25=56 过），票据开得出但跑必撞——前置一次性
+`--preflight`（25<28 绿）是假信心陷阱。
+
+用户 2026-10-30 AskUserQuestion 逐字裁决选「**抬帽 28→53 后继续**」：
+- `PHASE25_TASK_CAPS[5]` 28→**53**（=G2 已用 25 + 5b 新批 25 + 污染
+  储备 3 原样；储备仍只供污染重跑、5b 不借调）；全局硬门
+  196→**221**（=sum 自动）；MappingProxyType 保持，仍在科学子集，
+  **再次修改仍须预注册+用户裁决**，预算自治不含此权。
+- 这是呼量信封的预注册修订，**不翻 G2「不成立」案**（硬规则 7），
+  不改 H1/H2 阈值、不改墙、不改帽 16/9、不改模型、不改评分器。
+- 修订方式：源码常量+溯源注释+契约测试（test_task0_foundation 活常量
+  断言与 test_task5b R1 信封契约）+本附录 A 一起提交；冻结于 af2df49 的
+  §1–§6 原文一字不改（追加式新版本，非就地改）。
+- 修订提交后两 lane 对【修订 diff】重新三签，齐了才准 write_approval
+  开 B4/B5；seq 从 32 起不变（修订期间零付费呼）；B4 末呼投影 41、
+  B5 末呼投影 50，均 < 53。
+
+## 附录 B. 评审 LOW 措辞更正（2026-10-30，门 1 reviewer lane 实证，不改语义）
+
+- LOW-1：§3.1 与 protocol.py docstring 称「无围栏裸合法 Python 会被
+  框架执行」描述的是 auto-close **前**路径；运行期 agents.py:1693 先
+  补结尾 ``` 致其解析失败→归 no_code_fence（reviewer 16 形态矩阵实证）。
+  H1 的「协议空轮」口径对 G2/5b 同一裁决器同一 auto-close，可比性不变。
+- LOW-2：补记②-1 称 fence_unclosed/empty_code_block 均仅纯函数可达
+  不确：成对空块围栏（```python\n\n```）运行期可达 empty_code_block；
+  仅 fence_unclosed（缺闭栏）被 auto-close 兜成可解析而不可达。反馈
+  文案对两类归因均准确，无行为后果。
+- LOW-3（wall_result 哈希钉）、LOW-4（逐轮标签文案断言/ActionOutput
+  透传专项断言）、LOW-5（AST 禁项补 __import__/getattr）、LOW-6
+  （isort 外观）登记 Phase 2.5 尾债，门后处理。

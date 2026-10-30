@@ -481,11 +481,22 @@ LEDGER_PHASE25 = 25       # phase25 批准件/恢复流水的 phase 断言标记
 # 本字典【禁止】并入 TASK_HARD_CAPS，闸门/CLI 一律按 ledger 期各取各字典。
 # M-caps：同样封 MappingProxyType（科学帽 3/5 只能经预注册改，见
 # PHASE25_SCIENTIFIC_TASKS；运行时原地改一律 TypeError）。
-PHASE25_TASK_CAPS = types.MappingProxyType({3: 6, 5: 28, 9: 160, 10: 2})
-# 科学硬帽任务子集：这些 cap 只能经预注册改，预算自批不含提帽（§0.1/R13）。
+#
+# 预注册修订 R1（2026-10-30，用户 AskUserQuestion 逐字裁决「抬帽 28→53
+# 后继续」；三签门 lead/verifier/reviewer 独立确认 BLOCKER-1 后放行）：
+#   Task 5b（task5b_spec.md 附录 A）是 D-4 裁决追加的【独立第二实验批次】
+#   P25-B4(墙A 16)+P25-B5(墙B 9)=25 呼，与 G2 首实验已用 25 呼（B2+B3）
+#   共池；原 28 帽（=G2 单实验子帽 16+9+污染储备 3）余量仅 3，B4 第 4 呼
+#   即确定性撞门4（task_hard_cap 不可恢复）。新帽 53 = 25 已用 + 25 新批
+#   + 3 储备原样（储备仍只供污染重跑，5b 不借调）。这是呼量信封修订，
+#   不改动 G2「不成立」结论（硬规则 7）。原始估算出处
+#   estimates/interval_t5.json（p90=28 是 G2 单实验信封）历史不动。
+PHASE25_TASK_CAPS = types.MappingProxyType({3: 6, 5: 53, 9: 160, 10: 2})
+# 科学硬帽任务子集：这些 cap 只能经预注册改，预算自批不含提帽（§0.1/R13；
+# 2026-10-30 R1 经用户显式裁决，见上注释与 task5b_spec.md 附录 A）。
 PHASE25_SCIENTIFIC_TASKS = frozenset({3, 5})
-# 全局兜底硬门 = 四任务帽之和 6+28+160+2=196（与 §11「含 T9 占位约 54–196」
-# 上沿一致；T9 帽被方法学值替换后本常量随提顶 SOP 自批调整并留溯源注释）。
+# 全局兜底硬门 = 四任务帽之和 6+53+160+2=221（R1 前为 6+28+160+2=196；
+# T9 帽被方法学值替换后本常量随提顶 SOP 自批调整并留溯源注释）。
 PHASE25_HARD_CAP = sum(PHASE25_TASK_CAPS.values())
 # Phase 2.5 批次全部自批（2026-10-28 预算完全自治授权），不存在 60→硬顶的
 # beyond_normal 分层票：常态门等于硬门，preflight 常态闸永不先于全局硬闸触发，
@@ -887,7 +898,7 @@ class QuotaLedger:
                        "batch_approved": approval["approved"], "batch_used": batch_used,
                        "global_used": global_used, "global_cap": self.ns.hard_cap}
 
-            # 3) 全局硬门（先到先停，与单任务列无关；phase25=196 兜底）
+            # 3) 全局硬门（先到先停，与单任务列无关；phase25=221 兜底，R1）
             if global_used >= self.ns.hard_cap:
                 state = _write_budget_pause("global_hard_cap", trigger, ns=self.ns)
                 self._record_blocked(stage, task, batch_id,

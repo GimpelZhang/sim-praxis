@@ -353,6 +353,28 @@ def test_prompt_change_changes_fingerprint():
 
 
 # ---------------------------------------------------------------------------
+# §7 R1：科学帽预注册修订（2026-10-30 用户逐字裁决）的活常量契约
+# ---------------------------------------------------------------------------
+
+def test_r1_cap_envelope_covers_g2_plus_5b_single_batch():
+    """BLOCKER-1 关门钉：G2 已用 25（B2=16+B3=9，活账事实在付费批次前由
+    门 1 三 lane 数过）+ 5b 唯一批次 B4(16)+B5(9)=25 + 污染储备 3 = 53。
+    常量不足即红——防止常量被悄悄改回而 5b 批次重新不可执行。"""
+    from orchestrator.gateway import quota_ledger as ql
+    cap5 = ql.PHASE25_TASK_CAPS[5]
+    g2_used = 25
+    b5b = 16 + 9
+    reserve = 3
+    assert cap5 == g2_used + b5b + reserve == 53
+    assert ql.PHASE25_HARD_CAP == 6 + 53 + 160 + 2 == 221
+    assert ql.PHASE25_NORMAL_BUDGET == ql.PHASE25_HARD_CAP
+    # 科学任务子集不变（改帽不改科学身份；再改仍须预注册）。
+    assert 5 in ql.PHASE25_SCIENTIFIC_TASKS
+    # 5b 批次全程不触任务帽的逐呼投影：B4 末呼 41、B5 末呼 50 均 < 53。
+    assert g2_used + 16 == 41 < cap5 and g2_used + b5b == 50 < cap5
+
+
+# ---------------------------------------------------------------------------
 # §4.9 新件 import 白名单（零 os/sys/subprocess/socket/网络/model-id）
 # ---------------------------------------------------------------------------
 
