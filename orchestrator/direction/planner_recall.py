@@ -58,6 +58,16 @@ DEFAULT_KB_TOP_K = 8
 DEFAULT_SOLUTION_TOP_K = 8
 DEFAULT_LEARNING_TOP_K = 8
 
+# r3 召回合并规则版本（2026-10-31 冻结，见
+# scripts/phase25/task6_r3_prereg.md §5.1/§5.6）：kb/solutions 两路在 r2
+# 全局+作用域并行探针（深度恒 8、查询串不变）之上加「作用域保底配额」——
+# 保底席只给 S-only 行（作用域探针可达、但全局探针不可达的 id），
+# q=floor(top_k/2)（生产 top_k=8 时 q=4）；G∩S 双属行不进保底段、不耗
+# 保底席，只在开放段按 G 距离序竞争并保持全局注解形态；learning 路不引入
+# 配额；matched_projects 为空时与 r2 距离合并逐字节相同；生产 retrieve()
+# 与判分器走同一实现，无 eval 专用分支。
+R3_RULES_VERSION = "r3"
+
 # AC-T6-4 r2 固定并行查询规则：synonyms.yaml 的 kb_projects 只允许活库既有
 # project 标签（fail-closed，防数据文件写出无意义 WHERE）。
 KB_PROJECT_TAGS = frozenset(
@@ -293,29 +303,74 @@ class PlannerRecall:
     # ---------- 距离合并（同表同嵌入同度量，跨 lane 可直接比 _distance） ----------
 
     @staticmethod
-    def _merge_lanes(lanes: list[list[dict]], top_k: int) -> list[dict]:
-        def _dist(r: dict) -> float:
-            d = r.get("_distance")
-            try:
-                return float(d)
-            except (TypeError, ValueError):
-                return float("inf")
+    def _row_distance(row: dict) -> float:
+        """排序键距离分量（r2/r3 共用单一源）：缺/坏 _distance → inf 排末尾。"""
+        d = row.get("_distance")
+        try:
+            return float(d)
+        except (TypeError, ValueError):
+            return float("inf")
 
-        # 无距离元数据（假引擎）时排末尾并保持词典序稳定；按 id 去重。
+    @staticmethod
+    def _sort_dedup_lanes(lanes: list[list[dict]]) -> list[dict]:
+        """flatten lanes → 按 (_distance, str(id)) 升序 → 按 id 去重保留首次
+        出现行。r2 ``_merge_lanes`` 与 r3 保底配额合并唯一公共排序/去重段，
+        语义与 r2 逐字一致（tie-break 用 str(id)，见 task6_r3_prereg §5.6 N1；
+        无距离元数据时排末尾并保持词典序稳定）。
+        """
         ordered = sorted(
-            [r for lane in lanes for r in lane],
-            key=lambda r: (_dist(r), str(r.get("id"))))
+            (row for lane in lanes for row in lane),
+            key=lambda r: (PlannerRecall._row_distance(r),
+                           str(r.get("id"))))
         merged: list[dict] = []
-        seen: set[str] = set()
+        seen: set = set()
         for row in ordered:
             rid = row.get("id")
             if rid in seen:
                 continue
             seen.add(rid)
             merged.append(row)
-            if len(merged) >= top_k:
-                break
         return merged
+
+    @staticmethod
+    def _merge_lanes(lanes: list[list[dict]], top_k: int) -> list[dict]:
+        # r2 纯距离合并（learning 路与 r3 退化情形仍走此入口）：排序/去重
+        # 只允许走公共段，禁止与 r3 复制出两套不一致逻辑。
+        return PlannerRecall._sort_dedup_lanes(lanes)[:top_k]
+
+    @staticmethod
+    def _merge_with_scoped_quota(global_lanes: list[list[dict]],
+                                 scoped_lanes: list[list[dict]],
+                                 top_k: int) -> list[dict]:
+        """r3 作用域保底配额合并（R3_RULES_VERSION，规则逐字对应
+        task6_r3_prereg.md §5.1/§5.6 NOTES 1–4）：
+
+        - P_G/P_S：global/scoped lanes 各自 flatten 后按 (_distance, str(id))
+          升序、按 id 去重保留首次出现行（同一公共排序段，与 r2 逐字一致）；
+        - 保底段 R 只取 S-only 行（id ∉ ids(P_G)），q=top_k//2（floor），
+          至多 q 行，保留其作用域注解（scoped_project/scoped_solution_id）；
+          G∩S 双属行不进保底段、不耗保底席；
+        - 开放段取 P_G 距离序、跳过 R 中 id 依次补足 top_k——双属行在此以其
+          全局 lane 注解形态出现（无 scoped_* 键，§5.6 NOTES-2）；
+        - 候选总数不足 top_k 返回实际并集行数，不填充、不报错（NOTES-3）；
+        - scoped_lanes 为空时退化为 r2：与
+          ``_merge_lanes(global_lanes, top_k)`` 逐 dict 相等。
+        """
+        p_g = PlannerRecall._sort_dedup_lanes(global_lanes)
+        p_s = PlannerRecall._sort_dedup_lanes(scoped_lanes)
+        global_ids = {r.get("id") for r in p_g}
+        s_only = [r for r in p_s if r.get("id") not in global_ids]
+        q = top_k // 2
+        reserved = s_only[:min(q, len(s_only))]
+        reserved_ids = {r.get("id") for r in reserved}
+        open_segment: list[dict] = []
+        for row in p_g:
+            if row.get("id") in reserved_ids:
+                continue
+            open_segment.append(row)
+            if len(reserved) + len(open_segment) >= top_k:
+                break
+        return reserved + open_segment
 
     # ---------- kb 路（双 namespace 全局并查 + r2 项目作用域并行探针） ----------
 
@@ -323,7 +378,7 @@ class PlannerRecall:
                   projects: "list[dict] | None" = None
                   ) -> tuple[list[dict], list[dict], list[dict]]:
         per_ns: dict[str, list[dict]] = {}
-        lanes: list[list[dict]] = []
+        global_lanes: list[list[dict]] = []
         for namespace in NAMESPACES:
             rows = self.vector_engine.query_kb(
                 hint, namespace=namespace, top_k=self.kb_top_k)
@@ -331,17 +386,21 @@ class PlannerRecall:
                 _annotate(r, route=ROUTE_KB, relpath=r.get("kb_relpath"))
                 for r in rows]
             per_ns[namespace] = annotated
-            lanes.append(annotated)
+            global_lanes.append(annotated)
         # r2 固定并行规则：每个命中项目声明的 kb_projects 各发一条 project
-        # 过滤探针（namespace=None 跨两 namespace），与全局 lane 距离合并。
+        # 过滤探针（namespace=None 跨两 namespace）。探针签名/深度（恒
+        # kb_top_k=8）/查询串与 r2 逐字不变；r3 仅改合并策略：作用域 lane
+        # 走保底配额（保底席仅 S-only，q=floor(k/2)，见 R3_RULES_VERSION）。
+        scoped_lanes: list[list[dict]] = []
         for tag in _scoped_kb_projects(projects):
             rows = self.vector_engine.query_kb(
                 hint, project=tag, top_k=self.kb_top_k)
-            lanes.append([
+            scoped_lanes.append([
                 _annotate(r, route=ROUTE_KB, relpath=r.get("kb_relpath"),
                           scoped_project=tag)
                 for r in rows])
-        merged = self._merge_lanes(lanes, self.kb_top_k)
+        merged = self._merge_with_scoped_quota(
+            global_lanes, scoped_lanes, self.kb_top_k)
         return merged, per_ns[NAMESPACES[0]], per_ns[NAMESPACES[1]]
 
     # ---------- solution 路（全局 + r2 方案作用域并行探针） ----------
@@ -350,19 +409,23 @@ class PlannerRecall:
                         projects: "list[dict] | None" = None) -> list[dict]:
         rows = self.solutions_engine.query_solutions(
             hint, top_k=self.solution_top_k)
-        lanes: list[list[dict]] = [[
+        global_lanes: list[list[dict]] = [[
             _annotate(r, route=ROUTE_SOLUTIONS, relpath=r.get("relpath"))
             for r in rows]]
         # r2 固定并行规则：命中项目声明 solution_id 时加一条方案过滤探针；
         # 同 query 同表同嵌入，作用域 lane 的 _distance 与全局 lane 可比。
+        # 探针签名/深度（恒 solution_top_k=8）/查询串不变；r3 仅把作用域
+        # lane 改走保底配额合并（R3_RULES_VERSION，规则见 task6_r3_prereg §5.1）。
+        scoped_lanes: list[list[dict]] = []
         for solution_id in _scoped_solution_ids(projects):
             rows = self.solutions_engine.query_solutions(
                 hint, top_k=self.solution_top_k, solution_id=solution_id)
-            lanes.append([
+            scoped_lanes.append([
                 _annotate(r, route=ROUTE_SOLUTIONS, relpath=r.get("relpath"),
                           scoped_solution_id=solution_id)
                 for r in rows])
-        return self._merge_lanes(lanes, self.solution_top_k)
+        return self._merge_with_scoped_quota(
+            global_lanes, scoped_lanes, self.solution_top_k)
 
     def retrieve_with_hints(self, hints: "dict[str, str]", *,
                             site: str = "direction",
