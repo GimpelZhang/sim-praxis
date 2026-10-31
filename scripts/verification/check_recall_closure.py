@@ -8,23 +8,32 @@ V2」。2026-10-26 run27 Gate2 真人 approve（"V2通过"）+ persist/done 之�
 
 五道断言（全部 fail-closed，损坏即非零退出；不放水、不放宽、不模糊匹配）：
 
-  [A] 计数互证：count_adoptions() == jsonl 行数（六字段严格 schema + 严格
-      UTC Z，任何损坏行抛错）；
-  [B] 采纳行的学习 id 全部是 phase1_learnings 真实行（不可伪造：没有真实行
-      就没有采纳）；
-  [C] prompt 互证：至少 1 条采纳行的 prompt_sha256 能由**实际 req 证据**
-      （redact 前发送串的重建：coding sort_keys=True / direction
-      sort_keys=False，与 setter/runner 规范串同源）逐字节复原，且该行学习
-      文本（prompt_embedded_text JSON 转义形）逐字出现在该 prompt 中；
-      已复原集合内**零容忍**——文本缺失/非子串一律判伪；
+  [A] 计数互证：count_adoptions() == jsonl 行数（六字段旧行/七字段新行两种
+      严格 schema + 严格 UTC Z，任何损坏行抛错）；并做来源路审计——旧行缺
+      source_route → unknown，新行空字段/未知合法值也归 unknown，逐行归类
+      不崩；unknown 行与非本闭环线程行只如实挂牌，不计入通过证据。
+  [B] id 真实性按路对账：kb 行 id ∈ kb_chunks、solutions 行 ∈
+      solution_chunks、learnings 行 ∈ phase1/phase2_learnings；unknown
+      旧行按历史写入语义查学习表并集（不可伪造：没有真实行就没有采纳）。
+  [C] prompt 互证：闭环线程（THREAD）至少 1 条采纳行的 prompt_sha256 能由
+      **实际 req 证据**（redact 前发送串的重建：coding sort_keys=True /
+      direction sort_keys=False，与 setter/runner 规范串同源）逐字节复原，
+      且该行命中文本（prompt_embedded_text JSON 转义形）按其来源路取真实
+      行文本、逐字出现在该 prompt 中；已复原集合内**零容忍**——文本缺失/
+      非子串一律判伪；
   [D] 端到端：采纳行同线程在 pending_gates 有 Gate2 DECIDED approve，
       且 LangGraph checkpoint 最新行事件链含 persist_learning/done；
-  [E] 时间序：采纳行 ts 全部早于 Gate2 decided_at（采纳发生在成功结果之前，
-      而非事后补记）。
+  [E] 时间序：闭环线程采纳行 ts 全部早于 Gate2 decided_at（采纳发生在成功
+      结果之前，而非事后补记）。
 
-不能由 req 证据复原的采纳行（证据随 run 归档迁移/异常轮证据缺失）计入
-provenance_limited 如实报告，不计入通过条件也不掩盖——通过条件由 [C] 的
-已复原集合承担。
+不能由 req 证据复原的采纳行（证据随 run 归档迁移/异常轮证据缺失）与非闭环
+线程行计入 provenance_limited / off_thread 如实报告，不计入通过条件也不掩盖
+——通过条件由 [C] 的已复原集合承担。
+
+锁内适配（Phase 2.5 Task6，AC-T6-8）：生产 jsonl 自 Task7/Task8 起已多线程
+追加（1077 行/4 线程，全部旧六字段），原 [A]「线程集恰为 {THREAD}」硬断言与
+单一学习表 [B] 已过时；改为纯函数 audit_adoption_rows 的来源路审计 + 按路
+id 对账，[C]/[D]/[E] 的闭环证据仍严格限定 THREAD 线程，判据/阈值不变。
 
 用法：
     python scripts/verification/check_recall_closure.py \
@@ -51,15 +60,101 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-from memory_flywheel.phase1.learning_store import LearningStore  # noqa: E402
 from memory_flywheel.recall import (  # noqa: E402
     LOG_FIELDS,
+    LOG_FIELDS_V2,
+    SOURCE_ROUTES,
+    SOURCE_ROUTE_UNKNOWN,
     count_adoptions,
+    iter_adoption_rows,
     prompt_embedded_text,
+    row_source_route,
 )
 
 THREAD = "t6-genesis-ascent-20261016a"
 WINDOW_S = 180  # 未匹配行归因用的同窗 req 文件判定半径（秒）
+
+
+def audit_adoption_rows(rows: list[dict], *, id_sets: dict[str, set[str]]
+                        ) -> dict:
+    """纯函数：对**已解析合法**的采纳行做来源路审计与按路 id 对账（AC-T6-8）。
+
+    不读盘、不触网，hermetic 测试可直接合成行调用。容忍四形而不崩：
+      - 旧六字段行（缺 source_route）→ unknown，missing_route 计数；
+      - 完整七字段新行（kb/solutions/learnings）→ 该路；
+      - 空字段（None/""/空白）→ unknown，empty_route 计数；
+      - 未知但合法的非空字符串 → unknown，unknown_value_route 计数。
+    id 对账：已知路行的 learning_id 必须在该路 id 集合内，否则入 ghost；
+    unknown 行按历史唯一写入语义查学习表并集（learnings 集合），查无同样
+    入 ghost（route 标 unknown）。unknown/off-thread 行永不在调用方计入通过
+    证据——本函数只分类与抓 ghost，不放水。
+
+    id_sets 必含键 kb/solutions/learnings（值为 id set；缺表给空集）。
+    """
+    for key in ("kb", "solutions", "learnings"):
+        if key not in id_sets:
+            raise ValueError(f"id_sets 缺键 {key!r}")
+    by_route = {r: 0 for r in (*SOURCE_ROUTES, SOURCE_ROUTE_UNKNOWN)}
+    detail = {"missing_route": 0, "empty_route": 0,
+              "unknown_value_route": 0}
+    unknown_values: dict[str, int] = {}
+    ghost: list[dict] = []
+    classified: list[dict] = []
+    for idx, rec in enumerate(rows):
+        raw_v = rec.get("source_route", None)
+        if "source_route" not in rec:
+            detail["missing_route"] += 1
+        elif not isinstance(raw_v, str) or not raw_v.strip():
+            detail["empty_route"] += 1
+        elif raw_v not in SOURCE_ROUTES:
+            detail["unknown_value_route"] += 1
+            unknown_values[raw_v] = unknown_values.get(raw_v, 0) + 1
+        route = row_source_route(rec)
+        by_route[route] += 1
+        rid = str(rec.get("learning_id", ""))
+        id_ok = (rid in id_sets[route]) if route in SOURCE_ROUTES \
+            else (rid in id_sets["learnings"])
+        if not id_ok:
+            ghost.append({"index": idx, "route": route, "learning_id": rid})
+        classified.append({"route": route, "learning_id": rid,
+                           "ts": rec.get("ts"), "site": rec.get("site"),
+                           "thread_id": rec.get("thread_id"),
+                           "prompt_sha256": rec.get("prompt_sha256")})
+    return {"n": len(rows), "by_route": by_route, "form_detail": detail,
+            "unknown_values": unknown_values, "ghost": ghost,
+            "rows": classified}
+
+
+def _live_route_index() -> tuple[dict[str, set[str]], dict[str, dict[str, str]]]:
+    """只读连接活 lancedb，取四路 id 集合与 {route: {id: text}}；缺表给空。"""
+    import lancedb
+
+    from memory_flywheel import kb_pins
+    db = lancedb.connect(kb_pins.default_lancedb_uri())
+    names = set(db.table_names())
+    id_sets: dict[str, set[str]] = {
+        "kb": set(), "solutions": set(), "learnings": set()}
+    texts: dict[str, dict[str, str]] = {
+        "kb": {}, "solutions": {}, "learnings": {}}
+
+    def _load(table: str, route: str, learnings: bool = False) -> None:
+        if table not in names:
+            return
+        for r in db.open_table(table).search().select(
+                ["id", "text"]).limit(1_000_000).to_list():
+            rid = str(r["id"])
+            id_sets[route].add(rid)
+            texts[route][rid] = str(r.get("text", ""))
+            if learnings:
+                id_sets["learnings"].add(rid)
+                # 并集文本以 phase1 先入为准（与召回合并主库优先同序）
+                texts["learnings"].setdefault(rid, str(r.get("text", "")))
+
+    _load("kb_chunks", "kb")
+    _load("solution_chunks", "solutions")
+    _load("phase1_learnings", "learnings", learnings=True)
+    _load("phase2_learnings", "learnings", learnings=True)
+    return id_sets, texts
 
 
 def _phase2_root() -> Path:
@@ -120,37 +215,41 @@ def main() -> int:
 
     p2 = _phase2_root()
     recall_path = p2 / "recall" / "production_recall.jsonl"
-    rows = [json.loads(l) for l in
-            open(recall_path, encoding="utf-8") if l.strip()]
+    # iter_adoption_rows 接受六字段旧行/七字段新行两种冻结 schema，严格 Z；
+    # 损坏行/其他 schema fail-closed 抛错（不放水）。
+    rows = iter_adoption_rows(recall_path)
 
-    # [A] 计数互证（count_adoptions 内部 fail-closed：六字段 + 严格 Z）
+    # [A] 计数互证 + schema 两形统计 + 来源路审计（四形不崩；见模块 docstring
+    # 的锁内适配说明）。
     n_count = count_adoptions(recall_path)
     if n_count != len(rows):
         _fail(f"[A] count_adoptions={n_count} != 行数 {len(rows)}")
+    schema_forms = collections.Counter(
+        "v2" if tuple(r.keys()) == LOG_FIELDS_V2 else "legacy"
+        for r in rows)
     bad_fields = [i for i, r in enumerate(rows)
-                  if tuple(r.keys()) != LOG_FIELDS]
+                  if tuple(r.keys()) not in (LOG_FIELDS, LOG_FIELDS_V2)]
     if bad_fields:
         _fail(f"[A] schema 不符行：{bad_fields[:5]}")
-    threads = {r["thread_id"] for r in rows}
-    if threads != {THREAD}:
-        _fail(f"[A] 采纳行线程集越界：{threads}")
+    by_thread = collections.Counter(r["thread_id"] for r in rows)
 
-    # [B] 学习 id 全部真实行
-    store = LearningStore()
-    if not store.table_exists():
-        _fail("[B] phase1_learnings 表不存在")
-    table_rows = store.db.open_table("phase1_learnings").search().select(
-        ["id", "text"]).limit(10000).to_list()
-    texts = {r["id"]: str(r.get("text", "")) for r in table_rows}
+    # [B] 按路 id 真实性对账（kb/solutions/learnings；unknown 旧行查学习表并集）。
+    id_sets, route_texts = _live_route_index()
+    audit = audit_adoption_rows(rows, id_sets=id_sets)
+    if audit["ghost"]:
+        _fail(f"[B] 采纳行引用了来源路不存在的 id：{audit['ghost'][:5]}")
     adopt_ids = sorted({r["learning_id"] for r in rows})
-    ghost = [i for i in adopt_ids if i not in texts]
-    if ghost:
-        _fail(f"[B] 采纳行引用了学习表不存在的 id：{ghost[:5]}")
 
-    # [C] prompt 互证（req 证据重建 + 逐字文本；已复原集合零容忍）
+    # 闭环证据严格限定 THREAD 线程；其余线程行只挂牌（off_thread），不计通过。
+    thread_rows = [r for r in rows if r["thread_id"] == THREAD]
+    off_thread = len(rows) - len(thread_rows)
+    if not thread_rows:
+        _fail(f"[A] 闭环线程 {THREAD} 零采纳行（多线程审计：{dict(by_thread)}）")
+
+    # [C] prompt 互证（THREAD 行；req 证据重建 + 按路取真实文本，零容忍）
     req_index, n_req_docs = _index_req_evidence()
     by_prompt: dict[str, list[dict]] = collections.defaultdict(list)
-    for r in rows:
+    for r in thread_rows:
         by_prompt[r["prompt_sha256"]].append(r)
     matched = [s for s in by_prompt if s in req_index]
     unmatched = [s for s in by_prompt if s not in req_index]
@@ -162,11 +261,14 @@ def main() -> int:
         pj = json.dumps(msgs, ensure_ascii=False,
                         sort_keys=(site == "coding"))
         for r in by_prompt[s]:
-            t = texts[r["learning_id"]]
+            route = row_source_route(r)
+            # unknown 旧行按历史唯一写入语义取学习表并集文本。
+            tmap = route_texts.get(route) or route_texts["learnings"]
+            t = tmap.get(r["learning_id"], "")
             if not t or prompt_embedded_text(t) not in pj:
-                _fail(f"[C] 已复原 prompt 内学习文本非逐字/缺失："
-                      f"learning_id={r['learning_id']} ts={r['ts']} "
-                      f"req={path}")
+                _fail(f"[C] 已复原 prompt 内命中文本非逐字/缺失："
+                      f"route={route} learning_id={r['learning_id']} "
+                      f"ts={r['ts']} req={path}")
             verified += 1
     if verified < 1:
         _fail("[C] 零条已复原逐字互证采纳行（验收需 ≥1）")
@@ -205,8 +307,9 @@ def main() -> int:
     if not ("persist_learning" in ev and "done" in ev):
         _fail(f"[D] 最新 checkpoint 事件链缺 persist_learning/done：{ev}")
 
-    # [E] 时间序：全部采纳行早于 Gate2 decided_at
-    late = [r["ts"] for r in rows if _parse_z(r["ts"]) >= decided_at]
+    # [E] 时间序：闭环线程采纳行早于 Gate2 decided_at（他线程不参与本闭环）
+    late = [r["ts"] for r in thread_rows
+            if _parse_z(r["ts"]) >= decided_at]
     if late:
         _fail(f"[E] 存在 Gate2 决定后补记的采纳行（{len(late)}）：{late[:3]}")
 
@@ -222,11 +325,29 @@ def main() -> int:
         "thread_id": THREAD,
         "verdict": "closed",
         "recall_path": str(recall_path),
-        "A_count": {"count_adoptions": n_count, "rows": len(rows),
-                    "schema_fields": list(LOG_FIELDS)},
-        "B_learning_ids": {"distinct": len(adopt_ids),
-                           "all_in_phase1_learnings": True},
+        "A_count": {
+            "count_adoptions": n_count, "rows": len(rows),
+            "schema_forms": {"legacy_six_fields": schema_forms["legacy"],
+                             "v2_seven_fields": schema_forms["v2"]},
+            "legacy_schema_fields": list(LOG_FIELDS),
+            "v2_schema_fields": list(LOG_FIELDS_V2),
+            "by_thread": dict(by_thread),
+            "off_thread_rows": off_thread,
+            "closure_thread_rows": len(thread_rows),
+        },
+        "route_audit": {
+            "by_route": audit["by_route"],
+            "form_detail": audit["form_detail"],
+            "unknown_values": audit["unknown_values"],
+            "ghost": audit["ghost"],
+        },
+        "B_learning_ids": {
+            "distinct": len(adopt_ids),
+            "all_real_by_route": True,
+            "id_set_sizes": {k: len(v) for k, v in id_sets.items()},
+        },
         "C_prompt_crosscheck": {
+            "population_thread": THREAD,
             "req_docs_indexed": n_req_docs,
             "distinct_prompts": len(by_prompt),
             "prompts_reconstructed": len(matched),
@@ -241,9 +362,11 @@ def main() -> int:
                       "decided_at": decided_at.strftime("%Y-%m-%dT%H:%M:%SZ")},
             "checkpoint_tail_events": ev[-7:],
         },
-        "E_time_order": {"adoption_rows_before_gate2": len(rows) - len(late),
-                         "late_rows": len(late)},
+        "E_time_order": {
+            "adoption_rows_before_gate2": len(thread_rows) - len(late),
+            "late_rows": len(late), "population": "closure_thread_only"},
         "by_site": dict(collections.Counter(r["site"] for r in rows)),
+        "by_thread": dict(by_thread),
         "distinct_learning_ids": len(adopt_ids),
     }
 
@@ -255,8 +378,8 @@ def main() -> int:
     out.write_text(text, encoding="utf-8")
     os.chmod(out, 0o600)
 
-    print(f"OK 闭环成立：{verified}/{len(rows)} 行逐字互证"
-          f"（未复原 {prov_limited} 行如实挂牌）")
+    print(f"OK 闭环成立：{verified}/{len(thread_rows)} 闭环线程行逐字互证"
+          f"（未复原 {prov_limited} 行挂牌；另有 {off_thread} 他线程行只审计不计数）")
     print(f"OK Gate2 approve（{g2[2]}）+ checkpoint {ev[-1]}")
     print(f"报告：{out}")
     return 0

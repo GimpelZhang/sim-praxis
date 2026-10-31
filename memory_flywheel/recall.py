@@ -58,6 +58,39 @@ RECALL_LOG_RELPATH = Path("recall") / "production_recall.jsonl"
 # 行 schema 恰好六字段；键序冻结，count_adoptions/看板按此解析对账。
 LOG_FIELDS = ("ts", "thread_id", "site", "learning_id",
               "prompt_sha256", "adopted_text_sha256")
+# Phase 2.5 Task6（AC-T6-5/8）：新行尾增 source_route 第七字段；旧六字段行
+# 永久合法（历史 jsonl 不回填、不改写），解析侧两形并存。生产写入方只允许
+# 写下列三个已知路；缺字段/空字段/未来未知值在读侧归类 "unknown"（不崩、
+# 不计路证据，见 row_source_route）。
+SOURCE_ROUTE_KB = "kb"
+SOURCE_ROUTE_SOLUTIONS = "solutions"
+SOURCE_ROUTE_LEARNINGS = "learnings"
+SOURCE_ROUTES = (SOURCE_ROUTE_KB, SOURCE_ROUTE_SOLUTIONS,
+                 SOURCE_ROUTE_LEARNINGS)
+SOURCE_ROUTE_UNKNOWN = "unknown"
+LOG_FIELDS_V2 = LOG_FIELDS + ("source_route",)
+_VALID_LOG_KEYS = (LOG_FIELDS, LOG_FIELDS_V2)
+
+
+def row_source_route(rec: dict) -> str:
+    """归类单行采纳遥测的来源路（AC-T6-8 三形不崩）。
+
+    - 旧行缺 ``source_route`` 字段 → ``unknown``（按 unknown 路由计，
+      不得作为新路通过证据，只走历史 legacy 对账）；
+    - 空字段（None/"" / 纯空白）→ ``unknown``；
+    - 未知但合法的非空字符串（未来版本写入）→ ``unknown``（前向兼容，
+      不抛错也不计入已知三路证据）；
+    - 恰为三个已知路之一 → 该路名。
+
+    入参必须是 dict（调用方对 JSON 解析结果负责）；其余字段缺失不由此
+    函数判定（schema 严格性仍由 count_adoptions 的键集断言承担）。
+    """
+    if "source_route" not in rec:
+        return SOURCE_ROUTE_UNKNOWN
+    v = rec.get("source_route")
+    if not isinstance(v, str) or not v.strip():
+        return SOURCE_ROUTE_UNKNOWN
+    return v if v in SOURCE_ROUTES else SOURCE_ROUTE_UNKNOWN
 
 
 def adopted(prompt_text: str, learning_text: str) -> bool:
@@ -148,15 +181,20 @@ class ProductionRecall:
 
     def record_adoption(self, *, thread_id: str, site: str, learning_id: str,
                         prompt_text: str, learning_text: str,
-                        path: "str | Path | None" = None) -> bool:
-        """学习行经纯函数判定确已逐字渲染进 prompt 时，追加一条采纳行。
+                        path: "str | Path | None" = None,
+                        source_route: "str | None" = None) -> bool:
+        """命中行经纯函数判定确已逐字渲染进 prompt 时，追加一条采纳行。
 
         - thread_id 过字符集白名单（与证据文件命名同一校验）；
         - site 严校验白名单；learning_id 必须是非空字符串（真实行 id）；
         - ``adopted`` 为假（未渲染/空文本）直接返回 False、不落任何行
           （不可伪造：没有逐字渲染就没有采纳计数）；
-        - 行 schema 恰好六字段；父目录 0700，首行原子写出生即 0600，
-          其后 append+flush+fsync 并 chmod 0600。
+        - 行 schema：``source_route=None``（旧 setter/runner 调用点）时
+          恰好六字段、与历史行逐字同形；显式给路（Task6 planner 四路：
+          kb/solutions/learnings）时写七字段 LOG_FIELDS_V2，未知路名
+          fail-closed（前向兼容只在读侧，写入侧不允许发明路名）；
+        - 父目录 0700，首行原子写出生即 0600，其后 append+flush+fsync
+          并 chmod 0600。
         - ``path`` 给定时即 jsonl 文件全路径（测试落 tmp）；缺省走
           telemetry_path()=$SIMPRAXIS_PHASE2_ROOT/recall/production_recall.jsonl。
         """
@@ -164,7 +202,11 @@ class ProductionRecall:
         if site not in SITES:
             raise ValueError(f"site 非法：{site!r}；白名单 {SITES}")
         if not isinstance(learning_id, str) or not learning_id.strip():
-            raise ValueError("learning_id 必须是非空字符串（学习表真实行 id）")
+            raise ValueError("learning_id 必须是非空字符串（真实行 id）")
+        if source_route is not None and source_route not in SOURCE_ROUTES:
+            raise ValueError(
+                f"source_route 非法：{source_route!r}；白名单 {SOURCE_ROUTES}"
+                "（生产写入只允许已知三路，未知值仅读侧容忍）")
         if not adopted(prompt_text, learning_text):
             return False
 
@@ -178,6 +220,8 @@ class ProductionRecall:
             "adopted_text_sha256": hashlib.sha256(
                 learning_text.encode("utf-8")).hexdigest(),
         }
+        if source_route is not None:
+            record["source_route"] = source_route
         log_path = Path(path) if path is not None else self.telemetry_path()
         ensure_private_dir(log_path.parent)
         line = json.dumps(record, ensure_ascii=False)
@@ -193,18 +237,20 @@ class ProductionRecall:
         return True
 
 
-def count_adoptions(path: "str | Path | None" = None) -> int:
-    """读取采纳行数（Task9 看板在此函数上接线；本任务只留接口）。
+def iter_adoption_rows(path: "str | Path | None" = None) -> list[dict]:
+    """读取并逐行校验采纳日志，返回行列表（Task6 起 closure 脚本共用此入口）。
 
-    jsonl 不存在返回 0；任何非空行不可解析、字段集不是冻结六字段或 ts 不是
-    严格 UTC Z，一律 fail-closed 抛错——计数必须可对账，不吞损坏行。
+    jsonl 不存在返回 []；任何非空行不可解析、字段集不是冻结六字段（旧行）
+    或冻结七字段（Task6 新行）、ts 不是严格 UTC Z，一律 fail-closed 抛错——
+    计数必须可对账，不吞损坏行。source_route 的取值宽严由 row_source_route
+    在读语义处归类（缺/空/未知 → unknown），不影响 schema 合法性。
     ``path`` 给定时即 jsonl 文件全路径（与 record_adoption 同一语义）。
     """
     log_path = Path(path) if path is not None \
         else ProductionRecall.telemetry_path()
     if not log_path.is_file():
-        return 0
-    n = 0
+        return []
+    rows: list[dict] = []
     with open(log_path, "r", encoding="utf-8") as fh:
         for line in fh:
             if not line.strip():
@@ -214,10 +260,19 @@ def count_adoptions(path: "str | Path | None" = None) -> int:
             except ValueError as exc:
                 raise ValueError(
                     f"采纳日志损坏行（JSON 不可解析）：{log_path}") from exc
-            if not isinstance(rec, dict) or tuple(rec.keys()) != LOG_FIELDS:
+            if not isinstance(rec, dict) or tuple(rec.keys()) not in _VALID_LOG_KEYS:
                 raise ValueError(
-                    f"采纳日志行 schema 不符（须恰好六字段 {LOG_FIELDS}）："
-                    f"{log_path}")
+                    "采纳日志行 schema 不符（须为六字段旧行 "
+                    f"{LOG_FIELDS} 或七字段新行 {LOG_FIELDS_V2}）：{log_path}")
             parse_ts_iso_strict(rec["ts"])  # 严格 Z 时钟口径
-            n += 1
-    return n
+            rows.append(rec)
+    return rows
+
+
+def count_adoptions(path: "str | Path | None" = None) -> int:
+    """读取采纳行数（Task9 看板在此函数上接线；本任务只留接口）。
+
+    jsonl 不存在返回 0；schema/ts 校验见 iter_adoption_rows。
+    ``path`` 给定时即 jsonl 文件全路径（与 record_adoption 同一语义）。
+    """
+    return len(iter_adoption_rows(path))

@@ -797,7 +797,12 @@ CALL_CACHE_ALLOWLIST = {
     # Phase 2 Task2：ascent_claims 校验+批判段注入纯位移（422→506），落点不变。
     # 攢批89：glm-5.3 强制思考锁内适配注释+MACRO_TIMEOUT_S 常量插入纯位移
     # （506→522），0 新增落点。
-    ("orchestrator/direction/setter.py", 522),
+    # Phase 2.5 Task6：planner 四路召回接缝（planner import、PLANNER_SECTION_*
+    # 常量、_POLICY_REQUIREMENT、三段题面 builder、build_planner_first_messages）
+    # 全在构造点之前，纯位移（522→727，+205 行）；规划路径复用同一 macro
+    # _replay_cache 构造点（每候选轮 1 次 macro 调用，键形 macro_ 不变），
+    # 0 新增 CallReplay 落点、0 新增网关调用路径。
+    ("orchestrator/direction/setter.py", 727),
     # Phase 2.5 Task4（AC-T4-13，LEAD 2026-10-29 方案 A 裁决）：agentic
     # 组合根适配器的默认缓存落点——同一 phase1_root()/.call_cache 目录，
     # 键空间独立（agentic-v2- 前缀，与 coding_/macro_ 零交集）；测试注入

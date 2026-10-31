@@ -34,6 +34,7 @@ from memory_flywheel import kb_pins
 from memory_flywheel.embedding_selector import CONFIG_PATH, select_embedding
 
 TABLE_NAME = "kb_chunks"
+SOLUTION_TABLE_NAME = "solution_chunks"
 NAMESPACES = ("capabilities", "troubleshooting")
 # m13：与 ingest_kb.classify 的产出全集一一对应（KB 32 文件实际只会产出这 11 类）
 DOC_TYPES = (
@@ -179,6 +180,40 @@ class VectorEngine:
         search = self.table().search(qv)
         if where:
             search = search.where(where)
+        rows = search.limit(top_k).to_list()
+        for row in rows:
+            row.pop("vector", None)
+        return rows
+
+    # ---------- read: solution_chunks 只读查询缝（Phase 2.5 Task6 AC-T6-1） ----------
+
+    def solution_table_exists(self) -> bool:
+        return SOLUTION_TABLE_NAME in self.db.table_names()
+
+    def query_solutions(self, query: str, *, top_k: int = 8,
+                        solution_id: str | None = None) -> list[dict[str, Any]]:
+        """只读语义检索 ``solution_chunks``（Task0b 起 94 块/5 方案）。
+
+        Task6 新增的生产查询通道：此前该表只有入库（ingest_solutions）没有
+        生产查询路。本方法**只读、不建表、不改切块**；表不存在即抛
+        RuntimeError（缺表 fail-closed，与 query_kb 同语义；四路编排在
+        planner_recall 层按路容错）。solution_id 过滤复用入库侧的 C4 校验
+        （orchestrator.solutions.validate_solution_id），非法 id 不触库。
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query_solutions 的 query 必须是非空字符串")
+        if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
+            raise ValueError(f"top_k 必须是正整数，收到 {top_k!r}")
+        if not self.solution_table_exists():
+            raise RuntimeError(
+                f"表 {SOLUTION_TABLE_NAME} 不存在（先运行 ingest_solutions）")
+        if solution_id is not None:
+            from orchestrator.solutions import validate_solution_id
+            validate_solution_id(solution_id)
+        qv = self.embed([query])[0]
+        search = self.db.open_table(SOLUTION_TABLE_NAME).search(qv)
+        if solution_id:
+            search = search.where(f"solution_id = '{solution_id}'")
         rows = search.limit(top_k).to_list()
         for row in rows:
             row.pop("vector", None)

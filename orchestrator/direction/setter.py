@@ -21,13 +21,25 @@ from typing import Any, Callable
 
 import yaml
 
-from memory_flywheel.recall import ProductionRecall, prompt_embedded_text
+from memory_flywheel.recall import (
+    SOURCE_ROUTE_KB,
+    SOURCE_ROUTE_LEARNINGS,
+    SOURCE_ROUTE_SOLUTIONS,
+    ProductionRecall,
+    prompt_embedded_text,
+)
 from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.common.runtime_paths import phase1_root
 from orchestrator.common.validators import assert_within, validate_thread_id
+from orchestrator.direction.planner_recall import (
+    TIER_POLICY_CLOSED_LOOP,
+    TIER_PROBE,
+    TIERS,
+    PlannerRecall,
+)
 from orchestrator.gateway.quota_ledger import set_current_evidence
 from orchestrator.gateway.router import ModelGateway, redact
 from orchestrator.graph.ascent import build_ascent_messages
@@ -162,6 +174,193 @@ def _suffix_learning(learning_hits: "list[dict] | None") -> str:
     """避坑段拼接到 user prompt 末尾；无命中返回 ""（旧 prompt 逐字节不变）。"""
     block = _learning_block(learning_hits)
     return f"\n\n{block}" if block else ""
+
+
+# ---------- Phase 2.5 Task6（AC-T6-5）：四路三段 prompt（纯加法新函数） ----------
+#
+# 旧 _evidence_block/_learning_block/_track{1,2}_user 一字不动：planner_recall
+# 未注入时生产 prompt 与 Phase 1/2 逐字节一致（AC-T6-6）。下列函数只服务注入了
+# PlannerRecall 的新分支：kb+solution 两路统一连续编号 [S1]..[Sn]（证据引用只能
+# 解析到本轮真实渲染的行；validate_proposals 的 n 取两路总行数），学习路保持
+# 非引用 [Li]。空段整段不渲染。所有命中文本逐字入段（不压换行——solution 路是
+# 代码窗，压行会破坏逐字对账；采纳遥测以同一逐字文本判定）。
+
+PLANNER_SECTION_KB = "【基线理论先验(kb)】"
+PLANNER_SECTION_SOLUTIONS = "【方案实录(solutions)】"
+PLANNER_SECTION_LEARNINGS = "【实战避坑(learnings)】"
+
+_POLICY_REQUIREMENT = (
+    "本题按 policy_closed_loop 档规划：必须逐 Stage 说清闭环策略——"
+    "动作从哪来（action source），policy_source 候选且仅限 "
+    "scripted_servo / official_demo_policy / opensource_vla / training 之一，"
+    "并给出选择依据；明确 action space（如 7-DOF delta EEF 末端位姿增量 + "
+    "夹爪 gripper 归一化/反归一化口径）；在 Stage 0..3 上标明策略切分点"
+    "（哪一 Stage 用哪一 policy_source、切换的验证证据是什么）。")
+
+
+def _planner_kb_block(kb_hits: list[dict], start: int = 1) -> str:
+    lines = []
+    for i, h in enumerate(kb_hits, start):
+        locator = f"{h.get('kb_relpath', '?')}#{h.get('section_path', '?')}"
+        lines.append(
+            f"[S{i}] [来源: kb {locator}] (doc_type={h.get('doc_type', '?')})\n"
+            f"{str(h.get('text', ''))}")
+    return "\n\n".join(lines)
+
+
+def _planner_solution_block(solution_hits: list[dict], start: int) -> str:
+    lines = []
+    for i, h in enumerate(solution_hits, start):
+        locator = (f"{h.get('relpath', '?')}#"
+                   f"{h.get('kind', '?')}/{h.get('chunk_index', '?')}")
+        lines.append(
+            f"[S{i}] [来源: solutions {locator}] "
+            f"(solution_id={h.get('solution_id', '?')})\n"
+            f"{str(h.get('text', ''))}")
+    return "\n\n".join(lines)
+
+
+def _planner_learning_block(learning_hits: list[dict]) -> str:
+    """【实战避坑(learnings)】段：phase1/phase2 两库真实行，逐字、带来源表标签。"""
+    if not learning_hits:
+        return ""
+    lines = ["【实战避坑(learnings)】（以下条目逐字摘自历史真实运行学习表；"
+             "必须作为避坑约束逐条对照，不得改写，也不得伪造其中未给出的引用）"]
+    for i, h in enumerate(learning_hits, 1):
+        lines.append(
+            f"[L{i} 来源 learning_table={h.get('learning_table', '?')} "
+            f"learning_id={h.get('id', '?')} run_id={h.get('run_id', '?')} "
+            f"gate_source={h.get('gate_source', '?')} "
+            f"rung={h.get('rung', '?')}]\n{str(h.get('text', ''))}")
+    return "\n\n".join(lines)
+
+
+def _planner_sections(kb_hits: list[dict], solution_hits: list[dict],
+                      learning_hits: list[dict]) -> "tuple[str, int]":
+    """拼成 user prompt 的三段证据区，返回 (文本, 可引用 [Si] 总数)。"""
+    blocks: list[str] = []
+    blocks.append(f"{PLANNER_SECTION_KB}（以下条目逐字摘自知识库 kb_chunks；"
+                  "每个关键论断后标注 [Si]）\n" + _planner_kb_block(kb_hits))
+    n_cite = len(kb_hits)
+    if solution_hits:
+        blocks.append(
+            f"{PLANNER_SECTION_SOLUTIONS}（以下条目逐字摘自公开解题方案库 "
+            "solution_chunks，含 README/清单/代码窗；引用代码事实时标注 [Si]）\n"
+            + _planner_solution_block(solution_hits, n_cite + 1))
+        n_cite += len(solution_hits)
+    if learning_hits:
+        blocks.append(_planner_learning_block(learning_hits))
+    return "\n\n".join(blocks), n_cite
+
+
+def _planner_track1_user(payload: dict, sections: str, *,
+                         tier: str) -> str:
+    """Track1 planner 版：probe 档任务散文与旧 _track1_user 逐字相同。
+
+    policy_closed_loop 档在任务段尾追加 _POLICY_REQUIREMENT（动作来源/
+    policy_source/Stage 切分）；两档的 canonical spine 与证据区位置不变。
+    """
+    urls = "\n".join(f"- {u}" for u in payload.get("urls", []))
+    spine = json.loads(BLUEPRINT_PATH.read_text(encoding="utf-8"))["canonical_spine"]
+    spine_text = "\n".join(
+        f"{s['stage_id']} {s['name']}：{s['objective']}" for s in spine)
+    task = (
+        "任务：围绕该工具链设计 2-3 个实质不同的「工具链最小复现 + 能力探针」方案，"
+        "沿 Stage 0 环境探活 → Stage 1 最小闭环 → Stage 2 泛化/批量 → "
+        "Stage 3 评测递进（canonical spine 见下）。key_params 写关键依赖/渲染/物理参数；"
+        "controls_vs_experiment 写探针对照项（如 CPU/GPU 后端、不同接触求解器对照）；"
+        "expected_artifacts 写具体产物文件名（探针视频/JSON/报告）。")
+    if tier == TIER_POLICY_CLOSED_LOOP:
+        task = task + "\n" + _POLICY_REQUIREMENT
+    return (
+        f"【Track 1：开源工具链深度巡礼】\n工具：{payload['name']}\n链接：\n{urls}\n\n"
+        f"{task}\n\n"
+        f"【canonical spine】\n{spine_text}\n\n"
+        f"{sections}")
+
+
+def _planner_track2_user(payload: dict, sections: str, *,
+                         tier: str) -> str:
+    """Track2 planner 版：理论先验散文与旧 _track2_user 逐字相同（tier 只改检索串）。"""
+    return (
+        f"【Track 2：具身工程难题第一性原理实证】\n题目：{payload['question']}\n\n"
+        "任务：先在 first_principles 中给出严密的第一性原理/物理推导（公式与假设），"
+        "再给出 2-3 个实质不同的仿真实证方案。每个方案必须：\n"
+        "- key_params 列出待随机化/标定的物理量及其分布或取值（量级要可执行）；\n"
+        "- controls_vs_experiment 明确 Baseline 对照组（参数崩溃/失真）与 Ours 实验组"
+        "（理论模型/高保真）及判别指标；\n"
+        "- sim_engine 的选择由证据 [Si] 支撑；expected_artifacts 含对照视频与指标 JSON。\n\n"
+        f"{sections}")
+
+
+def build_planner_first_messages(*, track: str, payload: dict,
+                                 kb_hits: list[dict],
+                                 solution_hits: list[dict],
+                                 learning_hits: list[dict],
+                                 catalog: dict[str, dict],
+                                 tier: str = TIER_PROBE
+                                 ) -> "tuple[list[dict[str, str]], int]":
+    """planner 四路三段版首轮消息；返回 (messages, 可引用证据行数)。"""
+    if tier not in TIERS:
+        raise DirectionError(f"planner tier 非法：{tier!r}（白名单 {TIERS}）")
+    sections, n_cite = _planner_sections(kb_hits, solution_hits, learning_hits)
+    system = _system_prompt(catalog, n_cite)
+    if track == "track1":
+        user = _planner_track1_user(payload, sections, tier=tier)
+    elif track == "track2":
+        user = _planner_track2_user(payload, sections, tier=tier)
+    else:
+        raise DirectionError(f"未知 track={track!r}")
+    return [{"role": "system", "content": system},
+            {"role": "user", "content": user}], n_cite
+
+
+def build_planner_reject_messages(*, track: str, payload: dict,
+                                  kb_hits: list[dict],
+                                  solution_hits: list[dict],
+                                  learning_hits: list[dict],
+                                  catalog: dict[str, dict],
+                                  human_notes: str,
+                                  prev_proposals: list[dict],
+                                  tier: str = TIER_PROBE
+                                  ) -> "tuple[list[dict[str, str]], int]":
+    """planner 版 Gate1 打回轮：人工意见后缀与旧 build_reject_messages 逐字相同。"""
+    messages, n_cite = build_planner_first_messages(
+        track=track, payload=payload, kb_hits=kb_hits,
+        solution_hits=solution_hits, learning_hits=learning_hits,
+        catalog=catalog, tier=tier)
+    messages.append({"role": "user", "content": (
+        "【人工评审意见（最高优先级，必须逐条响应）】\n"
+        f"{human_notes.strip()}\n\n"
+        "上一轮候选方案（已被打回）：\n"
+        f"{json.dumps(prev_proposals, ensure_ascii=False, indent=2)}\n\n"
+        "请按人工意见给出修订后的 2-3 个方案：必要时更换解题路径（但 sim_engine "
+        "仍限于引擎目录、仍须引用 [Si] 证据），只输出单个 JSON 对象。")})
+    return messages, n_cite
+
+
+def _planner_kb_sources(kb_hits: list[dict],
+                        solution_hits: list[dict]) -> list[dict]:
+    """结果件 kb_sources：每路自带 source_route；旧五键在 kb 行保持不变。"""
+    out: list[dict] = []
+    for i, h in enumerate(kb_hits, 1):
+        out.append({
+            "ref": f"S{i}", "id": h.get("id"),
+            "source_route": SOURCE_ROUTE_KB,
+            "kb_relpath": h.get("kb_relpath"),
+            "section_path": h.get("section_path"),
+            "doc_type": h.get("doc_type"),
+        })
+    for j, h in enumerate(solution_hits, len(kb_hits) + 1):
+        out.append({
+            "ref": f"S{j}", "id": h.get("id"),
+            "source_route": SOURCE_ROUTE_SOLUTIONS,
+            "relpath": h.get("relpath"),
+            "solution_id": h.get("solution_id"),
+            "kind": h.get("kind"),
+            "chunk_index": h.get("chunk_index"),
+        })
+    return out
 
 
 def _catalog_block(catalog: dict[str, dict]) -> str:
@@ -501,6 +700,7 @@ class DirectionSetter:
     def __init__(self, gateway: ModelGateway, vector_engine: VectorEngine,
                  *, evidence_writer: "Callable | None" = None,
                  recall: "ProductionRecall | None" = None,
+                 planner_recall: "PlannerRecall | None" = None,
                  call_cache: "CallReplay | None" = None):
         # Task3（§6.3）：本类不再持账本——preflight/记账统一由 ModelGateway.call
         # 经 BillingGate 在 billing_context 内完成；构造网关时必须传 ledger=，
@@ -512,6 +712,11 @@ class DirectionSetter:
         # Phase 2 Task1：None=Phase 1 行为（revert 单文件回滚）；生产装配注入
         # ProductionRecall 后启用 learning 双路召回 + 采纳遥测。
         self.recall = recall
+        # Phase 2.5 Task6（AC-T6-1/T6-5）：None=旧双路行为逐字节不变；注入
+        # PlannerRecall（组合同一个 ProductionRecall）后启用 kb 双 namespace
+        # 并查 + solution_chunks 只读路 + 两学习库合并的四路三段 prompt，
+        # 采纳遥测经 PlannerRecall 透传同一个 ProductionRecall 写七字段新行。
+        self.planner_recall = planner_recall
         # S-5 于 Task1 关闭：macro 实呼启用调用级重放缓存（kill-9 节点重放
         # 0 二次计费）。None=默认惰性 phase1_root()/.call_cache（与 coding/
         # Rung4 同一缓存目录，macro_ key 前缀不冲突）；注入优先（测试 tmp）。
@@ -539,19 +744,34 @@ class DirectionSetter:
                       prev_proposals: "list[dict] | None" = None,
                       bypass_stamp: bool = False,
                       v1_archive: "dict | None" = None,
-                      ascent_targets: "dict | None" = None) -> dict:
+                      ascent_targets: "dict | None" = None,
+                      planner_tier: str = TIER_PROBE) -> dict:
         # G-5：thread_id 直接拼进证据文件名（macro_<thread>_* / proposals_<thread>_*），
         # 入口先过字符集白名单 ^[A-Za-z0-9_-]{1,64}$，拒绝遍历/分隔符形态。
         validate_thread_id(thread_id)
         query = payload["question"] if track == "track2" else \
             f"{payload['name']} 架构 物理引擎 特性 闭环仿真"
+        # Phase 2.5 Task6：planner_recall 注入时走四路召回（kb 双 namespace +
+        # solutions + 两学习库）与三段 prompt；未注入时下面的 Phase 2/1 路径
+        # 逐字节保留（AC-T6-6：旧调用点/旧模板/旧六字段遥测都不改）。
+        planner_mode = self.planner_recall is not None
+        solution_hits: list[dict] = []
         # Phase 2 Task1：recall 注入时 kb 路由 ProductionRecall 同参查询
         # （retrieve 内部仍是 query_kb(namespace=capabilities, top_k=TOP_K)），
         # ret["kb_hits"] 与原 hits 同源同语义（同一次调用返回，0 命中/校验/
         # kb_sources 行为逐字不变），同时取 learning 路真实学习表命中；
         # recall=None 走原查询路径（Phase 1 行为，revert 单文件）。
         learning_hits: list[dict] = []
-        if self.recall is not None:
+        if planner_mode:
+            if planner_tier not in TIERS:
+                raise DirectionError(
+                    f"planner_tier 非法：{planner_tier!r}（白名单 {TIERS}）")
+            ret = self.planner_recall.retrieve(
+                track, payload, tier=planner_tier, site="direction")
+            hits = ret["kb_hits"]
+            solution_hits = ret["solution_hits"]
+            learning_hits = ret["learning_hits"]
+        elif self.recall is not None:
             ret = self.recall.retrieve(query, site="direction")
             hits = ret["kb_hits"]
             learning_hits = ret["learning_hits"]
@@ -560,15 +780,32 @@ class DirectionSetter:
                                                top_k=TOP_K)
         if not hits:
             raise DirectionError("capabilities 检索 0 行：无证据不得产地方向")
-        kb_sources = [{
-            "ref": f"S{i}", "id": h.get("id"),
-            "kb_relpath": h.get("kb_relpath"),
-            "section_path": h.get("section_path"),
-            "doc_type": h.get("doc_type"),
-        } for i, h in enumerate(hits, 1)]
+        # 可引用 [Si] 行：planner 路为 kb+solution 合并连续编号；旧路仅 kb。
+        cite_hits = hits + solution_hits if planner_mode else hits
+        if planner_mode:
+            kb_sources = _planner_kb_sources(hits, solution_hits)
+        else:
+            kb_sources = [{
+                "ref": f"S{i}", "id": h.get("id"),
+                "kb_relpath": h.get("kb_relpath"),
+                "section_path": h.get("section_path"),
+                "doc_type": h.get("doc_type"),
+            } for i, h in enumerate(hits, 1)]
 
         # Task1：三入口统一透传避坑段（repair 轮在 messages 历史中原样保留）。
-        if human_notes and prev_proposals:
+        if planner_mode:
+            if human_notes and prev_proposals:
+                messages, _n = build_planner_reject_messages(
+                    track=track, payload=payload, kb_hits=hits,
+                    solution_hits=solution_hits, learning_hits=learning_hits,
+                    catalog=self.catalog, human_notes=human_notes,
+                    prev_proposals=prev_proposals, tier=planner_tier)
+            else:
+                messages, _n = build_planner_first_messages(
+                    track=track, payload=payload, kb_hits=hits,
+                    solution_hits=solution_hits, learning_hits=learning_hits,
+                    catalog=self.catalog, tier=planner_tier)
+        elif human_notes and prev_proposals:
             messages = build_reject_messages(track=track, payload=payload, hits=hits,
                                              catalog=self.catalog,
                                              human_notes=human_notes,
@@ -653,7 +890,7 @@ class DirectionSetter:
             try:
                 obj = parse_json_object(raw)
                 proposals, errors = validate_proposals(
-                    obj, hits=hits, catalog=self.catalog,
+                    obj, hits=cite_hits, catalog=self.catalog,
                     ascent=bool(ascent_mode))
             except (json.JSONDecodeError, ValueError) as exc:
                 parse_error = str(exc)
@@ -688,7 +925,23 @@ class DirectionSetter:
                 # 重记（安全方向）。prompt 文本逐字未改，prompt_sha256 仍是
                 # 实际发送串；learning_text 取其在 prompt_json 中的逐字出现
                 # 形（JSON 转义形），未逐字渲染的命中不产生采纳行。
-                if self.recall is not None:
+                if planner_mode:
+                    # Task6 四路：逐路把**实际逐字渲染**的行写成七字段新行
+                    # （source_route=kb/solutions/learnings）；未渲染的命中
+                    # adopted() 判否不产生行；写入方仍是组合内同一个
+                    # ProductionRecall，jsonl 单一追加口不变。
+                    route_hits = (
+                        [(h, SOURCE_ROUTE_KB) for h in hits]
+                        + [(h, SOURCE_ROUTE_SOLUTIONS) for h in solution_hits]
+                        + [(h, SOURCE_ROUTE_LEARNINGS) for h in learning_hits])
+                    for hit, route in route_hits:
+                        self.planner_recall.record_adoption(
+                            thread_id=thread_id, site="direction",
+                            learning_id=hit["id"], prompt_text=prompt_json,
+                            learning_text=prompt_embedded_text(
+                                str(hit.get("text", ""))),
+                            source_route=route)
+                elif self.recall is not None:
                     for hit in learning_hits:
                         self.recall.record_adoption(
                             thread_id=thread_id, site="direction",
@@ -726,7 +979,8 @@ class DirectionSetter:
     # Gate1 循环：打回意见注入下一轮；2 次打回 → human_failure（D10）
     def run_gate1_loop(self, feishu: Any, *, track: str, payload: dict,
                        thread_id: str, batch_id: str,
-                       task_title: "str | None" = None) -> dict:
+                       task_title: "str | None" = None,
+                       planner_tier: str = TIER_PROBE) -> dict:
         title = task_title or (
             f"Track1 工具链巡礼：{payload['name']}" if track == "track1"
             else f"Track2 实证：{payload['question'][:30]}")
@@ -737,7 +991,8 @@ class DirectionSetter:
             last = self.run_direction(track=track, payload=payload,
                                       thread_id=thread_id, batch_id=batch_id,
                                       gate_round=gate_round, human_notes=notes,
-                                      prev_proposals=prev)
+                                      prev_proposals=prev,
+                                      planner_tier=planner_tier)
             decision = feishu.request_gate1_approval(
                 thread_id, title, last["proposals"])
             verdict = decision.get("decision")

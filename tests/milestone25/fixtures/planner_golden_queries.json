@@ -1,0 +1,484 @@
+{
+  "schema": "simpraxis.phase25.planner_golden.v1",
+  "frozen_at": "2026-10-31",
+  "rules_version": "r1",
+  "note": "Phase 2.5 Task6 AC-T6-4 预注册 gold@8 标注集（47 条，0 付费本地 mpnet 评测）。标签全部从 Phase 2 真实 req 证据（Task6 V2/Task7 LIBERO/Task8 流体战役、555 行采纳遥测）、Task 5 两堵历史墙事实与四 tour 结构化知识库逆向整理，冻结后不按检索结果回填（gold-fishing 即违规）。中英混合，含硬负例（hard_negative 字段）。",
+  "thresholds": {
+    "overall": 0.80,
+    "solution_route": 0.75,
+    "learning_route": 0.75
+  },
+  "allowed_repair": {
+    "max_iterations_after_first": 1,
+    "scope": "若 iter1 未过阈，允许且仅允许一次规则级修复，规则集版本升 r2：(A) 修订 orchestrator/direction/synonyms.yaml 同义词典（新增项目别名组，及每个项目可选的 kb_projects 列表 / solution_id 单一映射，值只能取活库既有 project 标签或经 validate_solution_id 校验的方案 id）；(B) 在 planner_recall 固定并查策略中加项目作用域并行探针：kb 路对每个命中项目的 kb_projects 各发一条 project 过滤探针（跨两 namespace），solutions 路对命中项目的 solution_id 各发一条方案过滤探针，与原全局探针结果按 _distance 合并、按 id 去重、截 top_k。禁止：改 case 标签/查询文本/阈值、按 case 定制规则、给规则喂 gold id、改 kb/学习切块与表结构。",
+    "changeable_files": [
+      "orchestrator/direction/synonyms.yaml",
+      "orchestrator/direction/planner_recall.py"
+    ]
+  },
+  "cases": [
+    {
+      "id": "kb_check_success",
+      "query": "LIBERO 任务里成功判定应该怎么取？能不能自己数 telemetry 帧？check_success 信号为什么是唯一可信来源",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "dfd2c061e8d180debf63a50b336f42f0",
+      "gold_text": "成功判定只能信环境返回的信号",
+      "provenance": "通用复现流程指南 5.2；Task7 LIBERO 战役 telemetry 判分争议（Rung1–3 结构不可判，只信 env.check_success()）",
+      "hard_negative": "LIBERO 项目词会把 lw_benchhub 项目块抬高，gold 是 global 通用指南块"
+    },
+    {
+      "id": "kb_272_families",
+      "query": "LW-BenchHub 的 272 个任务里 LIBERO 系 131 个和 RoboCasa 系 141 个设计风格哪里相反？资产指定和干扰物有什么区别",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "66d8bc7e2f13555dbe7244102d7a7c4f",
+      "gold_text": "272 个任务分两大族",
+      "provenance": "LW-BenchHub background 4.3 任务库两种设计风格；选型先看规模校准的 Task 5 墙事实",
+      "hard_negative": "邻近 4.2 规模数字校准块（8462…）与 3.5 任务声明块（41d3…）语义极近"
+    },
+    {
+      "id": "kb_execmode",
+      "query": "LW-BenchHub 的 ExecuteMode 枚举有哪 9 种运行语义？TRAIN 模式下 _check_success 为什么短路到 reward shaping",
+      "track": "track1",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "7430ab27e8504a7f1b4e8797fff52145",
+      "gold_text": "ExecuteMode",
+      "provenance": "LW-BenchHub background 2.4 ExecuteMode 9 种运行语义（lw_benchhub/utils/env.py:46）"
+    },
+    {
+      "id": "kb_libero_two_diff",
+      "query": "LW-BenchHub 里 LIBERO 系任务的声明和普通任务有哪两点差异？共享基类和 get_ep_meta 的 lang 字符串是怎么回事",
+      "track": "track1",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "41d3a714186f3454798394100f89f706",
+      "provenance": "LW-BenchHub background 3.5 LIBERO 系两点差异；Task7 BDDL/任务声明题面来源"
+    },
+    {
+      "id": "kb_termcfg",
+      "query": "LW-BenchHub 的成功判定通用管线 TerminationsCfg.success 怎么绑成 DoneTerm？为什么要 episode_length_buf>=10 和连续成功防抖",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "4aaedb3cc3447e9ed71299c8268e77ed",
+      "gold_text": "TerminationsCfg.success",
+      "provenance": "LW-BenchHub background 4.3 成功判定通用管线（base.py:160/204-206/280-300）；解释遥操作半秒延迟"
+    },
+    {
+      "id": "kb_q28_contacts",
+      "query": "Genesis 里 get_contacts() 对 PBD 实体抛 AttributeError，流体的刚柔接触查询该怎么办",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "bcfc823cc8e7c1d2e6669c9ede892d8f",
+      "gold_text": "get_contacts()",
+      "provenance": "Genesis World FAQ G 刚柔/刚流耦合 Q28；Task8 流体战役接触查询实坑"
+    },
+    {
+      "id": "kb_q34_sph",
+      "query": "Genesis SPH 流体一开始粒子就迅速四散炸开是什么问题，怎么排查",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "8e53e69bde857bb2046b1b0b01b991d0",
+      "provenance": "Genesis World FAQ Q34 SPH 炸开；Task8 Stage0 sph_ok 探针对照"
+    },
+    {
+      "id": "kb_q10_vla",
+      "query": "OpenVLA 驱动 Franka 时末端无论目标在哪都收敛到同一个点、夹爪输出恒为 0.0，动作接口可能哪里错了",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "kb",
+      "gold_id": "a68795f01fcf2a6b06b33dd968d986a0",
+      "provenance": "genesis_world Q10 VLA 末端收敛同点/夹爪恒 0.0；Task 5 墙与 J.4 D18 止损机制证据；policy_closed_loop 动作接口典型题面",
+      "hard_negative": "GE-Sim 16 维布局与 D10/D12 决策块语义近邻"
+    },
+    {
+      "id": "kb_16d_layout",
+      "query": "GE-Sim 世界模型和平台信封两套 16 维动作布局里夹爪维位置不同，弄反了为什么会静默失效",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "kb",
+      "gold_id": "8f5da09700d08aed6de85ea5fa03a454",
+      "gold_text": "两套 16 维布局不同",
+      "provenance": "GE-Sim 2.0 background 8.5 工程注意事项 #1 + 7.2 S3（_wm_to_model_layout/wm_to_grip_last 重排两遍）；Task 5 合同/测量墙事实",
+      "hard_negative": "GE-Sim 概览类背景块在全局检索中系统性压过表格块"
+    },
+    {
+      "id": "kb_pipolicy",
+      "query": "genie_sim_v3 的 π0 策略客户端 PiPolicy get_payload 怎么组包？state 32 维和 Action Chunking 缓冲 deque 的 30Hz 消费节奏是什么",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "kb",
+      "gold_id": "433e8ec30133e943f4faac82440f3c7b",
+      "gold_text": "PiPolicy",
+      "provenance": "genie_sim_v3 tour 代码知识 3.3 PiPolicy；动作从哪来/action chunk 节奏的 policy_closed_loop 核心题面"
+    },
+    {
+      "id": "kb_openpi_dephell",
+      "query": "装 openpi 时 lerobot API 对不上、numpy 被顶到 2.x、torch 报 regex No matching distribution，依赖地狱按什么顺序解",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "551821da8bd7df04d64f3a043b079c1f",
+      "gold_text": "openpi 依赖地狱",
+      "provenance": "GE-Sim 2.0 troubleshooting Q11（三症状，regex→lerobot commit→回锁 numpy 1.26.4）；硬规则 8 钉版教训同源"
+    },
+    {
+      "id": "kb_lora_dead",
+      "query": "给 openpi 策略做 LoRA 微调 peft 套不上，为什么说这条微调路线本身不成立",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "9e702e67e68d9f01acabe42e4c32cf55",
+      "gold_text": "这条路线本身不成立",
+      "provenance": "GE-Sim 2.0 troubleshooting Q24（JAX-only/无 action_head 四原因，替代：冻结主干解 4 Linear）"
+    },
+    {
+      "id": "kb_vla_local",
+      "query": "VLA 模型用本地目录加载 local_files_only=True 运行时不联网，model_path 默认路径怎么管理",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "kb",
+      "gold_id": "3e4e679b4fc7cc6a7e9f46091d7e2a70",
+      "gold_text": "local_files_only",
+      "provenance": "genesis_world quickstart 1.4 VLA 模型；离线/沙盒部署实需（本机 hf-mirror + 0 触网纪律）"
+    },
+    {
+      "id": "kb_pi0_chunking",
+      "query": "PI0 3.5B 流匹配加动作分块为什么能同时解决 embodiment mismatch 和单步预测抖动，Unitree G1 8D 关节空间怎么绕开 IK 振荡",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "kb",
+      "gold_id": "f13d9d02a5d5d1334d91620b410f7c85",
+      "gold_text": "动作分块",
+      "provenance": "genesis_world AI Knowledge D10 Patch01（⚠️ 推理完整但从未执行——诚实标注）；Task8 战役同文档决策表"
+    },
+    {
+      "id": "kb_judge_discipline",
+      "query": "任务过不去的时候能不能放宽判定口径先过？假阳性和降低目标的代价是什么，正确的口径纪律是什么",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "cf2bfe444da3f9334528f7de484baf8a",
+      "gold_text": "口径纪律",
+      "provenance": "跨项目库 J.4 过不去时的口径纪律（D08 假阳性/L8 降目标/D18 机制层止损）；硬规则 7 的知识库对应件",
+      "hard_negative": "最佳实践 6.2/6.3 同主题块（ae918/57d8/550d）语义近邻，预期难例"
+    },
+    {
+      "id": "kb_quantify_first",
+      "query": "动手写修复之前为什么要先跑未打补丁的 baseline 把 X 是否真的发生量化出来",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "c4b3570d42827113b5ffa04d0a2e9f0b",
+      "provenance": "具身智能仿真复现最佳实践 3.1 先量化再修复；Task6 升阶战役与 555 行采纳遥测反复引用"
+    },
+    {
+      "id": "kb_judge_zero_json",
+      "query": "GE-Sim V2 tour 里判分器 JSON 解析失败为什么会让 completion_score 静默变成 0.0 且 judge_source 不改，MiMo response parse error 怎么区分",
+      "track": "track2",
+      "tier": "probe",
+      "route": "kb",
+      "gold_id": "74b5754164c457736a6ea8b0379631f0",
+      "gold_text": "MiMo response parse error",
+      "provenance": "GE-Sim-V2-tour 代码知识 7.2 S1（vlm_reward_client.py:209-214）；Task 5 测量墙与机判哨兵 -1 同族静默失效"
+    },
+    {
+      "id": "sol_bddl_readme",
+      "query": "LIBERO 的 BDDL goal 里 On/Inside 大写谓词和 obj_of_interest 怎么解析兼容",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "8fc302da5604bd93df72c10d0c7cc740",
+      "gold_text": "BDDL",
+      "provenance": "solutions/track1_tools/03_libero/README.md（GOAL_RE/OBJINT_RE 与大写谓词回退）；Task7 Gate2 回收件",
+      "hard_negative": "gold 是方案 README 而非代码窗"
+    },
+    {
+      "id": "sol_pincompat",
+      "query": "robosuite 1.4.0 配 mujoco 3.15 为什么 d.qM/d.M 和 jnt_type 断言结构性断裂，方案为什么钉死 mujoco 3.1.6",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "8fc302da5604bd93df72c10d0c7cc740",
+      "gold_text": "3.1.6",
+      "provenance": "03_libero/README 版本钉死说明（用户裁决降级，硬规则 8 锁版）",
+      "hard_negative": "同案两标签；mujoco push 方案代码块语义近邻"
+    },
+    {
+      "id": "sol_manifest",
+      "query": "03_libero 方案 manifest 里入口参数 out-dir/run-id、隔离 venv 和 pins 依赖是怎么声明的",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "7f9bdabc4e7286f7c1d58ce8972fea64",
+      "gold_text": "track1_tools/03_libero",
+      "provenance": "solutions/track1_tools/03_libero/manifest.yaml（simpraxis.solution_manifest.v1 逐件 sha256）"
+    },
+    {
+      "id": "sol_win1_env",
+      "query": "LIBERO stage1 脚本为什么开头要 setrlimit RLIMIT_NOFILE 65535、MUJOCO_GL=egl，OffScreenRenderEnv 从哪里 import",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "947d4633823cd48f901678879f59c41a",
+      "gold_text": "RLIMIT_NOFILE",
+      "provenance": "03_libero/stage1_minimal.py 代码窗1；Task7 战役 EMFILE/EGL 真实排障"
+    },
+    {
+      "id": "sol_win2_servo",
+      "query": "LIBERO stage1_minimal 的 servo() 七维动作 np.zeros(7) 各维分别控制什么？a[:3] 平移、a[5] 腕 yaw、a[6] 夹爪怎么 clip",
+      "track": "track1",
+      "tier": "policy_closed_loop",
+      "route": "solutions",
+      "gold_id": "c7d2a7a8ba7ab3f6e7820da59d956467",
+      "gold_text": "np.zeros(7)",
+      "provenance": "stage1_minimal.py 代码窗2 servo()；policy_source=scripted_servo 的 7-DOF delta EEF+夹爪接口实证",
+      "hard_negative": "ice/maniskill 代码窗同为 7 维动作控制，全局检索强竞争"
+    },
+    {
+      "id": "sol_win3_clearance",
+      "query": "LIBERO 抓取前环绕物体做 24 个角度 clearance 扫描选 pick_offset_angle 是怎么实现的",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "50405f5cb4ec13d2e84b61d40bb609b3",
+      "gold_text": "pick_offset_angle",
+      "provenance": "stage1_minimal.py 代码窗3（24 角度扫描+run_episode 单控制环纪律）"
+    },
+    {
+      "id": "sol_win4_region",
+      "query": "LIBERO 怎么从 env.bddl_file_name 解析大写 On/Inside 目标名，并把 plate/ramekin 区域名解析成放置坐标均值中位数",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "9a15e94c83e73ca331cfdd5b4420feed",
+      "gold_text": "resolve_target",
+      "provenance": "stage1_minimal.py 代码窗4 parse_goal_names/resolve_names/resolve_target"
+    },
+    {
+      "id": "sol_win5_finger",
+      "query": "LIBERO finger_joint1/2 的 pad/tip geom_xpos 怎么算两指轴角误差 finger_axis_err",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "cb1f008d670f1ff7d53eac4d7a15f96d",
+      "gold_text": "finger_axis_err",
+      "provenance": "stage1_minimal.py 代码窗5（指轴 z 对齐：finger spread ±y, rotate about z）"
+    },
+    {
+      "id": "sol_win6_align",
+      "query": "LIBERO align_yaw 遇到符号反转怎么用 bad 计数和 restore(set_init_state) 重试，attempt_grasp 的 hover 下探闭爪抬升步数是多少",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "ae0146acc531960293839d85b5f429fe",
+      "gold_text": "align_yaw",
+      "provenance": "stage1_minimal.py 代码窗6（符号反转重试+restore+下探 0.027/闭爪 16 步/抬升 50 步）"
+    },
+    {
+      "id": "sol_win7_held",
+      "query": "LIBERO 物理判持 held 为什么要求 rise>0.05 且超过 eef_rise 一半；拖尾补偿 trail、分轴运输和反应式下放阈值怎么定，最后怎么 return check_success",
+      "track": "track1",
+      "tier": "policy_closed_loop",
+      "route": "solutions",
+      "gold_id": "ca8c9e45328b9d258ca59f89a4149b99",
+      "gold_text": "check_success()",
+      "provenance": "stage1_minimal.py 代码窗7（碗拖尾 ~0.047m/分轴运输/反应式 0.014,0.035/return bool(env.check_success())）；真人 Gate2 空爪负反馈的对策件",
+      "hard_negative": "ice/lidar 代码窗全局检索强竞争；同表 README 也描述判分"
+    },
+    {
+      "id": "sol_win8_benchmark",
+      "query": "LIBERO get_benchmark('libero_spatial')、get_task_bddl_file_path 和 OffScreenRenderEnv TypeError 兜底、horizon 属性设置怎么写",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "2e7d3ac99db9cbb7e791f8355f13af51",
+      "gold_text": "get_benchmark",
+      "provenance": "stage1_minimal.py 代码窗8 main（10 任务 benchmark、init states≥2、2 episodes）"
+    },
+    {
+      "id": "sol_win9_results",
+      "query": "results.json 的 simpraxis.task7.libero_results.v1 合同、judge=libero_official 和逐 episode telemetry 字段怎么落",
+      "track": "track1",
+      "tier": "policy_closed_loop",
+      "route": "solutions",
+      "gold_id": "c685ddb05301e1dad8dbf713b3df64d2",
+      "gold_text": "libero_official",
+      "provenance": "stage1_minimal.py 代码窗9（results_obj/telemetry FPS dt=0.002/manifest，env.close finally）",
+      "hard_negative": "README 同样描述 results.json 合同，易压过代码窗"
+    },
+    {
+      "id": "sol_win10_exit",
+      "query": "LIBERO 任务数不齐时 incomplete suite 为什么要 sys.exit(1)，cover.png 和 imageio 收尾怎么保证",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "77444cbfec27c5e08dc037835e4768c7",
+      "gold_text": "incomplete suite",
+      "provenance": "stage1_minimal.py 代码窗10（不完整套件 exit1，错误路径 sys.exit(1)）"
+    },
+    {
+      "id": "sol_ice_code",
+      "query": "Genesis 人形冰面摩擦系数域随机化对照实验脚本怎么写",
+      "track": "track2",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "a13906551ee98fe4311469fc57d1c9f1",
+      "provenance": "solutions/track2_questions/01_ice_floor_humanoid_dr/genesis_humanoid_dr.py；Task8 Q1 0.824<界2.0 矛盾结论的执行脚本（v1 实际执行副本）"
+    },
+    {
+      "id": "sol_lidar_optics",
+      "query": "CARLA 固态激光雷达雨雪雾天气回波的光学模型和参数标定怎么做",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "solutions",
+      "gold_id": "0efb2069305352ac46bc95bc3c9d7894",
+      "provenance": "solutions/track2_questions/02_lidar_weather/optics_model.py；Task8-Q2 天气因果证伪/几何射线 bit 相等补点验 rung=1"
+    },
+    {
+      "id": "sol_maniskill",
+      "query": "ManiSkill3 PushCube 最小闭环脚本怎么写，GPU 并行怎么开",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "0f2a32dad39fb0f4474fa7790db5fd53",
+      "provenance": "solutions/track1_tools/01_maniskill_pushcube/maniskill_pushcube.py；Phase 1 Task7 ManiSkill track"
+    },
+    {
+      "id": "sol_mujoco",
+      "query": "MuJoCo contact 接触推动轨迹平移最小复现怎么搭",
+      "track": "track1",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "018286cd723b0a4e95bbb09d0b4b56b0",
+      "provenance": "solutions/track1_tools/02_mujoco_contact_push/mujoco_contact_push.py；Phase 1 Task7 MuJoCo track"
+    },
+    {
+      "id": "sol_ice_readme",
+      "query": "Genesis 冰面 humanoid DR 方案的 README 里写了哪些运行面和产物结论",
+      "track": "track2",
+      "tier": "probe",
+      "route": "solutions",
+      "gold_id": "467276ad24fdee3f274120de4951c603",
+      "gold_text": "冰面足式 Locomotion DR",
+      "provenance": "solutions/track2_questions/01_ice_floor_humanoid_dr/README.md（正本溯源 v1 执行副本/运行面 batch 与 CSV 合同）",
+      "hard_negative": "同方案 22 个代码窗在全局检索中压过 README"
+    },
+    {
+      "id": "l_rungs",
+      "query": "persist_learning 为什么崩在 metrics 缺 rungs 结构、无法确定 rung",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "2f9ca046843efa7a62ddf548af7438ef",
+      "provenance": "phase1_learnings run_id=t7-libero-stage1 侧车 persist 首崩（2026-10-27，攒批85 rungs 契约修复）"
+    },
+    {
+      "id": "l_evroot",
+      "query": "学习证据换算为什么被拒：summary.json 不在 phase1 根也不在 runs 根下，无证据不写",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "020327ed97ad817254eefffe729a8974",
+      "provenance": "phase1_learnings t6-genesis-ascent persist 证据根拒绝（@phase2/ 第三根修复 f5d269b）"
+    },
+    {
+      "id": "l_usercustomize",
+      "query": "工作目录顶层检出宿主引导同名件 usercustomize.py，卫生预检为什么是 0 运行红线",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "5f5a383247ec9f99d55fd7ecac804b2a",
+      "provenance": "phase1_learnings Task6 升阶战役 usercustomize.py hygiene 教训"
+    },
+    {
+      "id": "l_v2_accept",
+      "query": "Task6 V2 升阶 genesis Gate2 真人一次验收通过 rung=3",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "66bafb1d8f3a88da7075bbab274205b6",
+      "provenance": "phase1_learnings gate2_accepted run t6-genesis-ascent V2（2026-10-26“V2通过”，与 pareto=dominated_by_v1 两轴正交）"
+    },
+    {
+      "id": "l_patch_safety",
+      "query": "补丁安全检查为什么拒绝：old 块命中 2 次需恰好 1 次",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "0ef64b94244b437f4c00a605b15ad50f",
+      "provenance": "phase1_learnings run7a patch safety（genesis_humanoid_dr_v2.py old-block 2 hits）"
+    },
+    {
+      "id": "l_mujoco_reject",
+      "query": "t7-mujoco Gate2 连续打回要求重新说明仿真任务做什么、视频什么意思",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "dc0d01e7e53c64c6c2f4784718e4e51d",
+      "provenance": "phase1_learnings t7-mujoco human_failure_gate2 rung=0（Task9 HITL 抽验同源）"
+    },
+    {
+      "id": "l_fluid_reject",
+      "query": "Genesis 流体 Gate2 连续打回 D10 熔次结案转人工是什么意见",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "de8910c9ece9ca0e82435ed5bb6bc870",
+      "provenance": "phase1_learnings t8q5-fluid-stage1 D10 第三熔 human_failure_gate2（2026-10-28 负结果结案五战役之一）"
+    },
+    {
+      "id": "l_empty_gripper",
+      "query": "LIBERO 真人 Gate2 指出空爪没有负载移动到目标、没有完整成功 demo",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "learnings",
+      "gold_id": "1b10ac8d9d30289f7489723f0d361fa7",
+      "provenance": "phase1_learnings 唯一 task7 gate2_accepted rung=1（2026-10-27 14:47:24 卡#3，r27 官方判分抓取成功）"
+    },
+    {
+      "id": "l_jitter",
+      "query": "LIBERO 视频里夹爪无序抖动、没伸向物体、没有一个任务成功",
+      "track": "track2",
+      "tier": "policy_closed_loop",
+      "route": "learnings",
+      "gold_id": "1bf02ea873f5fb91555a3d310490f63c",
+      "provenance": "phase1_learnings t7-libero run_e human_failure_agent_run（夹爪无序抖动没伸向物体）",
+      "hard_negative": "与 run a/d 及空爪 accept 行多近似近邻"
+    },
+    {
+      "id": "l_runa",
+      "query": "LIBERO stage1 run a 五轮 coding_debug 后仍失败撞上 RunSpec 上限",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "42b7de2bebf307e7f10988c544790cfc",
+      "provenance": "phase1_learnings t7-libero-stage1 run a（RunSpec 轮帽）"
+    },
+    {
+      "id": "l_carla",
+      "query": "Carla 固态 LiDAR 雨雪雾天气因果为什么被证伪：几何射线 bit 相等，补点验 rung=1",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "86d4198cb307c994431dde21039e8e98",
+      "provenance": "phase1_learnings t8-q2carla accepted_supplementary rung=1（Q2 光学模型参数标定 Phase 3 backlog 同源）"
+    },
+    {
+      "id": "l_fluid_wall",
+      "query": "流体 Stage1 run5 非流形网格哨兵 -1、角速折算、铰链耦合运动学三个机判墙连撞 8 轮帽",
+      "track": "track2",
+      "tier": "probe",
+      "route": "learnings",
+      "gold_id": "54b27b597d440bda1f919143da33fd3d",
+      "provenance": "phase1_learnings t8q5-fluid-stage1-20261027a run5 机判墙三新行之一（2026-10-28 负结果结案）",
+      "hard_negative": "54b2/b6eb/1b5d 三行结构近似（同 run 的 coding 轮次聚合+四条真人 reject），D10 三熔行也近似；预期硬负例"
+    }
+  ]
+}

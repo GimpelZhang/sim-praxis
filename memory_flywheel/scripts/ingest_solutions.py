@@ -4,8 +4,11 @@
 与 kb_chunks 的关系：
 - 同库（SIMPRAXIS_LANCEDB_URI / $KB_ROOT/data/lancedb）同嵌入（mpnet 768，
   复用 /mnt 缓存，绝不二次下载），但独立新表 solution_chunks；
-- kb_chunks（恒 1542 行）与 phase1_learnings（Task0a 后 5 行）全程只读：
-  写入前后各数一次，不一致即失败（默认期望 1542/5，可由参数覆盖用于彩排）；
+- kb_chunks（恒 1542 行）与 phase1_learnings（活表现 44 行）全程只读：
+  写入前后各数一次，不一致即失败（期望 1542/N 必须显式给参：
+  --expect-kb-rows 默认 1542；--expect-learnings 必填、无默认值，
+  活库当前传 44，彩排库按夹具实际行数传——锁内适配（Phase 2.5 Task6
+  AC-T6-7）：原默认 5 停在 Task0b 时点，已与活表长期不符）；
 - 切块口径复用 ingest_kb 的 TARGET_CHARS=1200/HARD_CHARS=2000 与
   chunk_section：每方案 README 一块（atomic=True）、manifest 一块，脚本
   源码按 HARD_CHARS 行窗切 code 块，relpath 一律带 solutions/ 前缀。
@@ -14,8 +17,10 @@
 任何方案 fail-closed 都发生在首笔写入之前，不留半批新行。
 
 用法：
-  python -m memory_flywheel.scripts.ingest_solutions                # 全量幂等
-  python -m memory_flywheel.scripts.ingest_solutions --dry-run
+  # 全量幂等（活库：phase1_learnings 现 44 行，必须显式给，缺参 fail-closed）
+  python -m memory_flywheel.scripts.ingest_solutions --expect-learnings 44
+  python -m memory_flywheel.scripts.ingest_solutions --dry-run \
+      --expect-learnings 44
 """
 from __future__ import annotations
 
@@ -346,7 +351,10 @@ def main() -> int:
     ap.add_argument("--solutions-root", default=None)
     ap.add_argument("--uri", default=None, help="lancedb 目录（默认 env/新数据层）")
     ap.add_argument("--expect-kb-rows", type=int, default=1542)
-    ap.add_argument("--expect-learnings", type=int, default=5)
+    # AC-T6-7：取消 Task0b 时点的 default=5（活表现 44 行），缺参 argparse
+    # 直接 exit 2 fail-closed；活库传 44，彩排/测试按夹具实际行数显式传。
+    ap.add_argument("--expect-learnings", type=int, required=True,
+                    help="phase1_learnings 期望行数（必填；活库 2026-10 起为 44）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
     try:

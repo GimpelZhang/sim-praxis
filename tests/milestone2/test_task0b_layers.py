@@ -96,6 +96,22 @@ _PHASE1_LEARNING_IDS_BASELINE = {
     "1bf02ea873f5",  # 2026-10-27T01:53:11Z run2k 随机动作帽尽 human_failure（Gate2 reject#1 前）
     "2f9ca046843e",  # 2026-10-27T06:47:24Z persist 首崩侧车 human_failure（rungs 契约修复前）
     "1b10ac8d9d30",  # 2026-10-27T07:26:07Z Gate2 accept rung=1（核验级，Task0a 同约定）
+    # —— Task8 Genesis 流体 Stage1 诚实负结果战役 12 行（2026-10-27…28，
+    # run=t8q5-fluid-stage1-20261027a；四次真人 Gate2 reject + run_5 三机判墙，
+    # 2026-10-28 用户裁决定案，不回收 KB/不抬阈翻案；Task6 AC-T6-7 活表对账
+    # 32→44，id 2026-10-31 从活表现读，原 32 行全保留）——
+    "70647bf0f8ac",  # 2026-10-27T15:24:04Z human_failure_agent_run
+    "459aacc886c2",  # 2026-10-27T15:37:25Z human_failure_agent_run
+    "d357a40dccae",  # 2026-10-27T16:30:42Z human_failure_agent_run
+    "a89d254d5db9",  # 2026-10-28T01:42:27Z human_failure_agent_run
+    "4a5e3c0234fe",  # 2026-10-28T02:10:54Z human_failure_agent_run
+    "edf8b68bb23b",  # 2026-10-28T02:35:16Z human_failure_agent_run
+    "de8910c9ece9",  # 2026-10-28T03:13:40Z human_failure_gate2（D10 三熔 reject 卡#2）
+    "c19b5c0d8df2",  # 2026-10-28T04:15:34Z human_failure_gate2（reject 卡#3）
+    "b267d1d438b4",  # 2026-10-28T07:16:55Z human_failure_gate2（reject 卡#4）
+    "54b27b597d44",  # 2026-10-28T08:45:45Z run_5 机判墙① 非流形网格→哨兵（created_at 曾被重放事故覆写）
+    "b6eb36a26961",  # 2026-10-28T09:11:43Z run_5 机判墙② 峰值测量墙
+    "1b5db0a5d3ac",  # 2026-10-28T09:44:01Z run_5 机判墙③ 铰链耦合运动学 speed/clearance
 }
 
 def _load_script(name: str):
@@ -501,13 +517,15 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
 
     before = ing.old_table_rows()
     assert before["kb_chunks"] == 1542, before
-    # 锁内适配（规格 §8 活表基线对账，工单 /tmp/kb_recon_dispatch.md）：活表
-    # 现实 32 行 = 迁移时 5 + Task6 run1–6 human_failure 6 + run7a 1
-    # + Task6 升阶战役 12（2026-10-25）+ persist 首崩侧车 1 + Task6 Gate2
-    # accept 行 1 + Task7 战役六行（run1/run2/run2j/run2k/侧车 human_failure
-    # 5 + Gate2 accept 1，2026-10-26…27）；run7c 内容寻址 upsert 塌到既有
-    # 24681e47 不增行。32 个 id 全集合在 test_lancedb_move_regression 钉死。
-    assert before["phase1_learnings"] == 32, before
+    # 锁内适配（规格 §8 活表基线对账，工单 /tmp/kb_recon_dispatch.md；
+    # Task6 AC-T6-7 2026-10-31 随活表 32→44）：活表现实 44 行 = 迁移时 5
+    # + Task6 run1–6 human_failure 6 + run7a 1 + Task6 升阶战役 12
+    # （2026-10-25）+ persist 首崩侧车 1 + Task6 Gate2 accept 行 1 + Task7
+    # 战役六行（2026-10-26…27）+ Task8 流体战役十二行（2026-10-27…28，
+    # 6 agent_run + 3 gate2 reject + run_5 三机判墙）；run7c 内容寻址 upsert
+    # 塌到既有 24681e47 不增行。44 个 id 全集合在 test_lancedb_move_regression
+    # 钉死。
+    assert before["phase1_learnings"] == 44, before
 
     tbl = ing.table()
     df = tbl.to_pandas()
@@ -530,11 +548,11 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
 
     # 幂等重跑（本工具设计语义）：solution_chunks 行数不翻倍，老两表冻结
     total_before = ing.count()
-    # 锁内适配（规格 §8 活表基线对账）：fail-closed 期望值随活表 5→11→12→32
-    # （升阶战役 12 + 侧车 1 + Gate2 accept 1 + Task7 六行；run7c 内容寻址
-    # 去重塌到 24681e47 不增行），守卫语义不松——老两表行数与期望不符
-    # ingester 仍拒入库。
-    ing.ingest(expect_kb_rows=1542, expect_learnings=32)
+    # 锁内适配（规格 §8 活表基线对账）：fail-closed 期望值随活表
+    # 5→11→12→32→44（+Task8 流体战役十二行，2026-10-27…28；Task6 AC-T6-7
+    # 2026-10-31 同步，另见 ingest_solutions 的 --expect-learnings 已去默认值
+    # 必填 fail-closed），守卫语义不松——老两表行数与期望不符 ingester 仍拒入库。
+    ing.ingest(expect_kb_rows=1542, expect_learnings=44)
     assert ing.count() == total_before
     assert ing.old_table_rows() == before
 
@@ -597,12 +615,13 @@ def test_lancedb_move_regression(monkeypatch):
     # 3 条固定查询召回 id 与迁移前快照逐项一致
     for name, ids in inventory["recall_snapshot"].items():
         assert state["recall_snapshot"][name] == ids, name
-    # 活 phase1_learnings：32 行且 32 个 id（12 位前缀）集合钉死，只多不少
-    # （升阶战役 12 + 侧车 1 + Task6 Gate2 accept 1 + Task7 六行，
-    # 2026-10-27 攒批86 对账；run7c 内容寻址塌到 24681e47 不增行）；
-    # id 从 state 同源（live_uri）连接现读，防字面量与活表各说各话。
-    assert state["rows"]["phase1_learnings"] == 32
-    assert len(_PHASE1_LEARNING_IDS_BASELINE) == 32
+    # 活 phase1_learnings：44 行且 44 个 id（12 位前缀）集合钉死，只多不少
+    # （32 行旧账：升阶战役 12 + 侧车 1 + Task6 Gate2 accept 1 + Task7 六行；
+    # +Task8 流体战役十二行 2026-10-27…28，2026-10-31 Task6 AC-T6-7 对账；
+    # run7c 内容寻址塌到 24681e47 不增行）；id 从 state 同源（live_uri）连接
+    # 现读，防字面量与活表各说各话。
+    assert state["rows"]["phase1_learnings"] == 44
+    assert len(_PHASE1_LEARNING_IDS_BASELINE) == 44
     import lancedb
     live_tbl = lancedb.connect(str(live_uri)).open_table("phase1_learnings")
     live_ids = {i[:12] for i in live_tbl.to_pandas()["id"]}

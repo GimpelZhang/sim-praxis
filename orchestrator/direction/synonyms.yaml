@@ -1,0 +1,112 @@
+# Phase 2.5 Task6（AC-T6-2）：Gate1 全量召回查询构造器的项目同义词典。
+#
+# 数据文件而非硬编码：项目目录边界锁死的对策——题面出现项目别名时，查询串
+# 追加该项目的跨项目扩展词（英文术语为主，mpnet 跨语言对齐），让 kb 双
+# namespace、solution_chunks、学习三路在同一查询串下并查。匹配规则由
+# orchestrator/direction/planner_recall.py 的固定规则集实现（本文件只供数据）：
+#   - ASCII 别名：大小写敏感、词边界匹配（"ACT" 不得命中 react/action；
+#     需匹配小写形态时在 aliases 中显式列出，如 "libero"）；
+#   - 含 CJK 的别名：子串匹配；
+#   - 命中文档的项目按本文件出现序去重展开；一个都没命中时，probe 档查询串
+#     与 Phase 1/2 现行 hint 逐字节一致（golden 测试钉死）。
+# 预注册改写规则集的一部分：r2（AC-T6-4 唯一一次规则修复迭代，2026-10-31）
+# 新增每个项目的两个可选映射，供固定并行探针（project-scoped fan-out）使用：
+#   kb_projects: 命中时 kb 路对这些活库 project 标签各发一条过滤探针
+#                （跨两 namespace，与全局探针按距离合并去重截 top_k）；
+#   solution_id: 命中时 solutions 路对该方案发一条 solution_id 过滤探针。
+# 取值只能是活库既有 project 标签（planner_recall.KB_PROJECT_TAGS 白名单）
+# 或经 validate_solution_id 校验的方案 id；不按 case 定制、不喂 gold id。
+schema: simpraxis.planner_synonyms.v1
+
+projects:
+  - id: libero
+    aliases: [LIBERO, Libero, libero, libero_spatial, libero_official, "03_libero", stage1_minimal, BDDL, bddl, bddl_file_name]
+    expansion: "LIBERO libero_spatial benchmark 机器人操作任务 robosuite MuJoCo 栈 BDDL goal"
+    kb_projects: [lw_benchhub]
+    solution_id: "track1_tools/03_libero"
+
+  - id: robosuite
+    aliases: [robosuite, RoboSuite, Robosuite]
+    expansion: "robosuite MuJoCo 机器人仿真 OSC 控制器 OSC_POSE base_controller 关节"
+    # 活库内 robosuite 栈只在 03_libero 方案落地（LW-BenchHub 是 Isaac 系）。
+    solution_id: "track1_tools/03_libero"
+
+  - id: mujoco
+    aliases: [MuJoCo, mujoco, MjData, mj_fullM]
+    expansion: "MuJoCo MjData 物理引擎 接触模型 关节 qpos qM 紧凑稀疏"
+    solution_id: "track1_tools/02_mujoco_contact_push"
+
+  - id: vla
+    aliases: [VLA, "vision-language-action", "vision language action", 视觉语言动作, 视觉-语言-动作]
+    expansion: "VLA vision-language-action 策略模型 机器人 动作预测 闭环 rollout"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: openvla
+    aliases: [OpenVLA, openvla, "open-vla", OpenVLA-7B]
+    expansion: "OpenVLA 7B 微调 LoRA checkpoint 权重 动作归一化 末端收敛"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: openpi
+    aliases: [openpi, π0, π₀, pi0, Pi0, PI0, π0.5, pi0.5, PI0.5, PiPolicy]
+    expansion: "openpi π0 pi0 策略 checkpoint 权重 微调 机器人动作"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: octo
+    aliases: [Octo, octo, OCTO]
+    expansion: "Octo 通用机器人策略 小尺寸 checkpoint wrapper 数据集"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: robomimic
+    aliases: [robomimic, RoboMimic, Robomimic]
+    expansion: "robomimic BC RNN 模仿学习 baseline 配置 数据集训练"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: act
+    # ACT 是常见英文词片段：只匹配大写专有形态（见文件头规则）。
+    aliases: [ACT, "Action Chunking", "Action Chunking Transformer", "action chunking", 动作分块, 动作块]
+    expansion: "ACT Action Chunking Transformer 动作序列 分块预测 模仿学习"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: diffusion_policy
+    aliases: ["Diffusion Policy", "diffusion-policy", "diffusion policy", 扩散策略]
+    expansion: "Diffusion Policy 扩散策略 动作序列 去噪 模仿学习"
+    kb_projects: [ge_sim_v2, genie_sim_v3, genesis_world]
+
+  - id: genesis
+    aliases: [Genesis, genesis, GENESIS, "genesis-world"]
+    expansion: "Genesis 生成式物理引擎 SPH 流体 仿真 PBD"
+    kb_projects: [genesis_world]
+    solution_id: "track2_questions/01_ice_floor_humanoid_dr"
+
+  - id: maniskill
+    aliases: [ManiSkill, maniskill, ManiSkill3]
+    expansion: "ManiSkill GPU 并行仿真 机器人操作 PushCube 任务"
+    solution_id: "track1_tools/01_maniskill_pushcube"
+
+  - id: carla
+    aliases: [CARLA, Carla, carla]
+    expansion: "CARLA 自动驾驶仿真 激光雷达 LiDAR 天气 传感器光学"
+    solution_id: "track2_questions/02_lidar_weather"
+
+  # ---- r2 新增项目作用域别名（只映射活库 project 标签，无落地方案） ----
+  - id: gesim
+    aliases: [GE-Sim, "GE Sim", GESim, ge_sim_v2]
+    expansion: "GE-Sim ge_sim_v2 世界模型 策略闭环 代码知识 静默失效"
+    kb_projects: [ge_sim_v2]
+
+  - id: geniesim
+    aliases: ["Genie Sim", GenieSim, genie_sim_v3, "genie sim"]
+    expansion: "genie_sim_v3 Genie Sim π0 策略客户端 WebSocket 动作块"
+    kb_projects: [genie_sim_v3]
+
+  - id: lwbench
+    aliases: [LW-BenchHub, lw_benchhub, "LW BenchHub", Lightwheel, 光轮]
+    expansion: "LW-BenchHub lw_benchhub 任务库 环境声明 成功判定 ExecuteMode"
+    kb_projects: [lw_benchhub]
+
+# hint 分档（AC-T6-2）：probe 档不加任何主题句；policy_closed_loop 档仅在
+# kb 路查询串尾追加下句（solution/learning 两路不加——切块是项目代码与战役
+# 叙述，泛化主题句只稀释近邻；此为预注册固定规则，非跑分外调参）。
+tiers:
+  probe: ""
+  policy_closed_loop: "策略推理 policy inference：动作从哪来 action source、action space 动作空间、7-DOF delta EEF 末端位姿增量、夹爪 gripper 归一化 denormalize；闭环 rollout 的 Stage 切分；policy_source 候选 scripted_servo / official_demo_policy / opensource_vla / training"
