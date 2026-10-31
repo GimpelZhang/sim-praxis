@@ -78,12 +78,13 @@ out = {}
 q1 = ("YAML 配置文件为什么会静默覆盖命令行参数？我在命令行传 --device cuda:0 "
       "为什么还是跑在 CPU 上？")
 h1 = eng.query_kb(q1, namespace="capabilities", project="lw_benchhub", top_k=5)
-out["q1"] = [{"kb_relpath": h["kb_relpath"], "section_path": h["section_path"],
+out["q1"] = [{"id": h["id"], "kb_relpath": h["kb_relpath"],
+              "section_path": h["section_path"],
               "source_commit": h["source_commit"], "content_hash": h["content_hash"],
               "doc_type": h["doc_type"]} for h in h1]
 q2 = "headless 无显示器，EGL 离屏渲染初始化失败、黑屏怎么排查？"
 h2 = eng.query_kb(q2, namespace="troubleshooting", top_k=5)
-out["q2"] = [{"kb_relpath": h["kb_relpath"], "project": h["project"],
+out["q2"] = [{"id": h["id"], "kb_relpath": h["kb_relpath"], "project": h["project"],
               "section_path": h["section_path"], "source_commit": h["source_commit"],
               "content_hash": h["content_hash"]} for h in h2]
 ok1 = any("background_knowledge.md" in h["kb_relpath"]
@@ -110,9 +111,52 @@ sys.exit(0 if (ok1 and ok2 and prov) else 1)
     # 锁内适配（Task0b）：kb_chunks 行是 Phase0 按 aac53313 入库的，行内
     # source_commit 永久记录入库时 knowledge 树状态；Task0b 后 KB HEAD 已前进
     # 到迁移提交 c5712e9f（只新增 solutions/），knowledge/ 32-md 哈希集仍逐字
-    # 等于 aac53313（kb_pins 分层不变量在 test_05 机判）。故这里断言行内
-    # 戳记 == knowledge 基线提交，而非当前 HEAD（旧断言 HEAD==aac 已回填）。
-    assert data["q1"][0]["source_commit"] == KNOWLEDGE_BASELINE_SHA
+    # 等于 aac53313（kb_pins 分层不变量在 test_05 机判）。故 mpnet 轨断言
+    # 行内戳记 == knowledge 基线提交，而非当前 HEAD（旧断言 HEAD==aac 已回填）。
+    #
+    # 锁内适配（Phase 2.5 换嵌入，2026-10-31）：窗后 Qwen3 轨的 kb_chunks 是
+    # 按预冻时点 KB HEAD 重灌的，期望值 header.kb_head 只许从 sha 钉死的预冻
+    # 数据件读出（c5dd7175，禁手写）；并加内容身份对账——召回行 id ⊆ 预冻 id
+    # 集、活库只读全量 1542 id 集与预冻件逐字相等、§6 id 集 sha 三处互证，
+    # 断言只加强不放水。
+    from memory_flywheel.embedding_selector import select_embedding
+    hits = data["q1"] + data["q2"]
+    model = select_embedding()["model_name"]
+    if model.endswith("paraphrase-multilingual-mpnet-base-v2"):
+        assert data["q1"][0]["source_commit"] == KNOWLEDGE_BASELINE_SHA
+    elif model == "Qwen/Qwen3-Embedding-0.6B":
+        import hashlib
+
+        import lancedb
+
+        from memory_flywheel.kb_pins import default_lancedb_uri
+        from scripts.kb import gen_post_rebuild_snapshots as gps
+
+        pre_p = Path(gps.PREWINDOW_PATH)
+        raw = pre_p.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == gps.PREWINDOW_SHA256, \
+            "预冻快照 sha256 不符（被改写？）"
+        pre = json.loads(raw.decode("utf-8"))
+        kb_head = pre["header"]["kb_head"]
+        assert kb_head and kb_head != KNOWLEDGE_BASELINE_SHA
+        frozen_kb = pre["tables"]["kb_chunks"]
+        frozen_ids = {r["id"] for r in frozen_kb["per_row"]}
+        assert len(frozen_ids) == frozen_kb["rows"] == 1542
+        for h in hits:
+            assert h["source_commit"] == kb_head
+            assert h["content_hash"]
+        assert {h["id"] for h in hits} <= frozen_ids
+        live_tbl = lancedb.connect(default_lancedb_uri()).open_table("kb_chunks")
+        live_ids = {
+            str(r["id"]) for r in
+            live_tbl.search(None).select(["id"]).limit(2_000_000).to_list()}
+        assert live_ids == frozen_ids, "窗后 kb_chunks id 集与预冻件不一致"
+        assert frozen_kb["id_set_sha256"] == \
+            pre["header"]["table_id_set_sha256"]["kb_chunks"] == \
+            gps.EXPECTED_ID_SET_SHA["kb_chunks"]
+    else:
+        raise AssertionError(
+            f"双轨测试只认 mpnet/Qwen3，活 config model_name={model!r} 未识别")
 
 
 # ---------- ③ 真实 GPU EGL MP4 ----------

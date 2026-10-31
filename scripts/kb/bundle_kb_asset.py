@@ -11,7 +11,14 @@
     tables/<table>.lance/...  逐文件字节复制（拒绝软链），sha256+size 入清单
 
 manifest 对账项（verify_bundle.py 复算）：kb_sha、引擎仓 sim_praxis_sha、
-嵌入模型 paraphrase-multilingual-mpnet-base-v2、vector_dim=768、每表行数。
+打包时 select_embedding() 的 embedding_model/vector_dim、每表行数。
+
+封存注（Phase 2.5 Task6 Stage A 换嵌入，2026-10-31）：2026-10-17 的六份
+历史资产包为 mpnet/768（embedding_model=sentence-transformers/
+paraphrase-multilingual-mpnet-base-v2，vector_dim=768），其 manifest 自
+描述、verify_bundle 按 manifest 值对账，永久可验；换嵌入 Qwen3-0.6B/1024
+后新包记录新模型/新维度，代码不再硬钉 mpnet/768，混维度守卫改为「每表维度
+== 打包时当前嵌入 config dim」。
 
 实跑（lead 在引擎仓提交 + 数据迁移 + solution_chunks 入库之后）：
   python scripts/kb/bundle_kb_asset.py --tier both
@@ -40,7 +47,6 @@ from orchestrator.common.fsutil import (  # noqa: E402
     atomic_write_text, ensure_private_dir)
 
 BUNDLE_SCHEMA = "simpraxis.bundle_manifest.v1"
-EMBEDDING_MODEL_EXPECTED = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 CORE_TABLES = ("kb_chunks", "phase1_learnings")
 DEFAULT_OUT = Path("/mnt/artifacts/embodied-kb/data/bundles")
 
@@ -127,12 +133,14 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
             raise BundleError(f"extended 必须包含 core 全部表，缺：{missing}")
         wanted = present
 
+    # 锁内适配（Phase 2.5 换嵌入）：不再硬钉 mpnet/768；manifest 记录打包时
+    # 当前 config 的模型/维度，混维度守卫＝每表维度 == config dim（见下）。
     cfg = select_embedding()
-    if cfg["model_name"] != EMBEDDING_MODEL_EXPECTED:
-        raise BundleError(
-            f"嵌入模型口径偏移：{cfg['model_name']} != {EMBEDDING_MODEL_EXPECTED}")
-    if int(cfg["dim"]) != 768:
-        raise BundleError(f"嵌入维度口径偏移：{cfg['dim']} != 768")
+    if not isinstance(cfg.get("model_name"), str) or not cfg["model_name"]:
+        raise BundleError(f"嵌入 config 缺 model_name：{cfg!r}")
+    config_dim = int(cfg["dim"])
+    if config_dim <= 0:
+        raise BundleError(f"嵌入 config dim 非法：{cfg.get('dim')!r}")
 
     kb_sha = kb_head(kb_root)
     engine_sha = _git(sim_root, "rev-parse", "HEAD")
@@ -155,8 +163,10 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
         files = copy_table(src_dir, dst_dir)
         rows = db.open_table(table).count_rows()
         dim = table_vector_dim(uri, table)
-        if dim is not None and dim != 768:
-            raise BundleError(f"{table} 维度 {dim} != 768（混维度守卫）")
+        if dim is not None and dim != config_dim:
+            raise BundleError(
+                f"{table} 维度 {dim} != 当前嵌入 config dim {config_dim}"
+                f"（混维度守卫；manifest 只记录打包时活 config）")
         tables_meta[table] = {"rows": rows, "vector_dim": dim, "files": files}
         print(f"[bundle] {tier}/{table}: {rows} 行，{len(files)} 文件")
 
@@ -168,7 +178,7 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
         "sim_praxis_sha": engine_sha,
         "sim_praxis_dirty_at_bundle": dirty,
         "embedding_model": cfg["model_name"],
-        "vector_dim": int(cfg["dim"]),
+        "vector_dim": config_dim,
         "source_uri": str(uri),
         "tables": tables_meta,
     }

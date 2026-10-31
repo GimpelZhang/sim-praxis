@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import subprocess
@@ -23,6 +24,7 @@ import pyarrow as pa
 
 import lancedb
 
+from memory_flywheel.embedding_selector import select_embedding
 from memory_flywheel.phase1 import learning_store as ls_mod
 from memory_flywheel.phase1.learning_store import (
     LAYER,
@@ -31,30 +33,60 @@ from memory_flywheel.phase1.learning_store import (
     LearningStore,
 )
 from memory_flywheel.vector_engine import TABLE_NAME as KB_TABLE, VectorEngine
+from scripts.kb import gen_post_rebuild_snapshots as gps
 # Task0b：读活数据层（$KB_ROOT/data/lancedb）的 02/03/04/05 打 kb_integration 门
 from tests.kb_support import require_kb_integration
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Phase0/Task2 基线（/mnt/artifacts/.../task2_direction/recall_baseline_q1q2q3.json
-# 逐行转录；mpnet 768 重算必须逐位同序，不允许只断「命中」）
-Q1_IDS = ["a5ac6af02544fc330202e3a512198d12",
-          "69bc86bd5f56599c09754864816a5aa7",
-          "36d88099b89eb2d7bc95cb8b63ae1b20"]
-Q2_IDS = ["398ef19f41b0901b04c3a7f3984e8ece",
-          "a4a1083844306f192273f41763fa7020",
-          "5f3dd7341b0553129fcf87746a5a4aac",
-          "5c9058abbc25c15702dc9249e813aab6",
-          "667621d5b55057536b0658d9e7801593"]
-Q3_IDS = ["8fd71136657b7b29cf551ddb17224fa8",
-          "65b9c51cd155fe49adbd9ac0609b7696",
-          "3936c514758ed8d5d33f1235533c57a0",
-          "33b9cd6b58aa0b00c06bb433b61e2c9a",
-          "c8fe70ddd727296a11a80cfb59e90c50"]
+# Phase0/Task2 mpnet 基线（/mnt/artifacts/.../task2_direction/recall_baseline_q1q2q3.json
+# 逐行转录，该件 sha256=d67db07c…；锁内适配 Phase 2.5 换嵌入：以下有序 id 封存为
+# _MPNET768_* 历史常量，只在 mpnet config 轨与活库对账；qwen 轨期望值只许来自
+# E6 机产数据件（gen_post_rebuild_snapshots 产物①③），不手写第二事实源）
+_MPNET768_Q1_IDS = ["a5ac6af02544fc330202e3a512198d12",
+                    "69bc86bd5f56599c09754864816a5aa7",
+                    "36d88099b89eb2d7bc95cb8b63ae1b20"]
+_MPNET768_Q2_IDS = ["398ef19f41b0901b04c3a7f3984e8ece",
+                    "a4a1083844306f192273f41763fa7020",
+                    "5f3dd7341b0553129fcf87746a5a4aac",
+                    "5c9058abbc25c15702dc9249e813aab6",
+                    "667621d5b55057536b0658d9e7801593"]
+_MPNET768_Q3_IDS = ["8fd71136657b7b29cf551ddb17224fa8",
+                    "65b9c51cd155fe49adbd9ac0609b7696",
+                    "3936c514758ed8d5d33f1235533c57a0",
+                    "33b9cd6b58aa0b00c06bb433b61e2c9a",
+                    "c8fe70ddd727296a11a80cfb59e90c50"]
+_MPNET768_RECALL = {
+    "q1_yaml_override": _MPNET768_Q1_IDS,
+    "q2_egl_black_screen": _MPNET768_Q2_IDS,
+    "q3_cuda_illegal_address": _MPNET768_Q3_IDS,
+}
+# /mnt Task2 mpnet 基线件（只进 mpnet 轨交叉核对，qwen 轨不读它）
+_TASK2_MPNET_BASELINE = Path(
+    "/mnt/artifacts/simpraxis/phase1/task2_direction/"
+    "recall_baseline_q1q2q3.json")
+_TASK2_MPNET_BASELINE_SHA256 = (
+    "d67db07c78780ad7fcee5e902db374a45a4624bfab01a084919f33a91724f5e7")
+_MPNET_MODEL_SUFFIX = "paraphrase-multilingual-mpnet-base-v2"
 Q1_TEXT = ("YAML 配置文件为什么会静默覆盖命令行参数？我在命令行传 --device cuda:0 "
            "为什么还是跑在 CPU 上？")
 Q2_TEXT = "headless 无显示器，EGL 离屏渲染初始化失败黑屏怎么排查？"
 Q3_TEXT = "Isaac Sim 里 cudaErrorIllegalAddress 非法显存地址在什么情况下发生？"
+
+_SNAPSHOT_NAME_TO_QKEY = {
+    "q1_yaml_override": "Q1", "q2_egl_black_screen": "Q2",
+    "q3_cuda_illegal_address": "Q3"}
+
+
+def _embed_track() -> str:
+    """按活 config 模型全名选轨（不认模型即硬红，不 skip 不猜）。"""
+    model = str(select_embedding().get("model_name", ""))
+    if model.endswith(_MPNET_MODEL_SUFFIX):
+        return "mpnet768"
+    if model == gps.QWEN_MODEL:
+        return "qwen1024"
+    raise AssertionError(
+        f"双轨测试只认 mpnet/Qwen3，活 config model_name={model!r} 未识别")
 
 
 @pytest.fixture
@@ -149,12 +181,14 @@ def test_01b_replay_is_idempotent(store, roots):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.kb_integration
-def test_02_real_kb_table_still_1542_dim768():
+def test_02_real_kb_table_still_1542_dim_matches_config():
+    # 改名留痕（锁内适配 Phase 2.5 换嵌入）：原 test_02_real_kb_table_still_1542_dim768
     require_kb_integration(data=True)
     eng = VectorEngine()
     tbl = eng.table()
     assert tbl.count_rows() == 1542, "kb_chunks 被污染（学习只能写新表）"
-    assert tbl.schema.field("vector").type.list_size == 768
+    assert tbl.schema.field("vector").type.list_size == \
+        int(select_embedding()["dim"])
 
 
 @pytest.mark.kb_integration
@@ -170,23 +204,42 @@ def test_03_qxx_atomic_chunks_still_104():
 @pytest.mark.kb_integration
 def test_04_q1q2q3_ordered_ids_match_phase0_baseline():
     require_kb_integration(data=True)
+    track = _embed_track()
     eng = VectorEngine()
-    q1 = [h["id"] for h in eng.query_kb(
-        Q1_TEXT, namespace="capabilities", project="lw_benchhub", top_k=3)]
-    q2 = [h["id"] for h in eng.query_kb(
-        Q2_TEXT, namespace="troubleshooting", top_k=5)]
-    q3 = [h["id"] for h in eng.query_kb(
-        Q3_TEXT, namespace="capabilities", top_k=5)]
-    assert q1 == Q1_IDS
-    assert q2 == Q2_IDS
-    assert q3 == Q3_IDS
-    # 与 /mnt Task2 基线文件交叉核对（防止转录漂移）
-    base = json.loads(Path(
-        "/mnt/artifacts/simpraxis/phase1/task2_direction/"
-        "recall_baseline_q1q2q3.json").read_text(encoding="utf-8"))
-    assert [h["id"] for h in base["Q1"]["hits"]] == Q1_IDS
-    assert [h["id"] for h in base["Q2"]["hits"]] == Q2_IDS
-    assert [h["id"] for h in base["Q3"]["hits"]] == Q3_IDS
+    live = {
+        "q1_yaml_override": [h["id"] for h in eng.query_kb(
+            Q1_TEXT, namespace="capabilities", project="lw_benchhub", top_k=3)],
+        "q2_egl_black_screen": [h["id"] for h in eng.query_kb(
+            Q2_TEXT, namespace="troubleshooting", top_k=5)],
+        "q3_cuda_illegal_address": [h["id"] for h in eng.query_kb(
+            Q3_TEXT, namespace="capabilities", top_k=5)],
+    }
+    if track == "mpnet768":
+        # 活库有序 id == 封存 mpnet 常量
+        for name, ids in _MPNET768_RECALL.items():
+            assert live[name] == ids, name
+        # 与 /mnt Task2 基线件交叉核对（sha 钉死防转录漂移；该路径只进 mpnet 轨）
+        raw = _TASK2_MPNET_BASELINE.read_bytes()
+        assert hashlib.sha256(raw).hexdigest() == _TASK2_MPNET_BASELINE_SHA256
+        base = json.loads(raw.decode("utf-8"))
+        assert [h["id"] for h in base["Q1"]["hits"]] == _MPNET768_Q1_IDS
+        assert [h["id"] for h in base["Q2"]["hits"]] == _MPNET768_Q2_IDS
+        assert [h["id"] for h in base["Q3"]["hits"]] == _MPNET768_Q3_IDS
+        return
+
+    # qwen 轨：活库 == E6 产物①（仓内 ids+filters）== 产物③（/mnt 同 schema 件）；
+    # 机产件缺席即硬红（先运行 gen_post_rebuild_snapshots），严禁 skip/xfail。
+    p1 = Path(gps.PRODUCT_Q1Q2Q3)
+    p3 = Path(gps.PRODUCT_BASELINE_QWEN)
+    for p in (p1, p3):
+        assert p.is_file(), f"先运行 gen_post_rebuild_snapshots 生成 {p}"
+    product1 = json.loads(p1.read_text(encoding="utf-8"))
+    product3 = json.loads(p3.read_text(encoding="utf-8"))
+    for name, qkey in _SNAPSHOT_NAME_TO_QKEY.items():
+        ids3 = [h["id"] for h in product3[qkey]["hits"]]
+        assert product1[name]["ids"] == ids3, name
+        assert live[name] == product1[name]["ids"], name
+        assert live[name] == ids3, name
 
 
 @pytest.mark.kb_integration

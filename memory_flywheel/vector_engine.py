@@ -43,6 +43,11 @@ DOC_TYPES = (
 )
 
 
+def _table_vector_dim(tbl) -> int | None:
+    """读 Lance 表 vector 字段的固定 list_size（非固定长返回 None）。"""
+    return getattr(tbl.schema.field("vector").type, "list_size", None)
+
+
 class VectorEngine:
     def __init__(self, uri: str | None = None):
         # Task0b：默认库随 KB data/ 软链（$KB_ROOT/data/lancedb，实体在 /mnt）。
@@ -61,8 +66,7 @@ class VectorEngine:
         """512(bge-small) 与 384(MiniLM) 混库是硬错误：启动即拒，给出 --rebuild 处置。"""
         if TABLE_NAME not in self.db.table_names():
             return
-        vtype = self.db.open_table(TABLE_NAME).schema.field("vector").type
-        existing_dim = getattr(vtype, "list_size", None)
+        existing_dim = _table_vector_dim(self.db.open_table(TABLE_NAME))
         if existing_dim is not None and int(existing_dim) != self.dim:
             raise RuntimeError(
                 f"已有 {TABLE_NAME} 向量维度 {existing_dim} 与当前嵌入配置 {self.dim} 不一致"
@@ -207,11 +211,22 @@ class VectorEngine:
         if not self.solution_table_exists():
             raise RuntimeError(
                 f"表 {SOLUTION_TABLE_NAME} 不存在（先运行 ingest_solutions）")
+        # 锁内适配（Phase 2.5 换嵌入）：四组合拦截矩阵 §4 的 query_solutions
+        # 维度 fail-fast——构造期不检查 solution_chunks（历史行为），故查询前
+        # 必须显式拦；否则 768 查询向量打 1024 表只会在 Lance 内核报含混错误。
+        sol_tbl = self.db.open_table(SOLUTION_TABLE_NAME)
+        existing_dim = _table_vector_dim(sol_tbl)
+        if existing_dim is not None and int(existing_dim) != self.dim:
+            raise RuntimeError(
+                f"已有 {SOLUTION_TABLE_NAME} 向量维度 {existing_dim} 与当前嵌入配置 "
+                f"{self.dim} 不一致（疑似切换过嵌入模型）。处置：运行 "
+                f"memory_flywheel.scripts.ingest_solutions 按当前嵌入整表重灌 "
+                f"{SOLUTION_TABLE_NAME}；禁止不同维度混查同一张表")
         if solution_id is not None:
             from orchestrator.solutions import validate_solution_id
             validate_solution_id(solution_id)
         qv = self.embed([query])[0]
-        search = self.db.open_table(SOLUTION_TABLE_NAME).search(qv)
+        search = sol_tbl.search(qv)
         if solution_id:
             search = search.where(f"solution_id = '{solution_id}'")
         rows = search.limit(top_k).to_list()

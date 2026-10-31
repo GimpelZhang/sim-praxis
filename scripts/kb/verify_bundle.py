@@ -7,10 +7,13 @@
                                      [--engine-allow-ancestor]
 
 校验项（全过 exit 0；内容不符 exit 1；用法/缺件硬错 exit 2）：
-  1. manifest schema/tier/嵌入模型/768 维；core 表集恰为 kb_chunks+
+  1. manifest schema/tier；embedding_model/vector_dim 以 **manifest 自描述**
+     为准（锁内适配 Phase 2.5 换嵌入：历史六包为 mpnet/768 永久可验，新包
+     为 Qwen3/1024；代码不再硬钉模型名/768），core 表集恰为 kb_chunks+
      phase1_learnings，extended 必须包含 core；
   2. 包内文件集与 manifest 逐项 sha256/size 一致，无多无缺，无未登记软链；
-  3. 直接打开包里的 .lance 表：行数、vector 维度逐项等于 manifest；
+  3. 直接打开包里的 .lance 表：行数、vector 维度逐项等于 manifest，且每表
+     维度 == manifest 顶层 vector_dim（混维度以 manifest 记录值为准）；
   4. --kb-root 给定时：记录的 kb_sha 是当前 HEAD 祖先（内容层只增不改），
      且 knowledge/ 哈希集通过 kb_pins；
   5. --sim-praxis-root 给定时：sim_praxis_sha == 当前 HEAD（默认严格）；
@@ -36,7 +39,6 @@ import lancedb  # noqa: E402
 from memory_flywheel import kb_pins  # noqa: E402
 
 BUNDLE_SCHEMA = "simpraxis.bundle_manifest.v1"
-EMBEDDING_MODEL_EXPECTED = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
 CORE_TABLES = ("kb_chunks", "phase1_learnings")
 
 
@@ -77,10 +79,15 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
     tier = manifest.get("tier")
     if tier not in ("core", "extended"):
         problems.append(f"tier 非法：{tier!r}")
-    if manifest.get("embedding_model") != EMBEDDING_MODEL_EXPECTED:
-        problems.append(f"embedding_model != mpnet：{manifest.get('embedding_model')!r}")
-    if manifest.get("vector_dim") != 768:
-        problems.append(f"vector_dim != 768：{manifest.get('vector_dim')!r}")
+    # 锁内适配（Phase 2.5 换嵌入）：模型/维度以 manifest 自描述为准——
+    # 历史 mpnet/768 包与新 Qwen3/1024 包同规则可验，不硬钉具体模型名。
+    embedding_model = manifest.get("embedding_model")
+    if not isinstance(embedding_model, str) or not embedding_model:
+        problems.append(f"embedding_model 缺失或非字符串：{embedding_model!r}")
+    manifest_dim = manifest.get("vector_dim")
+    if not isinstance(manifest_dim, int) or isinstance(manifest_dim, bool) \
+            or manifest_dim <= 0:
+        problems.append(f"vector_dim 缺失或非正整数：{manifest_dim!r}")
 
     tables = manifest.get("tables")
     if not isinstance(tables, dict) or not tables:
@@ -137,8 +144,10 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
                 if dim != meta.get("vector_dim"):
                     problems.append(
                         f"{table}: 维度 {dim} != manifest {meta.get('vector_dim')}")
-                if dim != 768:
-                    problems.append(f"{table}: 维度 {dim} != 768（混维度）")
+                if isinstance(manifest_dim, int) and dim != manifest_dim:
+                    problems.append(
+                        f"{table}: 维度 {dim} != manifest 顶层 vector_dim "
+                        f"{manifest_dim}（混维度）")
 
     # --- kb_sha 交叉核对：记录点必须是当前 HEAD 祖先（只增不改）---
     recorded_kb = manifest.get("kb_sha")

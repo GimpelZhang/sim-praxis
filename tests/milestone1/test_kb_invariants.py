@@ -5,7 +5,8 @@
 
 Task0b（三层分离）后分两套（与 paid marker 同构，非 test.skip 放水）：
 - 读活 KB 仓的检查打 kb_integration（需 SIMPRAXIS_KB_INTEGRATION=1）：
-  HEAD≥迁移提交 + knowledge/ 32-md 哈希集、工作区干净、活数据层 1542/768、
+  HEAD≥迁移提交 + knowledge/ 32-md 哈希集、工作区干净、活数据层 1542 行且
+  vector 维度 == 活嵌入 config（mpnet=768；窗后 Qwen3=1024）、
   check_chunk_integrity --expect 104；
 - 纯常量检查（表名）留在默认套。
 纯本地 git/lancedb/子进程检查：不联网、0 付费。
@@ -18,12 +19,14 @@ import sys
 import pytest
 
 from memory_flywheel import kb_pins
+from memory_flywheel.embedding_selector import select_embedding
 from memory_flywheel.scripts.ingest_kb import KB_ROOT
 from memory_flywheel.vector_engine import TABLE_NAME, VectorEngine
 from tests.kb_support import require_kb_integration
 
 EXPECTED_KB_ROWS = 1542          # Phase 0 全量入库日志：kb_chunks 1542 行
-EXPECTED_VECTOR_DIM = 768        # paraphrase-multilingual-mpnet-base-v2
+# 锁内适配（Phase 2.5 换嵌入）：维度不再钉 768，按活 config 断言（mpnet=768，
+# 窗后 Qwen3=1024）；dim 真值唯一来源 select_embedding()["dim"]。
 EXPECTED_Q_CHUNKS = 104          # Qxx 原子块（check_chunk_integrity --expect 104）
 
 
@@ -50,7 +53,7 @@ def test_kb_worktree_clean():
 
 @pytest.mark.kb_integration
 def test_lancedb_baseline_table_rows_and_dim():
-    """kb_chunks 基线：1542 行、vector list_size=768（学习只允许写新表）。"""
+    """kb_chunks 基线：1542 行、vector list_size == 活嵌入 config 维度。"""
     require_kb_integration(data=True)
     eng = VectorEngine()
     table = eng.table()
@@ -58,7 +61,9 @@ def test_lancedb_baseline_table_rows_and_dim():
         f"kb_chunks 行数 {table.count_rows()} != 基线 {EXPECTED_KB_ROWS}（基线表被污染？）"
     )
     dim = table.schema.field("vector").type.list_size
-    assert dim == EXPECTED_VECTOR_DIM, f"vector 维度 {dim} != {EXPECTED_VECTOR_DIM}"
+    expect_dim = int(select_embedding()["dim"])
+    assert dim == expect_dim, (
+        f"vector 维度 {dim} != 嵌入 config {expect_dim}（疑似切换过嵌入模型未重灌）")
 
 
 def test_baseline_table_name_is_kb_chunks():

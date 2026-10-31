@@ -34,6 +34,7 @@ import lancedb
 import pyarrow as pa
 import pytest
 
+from memory_flywheel.embedding_selector import select_embedding
 from memory_flywheel.phase1.learning_store import (
     TABLE_NAME as P1_TABLE,
     LearningStore,
@@ -232,7 +233,8 @@ def test_phase2_table_idempotent_dim_guard(tmp_path):
     opened = fdb.open_table(TABLE_NAME)
     assert opened.schema.field("vector").type.list_size == 128
 
-    # 维度同为 768 但列集合不符（12 列 phase1 样式/异 schema 文件冒充新表）
+    # 维度同为活嵌入 config dim（锁内适配 Phase 2.5 换嵌入：mpnet=768/
+    # Qwen3=1024，不钉字面量）但列集合不符（12 列 phase1 样式/异 schema 冒充）
     wrong_cols_dir = tmp_path / "wrongcols"
     wrong_cols_dir.mkdir()
     wdb = lancedb.connect(str(wrong_cols_dir))
@@ -272,7 +274,9 @@ def test_evolution_columns_constraints(tmp_path):
     assert evo_schema.field("evolution_round").type == pa.int64()
     assert evo_schema.field("parent_run_id").type == pa.string()
     assert evo_schema.field("pareto_gain_ratio").type == pa.float64()
-    assert evo_schema.field("vector").type.list_size == p2.dim == 768
+    # 锁内适配（Phase 2.5 换嵌入）：不钉 768，schema/实例/config 三者同维
+    assert evo_schema.field("vector").type.list_size == p2.dim == int(
+        select_embedding()["dim"])
 
     # 证据件（双根校验复用继承实现）
     evo_md = p2_root / "evolutions" / "evolution_v1_to_v2_r1.md"

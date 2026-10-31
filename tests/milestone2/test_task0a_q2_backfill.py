@@ -29,6 +29,7 @@ from pathlib import Path
 
 import pytest
 
+from memory_flywheel.embedding_selector import select_embedding
 from memory_flywheel.phase1 import learning_store as ls_mod
 from memory_flywheel.phase1.learning_store import (
     GATE_ACCEPTED,
@@ -43,7 +44,21 @@ from memory_flywheel.phase1.offgraph_learning import (
     write_offgraph_learning,
 )
 from orchestrator.common.clock import parse_ts_iso_strict
+from scripts.kb import gen_post_rebuild_snapshots as gps
 from tests.kb_support import require_kb_integration  # Task0b：活库读取守门
+
+_MPNET_MODEL_SUFFIX = "paraphrase-multilingual-mpnet-base-v2"
+
+
+def _embed_track() -> str:
+    """按活 config 模型全名选轨（不认模型即硬红，不 skip 不猜）。"""
+    model = str(select_embedding().get("model_name", ""))
+    if model.endswith(_MPNET_MODEL_SUFFIX):
+        return "mpnet768"
+    if model == gps.QWEN_MODEL:
+        return "qwen1024"
+    raise AssertionError(
+        f"双轨测试只认 mpnet/Qwen3，活 config model_name={model!r} 未识别")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNS_ROOT = Path(os.environ.get("SIMPRAXIS_RUN_DIR",
@@ -263,7 +278,8 @@ def test_q2_backfill_exactly_one_row_five_total(seeded_site):
     assert row["rung"] == 1            # 非 4：Q2 无 Rung1-4 阶梯/无 VLM
     assert row["gate_source"] == GATE_ACCEPTED_SUPPLEMENTARY
     assert row["evidence_relpath"] == Q2_RELPATH
-    assert len(row["vector"]) == 768
+    # 锁内适配（Phase 2.5 换嵌入）：维度不钉 768，按活 store config 断言
+    assert len(row["vector"]) == store.dim == int(select_embedding()["dim"])
     # created_at 严格 Z 且为写入时刻（UTC 今天），不回填 2026-10-16
     created = parse_ts_iso_strict(row["created_at"])
     assert created.date() == datetime.now(timezone.utc).date()
@@ -519,17 +535,28 @@ def test_compose_text_facts_traced_and_empty_notes(seeded_site):
 @pytest.mark.kb_integration
 def test_q2_semantic_recall_offline(seeded_site):
     site = seeded_site
-    # mpnet 必须命中共机缓存（0 下载的物证）
-    assert site["store"].config["model_name"].endswith(
-        "paraphrase-multilingual-mpnet-base-v2")
-    assert Path(site["store"].config["onnx_path"]).is_file()
+    cfg = site["store"].config
+    track = _embed_track()
+    if track == "mpnet768":
+        # mpnet 必须命中共机缓存（0 下载的物证）
+        assert cfg["model_name"].endswith(_MPNET_MODEL_SUFFIX)
+        assert Path(cfg["onnx_path"]).is_file()
+    else:
+        # 锁内适配（Phase 2.5 换嵌入）：Qwen3 为 fp 主件 + 外部权重件双登记，
+        # 两件 resolved_path 都必须在共机缓存在场（0 下载物证），缺件即硬红。
+        assert cfg["model_name"] == gps.QWEN_MODEL
+        files = {f["relpath"]: f for f in cfg["onnx_files"]}
+        assert set(files) == {"onnx/model.onnx", "onnx/model.onnx_data"}
+        for rel in ("onnx/model.onnx", "onnx/model.onnx_data"):
+            assert Path(files[rel]["resolved_path"]).is_file(), rel
+        assert Path(cfg["onnx_data_path"]).is_file()
 
     write_offgraph_learning(
         decision_json=site["decision_path"], evidence_relpath=Q2_RELPATH,
         store=site["store"], phase2_root_path=site["phase2_root"])
     hits = site["store"].query(
         "lidar rain fog snow weather carla", top_k=3)
-    assert hits, "断网临时库应可召回（mpnet 本地缓存）"
+    assert hits, f"断网临时库应可召回（{track} 共机本地缓存，0 下载）"
     assert hits[0]["run_id"] == THREAD, (
         f"Q2 新行未居首：{[h['run_id'] for h in hits]}")
 

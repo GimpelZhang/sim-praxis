@@ -25,7 +25,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from memory_flywheel.embedding_selector import select_embedding
 from orchestrator.solutions import SolutionError, load_manifest, resolve_solution
+from scripts.kb import gen_post_rebuild_snapshots as gps
 from tests.kb_support import kb_root as live_kb_root
 from tests.kb_support import require_kb_integration
 
@@ -113,6 +115,39 @@ _PHASE1_LEARNING_IDS_BASELINE = {
     "b6eb36a26961",  # 2026-10-28T09:11:43Z run_5 机判墙② 峰值测量墙
     "1b5db0a5d3ac",  # 2026-10-28T09:44:01Z run_5 机判墙③ 铰链耦合运动学 speed/clearance
 }
+
+# 锁内适配（Phase 2.5 换嵌入）：migration_pre_inventory 的 recall_snapshot 是
+# 2026-10-17 mpnet/768 时点的历史冻结件，以下有序 id 逐字封存（与
+# test_learning_isolation._MPNET768_RECALL 同源），谁把清单改成窗后 qwen
+# 活值谁红；qwen 轨活链只对 E6 机产产物②（gen_post_rebuild_snapshots）。
+_MPNET768_RECALL_SNAPSHOT = {
+    "q1_yaml_override": ["a5ac6af02544fc330202e3a512198d12",
+                         "69bc86bd5f56599c09754864816a5aa7",
+                         "36d88099b89eb2d7bc95cb8b63ae1b20"],
+    "q2_egl_black_screen": ["398ef19f41b0901b04c3a7f3984e8ece",
+                            "a4a1083844306f192273f41763fa7020",
+                            "5f3dd7341b0553129fcf87746a5a4aac",
+                            "5c9058abbc25c15702dc9249e813aab6",
+                            "667621d5b55057536b0658d9e7801593"],
+    "q3_cuda_illegal_address": ["8fd71136657b7b29cf551ddb17224fa8",
+                                "65b9c51cd155fe49adbd9ac0609b7696",
+                                "3936c514758ed8d5d33f1235533c57a0",
+                                "33b9cd6b58aa0b00c06bb433b61e2c9a",
+                                "c8fe70ddd727296a11a80cfb59e90c50"],
+}
+_MPNET_MODEL_SUFFIX = "paraphrase-multilingual-mpnet-base-v2"
+
+
+def _embed_track() -> str:
+    """按活 config 模型全名选轨（不认模型即硬红，不 skip 不猜）。"""
+    model = str(select_embedding().get("model_name", ""))
+    if model.endswith(_MPNET_MODEL_SUFFIX):
+        return "mpnet768"
+    if model == gps.QWEN_MODEL:
+        return "qwen1024"
+    raise AssertionError(
+        f"双轨测试只认 mpnet/Qwen3，活 config model_name={model!r} 未识别")
+
 
 def _load_script(name: str):
     spec = importlib.util.spec_from_file_location(
@@ -610,11 +645,25 @@ def test_lancedb_move_regression(monkeypatch):
     # 历史证据冻结：迁移清单与 manifest 互证恒 5，改写历史即红
     assert inventory["rows"]["phase1_learnings"] == \
         manifest["tables"]["phase1_learnings"] == 5
-    assert state["vector_dim"] == 768
+    # 锁内适配（Phase 2.5 换嵌入）：维度不钉 768，按活 config 断言
+    # （mpnet=768，窗后 Qwen3=1024），dim 真值唯一来源 select_embedding()。
+    assert state["vector_dim"] == int(select_embedding()["dim"])
 
-    # 3 条固定查询召回 id 与迁移前快照逐项一致
-    for name, ids in inventory["recall_snapshot"].items():
-        assert state["recall_snapshot"][name] == ids, name
+    # 3 条固定查询召回 id：迁移清单是 2026-10-17 mpnet/768 历史冻结件，恒对
+    # 封存常量（谁把清单改成窗后活值谁红）；活链按轨——mpnet 轨 == 清单，
+    # qwen 轨 == E6 机产产物②（文件缺席硬红报「先运行 gen_post_rebuild_snapshots」）。
+    track = _embed_track()
+    for name, ids in _MPNET768_RECALL_SNAPSHOT.items():
+        assert inventory["recall_snapshot"][name] == ids, (
+            name, "迁移前清单历史冻结值被改写")
+        if track == "mpnet768":
+            assert state["recall_snapshot"][name] == ids, name
+    if track == "qwen1024":
+        p2 = Path(gps.PRODUCT_TASK0B)
+        assert p2.is_file(), f"先运行 gen_post_rebuild_snapshots 生成 {p2}"
+        product2 = json.loads(p2.read_text(encoding="utf-8"))
+        for name in _MPNET768_RECALL_SNAPSHOT:
+            assert state["recall_snapshot"][name] == product2[name], name
     # 活 phase1_learnings：44 行且 44 个 id（12 位前缀）集合钉死，只多不少
     # （32 行旧账：升阶战役 12 + 侧车 1 + Task6 Gate2 accept 1 + Task7 六行；
     # +Task8 流体战役十二行 2026-10-27…28，2026-10-31 Task6 AC-T6-7 对账；
@@ -633,14 +682,23 @@ def test_lancedb_move_regression(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_bundle_verify_roundtrip(tmp_path, monkeypatch):
-    """tmp 合成库 core/extended 打包-对账往返 + 篡改拒绝（0 付费，不读活数据）。"""
+    """tmp 合成库 core/extended 打包-对账往返 + 篡改拒绝（0 付费，不读活数据）。
+
+    锁内适配（Phase 2.5 换嵌入）：本 cell 显式封 mpnet/768（monkeypatch
+    select_embedding），与 test_bundle_qwen1024_manifest_cell 的 Qwen3/1024
+    cell 双轨并存——活 config 切 qwen 后本 cell 仍绿，不依赖活 config。
+    """
     import lancedb
     bk = _load_script("bundle_kb_asset.py")
     vb = _load_script("verify_bundle.py")
 
+    dim = 768
+    monkeypatch.setattr(bk, "select_embedding", lambda: {
+        "model_name": "sentence-transformers/" + _MPNET_MODEL_SUFFIX,
+        "dim": dim})
+
     uri = tmp_path / "data" / "lancedb"
     db = lancedb.connect(str(uri))
-    dim = 768
 
     def rows(n, tag):
         return [{"id": f"{tag}{i}", "vector": [0.0] * dim} for i in range(n)]
@@ -692,6 +750,68 @@ def test_bundle_verify_roundtrip(tmp_path, monkeypatch):
     mp.write_text(json.dumps(tampered, ensure_ascii=False), encoding="utf-8")
     problems = vb.verify_bundle(core, sim_root=REPO_ROOT)
     assert any("core 包表集" in p for p in problems), problems
+
+
+def test_bundle_qwen1024_manifest_cell(tmp_path, monkeypatch):
+    """锁内适配（Phase 2.5 换嵌入）：合成 1024 维库 + monkeypatch Qwen3 config，
+    manifest 自描述 Qwen3/1024、verify 按 manifest 值对账；混维度表打包拒绝。
+
+    与上一测的 mpnet/768 cell 双轨并存：本测不碰活 config、不读活数据、0 付费。
+    """
+    import lancedb
+    bk = _load_script("bundle_kb_asset.py")
+    vb = _load_script("verify_bundle.py")
+
+    uri = tmp_path / "data1024" / "lancedb"
+    db = lancedb.connect(str(uri))
+    # 合成世界维度唯一本地来源（gps.QWEN_DIM 自身在生产脚本里仅用于对 config
+    # 双断言，不构成 dim 事实源）；patch 后的 select_embedding 是唯一 config 源。
+    dim = int(gps.QWEN_DIM)
+
+    def rows(n, tag):
+        return [{"id": f"{tag}{i}", "vector": [0.0] * dim} for i in range(n)]
+
+    db.create_table("kb_chunks", data=rows(3, "k"), mode="create")
+    db.create_table("phase1_learnings", data=rows(2, "l"), mode="create")
+    db.create_table("solution_chunks", data=rows(1, "s"), mode="create")
+
+    qwen_cfg = {"model_name": gps.QWEN_MODEL, "dim": dim}
+    monkeypatch.setattr(bk, "select_embedding", lambda: qwen_cfg)
+
+    kb_git = tmp_path / "kbgit"
+    kb_git.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=kb_git, check=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                    "commit", "-qm", "x", "--allow-empty"], cwd=kb_git, check=True)
+    out = tmp_path / "bundles1024"
+
+    core = bk.build_bundle(tier="core", uri=uri, out_root=out,
+                           kb_root=kb_git, sim_root=REPO_ROOT)
+    extended = bk.build_bundle(tier="extended", uri=uri, out_root=out,
+                               kb_root=kb_git, sim_root=REPO_ROOT)
+    for b in (core, extended):
+        assert vb.verify_bundle(b, sim_root=REPO_ROOT) == []
+        m = json.loads((b / "bundle_manifest.json").read_text(encoding="utf-8"))
+        assert m["schema"] == "simpraxis.bundle_manifest.v1"
+        assert m["embedding_model"] == gps.QWEN_MODEL
+        assert m["vector_dim"] == dim
+        for meta in m["tables"].values():
+            assert meta["vector_dim"] == dim
+
+    # 混维度守卫：异维表在 Qwen3 config 下打包必须 fail-closed
+    other_dim = 768
+    bad_uri = tmp_path / "bad" / "lancedb"
+    bad_db = lancedb.connect(str(bad_uri))
+    bad_db.create_table(
+        "kb_chunks",
+        data=[{"id": "k0", "vector": [0.0] * other_dim}], mode="create")
+    bad_db.create_table(
+        "phase1_learnings",
+        data=[{"id": "l0", "vector": [0.0] * dim}], mode="create")
+    with pytest.raises(bk.BundleError, match="混维度守卫"):
+        bk.build_bundle(tier="core", uri=bad_uri,
+                        out_root=tmp_path / "badbundles",
+                        kb_root=kb_git, sim_root=REPO_ROOT)
 
     # 10. 构造期内容层改道守卫（QA 实测写穿事故的固化）：显式 kb_root 与
     # SIMPRAXIS_SOLUTIONS_ROOT 不一致必须 fail-closed，且发生在任何 mkdir/写之前。

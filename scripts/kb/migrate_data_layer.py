@@ -20,6 +20,12 @@
 
 无 --apply 为 dry-run（只做清单与设备检查，不动文件系统布局）。
 本脚本只允许操作调用方显式给出的路径；实跑红线见项目 CLAUDE.md 规则 5/6。
+
+封存注（Phase 2.5 Task6 Stage A 换嵌入，2026-10-31）：本件是 Task0b 的
+一次性历史迁移件，换嵌入后不重跑（dormant）。其 verify_only 自 2026-10-17
+起即按 data/manifest.json 自描述的 embedding_model/vector_dim 对账，全文件
+无 768 代码字面量（docstring 中「768 维」仅记述历史 manifest）；Phase 2.5
+的 Qwen3/1024 重建由维护窗口的 reembed/ingest 通路负责，与本件无关。
 """
 from __future__ import annotations
 
