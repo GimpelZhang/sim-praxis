@@ -2,8 +2,10 @@
 """Phase 2.5 Task6 — Gate1 全量知识四路召回与规划题面升级（全部离线 0 付费）。
 
 覆盖验收（计划 §4 AC-T6-1/2/5/6/7/8；AC-T6-4 的机判在
-scripts/phase25/eval_planner_recall.py，其负结论的活库重算在本文件尾部
-kb_integration 测试）：
+scripts/phase25/eval_planner_recall.py；mpnet/768 负结论的双轨对账在本文件
+尾部 kb_integration 测试——mpnet 轨活库重算、qwen 轨几何无关不变量，
+mpnet 历史值另在 iter1/iter2 报告文件证据链永久封存，见 fcb3fcd6 §3.4
+缺口双轨适配，2026-11-01 用户当日裁决）：
 
   A 查询构造器/同义词典：零命中逐字节旧 hint、ASCII 词边界（ACT 不命中
     react/action）、CJK 子串、档级主题句只进 kb 路、词典校验 fail-closed、
@@ -80,7 +82,11 @@ from orchestrator.direction.setter import (
     validate_proposals,
 )
 from orchestrator.solutions import validate_solution_id
+from memory_flywheel.embedding_selector import select_embedding
+from scripts.kb import gen_post_rebuild_snapshots as gps
 from tests.kb_support import require_kb_integration
+
+_MPNET_MODEL_SUFFIX = "paraphrase-multilingual-mpnet-base-v2"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = (REPO_ROOT / "tests" / "milestone25" / "fixtures"
@@ -988,13 +994,50 @@ LIBERO_VLA_QUERIES = [
     "OpenVLA LIBERO 动作接口 夹爪 归一化 action space 闭环",
 ]
 
-# AC-T6-4 冻结负结论（iter1/iter2 同数；r2 作用域 lane 零入座，详见报告）。
+# AC-T6-4 mpnet/768 封存负结论（iter1/iter2 同数；r2 作用域 lane 零入座，
+# 详见报告；攢批119 9c894eb）。锁内适配（Phase 2.5 换嵌入，冻结预注册
+# fcb3fcd6 §3.4 覆盖缺口，2026-11-01 用户当日裁决双轨适配）：本集与
+# PROD_UNION_3 是 mpnet 几何的历史封存值，只在 mpnet 轨对活库断言、并在
+# iter1/iter2 报告文件证据链永久对账；qwen 轨禁止回填任何几何活值
+# （预注册 §8），qwen 活证据仅存窗口门日志与 iter4 报告。
 FROZEN_MISSES = {
     "kb_check_success", "kb_execmode", "kb_16d_layout", "kb_pipolicy",
     "sol_win1_env", "sol_win2_servo", "sol_win3_clearance",
     "sol_win4_region", "sol_win5_finger", "sol_win6_align", "sol_win10_exit",
     "l_fluid_wall"}
 PROD_UNION_3 = {"2e7d3ac99db9", "7f9bdabc4e72", "8fc302da5604"}
+
+
+def _embed_track() -> str:
+    """按活 config 模型全名选轨（不认模型即硬红，不 skip 不猜）。
+
+    锁内适配（Phase 2.5 换嵌入，冻结预注册 fcb3fcd6 §3.4 覆盖缺口，
+    2026-11-01 用户当日裁决双轨适配）：范式同
+    tests/milestone1/test_learning_isolation.py 的 _embed_track()。
+    """
+    model = str(select_embedding().get("model_name", ""))
+    if model.endswith(_MPNET_MODEL_SUFFIX):
+        return "mpnet768"
+    if model == gps.QWEN_MODEL:
+        return "qwen1024"
+    raise AssertionError(
+        f"双轨测试只认 mpnet/Qwen3，活 config model_name={model!r} 未识别")
+
+
+def _live_route_id_sets() -> dict:
+    """活库四表真实 id 集（32 位全文，非 12 位前缀）；几何无关内容身份用。"""
+    import lancedb
+    from memory_flywheel import kb_pins
+    db = lancedb.connect(kb_pins.default_lancedb_uri())
+
+    def _ids(name: str) -> set[str]:
+        rows = (db.open_table(name).search(None)
+                .select(["id"]).limit(1_000_000).to_list())
+        return {str(r["id"]) for r in rows}
+
+    return {"kb": _ids("kb_chunks"),
+            "solutions": _ids("solution_chunks"),
+            "learnings": _ids("phase1_learnings") | _ids("phase2_learnings")}
 
 
 @pytest.mark.kb_integration
@@ -1020,7 +1063,10 @@ def test_live_four_table_invariants_1542_44_94_1(monkeypatch):
 
 @pytest.mark.kb_integration
 def test_live_task6_3_libero_scoped_seam_12_prod_union_3(monkeypatch):
-    """AC-T6-3：只读作用域缝并集 12/12；生产距离合并并集诚实只有 3/12（负）。"""
+    """AC-T6-3 双轨：作用域缝并集 12/12 两轨皆活（几何无关内容覆盖）；
+    生产距离合并「只有 3/12」是 mpnet/768 封存负结论，仅 mpnet 轨对活库
+    重算，qwen 轨只保留几何无关真断言（fcb3fcd6 §3.4 缺口双轨适配，
+    2026-11-01 用户当日裁决；qwen 入座活值禁人手填，归 iter4/门日志）。"""
     require_kb_integration(data=True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
@@ -1046,40 +1092,119 @@ def test_live_task6_3_libero_scoped_seam_12_prod_union_3(monkeypatch):
                                tier=TIER_PROBE, site="direction")
         union_prod |= {str(r["id"])[:12]
                        for r in ret["solution_hits"][:8]}
-    # 生产距离合并只入座 3 块——AC-T6-4 负结论的同因（mpnet 几何 + 全局
-    # 跨项目代码窗距离更近）；是否换配额/RRF 合并属用户裁决，不在 r2 规则内。
-    assert union_prod & LIBERO_12_PREFIXES == PROD_UNION_3
+    track = _embed_track()
+    if track == "mpnet768":
+        # 生产距离合并只入座 3 块——AC-T6-3/4 mpnet/768 封存负结论（mpnet
+        # 几何＋全局跨项目代码窗距离更近；攢批119 9c894eb），mpnet 轨保留
+        # 活库重算等式；回滚 mpnet 后此断言自动恢复全部活性覆盖。
+        assert union_prod & LIBERO_12_PREFIXES == PROD_UNION_3
+    else:
+        # qwen 轨：几何相关等式随换型退役（活证据归 iter4/门日志，禁回填，
+        # fcb3fcd6 §8）；以下均为几何无关真断言（非 X∩S⊆S 式恒真式）：
+        # 端到端真有 solution 入座、每个入座 id 在活 solution_chunks 真实
+        # 存在（内容身份）、每问至多 8 块的基数界。
+        live_solution_prefixes = {
+            x[:12] for x in _live_route_id_sets()["solutions"]}
+        assert union_prod  # 非空＝端到端真返回
+        assert union_prod <= live_solution_prefixes
+        assert len(union_prod) <= len(LIBERO_VLA_QUERIES) * 8
+
+
+def _assert_gold_eval_geometry_free(data: dict, results: list, metrics: dict):
+    """qwen 轨几何无关不变量（零 qwen 几何活值；fcb3fcd6 §3.4 缺口双轨适配）。
+
+    端到端实跑 evaluate/summarize 后，只断言与嵌入几何无关的事实：fixture
+    组成数、阈值单一源、计数/比率/合取内部自洽、miss⊆案集、每条 top8 id 都是
+    该路由活表真实行（跨表污染检测）、rank/matched_by 自洽。qwen 下几何数值
+    一律不 assert——Stage A 活证据归窗口门日志与 iter4 绑定报告。
+    """
+    cases = data["cases"]
+    th = data["thresholds"]
+    case_ids = {c["id"] for c in cases}
+    route_totals = {"kb": 0, "solutions": 0, "learnings": 0}
+    for c in cases:
+        route_totals[c["route"]] += 1
+    # 组成事实（冻结 fixture 构成，几何无关）：47 案 17/18/12。
+    assert route_totals == {"kb": 17, "solutions": 18, "learnings": 12}
+    assert len(cases) == metrics["n_cases"] == 47
+    assert len(results) == 47
+
+    blocks = [("overall", None), ("solution_route", "solutions"),
+              ("learning_route", "learnings")]
+    for block_name, route in blocks:
+        blk = metrics[block_name]
+        total = (47 if route is None else route_totals[route])
+        assert blk["total"] == total
+        assert 0 <= blk["hits"] <= total
+        assert blk["gold_at_8"] == (round(blk["hits"] / total, 4) if total else 0.0)
+        assert blk["threshold"] == th[block_name]
+        assert blk["pass"] == (blk["gold_at_8"] >= blk["threshold"])
+        counted = sum(1 for r in results
+                      if (route is None or r["route"] == route) and r["hit"])
+        assert blk["hits"] == counted
+    assert metrics["kb_route_observed"]["total"] == route_totals["kb"]
+    assert metrics["kb_route_observed"]["hits"] == sum(
+        1 for r in results if r["route"] == "kb" and r["hit"])
+    assert metrics["all_pass"] == (metrics["overall"]["pass"]
+                                   and metrics["solution_route"]["pass"]
+                                   and metrics["learning_route"]["pass"])
+    assert len(metrics["misses"]) == (metrics["overall"]["total"]
+                                      - metrics["overall"]["hits"])
+    assert {m["id"] for m in metrics["misses"]} <= case_ids
+
+    live_ids = _live_route_id_sets()
+    for r in results:
+        assert r["id"] in case_ids
+        assert len(r["top8_ids"]) <= 8
+        assert set(r["top8_ids"]) <= live_ids[r["route"]]
+        if r["hit"]:
+            assert isinstance(r["rank"], int) and 1 <= r["rank"] <= 8
+            assert r["matched_by"] in ("gold_id", "gold_text")
+        else:
+            assert r["rank"] is None and r["matched_by"] is None
 
 
 @pytest.mark.kb_integration
 def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
-    """AC-T6-4：对活库重跑 47 case，数字必须等于冻结负结论（不可悄悄漂移）。"""
+    """AC-T6-4 双轨：mpnet 轨活库重算须逐字等于冻结负结论（不可悄悄漂移）；
+    qwen 轨端到端实跑但只断言几何无关不变量（fcb3fcd6 §3.4 缺口双轨适配，
+    2026-11-01 用户当日裁决；qwen 几何活值禁人手填，活证据归 iter4）。"""
     require_kb_integration(data=True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
     monkeypatch.setenv("HF_DATASETS_OFFLINE", "1")
+    track = _embed_track()
     mod = _eval_mod()
     data = mod.load_cases(FIXTURE)
     planner = mod.build_planner()
     results = mod.evaluate(planner, data["cases"])
     metrics = mod.summarize(data, results)
-    assert metrics["overall"] == {
-        "hits": 35, "total": 47, "gold_at_8": 0.7447,
-        "threshold": 0.80, "pass": False}
-    assert metrics["solution_route"] == {
-        "hits": 11, "total": 18, "gold_at_8": 0.6111,
-        "threshold": 0.75, "pass": False}
-    assert metrics["learning_route"] == {
-        "hits": 11, "total": 12, "gold_at_8": 0.9167,
-        "threshold": 0.75, "pass": True}
-    assert metrics["kb_route_observed"] == {"total": 17, "hits": 13}
-    assert metrics["all_pass"] is False
-    assert {m["id"] for m in metrics["misses"]} == FROZEN_MISSES
+    if track == "mpnet768":
+        assert metrics["overall"] == {
+            "hits": 35, "total": 47, "gold_at_8": 0.7447,
+            "threshold": 0.80, "pass": False}
+        assert metrics["solution_route"] == {
+            "hits": 11, "total": 18, "gold_at_8": 0.6111,
+            "threshold": 0.75, "pass": False}
+        assert metrics["learning_route"] == {
+            "hits": 11, "total": 12, "gold_at_8": 0.9167,
+            "threshold": 0.75, "pass": True}
+        assert metrics["kb_route_observed"] == {"total": 17, "hits": 13}
+        assert metrics["all_pass"] is False
+        assert {m["id"] for m in metrics["misses"]} == FROZEN_MISSES
+    else:
+        _assert_gold_eval_geometry_free(data, results, metrics)
 
 
 @pytest.mark.kb_integration
 def test_live_iter_reports_frozen_and_chained():
-    """iter1/iter2 报告留痕：同数负结论 + iterations[] 链 + 0600。"""
+    """iter1/iter2 报告留痕：mpnet/768 封存负结论的永久证据链。
+
+    锁内适配（fcb3fcd6 §3.4 缺口双轨适配，2026-11-01 用户当日裁决）：
+    AC-T6-3/4 的 mpnet 负结论（35/47、12 miss、PROD_UNION_3）从「对活库
+    重算」改为「对 iter1/iter2 不可变机产报告逐字对账」——锚定 sha 的物证
+    反篡改强度只增不减，且与活库几何解耦；qwen 活证据归 iter4，本测不 glob。
+    """
     require_kb_integration(data=True)
     from orchestrator.common.runtime_paths import phase25_root
     rdir = phase25_root() / "task6_recall"
@@ -1095,7 +1220,15 @@ def test_live_iter_reports_frozen_and_chained():
     assert [i["iteration"] for i in d2["iterations"]] == [1, 2]
     for d in (d1, d2):
         m = d["metrics"]
-        assert (m["overall"]["gold_at_8"],
-                m["solution_route"]["gold_at_8"],
-                m["learning_route"]["gold_at_8"]) == (0.7447, 0.6111, 0.9167)
+        assert m["overall"] == {
+            "hits": 35, "total": 47, "gold_at_8": 0.7447,
+            "threshold": 0.80, "pass": False}
+        assert m["solution_route"] == {
+            "hits": 11, "total": 18, "gold_at_8": 0.6111,
+            "threshold": 0.75, "pass": False}
+        assert m["learning_route"] == {
+            "hits": 11, "total": 12, "gold_at_8": 0.9167,
+            "threshold": 0.75, "pass": True}
+        assert m["kb_route_observed"] == {"total": 17, "hits": 13}
         assert m["all_pass"] is False
+        assert {x["id"] for x in m["misses"]} == FROZEN_MISSES
