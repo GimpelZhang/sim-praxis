@@ -28,6 +28,7 @@ kb_integration，裸跑自动 skip。
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -54,6 +55,7 @@ from memory_flywheel.recall import (
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.direction.planner_recall import (
     KB_PROJECT_TAGS,
+    R3_RULES_VERSION,
     SYNONYMS_PATH,
     TIER_POLICY_CLOSED_LOOP,
     TIER_PROBE,
@@ -994,12 +996,19 @@ LIBERO_VLA_QUERIES = [
     "OpenVLA LIBERO 动作接口 夹爪 归一化 action space 闭环",
 ]
 
-# AC-T6-4 mpnet/768 封存负结论（iter1/iter2 同数；r2 作用域 lane 零入座，
-# 详见报告；攢批119 9c894eb）。锁内适配（Phase 2.5 换嵌入，冻结预注册
-# fcb3fcd6 §3.4 覆盖缺口，2026-11-01 用户当日裁决双轨适配）：本集与
-# PROD_UNION_3 是 mpnet 几何的历史封存值，只在 mpnet 轨对活库断言、并在
-# iter1/iter2 报告文件证据链永久对账；qwen 轨禁止回填任何几何活值
-# （预注册 §8），qwen 活证据仅存窗口门日志与 iter4 报告。
+# AC-T6-4 r1/r2 时代 mpnet/768 封存负结论（iter1/iter2 同数：35/47、
+# 12 miss；r2 作用域 lane 零入座，生产并集 3/12；攢批119 9c894eb）。
+# 攢批121 b5444be r3 作用域保底配额落地后活路径值前进（gold 38/0.8085、
+# 生产并集 8/12，r2 三块零丢失、单调 +5），但 121 收口只跑 hermetic，
+# kb_integration 活门自 119 起未再执行；攢批126 双轨改造在 qwen 活轨落盘，
+# mpnet 分支直到 2026-11-01 回滚后首次活跑才暴露这组常量已不能在活路径复现。
+# 锁内适配（攢批128，fcb3fcd6 §3.4 缺口双轨适配，2026-11-01 用户当日裁决
+# 授权双轨）：FROZEN_MISSES（r1/r2 12 miss）随 iter1/iter2 报告文件证据链
+# 永久对账（见 test_live_iter_reports_frozen_and_chained）；PROD_UNION_3 在
+# mpnet 轨保留为「r3 保底席只增不丢」的单调包含常量（不回改、不假装活可复现）；
+# r3 活值一律锚机产报告/快照（iter3 f1c0e7f4、task6_r3_mpnet_prod_union
+# _snapshot.json 攢批128 补注册），零手写几何第二事实源；qwen 分支一字不动，
+# qwen 活证据仅存窗口门日志与 iter4 报告（预注册 §8 禁回填）。
 FROZEN_MISSES = {
     "kb_check_success", "kb_execmode", "kb_16d_layout", "kb_pipolicy",
     "sol_win1_env", "sol_win2_servo", "sol_win3_clearance",
@@ -1040,6 +1049,50 @@ def _live_route_id_sets() -> dict:
             "learnings": _ids("phase1_learnings") | _ids("phase2_learnings")}
 
 
+# 攢批128：r3/mpnet 生产并集机产快照（scripts/phase25/gen_r3_prod_union_snapshot.py
+# 同口径生成；r3 时代漏采、回滚后补注册，两独立 lane -m 重跑 --out /tmp cmp）。
+R3_PROD_UNION_SNAPSHOT = (REPO_ROOT / "scripts" / "phase25" / "snapshots"
+                          / "task6_r3_mpnet_prod_union_snapshot.json")
+# verifier MINOR-1（攢批128）：注册件自身防篡改对位（两 lane 第五/六次重跑 cmp 同值）。
+_R3_PROD_UNION_SNAPSHOT_SHA256 = (
+    "53c043dc202c7de8c611fb523ee842546b47f9d5cbbbaf72633064fcbf98cc7b")
+_ITER3_REPORT_SHA256 = (
+    "f1c0e7f4caf32e066ef7ed4dbac9a75f02e32fc9e3876e42180e10ba267fa307")
+
+
+def _load_r3_prod_union_snapshot() -> dict:
+    raw = R3_PROD_UNION_SNAPSHOT.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == _R3_PROD_UNION_SNAPSHOT_SHA256
+    return json.loads(raw.decode("utf-8"))
+
+
+def _live_table_id_shas() -> dict:
+    """活四表 sorted(id) 换行 join sha256（同 gen_prewindow 与并集快照口径）。"""
+    import lancedb
+    from memory_flywheel import kb_pins
+    db = lancedb.connect(kb_pins.default_lancedb_uri())
+    out = {}
+    for name in ("kb_chunks", "solution_chunks", "phase1_learnings",
+                 "phase2_learnings"):
+        rows = (db.open_table(name).search(None)
+                .select(["id"]).limit(1_000_000).to_list())
+        ids = sorted(str(r["id"]) for r in rows)
+        out[name] = hashlib.sha256("\n".join(ids).encode("utf-8")).hexdigest()
+    return out
+
+
+def _load_frozen_iter3_report() -> dict:
+    """iter3 r3 机产报告（唯一一份，0600，sha 钉死 f1c0e7f4）。"""
+    from orchestrator.common.runtime_paths import phase25_root
+    rdir = phase25_root() / "task6_recall"
+    r3 = sorted(rdir.glob("planner_gold_iter3_*.json"))
+    assert len(r3) == 1, f"expect exactly one iter3 report, got {r3}"
+    p = r3[0]
+    assert stat.S_IMODE(p.stat().st_mode) == 0o600
+    assert hashlib.sha256(p.read_bytes()).hexdigest() == _ITER3_REPORT_SHA256
+    return json.loads(p.read_text(encoding="utf-8"))
+
+
 @pytest.mark.kb_integration
 def test_live_four_table_invariants_1542_44_94_1(monkeypatch):
     require_kb_integration(data=True)
@@ -1064,9 +1117,10 @@ def test_live_four_table_invariants_1542_44_94_1(monkeypatch):
 @pytest.mark.kb_integration
 def test_live_task6_3_libero_scoped_seam_12_prod_union_3(monkeypatch):
     """AC-T6-3 双轨：作用域缝并集 12/12 两轨皆活（几何无关内容覆盖）；
-    生产距离合并「只有 3/12」是 mpnet/768 封存负结论，仅 mpnet 轨对活库
-    重算，qwen 轨只保留几何无关真断言（fcb3fcd6 §3.4 缺口双轨适配，
-    2026-11-01 用户当日裁决；qwen 入座活值禁人手填，归 iter4/门日志）。"""
+    mpnet 轨生产距离合并活值锚攢批128 机产快照（r3 规则 8/12；r1/r2 的
+    3/12 保留为 PROD_UNION_3 单调包含常量），qwen 轨只保留几何无关真断言
+    （fcb3fcd6 §3.4 缺口双轨适配，2026-11-01 用户当日裁决；qwen 入座活值
+    禁人手填，归 iter4/门日志）。"""
     require_kb_integration(data=True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
@@ -1087,17 +1141,44 @@ def test_live_task6_3_libero_scoped_seam_12_prod_union_3(monkeypatch):
     planner = PlannerRecall(ProductionRecall(
         LearningStore(), ve, extra_learning_stores=(EvolutionStore(),)))
     union_prod: set[str] = set()
+    live_per_query: dict[str, list[str]] = {}
     for q in LIBERO_VLA_QUERIES:
         ret = planner.retrieve("track1", {"name": q, "urls": []},
                                tier=TIER_PROBE, site="direction")
-        union_prod |= {str(r["id"])[:12]
-                       for r in ret["solution_hits"][:8]}
+        hits8 = ret["solution_hits"][:8]
+        live_per_query[q] = [str(r["id"]) for r in hits8]
+        union_prod |= {str(r["id"])[:12] for r in hits8}
     track = _embed_track()
     if track == "mpnet768":
-        # 生产距离合并只入座 3 块——AC-T6-3/4 mpnet/768 封存负结论（mpnet
-        # 几何＋全局跨项目代码窗距离更近；攢批119 9c894eb），mpnet 轨保留
-        # 活库重算等式；回滚 mpnet 后此断言自动恢复全部活性覆盖。
-        assert union_prod & LIBERO_12_PREFIXES == PROD_UNION_3
+        # r3（攢批121 b5444be）作用域保底配额后生产合并入座 8/12：r1/r2 封存
+        # 三席（PROD_UNION_3，攢批119）零丢失、保底席单调 +5。r3 时代该活值
+        # 漏采（121 收口仅 hermetic），攢批128 在回滚保真的 mpnet+r3 活库
+        # 补注册机产快照；以下等式全部锚机产件，零手写几何第二事实源。
+        snap = _load_r3_prod_union_snapshot()
+        head = snap["header"]
+        assert head["config_model"].endswith(_MPNET_MODEL_SUFFIX)
+        assert head["config_dim"] == 768
+        assert head["rules_version"] == R3_RULES_VERSION
+        assert head["solution_id"] == LIBERO_SOLUTION_ID
+        assert head["top_k"] == 8
+        assert snap["source_queries"] == LIBERO_VLA_QUERIES
+        assert head["table_rows"] == {
+            "kb_chunks": 1542, "solution_chunks": 94,
+            "phase1_learnings": 44, "phase2_learnings": 1}
+        assert head["table_id_set_sha256"] == _live_table_id_shas()
+        assert set(snap["scoped_seam_prefixes"]) == LIBERO_12_PREFIXES
+        assert {x["query"] for x in snap["prod_union"]["per_query"]} \
+            == set(LIBERO_VLA_QUERIES)
+        snap_per_query = {x["query"]: x["solution_hit_ids"]
+                          for x in snap["prod_union"]["per_query"]}
+        assert live_per_query == snap_per_query  # 全 32 位 id 有序逐字
+        assert union_prod == set(
+            snap["prod_union"]["union_solution_prefixes_all"])
+        inter = union_prod & LIBERO_12_PREFIXES
+        assert inter == set(
+            snap["prod_union"]["intersection_scoped12_prefixes"])
+        # r1/r2 历史封存：r3 保底席只增不丢，原三席必须仍在座。
+        assert PROD_UNION_3 <= inter
     else:
         # qwen 轨：几何相关等式随换型退役（活证据归 iter4/门日志，禁回填，
         # fcb3fcd6 §8）；以下均为几何无关真断言（非 X∩S⊆S 式恒真式）：
@@ -1166,7 +1247,10 @@ def _assert_gold_eval_geometry_free(data: dict, results: list, metrics: dict):
 
 @pytest.mark.kb_integration
 def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
-    """AC-T6-4 双轨：mpnet 轨活库重算须逐字等于冻结负结论（不可悄悄漂移）；
+    """AC-T6-4 双轨：mpnet 轨活库重算须逐案逐字等于 iter3 r3 机产报告
+    （f1c0e7f4；攢批119 的 35/0.7447 是 r1/r2 负结论，只随 iter1/iter2 报告
+    文件证据链对账，见 test_live_iter_reports_frozen_and_chained——攢批128
+    修正：126 曾误把 r1/r2 常量钉在 r3 活路径，回滚后首跑曝光）；
     qwen 轨端到端实跑但只断言几何无关不变量（fcb3fcd6 §3.4 缺口双轨适配，
     2026-11-01 用户当日裁决；qwen 几何活值禁人手填，活证据归 iter4）。"""
     require_kb_integration(data=True)
@@ -1180,30 +1264,42 @@ def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
     results = mod.evaluate(planner, data["cases"])
     metrics = mod.summarize(data, results)
     if track == "mpnet768":
-        assert metrics["overall"] == {
-            "hits": 35, "total": 47, "gold_at_8": 0.7447,
-            "threshold": 0.80, "pass": False}
-        assert metrics["solution_route"] == {
-            "hits": 11, "total": 18, "gold_at_8": 0.6111,
-            "threshold": 0.75, "pass": False}
-        assert metrics["learning_route"] == {
-            "hits": 11, "total": 12, "gold_at_8": 0.9167,
-            "threshold": 0.75, "pass": True}
-        assert metrics["kb_route_observed"] == {"total": 17, "hits": 13}
-        assert metrics["all_pass"] is False
-        assert {m["id"] for m in metrics["misses"]} == FROZEN_MISSES
+        d3 = _load_frozen_iter3_report()
+        assert d3["iteration"] == 3 and d3["rules_version"] == "r3"
+        m3 = d3["metrics"]
+        assert metrics["overall"] == m3["overall"]
+        assert metrics["solution_route"] == m3["solution_route"]
+        assert metrics["learning_route"] == m3["learning_route"]
+        assert metrics["kb_route_observed"] == m3["kb_route_observed"]
+        assert metrics["all_pass"] is m3["all_pass"]
+        assert {m["id"] for m in metrics["misses"]} == {
+            m["id"] for m in m3["misses"]}
+        # 47 案逐案活算重放：hit/rank/matched_by/top8_ids 有序全等——
+        # 回滚保真度的最强机判（非仅聚合数相等）。
+        frozen_cases = {c["id"]: c for c in d3["cases"]}
+        assert set(frozen_cases) == {r["id"] for r in results}
+        for r in results:
+            f = frozen_cases[r["id"]]
+            assert r["hit"] is f["hit"]
+            assert r["rank"] == f["rank"]
+            assert r["matched_by"] == f["matched_by"]
+            assert r["top8_ids"] == f["top8_ids"]
     else:
         _assert_gold_eval_geometry_free(data, results, metrics)
 
 
 @pytest.mark.kb_integration
 def test_live_iter_reports_frozen_and_chained():
-    """iter1/iter2 报告留痕：mpnet/768 封存负结论的永久证据链。
+    """iter1/iter2 报告留痕：r1/r2 规则 mpnet/768 封存负结论（35/47、12 miss）
+    的永久证据链。
 
-    锁内适配（fcb3fcd6 §3.4 缺口双轨适配，2026-11-01 用户当日裁决）：
-    AC-T6-3/4 的 mpnet 负结论（35/47、12 miss、PROD_UNION_3）从「对活库
-    重算」改为「对 iter1/iter2 不可变机产报告逐字对账」——锚定 sha 的物证
-    反篡改强度只增不减，且与活库几何解耦；qwen 活证据归 iter4，本测不 glob。
+    锁内适配（fcb3fcd6 §3.4 缺口双轨适配，2026-11-01 用户当日裁决；
+    攢批128 补正锚点错配）：r1/r2 的 35/47、12 miss 从「对活库重算」改为
+    「对 iter1/iter2 不可变机产报告逐字对账」——锚定 sha 的物证反篡改强度
+    只增不减，且与活库几何解耦。活路径自攢批121 起为 r3（38/0.8085），
+    其活等式在 test_live_gold_eval_frozen_negative_recompute 锚 iter3 报告
+    f1c0e7f4、在 seam 测试锚 r3 机产快照；r2 生产并集 PROD_UNION_3 则保留为
+    r3 单调包含常量。qwen 活证据归 iter4，本测不 glob。
     """
     require_kb_integration(data=True)
     from orchestrator.common.runtime_paths import phase25_root

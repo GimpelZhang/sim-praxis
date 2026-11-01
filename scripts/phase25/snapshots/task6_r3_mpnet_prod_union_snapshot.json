@@ -1,0 +1,239 @@
+{
+  "header": {
+    "config_dim": 768,
+    "config_model": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+    "rules_version": "r3",
+    "solution_id": "track1_tools/03_libero",
+    "table_id_set_sha256": {
+      "kb_chunks": "35d4bf61849c3108348a0aa61bea89a269a2bd748b115dc2105b83de88da1b72",
+      "phase1_learnings": "022341f732776f33b33314db3e34ddfd915c9ed2ab88cfe6f8c0c9e87af43a9d",
+      "phase2_learnings": "82058d2fa23796c4130749ef0a86dce1504aeff3648ddde0caa7f3fbb5731b4e",
+      "solution_chunks": "cdab79c7e1de3d6bd821d28e65c8ac60ac412ccac3ba4c94bf5be90a4fd68197"
+    },
+    "table_rows": {
+      "kb_chunks": 1542,
+      "phase1_learnings": 44,
+      "phase2_learnings": 1,
+      "solution_chunks": 94
+    },
+    "top_k": 8,
+    "uri": "/home/vipuser/embodied-ai-sim-knowledge-base/data/lancedb"
+  },
+  "prod_union": {
+    "intersection_scoped12_prefixes": [
+      "2e7d3ac99db9",
+      "77444cbfec27",
+      "7f9bdabc4e72",
+      "8fc302da5604",
+      "947d4633823c",
+      "9a15e94c83e7",
+      "c685ddb05301",
+      "ca8c9e45328b"
+    ],
+    "per_query": [
+      {
+        "query": "LIBERO 24 角度 clearance 扫描 pick_offset_angle run_episode 单控制环",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "947d4633823cd48f901678879f59c41a",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "85cecf4469e244080bd003f2e16b2453"
+        ]
+      },
+      {
+        "query": "LIBERO align_yaw 符号反转 restore set_init_state attempt_grasp 闭爪抬升",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "85cecf4469e244080bd003f2e16b2453"
+        ]
+      },
+      {
+        "query": "LIBERO bddl_file_name 大写谓词 resolve_target 区域 plate ramekin 均值",
+        "solution_hit_ids": [
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "947d4633823cd48f901678879f59c41a",
+          "9a15e94c83e73ca331cfdd5b4420feed",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "cc5167b3ec658f8cbbd13ec7ace0303b"
+        ]
+      },
+      {
+        "query": "LIBERO finger_joint pad tip geom_xpos finger_axis_err 指轴角",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "947d4633823cd48f901678879f59c41a",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "a13906551ee98fe4311469fc57d1c9f1"
+        ]
+      },
+      {
+        "query": "LIBERO get_benchmark libero_spatial OffScreenRenderEnv TypeError horizon",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "947d4633823cd48f901678879f59c41a",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "2e7d3ac99db9cbb7e791f8355f13af51"
+        ]
+      },
+      {
+        "query": "LIBERO held rise 0.05 trail 拖尾 分轴运输 反应式下放 check_success",
+        "solution_hit_ids": [
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "85cecf4469e244080bd003f2e16b2453"
+        ]
+      },
+      {
+        "query": "LIBERO incomplete suite sys.exit cover imageio 收尾",
+        "solution_hit_ids": [
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "77444cbfec27c5e08dc037835e4768c7",
+          "947d4633823cd48f901678879f59c41a",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "568774a54aafefd210e280b632441d23"
+        ]
+      },
+      {
+        "query": "LIBERO results judge libero_official telemetry episode manifest",
+        "solution_hit_ids": [
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "3527610366e86230cfe32c64d8ebb815",
+          "4a32f893011654600def9a93a3567b23"
+        ]
+      },
+      {
+        "query": "LIBERO servo 七维动作 np.zeros(7) a[:3] 平移 a[5] yaw a[6] 夹爪 clip",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "947d4633823cd48f901678879f59c41a",
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "4a32f893011654600def9a93a3567b23",
+          "94ea9d7d55ea86ad807d6131f32f2116"
+        ]
+      },
+      {
+        "query": "LIBERO stage1 setrlimit RLIMIT_NOFILE MUJOCO_GL egl OffScreenRenderEnv import",
+        "solution_hit_ids": [
+          "947d4633823cd48f901678879f59c41a",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "cc5167b3ec658f8cbbd13ec7ace0303b",
+          "018286cd723b0a4e95bbb09d0b4b56b0"
+        ]
+      },
+      {
+        "query": "OpenVLA LIBERO 动作接口 夹爪 归一化 action space 闭环",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "947d4633823cd48f901678879f59c41a",
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "4a32f893011654600def9a93a3567b23"
+        ]
+      },
+      {
+        "query": "VLA LIBERO policy action 7-DOF delta EEF gripper 归一化 Stage 切分",
+        "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "c685ddb05301e1dad8dbf713b3df64d2",
+          "947d4633823cd48f901678879f59c41a",
+          "ca8c9e45328b9d258ca59f89a4149b99",
+          "8fc302da5604bd93df72c10d0c7cc740",
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "4a32f893011654600def9a93a3567b23",
+          "018286cd723b0a4e95bbb09d0b4b56b0"
+        ]
+      }
+    ],
+    "union_solution_prefixes_all": [
+      "018286cd723b",
+      "2e7d3ac99db9",
+      "3527610366e8",
+      "4a32f8930116",
+      "568774a54aaf",
+      "77444cbfec27",
+      "7f9bdabc4e72",
+      "85cecf4469e2",
+      "8fc302da5604",
+      "947d4633823c",
+      "94ea9d7d55ea",
+      "9a15e94c83e7",
+      "a13906551ee9",
+      "c685ddb05301",
+      "ca8c9e45328b",
+      "cc5167b3ec65"
+    ]
+  },
+  "schema": "simpraxis.phase25.task6_r3_prod_union.v1",
+  "scoped_seam_prefixes": [
+    "2e7d3ac99db9",
+    "50405f5cb4ec",
+    "77444cbfec27",
+    "7f9bdabc4e72",
+    "8fc302da5604",
+    "947d4633823c",
+    "9a15e94c83e7",
+    "ae0146acc531",
+    "c685ddb05301",
+    "c7d2a7a8ba7a",
+    "ca8c9e45328b",
+    "cb1f008d670f"
+  ],
+  "source_queries": [
+    "LIBERO stage1 setrlimit RLIMIT_NOFILE MUJOCO_GL egl OffScreenRenderEnv import",
+    "LIBERO servo 七维动作 np.zeros(7) a[:3] 平移 a[5] yaw a[6] 夹爪 clip",
+    "LIBERO 24 角度 clearance 扫描 pick_offset_angle run_episode 单控制环",
+    "LIBERO bddl_file_name 大写谓词 resolve_target 区域 plate ramekin 均值",
+    "LIBERO finger_joint pad tip geom_xpos finger_axis_err 指轴角",
+    "LIBERO align_yaw 符号反转 restore set_init_state attempt_grasp 闭爪抬升",
+    "LIBERO held rise 0.05 trail 拖尾 分轴运输 反应式下放 check_success",
+    "LIBERO get_benchmark libero_spatial OffScreenRenderEnv TypeError horizon",
+    "LIBERO results judge libero_official telemetry episode manifest",
+    "LIBERO incomplete suite sys.exit cover imageio 收尾",
+    "VLA LIBERO policy action 7-DOF delta EEF gripper 归一化 Stage 切分",
+    "OpenVLA LIBERO 动作接口 夹爪 归一化 action space 闭环"
+  ]
+}
