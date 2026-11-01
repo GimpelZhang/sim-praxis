@@ -37,7 +37,10 @@ import numpy as np  # noqa: E402
 
 import lancedb  # noqa: E402
 
-from memory_flywheel.embedding_selector import select_embedding  # noqa: E402
+from memory_flywheel.embedding_selector import (  # noqa: E402
+    fastembed_embed,
+    select_embedding,
+)
 from memory_flywheel.kb_pins import default_lancedb_uri  # noqa: E402
 from memory_flywheel.phase2.evolution_store import embedding_input  # noqa: E402
 
@@ -111,9 +114,12 @@ def run_probe(*, uri: str | None = None, out: str = DEFAULT_OUT) -> int:
     texts = [r["input"] for r in rows]
 
     model = make_model(cfg)
-    paired = list(model.embed([t for text in texts for t in (text, text)]))
-    batch_b = [_to_f32(v) for v in model.embed(texts)]
-    batch_c = [_to_f32(v) for v in model.embed(texts)]
+    # 锁内适配（2026-11-01 用户裁决 (a)）：嵌入统走 env 闸批大小，
+    # 探针因此在窗内生产批大小（当日二次裁决 16→8）下复验逐位确定性。
+    paired = list(fastembed_embed(
+        model, [t for text in texts for t in (text, text)]))
+    batch_b = [_to_f32(v) for v in fastembed_embed(model, texts)]
+    batch_c = [_to_f32(v) for v in fastembed_embed(model, texts)]
     if len(paired) != 2 * len(rows) or len(batch_b) != len(rows) \
             or len(batch_c) != len(rows):
         raise ProbeError("模型返回条数与输入不符")

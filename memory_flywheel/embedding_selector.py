@@ -18,10 +18,52 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Iterable
 
 import numpy as np
 
+if TYPE_CHECKING:  # 仅注解；fastembed 在调用点惰性导入
+    from fastembed import TextEmbedding
+
 CONFIG_PATH = Path(__file__).with_name("embedding_config.json")
+
+# 锁内适配（Task6 Stage A 换嵌入窗口，用户 2026-11-01 裁决 (a)）：
+# Qwen3-Embedding-0.6B 在本机 47GiB 内存下，fastembed 默认 batch_size=256
+# 对 94 个长方案块（max 4890 字符；单批 <256，padding 到批内最长）嵌入时
+# 确定性吃满内存——R3 被内核 global OOM 处死（dmesg：anon-rss 46.97GiB），
+# R2 被 harness 压力收割器处死，两次同一位置。fastembed 0.9.0 原生支持
+# embed(documents, batch_size=)；批大小只把文本切成多批，逐序列计算不变
+# （padding 由 attention mask 隔离，无跨序列归约），属位级安全旋钮。
+# env 未设/空 → None → 不传该参数，等价 fastembed 默认 256（冻结行为）。
+# 仅加 batch_size 一个闸口；threads 不动（归约顺序理论上可改逐位结果）。
+EMBED_BATCH_ENV = "SIMPRAXIS_EMBED_BATCH_SIZE"
+
+
+def env_embed_batch_size() -> int | None:
+    """读 SIMPRAXIS_EMBED_BATCH_SIZE：未设/空返回 None（＝fastembed 默认）。"""
+    raw = os.environ.get(EMBED_BATCH_ENV)
+    if raw is None or raw.strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"{EMBED_BATCH_ENV} 必须为正整数，实得 {raw!r}") from exc
+    if value <= 0:
+        raise RuntimeError(
+            f"{EMBED_BATCH_ENV} 必须为正整数，实得 {raw!r}")
+    return value
+
+
+def fastembed_embed(
+    model: "TextEmbedding",
+    texts: list[str],
+) -> "Iterable[np.ndarray]":
+    """统一嵌入入口：env 置批大小时透传 batch_size；否则与 model.embed 同形。"""
+    batch_size = env_embed_batch_size()
+    if batch_size is None:
+        return model.embed(texts)
+    return model.embed(texts, batch_size=batch_size)
 
 
 @dataclass(frozen=True)
@@ -270,7 +312,7 @@ def select_embedding(force: bool = False) -> dict:
             try:
                 model = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
                 vectors = [np.asarray(v, dtype=np.float32)
-                           for v in model.embed(list(_PROBES))]
+                           for v in fastembed_embed(model, list(_PROBES))]
             except Exception as exc:  # 下载/加载失败统一转成可读的损坏/镜像错误
                 raise RuntimeError(
                     f"{model_name} 下载或加载失败：{type(exc).__name__}: {exc}。"

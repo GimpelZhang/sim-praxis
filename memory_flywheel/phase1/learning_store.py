@@ -43,7 +43,7 @@ import pyarrow as pa
 import lancedb
 
 from memory_flywheel import kb_pins
-from memory_flywheel.embedding_selector import select_embedding
+from memory_flywheel.embedding_selector import fastembed_embed, select_embedding
 from orchestrator.common.clock import utc_now_iso_z
 
 TABLE_NAME = "phase1_learnings"
@@ -165,7 +165,8 @@ class LearningStore:
         return self._embedder
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [v.tolist() for v in self._model().embed(texts)]
+        # 锁内适配（2026-11-01 用户裁决 (a)）：env 闸批大小，未设＝默认。
+        return [v.tolist() for v in fastembed_embed(self._model(), texts)]
 
     # ---------- schema / table ----------
     def _schema(self) -> pa.Schema:

@@ -51,7 +51,7 @@ class FakeEmbedding:
     def __init__(self, model_name=None, cache_dir=None, **kwargs):
         self.model_name = model_name
 
-    def embed(self, texts):
+    def embed(self, texts, batch_size=256):  # 镜像 fastembed 真实签名（env 闸透传）
         inputs = list(texts)
         type(self).calls.append(inputs)
         if type(self).mode == "nan":

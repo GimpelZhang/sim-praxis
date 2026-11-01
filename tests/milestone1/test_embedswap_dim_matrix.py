@@ -137,7 +137,7 @@ class _FakeEmbedder:
     def __init__(self, dim: int):
         self.dim = dim
 
-    def embed(self, texts):
+    def embed(self, texts, batch_size=256):  # 镜像 fastembed 真实签名（env 闸透传）
         for _t in texts:
             yield np.full(self.dim, 0.01, dtype=np.float32)
 

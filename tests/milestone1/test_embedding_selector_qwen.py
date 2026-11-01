@@ -282,7 +282,7 @@ class _FakeQwenEmbedding:
         type(self).last_init = {"model_name": model_name,
                                 "cache_dir": cache_dir, "kwargs": kwargs}
 
-    def embed(self, docs):
+    def embed(self, docs, batch_size=256):  # 镜像 fastembed 真实签名（env 闸透传）
         v0 = np.zeros(1024, dtype=np.float32)
         v0[0] = 1.0
         v1 = np.zeros(1024, dtype=np.float32)
@@ -326,7 +326,7 @@ def test_select_embedding_config_schema_qwen(tmp_path, monkeypatch):
 
 def test_select_embedding_rejects_nan_vectors(tmp_path, monkeypatch):
     class NanEmbedding(_FakeQwenEmbedding):
-        def embed(self, docs):
+        def embed(self, docs, batch_size=256):
             vecs = list(super().embed(docs))
             vecs[2][5] = float("nan")
             return vecs
@@ -337,7 +337,7 @@ def test_select_embedding_rejects_nan_vectors(tmp_path, monkeypatch):
 
 def test_select_embedding_rejects_zero_vectors(tmp_path, monkeypatch):
     class ZeroEmbedding(_FakeQwenEmbedding):
-        def embed(self, docs):
+        def embed(self, docs, batch_size=256):
             return [np.zeros(1024, dtype=np.float32) for _ in docs]
 
     with pytest.raises(RuntimeError, match="所有候选嵌入模型均不可用"):
@@ -346,7 +346,7 @@ def test_select_embedding_rejects_zero_vectors(tmp_path, monkeypatch):
 
 def test_select_embedding_rejects_wrong_dim(tmp_path, monkeypatch):
     class Dim768(_FakeQwenEmbedding):
-        def embed(self, docs):
+        def embed(self, docs, batch_size=256):
             return [np.ones(768, dtype=np.float32) for _ in docs]
 
     with pytest.raises(RuntimeError, match="所有候选嵌入模型均不可用"):

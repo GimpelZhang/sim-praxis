@@ -56,7 +56,7 @@ class _StableEmbedding:
     def __init__(self, *a, **k):
         pass
 
-    def embed(self, texts):
+    def embed(self, texts, batch_size=256):  # 镜像 fastembed 真实签名（env 闸透传）
         out = []
         for t in texts:
             seed = int(hashlib.sha256(str(t).encode("utf-8")).hexdigest()[:16],
@@ -74,7 +74,7 @@ class _JitterEmbedding:
     def __init__(self, *a, **k):
         pass
 
-    def embed(self, texts):
+    def embed(self, texts, batch_size=256):  # 镜像 fastembed 真实签名（env 闸透传）
         type(self).calls += 1
         n = type(self).calls
         return [np.full(DIM_NEW, 0.01, dtype=np.float32)

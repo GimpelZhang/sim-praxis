@@ -35,7 +35,7 @@ import pyarrow as pa
 import yaml
 
 from memory_flywheel import kb_pins
-from memory_flywheel.embedding_selector import select_embedding
+from memory_flywheel.embedding_selector import fastembed_embed, select_embedding
 from memory_flywheel.kb_pins import DEFAULT_KB_ROOT, head as kb_head
 from memory_flywheel.scripts.ingest_kb import (  # 复用切块器与 HARD_CHARS 常量
     HARD_CHARS, chunk_section)
@@ -157,7 +157,8 @@ class SolutionIngester:
         return self._embedder
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        return [v.tolist() for v in self._model().embed(texts)]
+        # 锁内适配（2026-11-01 用户裁决 (a)）：env 闸批大小，未设＝默认。
+        return [v.tolist() for v in fastembed_embed(self._model(), texts)]
 
     def _schema(self) -> pa.Schema:
         return pa.schema([

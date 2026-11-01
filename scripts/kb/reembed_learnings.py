@@ -40,7 +40,7 @@ import lancedb
 import numpy as np
 import pyarrow as pa
 
-from memory_flywheel.embedding_selector import select_embedding
+from memory_flywheel.embedding_selector import fastembed_embed, select_embedding
 from memory_flywheel.kb_pins import default_lancedb_uri
 from memory_flywheel.phase2.evolution_store import embedding_input
 from scripts.kb.gen_prewindow_snapshots import (
@@ -125,7 +125,9 @@ def _build_embeddings(config: dict, table: str, rows: list[dict]):
         inputs = [embedding_input(str(r["text"])) for r in rows]
     model = TextEmbedding(model_name=config["model_name"],
                           cache_dir=config["cache_dir"])
-    vectors = [np.asarray(v, dtype=np.float32) for v in model.embed(inputs)]
+    # 锁内适配（2026-11-01 用户裁决 (a)）：env 闸批大小，未设＝默认。
+    vectors = [np.asarray(v, dtype=np.float32)
+               for v in fastembed_embed(model, inputs)]
     return inputs, vectors
 
 
