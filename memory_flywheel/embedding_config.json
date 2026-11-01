@@ -1,15 +1,30 @@
 {
-  "_machine_note": "cache_dir/onnx_path 为本机 /mnt 绝对路径（机器绑定）；跨机只认 model_name 与 dim，路径需重新生成",
-  "model_name": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-  "dim": 768,
+  "_machine_note": "cache_dir/onnx_path/onnx_files.resolved_path 为本机 /mnt 绝对路径（机器绑定）；跨机只认 model_name 与 dim，路径需重新生成。onnx_files 为逐件预钉登记（relpath/bytes/sha256），Qwen3 为 fp 主件+外部权重件双件；onnx_data_path 为外部权重件路径（无则 null）",
+  "model_name": "Qwen/Qwen3-Embedding-0.6B",
+  "dim": 1024,
   "cache_dir": "/mnt/caches/fastembed",
   "hf_endpoint": "https://hf-mirror.com",
-  "selected_at": "2026-10-12T20:28:42+0800",
+  "selected_at": "2026-11-01T20:30:30+0800",
   "sanity": {
-    "sim_related": 0.8789,
-    "sim_unrelated": 0.0343
+    "sim_related": 0.877,
+    "sim_unrelated": 0.2621
   },
-  "onnx_path": "/mnt/caches/fastembed/models--Xenova--paraphrase-multilingual-mpnet-base-v2/snapshots/e5d116277351513fd260955ece953ecddde7046e/onnx/model.onnx",
-  "onnx_bytes": 1110059084,
-  "onnx_sha256": "92f682c55d39e728187c6bffd488f17462d4e05e3c5fe86ef9ba6f38d66122ed"
+  "onnx_path": "/mnt/caches/fastembed/models--Qdrant--Qwen3-Embedding-0.6B-onnx/snapshots/af95f2c416ffe9379369ad64f9113e865db6112c/onnx/model.onnx",
+  "onnx_bytes": 4031521,
+  "onnx_sha256": "754d6ba1c7a323d7b3af0d85b8268f8b716b0cd362ce73295e0f71d3dd831639",
+  "onnx_files": [
+    {
+      "relpath": "onnx/model.onnx",
+      "bytes": 4031521,
+      "sha256": "754d6ba1c7a323d7b3af0d85b8268f8b716b0cd362ce73295e0f71d3dd831639",
+      "resolved_path": "/mnt/caches/fastembed/blobs/dc/dcc8aca0184904d5b77368b55e7ef108107ab552a789b6dc3334afe4383b4f48"
+    },
+    {
+      "relpath": "onnx/model.onnx_data",
+      "bytes": 2383106048,
+      "sha256": "15d02a315e3b95296700c73d72a436e79facf4e17d919345bed730e98433bcb4",
+      "resolved_path": "/mnt/caches/fastembed/blobs/db/dbef77d8fe07b43795d86669b0c373fde25dad859f5c2e75f79e7ce775b1fbb9"
+    }
+  ],
+  "onnx_data_path": "/mnt/caches/fastembed/models--Qdrant--Qwen3-Embedding-0.6B-onnx/snapshots/af95f2c416ffe9379369ad64f9113e865db6112c/onnx/model.onnx_data"
 }
