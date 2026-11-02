@@ -211,6 +211,32 @@ def test_table_node_without_per_row_is_an_evidence_error():
         ev_mod._write_surface(pre, post)
 
 
+def test_table_node_with_none_values_is_an_evidence_error():
+    """键在而值为 None 的节点曾让 `None == None` / `set()==set()` 恒成立。
+
+    生成器缺表时给 `{rows: None, id_set_sha256: None, missing: True}`——靠
+    `missing` 能拦；但残缺节点（例如被截断写出）可能只留 None 值，那时旧实现
+    会把「没观测到」判成「没写入」（GATE1-LANE-A M6/D10）。只认完整观测。
+    """
+    pre = _baseline()
+    post = _baseline()
+    for snap in (pre, post):
+        snap["tables"]["phase1_learnings"] = {
+            "rows": None, "id_set_sha256": None, "per_row": []}
+    with pytest.raises(ev_mod.EvidenceError, match="phase1_learnings"):
+        ev_mod._write_surface(pre, post)
+
+
+def test_table_node_with_empty_id_set_sha_is_an_evidence_error():
+    """空串 id 集 sha 不是身份（等同于未观测）。"""
+    pre = _baseline()
+    post = _baseline()
+    pre["tables"]["kb_chunks"]["id_set_sha256"] = ""
+    post["tables"]["kb_chunks"]["id_set_sha256"] = ""
+    with pytest.raises(ev_mod.EvidenceError, match="kb_chunks"):
+        ev_mod._write_surface(pre, post)
+
+
 # --- B. _q1q2q3：有序 13 id 集恒等 ----------------------------------------- #
 
 def test_q1q2q3_ok_when_live_matches_prewindow(monkeypatch):
@@ -291,6 +317,9 @@ def _stub_live(monkeypatch, *, ledger=56, containers=0, vram=14):
     monkeypatch.setattr(ev_mod, "_ledger_rows", lambda: ledger)
     monkeypatch.setattr(ev_mod, "_containers_present", lambda: containers)
     monkeypatch.setattr(ev_mod, "_vram_mib", lambda: vram)
+    monkeypatch.setattr(ev_mod, "_vector_identity", lambda path, uri: {
+        "observed": True, "unchanged": True, "mismatches": [],
+        "tables": {}})
 
 
 def _write_snaps(tmp_path, pre, post):
@@ -300,15 +329,28 @@ def _write_snaps(tmp_path, pre, post):
     return a, b
 
 
+_KBINT_OK_LOG = "1234 passed, 7 skipped, 50 deselected in 11.2s\n"
+_KBINT_BAD_LOG = "1 failed, 1233 passed in 11.2s\n"
+_GATE_OK_LOG = "== [gate 1/6] ... ==\n[STATIC GATE OK]\n"
+
+
+def _write_log(tmp_path, name, text):
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return str(p)
+
+
 def _args(tmp_path, pre, post, **kw):
     import argparse
     a, b = _write_snaps(tmp_path, pre, post)
     return argparse.Namespace(
         prewindow=str(a), postwindow=str(b), out=None,
+        pre_vector=kw.get("pre_vector"),
         hermetic_rc=kw.get("hermetic_rc", 0),
-        hermetic_ok=kw.get("hermetic_ok", True),
-        kbint_ok=kw.get("kbint_ok", True),
-        gate_static_ok=kw.get("gate_static_ok", True),
+        kbint_log=kw.get("kbint_log",
+                         _write_log(tmp_path, "kbint.log", _KBINT_OK_LOG)),
+        gate_static_log=kw.get("gate_static_log",
+                               _write_log(tmp_path, "gate.log", _GATE_OK_LOG)),
         provenance_restore=kw.get("provenance_restore", True))
 
 
@@ -318,14 +360,21 @@ def test_build_emits_exactly_the_keys_the_verdict_reads(monkeypatch, tmp_path):
     out = ev_mod.build(_args(tmp_path, _baseline(), _baseline()))
     for key in ("four_tables", "q1q2q3", "live_writes_except_gate_restamp",
                 "ledger_rows", "hermetic", "kbint", "gate_static",
-                "containers_present", "vram_mib", "provenance_restore"):
+                "containers_present", "vram_mib", "provenance_restore",
+                "write_surface", "vector_identity"):
         assert key in out, key
     assert out["live_writes_except_gate_restamp"] == 0
     assert out["ledger_rows"] == 56
     assert out["hermetic"] == {"rc": 0, "ok": True}
-    assert out["kbint"] == {"ok": True}
-    assert out["gate_static"] == {"ok": True}
+    # 门禁绑实跑工件（A10-M1）：kbint 带解析出的 rc 与日志 sha，gate_static 带标记
+    assert out["kbint"]["rc"] == 0 and out["kbint"]["ok"] is True
+    assert len(out["kbint"]["log_sha256"]) == 64
+    assert "passed" in out["kbint"]["summary"]
+    assert out["gate_static"]["ok"] is True
+    assert len(out["gate_static"]["log_sha256"]) == 64
     assert out["provenance_restore"] is True
+    # 只有 provenance_restore 仍是声明项（其余三项已绑工件）
+    assert out["declared_by_executor"] == ["provenance_restore"]
 
 
 def test_build_rejects_foreign_schema_before_touching_live_db(
@@ -341,16 +390,20 @@ def test_build_rejects_foreign_schema_before_touching_live_db(
         ev_mod.build(_args(tmp_path, pre, post))
 
 
-def test_declared_flags_are_not_defaulted_true(monkeypatch, tmp_path):
-    """缺声明即 False——脚本不替执行方声明门禁通过。"""
+def test_gate_flags_are_read_from_artifacts_not_defaulted_true(monkeypatch,
+                                                               tmp_path):
+    """门禁不认任何"声明通过"：rc/日志说什么就是什么，缺省也不得为真。"""
     _stub_live(monkeypatch)
-    out = ev_mod.build(_args(tmp_path, _baseline(), _baseline(),
-                             hermetic_ok=False, kbint_ok=False,
-                             gate_static_ok=False, provenance_restore=False))
-    assert out["hermetic"]["ok"] is False
-    assert out["kbint"]["ok"] is False
-    assert out["gate_static"]["ok"] is False
-    assert out["provenance_restore"] is False
+    out = ev_mod.build(_args(
+        tmp_path, _baseline(), _baseline(),
+        hermetic_rc=1,
+        kbint_log=_write_log(tmp_path, "bad.log", _KBINT_BAD_LOG),
+        gate_static_log=_write_log(tmp_path, "g.log", "no marker here\n"),
+        provenance_restore=False))
+    assert out["hermetic"]["ok"] is False        # 由 rc==1 推出
+    assert out["kbint"]["ok"] is False           # 由摘要里的 failed 推出
+    assert out["gate_static"]["ok"] is False     # 缺标记
+    assert out["provenance_restore"] is False    # 仍是声明项
 
 
 # --- D. CLI 契约 ----------------------------------------------------------- #
@@ -367,7 +420,10 @@ def test_cli_exit_2_on_bad_input(tmp_path, capsys):
     post = tmp_path / "post.json"
     post.write_text(json.dumps(_baseline()), encoding="utf-8")
     rc = ev_mod.main(["--prewindow", str(pre), "--postwindow", str(post),
-                      "--hermetic-rc", "0"])
+                      "--hermetic-rc", "0",
+                      "--kbint-log", _write_log(tmp_path, "k.log", _KBINT_OK_LOG),
+                      "--gate-static-log",
+                      _write_log(tmp_path, "g.log", _GATE_OK_LOG)])
     assert rc == 2
     assert "[T6R4-EVIDENCE][STOP]" in capsys.readouterr().err
 
@@ -379,8 +435,10 @@ def test_cli_writes_deterministic_json(monkeypatch, tmp_path):
     for path in (out1, out2):
         rc = ev_mod.main(["--prewindow", args.prewindow,
                           "--postwindow", args.postwindow,
-                          "--hermetic-rc", "0", "--hermetic-ok",
-                          "--kbint-ok", "--gate-static-ok",
+                          "--hermetic-rc", "0",
+                          "--kbint-log", args.kbint_log,
+                          "--gate-static-log", args.gate_static_log,
+                          "--pre-vector", "ignored-because-stubbed",
                           "--provenance-restore", "--out", str(path)])
         assert rc == 0
     assert out1.read_bytes() == out2.read_bytes()
@@ -496,6 +554,16 @@ def test_vram_non_numeric_output_is_an_evidence_error(monkeypatch):
         ev_mod._vram_mib()
 
 
+def test_vram_negative_reading_is_an_evidence_error(monkeypatch):
+    """负值是异常读数（`-5` ≤200 会让判据恒过），按未测处理。"""
+    class _Done:
+        stdout = "-5\n"
+
+    monkeypatch.setattr(ev_mod.subprocess, "run", lambda cmd, **kw: _Done())
+    with pytest.raises(ev_mod.EvidenceError, match="负值"):
+        ev_mod._vram_mib()
+
+
 def test_vram_command_failure_is_an_evidence_error(monkeypatch):
     def _boom(cmd, **kw):
         raise OSError("no nvidia-smi")
@@ -503,3 +571,176 @@ def test_vram_command_failure_is_an_evidence_error(monkeypatch):
     monkeypatch.setattr(ev_mod.subprocess, "run", _boom)
     with pytest.raises(ev_mod.EvidenceError):
         ev_mod._vram_mib()
+
+
+# ---------- G：向量身份（GATE1-LANE-A C-1——同维重嵌入不得隐身） ----------
+
+VEC_TABLES = ("kb_chunks", "solution_chunks", "phase1_learnings",
+              "phase2_learnings")
+
+
+def _vec_baseline(tmp_path, hashes=None):
+    mod = importlib.import_module("scripts.phase25.gen_task6_r4_vector_identity")
+    hashes = hashes or {n: f"sha-{n}" for n in VEC_TABLES}
+    path = tmp_path / "pre_vector.json"
+    path.write_text(json.dumps({
+        "schema": mod.SCHEMA,
+        "tables": {n: {"rows": 1, "dim": 768, "vector_set_sha256": h}
+                   for n, h in hashes.items()},
+        "total_rows": 4}), encoding="utf-8")
+    return str(path)
+
+
+def _stub_vec_live(monkeypatch, hashes=None):
+    mod = importlib.import_module("scripts.phase25.gen_task6_r4_vector_identity")
+    hashes = hashes or {n: f"sha-{n}" for n in VEC_TABLES}
+    monkeypatch.setattr(mod, "build", lambda uri=None: {
+        "schema": mod.SCHEMA,
+        "tables": {n: {"rows": 1, "dim": 768, "vector_set_sha256": h}
+                   for n, h in hashes.items()},
+        "total_rows": 4})
+
+
+def test_vector_identity_ok_when_hashes_match(monkeypatch, tmp_path):
+    _stub_vec_live(monkeypatch)
+    got = ev_mod._vector_identity(_vec_baseline(tmp_path), "x")
+    assert got["observed"] is True
+    assert got["unchanged"] is True
+    assert got["mismatches"] == []
+
+
+def test_vector_identity_detects_same_dim_reembed(monkeypatch, tmp_path):
+    """只换向量（行数/id/维度全同）也必须被抓到——这正是 C-1 的场景。"""
+    changed = {n: f"sha-{n}" for n in VEC_TABLES}
+    changed["solution_chunks"] = "other-sha"
+    _stub_vec_live(monkeypatch, changed)
+    got = ev_mod._vector_identity(_vec_baseline(tmp_path), "x")
+    assert got["observed"] is True
+    assert got["unchanged"] is False
+    assert [m["table"] for m in got["mismatches"]] == ["solution_chunks"]
+
+
+def test_vector_identity_requires_baseline_path():
+    with pytest.raises(ev_mod.EvidenceError, match="pre-vector"):
+        ev_mod._vector_identity(None, "x")
+
+
+def test_vector_identity_rejects_foreign_schema(monkeypatch, tmp_path):
+    mod = importlib.import_module("scripts.phase25.gen_task6_r4_vector_identity")
+    path = tmp_path / "v.json"
+    path.write_text(json.dumps({"schema": "nope", "tables": {}}),
+                    encoding="utf-8")
+    with pytest.raises(ev_mod.EvidenceError, match=mod.SCHEMA):
+        ev_mod._vector_identity(str(path), "x")
+
+
+def test_vector_identity_rejects_baseline_missing_a_table_hash(tmp_path):
+    baseline = _vec_baseline(tmp_path)
+    data = json.loads(open(baseline, encoding="utf-8").read())
+    data["tables"]["phase2_learnings"]["vector_set_sha256"] = None
+    open(baseline, "w", encoding="utf-8").write(json.dumps(data))
+    with pytest.raises(ev_mod.EvidenceError, match="phase2_learnings"):
+        ev_mod._vector_identity(baseline, "x")
+
+
+# ---------- H：门禁绑实跑工件（GATE1-LANE-A A10-M1） ----------
+
+def test_kbint_log_with_failure_parses_rc_1(monkeypatch, tmp_path):
+    """日志里有 failed → rc=1；判分器据此判负（不再有裸 ok 布尔可传）。"""
+    _stub_live(monkeypatch)
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 kbint_log=_write_log(tmp_path, "bad.log", _KBINT_BAD_LOG))
+    out = ev_mod.build(args)
+    assert out["kbint"]["rc"] == 1 and out["kbint"]["ok"] is False
+
+
+def test_kbint_log_without_pytest_summary_is_evidence_error(monkeypatch,
+                                                            tmp_path):
+    """日志里没有摘要行 = 没跑过（或被截断），不得写成"跑过了"。"""
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 kbint_log=_write_log(tmp_path, "empty.log", "collected 0 items\n"))
+    with pytest.raises(ev_mod.EvidenceError, match="摘要行"):
+        ev_mod.build(args)
+
+
+def test_kbint_log_missing_file_is_evidence_error(tmp_path):
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 kbint_log=str(tmp_path / "nope.log"))
+    with pytest.raises(ev_mod.EvidenceError, match="读不了"):
+        ev_mod.build(args)
+
+
+def test_gate_static_log_without_ok_marker_is_not_ok(monkeypatch, tmp_path):
+    _stub_live(monkeypatch)
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 gate_static_log=_write_log(tmp_path, "g.log", "[STATIC GATE FAIL]\n"))
+    out = ev_mod.build(args)
+    assert out["gate_static"]["ok"] is False
+
+
+def test_pytest_summary_pick_ignores_noise_lines():
+    """摘要行只认「结果词 + 耗时」结尾的那行；告警里的 passed 不算。"""
+    text = ("tests/x.py::test_a PASSED\n"
+            "WARNING: something passed through\n"
+            "3 passed, 1 skipped in 2.5s (0:00:02)\n"
+            "\n")
+    got = ev_mod._pytest_summary_rc(text, "t")
+    assert got["rc"] == 0
+    assert got["summary"].endswith("(0:00:02)")
+
+
+# ---------- I：ledger seq 连续性（A10-L3） ----------
+
+def _write_ledger(tmp_path, seqs):
+    p = tmp_path / "ledger.jsonl"
+    p.write_text("".join(json.dumps({"seq": s, "ok": True}) + "\n" for s in seqs),
+                 encoding="utf-8")
+    return p
+
+
+def test_ledger_rows_accepts_contiguous_seq(monkeypatch, tmp_path):
+    p = _write_ledger(tmp_path, range(1, 57))
+    monkeypatch.setattr(
+        "orchestrator.common.runtime_paths.phase25_ledger_path", lambda: p)
+    assert ev_mod._ledger_rows() == 56
+
+
+def test_ledger_rows_rejects_deleted_row_with_same_count(monkeypatch, tmp_path):
+    """删一行再补一行：行数仍 56，但 seq 断档——这正是旧实现的盲区。"""
+    seqs = list(range(1, 57))
+    seqs[10] = 999
+    p = _write_ledger(tmp_path, seqs)
+    monkeypatch.setattr(
+        "orchestrator.common.runtime_paths.phase25_ledger_path", lambda: p)
+    with pytest.raises(ev_mod.EvidenceError, match="连续"):
+        ev_mod._ledger_rows()
+
+
+def test_ledger_rows_rejects_row_without_seq(monkeypatch, tmp_path):
+    p = tmp_path / "ledger.jsonl"
+    p.write_text(json.dumps({"ok": True}) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "orchestrator.common.runtime_paths.phase25_ledger_path", lambda: p)
+    with pytest.raises(ev_mod.EvidenceError, match="seq"):
+        ev_mod._ledger_rows()
+
+
+# ---------- J：per_row 行形状（A10-L4） ----------
+
+def test_per_row_row_without_id_is_evidence_error():
+    """旧实现直取 r["id"] → KeyError（rc=1 traceback），不是输入层错误。"""
+    pre = _baseline()
+    post = _baseline()
+    pre["tables"]["kb_chunks"]["per_row"].append({"text_sha256": "x"})
+    post["tables"]["kb_chunks"]["per_row"].append({"text_sha256": "x"})
+    with pytest.raises(ev_mod.EvidenceError, match="per_row"):
+        ev_mod._write_surface(pre, post)
+
+
+def test_per_row_non_object_row_is_evidence_error():
+    pre = _baseline()
+    post = _baseline()
+    pre["tables"]["solution_chunks"]["per_row"].append("not-a-row")
+    post["tables"]["solution_chunks"]["per_row"].append("not-a-row")
+    with pytest.raises(ev_mod.EvidenceError, match="per_row"):
+        ev_mod._write_surface(pre, post)

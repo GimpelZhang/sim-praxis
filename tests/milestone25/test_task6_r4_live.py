@@ -135,10 +135,23 @@ def test_live_production_r4_equals_frozen_point_predictions(offline_env):
     for case in fixture["cases"]:
         ret = planner.retrieve(case["track"], _payload(case),
                                tier=case["tier"], site="direction")
-        rows = ret[ROUTE_KEY[case["route"]]][:8]
+        rows = ret[ROUTE_KEY[case["route"]]]
         ids = [str(r.get("id")) for r in rows]
+        # 尾席保持（预注册 §3.3 修订 A1）的**活库**断言（GATE1-LANE-A L6）：
+        # 原先只比前 8 行，A1 想防的「r4 静默丢弃 phase2 演化志行」恰好看不见。
+        # learning 路稠密侧是 8 行 phase1 + 1 行 phase2，融合段只定义 top-8，
+        # 第 9 行必须作为尾席原序追加；kb/solutions 路稠密侧恒 8 行，不得凭空
+        # 长出尾席（那也是未声明的注入面变化）。
+        assert len(ids) == len(set(ids)), f"{case['id']} 输出含重复 id"
+        if case["route"] == "learnings":
+            assert len(rows) in (8, 9), f"{case['id']} learning 路长度异常 {len(ids)}"
+            assert any(r.get("learning_table") == "phase2_learnings"
+                       for r in rows), f"{case['id']} 尾席丢了 phase2 演化志行"
+        else:
+            assert len(rows) == 8, f"{case['id']} 非 learning 路不该有尾席"
+        rows = rows[:8]
         want = pred[case["id"]]
-        assert ids == want["fused_ids"], f"{case['id']} 融合 top-8 与冻结快照不符"
+        assert ids[:8] == want["fused_ids"], f"{case['id']} 融合 top-8 与冻结快照不符"
         rank, via = _judge(case, rows)
         assert rank == want["rank"], case["id"]
         assert via == want["matched_by"], case["id"]

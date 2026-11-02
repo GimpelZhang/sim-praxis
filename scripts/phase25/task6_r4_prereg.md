@@ -187,7 +187,9 @@ rank-based 融合，可把上述精确标识符案直接从全表捞回 top-8，
    + `Bm25Index` + `rrf_fuse`，无 I/O、无全局可变态；
 2. `orchestrator/direction/planner_recall.py`：`rules_version` 参数、
    `lexical_hints` 参数、融合入口 `_fuse_route()`（原稿误写 `_lexical_route()`，
-   修订 A8-L3 校正；词法通道装配在 `_lexical_route()` 之外由它调用）、
+   修订 A8-L3 校正；词法通道的装配由 `_lexical_corpus()` / `_lexical_state()`
+   完成、`_fuse_route()` 调用它们——全仓**不存在** `_lexical_route` 符号，
+   修订 A9-D2 清除本句残留）、
    r3 分支代码零 diff；
 3. `memory_flywheel/vector_engine.py`：新增只读 `count_rows(name)`（词法索引
    失效键）与 `scan_rows(name, columns)`（AC-T6-1 授权的「通用表查询」缝，
@@ -209,6 +211,18 @@ rank-based 融合，可把上述精确标识符案直接从全表捞回 top-8，
    `tests/milestone25/test_task6_r4_registration.py`（§7.2 表 ↔ 件字节锁存）；
 9. 参考模拟修订（A8-L4）：`task6_r4_reference_sim.py::_build_planner` 的
    r3 钉子改为签名前置 + 构造后属性复核，不再 `except TypeError` 静默回退。
+10. `scripts/kb/gen_prewindow_snapshots.py`（修订 A9-D3）：`per_row` 增补
+   `ingested_at_sha256` / `source_commit_sha256` **分列**戳记哈希。这是 §7.3
+   唯一例外的判别器前提——没有分列哈希就区分不出"重戳 `ingested_at`"与
+   "`source_commit` 也变了"，例外范围会退化成"任何戳记变化"（A8 #2 /
+   规格 lane MAJOR-1）。**只加列**：不改文本、不改 §3 规则、不改排序，
+   点预测逐案 `top8_ids` 不变（由 §4.6 活库测复验）。缺任一列 →
+   `_write_surface` 一律按写入算（fail-closed）。
+11. `scripts/phase25/gen_task6_r4_vector_identity.py`（新，修订 A9-C1）：四表
+   **向量集合哈希**机产器（按 `str(id)` 排序，`id.utf8 + float32-LE` 字节流
+   一个 sha256/表）。用途见 §8.4：快照逐行哈希不含 `vector` 列，同维重嵌入
+   只能靠它发现。hermetic 自测 `tests/milestone25/test_task6_r4_vector_
+   identity.py`（口径/排序无关性/维度与 id 守卫/float32 精度边界）。
 
 ## 5. 冻结锚点（门 1 双 lane 复算一致）
 
@@ -222,6 +236,7 @@ rank-based 融合，可把上述精确标识符案直接从全表捞回 top-8，
 | 嵌入 | mpnet 768（离线三开关，0 下载） |
 | phase25 ledger | 56 行（Stage B 全程 0 付费，恒 56） |
 | 点预测快照 | `scripts/phase25/snapshots/task6_r4_point_predictions.json` sha256 `e7e1bc3853ac199bdc25bb99feabda19b1f688b5f4f214f10483f6a9d0740a76` |
+| 四表**向量**集合 sha（窗口前基线，修订 A9-C1） | kb `554652ee98a90819126732db4aa033066d69590dc993447a143e130688c18f53` / solutions `81eff42e22a1c263197398f61d4baea52803e739650c27512ec8ae999c4cb369` / phase1 `5271de376eebf483f354945f22a4d5c9a3f914d3c403fb703575c607d74d2799` / phase2 `42eb43a1484acc9eb36502690c81f407b39b6cf514603395753371454e544f2f`；基线件 `pre_vector_identity.json` sha256 `ea896f6474ffeaeb68098461aa0448a213d8171e581915f2bff85036f9e07d6e`（连跑两次逐字节相同；取基线的同一时刻重跑 `gen_prewindow_snapshots.py` 得到的件与 `prewindow_snapshot.json` 逐字节相同（`9228269a…`）→ 基线时点与窗前快照是同一状态） |
 
 ## 6. 设计期参考模拟与点预测（**如实披露**）
 
@@ -276,8 +291,11 @@ rank-based 融合，可把上述精确标识符案直接从全表捞回 top-8，
 `build_planner()` 不把它透传给 `PlannerRecall`。因此绑定跑的实际语义来自
 §3.7 的构造函数默认 `r4`，`--rules-version r4` 保证标签与默认一致。
 该解耦的残余风险由 §7.2 机判兜底：`point_prediction_match` 逐案比对
-`top8_ids` 与 §6 冻结快照，若行为实为 r3（或任何非 r4 实现），逐案 id
-必然不同 → `retain=false` → 判负。即「标签说谎」不可能换来保留结论。
+`top8_ids` 与 §6 冻结快照，若行为实为 r3（或任何非 r4 实现），**至少在词法
+增益的案上** id 不同、整体 `point_prediction_match` 必为 false → `retain=false`
+→ 判负（修订 A9-D6：原稿写"逐案必然不同"是过度断言——无词法增益的多数案上
+r3 与 r4 的 top-8 本来就相同，够用的是"整体必 false"这一步，结论不变）。
+即「标签说谎」不可能换来保留结论。
 
 ## 7. 绑定评测、尝试纪律与判决
 
@@ -320,17 +338,21 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
   `verdict`（`RETAIN_R4`/`NEGATIVE_ROLLBACK_R3`）、`retain`；
 - `retain` = **五条件 ∧ `point_prediction_match`**（见修订 A5/§13）。
 
-**首呼前登记的三个件 sha**（登记后改动即黑名单命中；下表为门 1 修复轮后的
-**最终登记值**，见修订 A8/§13.6）：
+**首呼前登记的五个件 sha**（登记后改动即黑名单命中；下表为门 1 修复轮后的
+**最终登记值**，见修订 A8/§13.6、A9/§13.7 与 A10/§13.8）：
 
 | 件 | sha256 |
 |---|---|
-| `scripts/phase25/task6_r4_verdict.py` | `adea3f524446a743ecec38b799af1ae0878b6299f2cab0a79332644e7756d3e2` |
+| `scripts/phase25/task6_r4_verdict.py` | `23c473472465a5007ac25b7d5e2dfca95530180e65a4362c7c33b9cb70f3772d` |
 | `scripts/phase25/task6_r4_reference_sim.py` | `836cf8a4198c164e6989a9b65d329e27876f67b76fd5f247228faa1341b1143f` |
-| `scripts/phase25/gen_task6_r4_window_evidence.py` | `a6743aa570a957ec10729bbecb5e84e60ff2dc961e072db78003612f31f2e1b3` |
+| `scripts/phase25/gen_task6_r4_window_evidence.py` | `6086d1603479e76ad17707d8183c250dd00a0703f10e93d283b22a3d80aae51c` |
+| `scripts/phase25/gen_task6_r4_vector_identity.py` | `32d376dbc358cc9149fa91117ebacf896339b1cd5ee292c9ebaa55164e9a2216` |
+| `scripts/kb/gen_prewindow_snapshots.py` | `e1f21597a30c5f632dd8004cd9e7c9d15bea51ce4b8d895e7d9fbc4fe72be8cd` |
 
 一致性机判：`tests/milestone25/test_task6_r4_registration.py` 逐字解析本表并
-比对三件实际字节；prereg 表与落地件一旦漂移即红（防"登记的是上一版"）。
+比对**五件**实际字节（并断言同件不重复登记）；目录白名单含 `scripts/kb/`，
+窗口快照生成器不再是"承重但未登记"（修订 A10-L1）。prereg 表与落地件一旦
+漂移即红（防"登记的是上一版"，修订 A9-D7）。
 
 ### 7.3 PROC-7 溯源过程（预注册的例外程序）
 
@@ -352,6 +374,9 @@ kbint**。终复不加跑任何门；32 passed 类结论只依赖内容/身份�
    全等；Q1/Q2/Q3 有序 13 id 集与冻结集恒等；**活库零写入**（唯一例外是
    §7.3 记录的 kbint 门自身重戳 + 门后溯源终复；例外**范围**另由证据
    `write_surface.gate_restamp_other_rows == 0` 单独机判，修订 A8）；
+   **四表向量集合 sha 与 §5 基线全等**（修订 A9-C1：逐行哈希不覆盖 `vector`
+   列，同维重嵌入在写入面比对里与"没写"无法区分，故向量身份由
+   `vector_identity.observed ∧ unchanged` 单独机判，缺观测即判负）；
 5. **零付费与工程门**：phase25 ledger 恒 56（0 实呼）；两排除 hermetic 全套
    rc0；`kb_integration` 门绿；`gate_static.sh` 六步绿；容器**存量** 0
    （`docker ps -a` 口径，含已退出/created，硬规则 5；修订 A8）、显存
@@ -397,10 +422,14 @@ kbint**。终复不加跑任何门；32 passed 类结论只依赖内容/身份�
 - 仓内：本件、`task6_r4_reference_sim.py`、`task6_r4_verdict.py`、
   `snapshots/task6_r4_point_predictions.json`、引擎批与测试；
 - /mnt：iter5 报告（0600）、窗口日志 `task6_r4_window.log`（0600）、
-  kbint 前后四表全列快照与终复比对件；
+  kbint 前后四表全列快照与终复比对件、窗口前向量身份基线
+  `pre_vector_identity.json`（0600，修订 A9-C1）+ 同刻快照重跑件
+  `snapshot_contemporaneity_check.json`（证明基线时点 = 窗前快照状态）、
+  门禁原始日志 `kbint_gate.log` 与 `gate_static.log`（0600；证据机产器解析
+  它们的 rc/标记并记 sha256，修订 A10-M1）；
 - 收尾：`docker compose down`（无容器则跳过并记录）、显存 ≤200 MiB、
   两排除全套冷跑、`check_git_author.sh`、author/trailer 合规则；
-- 提交策略：本地攒批（main ahead origin 23 → 递增），**push 永远人工 STOP 门**。
+- 提交策略：本地攒批（main ahead origin 26 → 递增），**push 永远人工 STOP 门**。
 
 ## 12. 衔接与禁止
 
@@ -409,11 +438,14 @@ kbint**。终复不加跑任何门；32 passed 类结论只依赖内容/身份�
   新规则形验收**，不改 AC-T6-4 的达标判据，也不回写 r3 结论；
 - 模型：本实验 0 实呼，不涉及任何 model_id 变更（硬规则 1 不触发）。
 
-## 13. 门 1 修订登记（A3–A7，2026-11-02，首呼前由 LEAD 登记）
+## 13. 门 1 修订登记（A3–A8，2026-11-02，首呼前由 LEAD 登记；A9 见 §13.7、A10 见 §13.8）
 
-门 1 规格 lane（laneA）对落地件与本节条款的**对账**提出 2 CRITICAL + 5
-MAJOR。全部按「修落地件 + 登记修订」处理，**不动 §1 机制假设、§3.1/§3.2/
-§3.3 规则形、§5 冻结锚点、§6 点预测、§8 五条件**（科学侧零改动）。逐条：
+门 1 第一轮两份报告（`gate1_laneA_report.md` / `gate1_specLane_report.md`，
+原始计数见 §13.6 开头引用）对落地件与本节条款的**对账**逐条提出阻塞项与
+LOW。全部按「修落地件 + 登记修订」处理，**不动 §1 机制假设、§3.1/§3.2/
+§3.3 规则形、§5 冻结锚点、§6 点预测、§8 五条件**（科学侧零改动）。逐条
+（A10-L5：本节原写「2 CRITICAL + 5 MAJOR」，与 §13.6 的 C=3/M=6/L=10 口径
+打架且把规格 lane 误记为 laneA，现改为不并列第二套计数）：
 
 | 编号 | 位置 | 性质 | 处置 |
 |---|---|---|---|
@@ -422,7 +454,7 @@ MAJOR。全部按「修落地件 + 登记修订」处理，**不动 §1 机制�
 | A5 | §7.2 `retain` 定义 | MAJOR（§7.2 与落地件不一致） | 明确 `retain` = 五条件 ∧ 点预测闸 |
 | A6 | §7.2 输入/输出 | MAJOR（按落地件校正） | 逐字写入 CLI 与输出键 + 三件 sha |
 | A7 | §3.7/§9「生产默认 r4」 | MAJOR（事实错误） | 更正为「构造函数默认值；今日无生产消费者」 |
-| A8 | §8.4/§8.5 工程判据 | C×2 + M×2（门 1 双 lane 修复轮） | 容器改 `docker ps -a` 存量口径；非授权戳记计数入硬条件；缺表/空显存读数为观测缺口 |
+| A8 | §8.4/§8.5 工程判据 | 修复轮（条目计数见 §13.6） | 容器改 `docker ps -a` 存量口径；非授权戳记计数入硬条件；缺表/空显存读数为观测缺口 |
 
 ### 13.1 A3 词法语料扫描列（落地件已修）
 
@@ -485,7 +517,10 @@ MAJOR。全部按「修落地件 + 登记修订」处理，**不动 §1 机制�
    `containers_running` 改名 `containers_present`；verdict 只认新键，旧键
    视为「未观测」（`test_engineering_rejects_legacy_containers_running_key`）。
 2. **C3(b) 例外范围**：evidence 的 `write_surface.gate_restamp_other_rows`
-   进 verdict 硬条件（必须为 0）；缺 `write_surface` 亦判负。
+   进 verdict 硬条件（必须为 0）；缺 `write_surface` 亦判负。判别器依赖
+   §4.10 新增的**分列戳记哈希**：缺任一列即按写入算（fail-closed）。
+   `--evidence` 另加 schema 强校验（`simpraxis.phase25.task6_r4_window_
+   evidence.v1`），不符即 exit 2——异构输入不得当证据读取（修订 A9-D4）。
 3. **M6 缺表**：`_write_surface` 对**任一侧**缺表/缺 `rows`/`id_set_sha256`/
    `per_row` 即 `EvidenceError`——"两侧都缺"不得记成零写入。
 4. **L10 显存**：`_vram_mib` 空输出/非数值即 `EvidenceError`，不再
@@ -495,12 +530,82 @@ MAJOR。全部按「修落地件 + 登记修订」处理，**不动 §1 机制�
 6. **L4 参考模拟 r3 钉子**：`_build_planner` 去掉 `try/except TypeError`
    （参数改名会静默退回构造器默认 r4），改为签名前置 + 构造后
    `rules_version == "r3"` 复核，不符即 `AnchorError`。
-7. **C1 kbint 门**：`test_task6_r4_planner_recall.py` 补 `_build_r3_planner`
-   装配 helper（原引用未定义符号 → kbint 门必红），活库复跑 4 passed。
+7. **C1 kbint 门**：`tests/milestone25/test_task6_planner_recall.py` 补
+   `_build_r3_planner` 装配 helper（`:926-943`，供 `:1288` 的冻结锚点测用）。
+   根因不是"未定义符号"——旧行 `planner = mod.build_planner()` 可解析；问题在
+   冻结判分器的 `build_planner()` **不透传** `rules_version`（修订 A2 的事实），
+   Stage B 把构造器默认翻成 r4 后它返回 r4，与 r3 锚点断言（38/47）冲突 →
+   kbint 门红。helper 逐字沿用 `build_planner()` 的装配、只多传
+   `rules_version="r3"`，断言一字未改。（修复当轮未为该门留存独立日志，故
+   此处**不再声称**"活库复跑 4 passed"；窗口内 kbint 门的正式结果见 §8.5 与
+   窗口日志，修订 A9-D1/M-1。）
 8. **M1 词法语料扫描列**（A3）与 **A4 显式 `lexical_hints`** 已随引擎批落地。
 
-已登记的残余口径（不改代码、如实留痕）：evidence 的 `hermetic/kbint/
-gate_static/provenance_restore` 四项仍是**执行方声明**（`declared_by_executor`
-键逐项列出），脚本只保证不默认 true；"执行方说谎"由仲裁与门 2 复核兜底，
-不属机判可判范围。修复轮后三件 sha 见 §7.2，由
+已登记的残余口径（如实留痕；**修订 A10-M1 后范围收窄为一项**）：
+`hermetic` / `kbint` / `gate_static` 三项已改为**绑定实跑工件**——hermetic
+只收 rc（ok 由 rc 推出），kbint 与 gate_static 由脚本解析原始日志得到
+rc/ok 并记录日志 sha256，缺日志或找不到摘要行即 `EvidenceError`。
+剩下的 `provenance_restore`（PROC-7 门后溯源终复）仍是**执行方声明**
+（`declared_by_executor == ["provenance_restore"]`）：它是执行方对活库做的
+一次动作，没有可解析的第三方工件；"执行方说谎"由仲裁与门 2 人工复核兜底，
+不属机判可判范围。修复轮（A8/A9/A10）后五件 sha 见 §7.2，由
 `test_task6_r4_registration.py` 锁存。
+
+### 13.7 A9 门 1 第二轮（r2 双 lane）修复登记（2026-11-02，首呼前）
+
+r2 双 lane 结论：`gate1-laneA-r2` REJECT（1 CRITICAL + 1 MAJOR + 若干 LOW）、
+`gate1-spec-r2` REJECT（3 阻塞）。**计数口径如实留痕**：laneA 报告末段在
+传输中被截断（C-1 之后正文未到），故此处不写死 LOW 总数；下表按已读到的
+条目逐项登记，lane 复述后若出现未登记项，按同一规则补行并复钉 sha。阻塞项全部为**登记/命名/观测口径**级，未发现 §3 规则形、§5
+冻结锚点、§6 点预测、§8 科学判据的任何变动——不构成第二变量，不需要重跑
+参考模拟/点预测/kbint/付费。逐条处置：
+
+| 编号 | 位置 | 性质 | 处置 |
+|---|---|---|---|
+| A9-D1 | §13.6 #7 件名 + 根因 | 阻塞（登记不实） | 件名改正为 `test_task6_planner_recall.py`；根因改正为「`build_planner()` 不透传 `rules_version` → 构造器默认 r4 与 r3 断言冲突」 |
+| A9-D2 | §4 #2 `_lexical_route()` 残句 | 阻塞（引用不存在的符号） | 改为 `_lexical_corpus()`/`_lexical_state()` 装配、`_fuse_route()` 调用 |
+| A9-D3 | §4.10 新列未登记 | 阻塞（未登记的行为变更） | 分列戳记哈希登记进 §4.10 与 §13.6 #2 |
+| A9-C1 | §8.4 向量轴空真 | **CRITICAL** | 新增 `gen_task6_r4_vector_identity.py`（§4.11）+ §5 基线 + §8.4 机判 `vector_identity.observed ∧ unchanged`；verdict `check_data_identity` 缺观测即判负 |
+| A9-M1 | §13.6 #7「活库复跑 4 passed」 | MAJOR（无日志支撑的声明） | 删除该声称；kbint 门的正式结果以窗口内实跑与日志为准 |
+| A9-L6 | 活库测只比前 8 行 | LOW（A1 机制无活库断言） | `test_task6_r4_live.py` 增「输出无重复 id / learning 路长度 ∈{8,9} / phase2 演化志行必须在输出里 / 非 learning 路恒 8」 |
+| A9-L7 | kb 失效键 docstring 过度断言 | LOW | 改为「已知边界、不声称等价」，写明什么形态会漏判 |
+| A9-L8 | 稠密行缺 id 退化成 `"None"` | LOW | `_fuse_route` fail-closed `ValueError`（不得把多行并成一行） |
+| A9-L10 | 显存负值恒过 | LOW | 负值读数一律 `EvidenceError` |
+| A9-D4 | verdict schema 校验未登记 | LOW | 登记进 §13.6 #2（不改 verdict 行为） |
+| A9-D5 | 注释仍称「生产默认 r4」 | LOW | 按修订 A7 改为「构造函数默认值；今日无生产消费者」 |
+| A9-D6 | §6.3「逐案必然不同」 | LOW | 收窄为「至少在词法增益案上不同，整体 match 必 false」 |
+| A9-D7 | 登记表重复行 last-wins | LOW | 解析器改 list + 断言同件只登记一次 |
+| A9-D8 | §13 标题 A3–A7 | LOW（笔误） | 改为 A3–A8 |
+| A9-D9 | evidence 文档「三项」实列四项 | LOW | 改为四项（随 C1 同一次改动，登记 sha 一并复钉） |
+| A9-D10 | `_write_surface` 对 None 值节点 | LOW | 三键按**类型**判（`rows` 为 int / `id_set_sha256` 非空串 / `per_row` 为 list），None 一律 `EvidenceError` |
+
+**未采纳（记录理由）**：laneA 提出的「显存改单卡口径」不采纳——§8.5 的
+「≤200 MiB」是硬规则 5 的**整机**收尾口径（他方进程也可能占显存），改成
+单卡会窄化证据；负值读数已按未测处理。
+
+**本轮口径变化对判据的方向**：全部为「更严」或「更如实」——新增的向量轴
+只能让条件 4 更难满足；None/负值/schema 校验只能让工程证据更难通过；活库
+尾席断言只能让实现缺陷更容易暴露。规则规格（§3）、点预测（§6）、阈值与
+fixture（§5）**一字未改**。
+
+### 13.8 A10 门 1 第二轮复核后的收口修复（2026-11-02，首呼前）
+
+`gate1-laneA-r2` 的完整复述件（此前因传输截断只收到 §3 开头）落地后，按其
+§3/§4 的阻塞项与 LOW 再做一轮。方向仍是「更严 / 更如实」：规则规格（§3）、
+fixture/阈值（§5）、点预测（§6）**零改动**，冻结锚点（fixture `f5c5cc58…`、
+判分器 `e73fe8b8…`、synonyms `b731ccbe…`、iter3 `f1c0e7f4…`、点预测
+`e7e1bc38…`）逐字节未动；参考模拟 `--check` 对冻结快照仍 rc=0。
+
+| 编号 | 位置 | 性质 | 处置 |
+|---|---|---|---|
+| A10-C1 | 向量轴（承接 A9-C1） | CRITICAL（laneA 复述件） | **实现形式与 laneA 建议不同，理由见下**：laneA 建议在快照 `per_row` 增 `vector_sha256`；本轮改用**独立机产器 + 独立判据轴**（`gen_task6_r4_vector_identity.py` 四表集合哈希 + verdict `vector_identity.observed ∧ unchanged`）。二者可观测面等价（任何向量字节变化都会翻转集合哈希），但独立件不必改动 **Stage A 已钉的** `scripts/kb/gen_prewindow_snapshots.py`，也不必让窗前快照作废重出；同时性由「同一时刻重跑快照生成器得 `9228269a…` 逐字节相同」作旁证。laneA 的失败场景（kbint 重嵌入 94 行、非向量列全等）在本实现下判**负**，由 `test_data_identity_requires_observed_vector_identity` 与 `test_vector_identity_detects_same_dim_reembed` 锁存 |
+| A10-M1 | 四项门禁全是执行方声明 | MAJOR（第一轮 M4 残余） | 三项改**绑实跑工件**：`hermetic` 只收 `--hermetic-rc`（`ok` 由 `rc == 0` 推出，不再有独立布尔）；`kbint` 收 `--kbint-log`，脚本自行解析 pytest 终局摘要行（须含结果词与耗时），记 `rc`/`ok`/`summary`/`log_sha256`，读不到或找不到摘要 → `EvidenceError`；`gate_static` 收 `--gate-static-log`，须含 `[STATIC GATE OK]`，记 `ok`/`log_sha256`。verdict 侧 `kbint.rc != 0` 即判负（裸 `{"ok": true}` 无 rc 也判负）。`provenance_restore` 无第三方工件可解析，**仍为声明项**并如实留在 `declared_by_executor == ["provenance_restore"]` |
+| A10-L1 | 快照生成器承重却未登记 | LOW | 登记为第 5 件；注册测试目录白名单放宽到 `scripts/phase25` 与 `scripts/kb`，并断言恰五件、同件不重复 |
+| A10-L2 | 显存负值在 verdict 侧仍可通过 | LOW | `check_engineering` 增 `isinstance(int) ∧ 0 <= vram <= 200`（证据侧 A9-L10 已拒收负值读数） |
+| A10-L3 | ledger 只数非空行 | LOW | 解析每行 `seq`，要求恰为 `1..N` 连续；断档/缺 seq/非 JSON → `EvidenceError`。"追加一行再删一行"不再能冒充零付费 |
+| A10-L4 | `per_row` 缺 id 抛 `KeyError`（rc=1） | LOW | 新增 `_per_row_index`，行非 dict 或缺 id → `EvidenceError`；`_q1q2q3` 内非 `EvidenceError` 的异常统一收敛为 `EvidenceError`（exit 2 = 输入不可用，不是判据） |
+| A10-L5 | §13 导语计数与 §13.6 自相矛盾 | LOW | 导语不再并列第二套计数，改为指向 §13.6；A8 行的「C×2 + M×2」同改 |
+
+**本轮作废的旧值**：A9 轮登记的 verdict `4a07d67b…` 与 window_evidence
+`0fd46928…` 因本轮改动作废，最终值见 §7.2（五件表）。仍未首呼，不构成
+§7.1 黑名单事件。

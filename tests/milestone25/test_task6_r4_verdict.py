@@ -100,9 +100,11 @@ def _evidence(**over):
         "write_surface": {"unexpected": [], "gate_restamp_rows": 0,
                           "gate_restamp_ingested_at_only_rows": 0,
                           "gate_restamp_other_rows": 0},
+        "vector_identity": {"observed": True, "unchanged": True,
+                            "mismatches": [], "tables": {}},
         "ledger_rows": vd.EXPECTED_LEDGER_ROWS,
         "hermetic": {"rc": 0, "ok": True},
-        "kbint": {"ok": True},
+        "kbint": {"ok": True, "rc": 0},
         "gate_static": {"ok": True},
         "containers_present": 0,
         "vram_mib": 14,
@@ -148,6 +150,23 @@ def test_engineering_requires_every_gate_declared():
         assert vd.check_engineering(_evidence(**{key: bad}))["ok"] is False
 
 
+def test_engineering_requires_kbint_rc_not_bare_ok():
+    """kbint 门必须绑实跑 rc（A10-M1）：只有 ok 布尔、缺 rc 一律判负。"""
+    ev = _evidence()
+    ev["kbint"] = {"ok": True}
+    got = vd.check_engineering(ev)
+    assert got["ok"] is False and any("kbint" in p for p in got["problems"])
+    # rc=1 即使 ok 写成 true 也判负
+    assert vd.check_engineering(
+        _evidence(kbint={"ok": True, "rc": 1}))["ok"] is False
+
+
+def test_engineering_rejects_negative_vram():
+    """负值天然落在上限内，旧实现会放过（A10-L2）。"""
+    assert vd.check_engineering(_evidence(vram_mib=-1))["ok"] is False
+    assert vd.check_engineering(_evidence(vram_mib=0))["ok"] is True
+
+
 def test_engineering_ledger_and_vram_bounds():
     assert vd.check_engineering(_evidence(ledger_rows=55))["ok"] is False
     assert vd.check_engineering(_evidence(vram_mib=None))["ok"] is False
@@ -185,6 +204,32 @@ def test_data_identity_pins_authorized_restamp_scope():
     ev["write_surface"]["gate_restamp_rows"] = 94
     ev["write_surface"]["gate_restamp_ingested_at_only_rows"] = 94
     assert vd.check_data_identity(ev)["ok"] is True
+
+
+def test_data_identity_requires_observed_vector_identity():
+    """向量轴必须被观测且不变（GATE1-LANE-A C-1）。
+
+    快照逐行哈希不含 ``vector`` 列，所以"文本/id 全等"不能推出"嵌入没被重算"。
+    缺观测、未观测、或哈希变了，都是条件 4 的失败——不是可选项。
+    """
+    assert vd.check_data_identity(_evidence())["ok"] is True
+
+    ev = _evidence()
+    ev.pop("vector_identity")
+    got = vd.check_data_identity(ev)
+    assert got["ok"] is False and any("vector_identity" in p
+                                      for p in got["problems"])
+
+    ev = _evidence()
+    ev["vector_identity"] = {"observed": False}
+    assert vd.check_data_identity(ev)["ok"] is False
+
+    ev = _evidence()
+    ev["vector_identity"] = {"observed": True, "unchanged": False,
+                             "mismatches": [{"table": "solution_chunks"}]}
+    got = vd.check_data_identity(ev)
+    assert got["ok"] is False and any("向量集合哈希" in p
+                                      for p in got["problems"])
 
 
 def test_data_identity_pins_rows_dims_and_id_sha():

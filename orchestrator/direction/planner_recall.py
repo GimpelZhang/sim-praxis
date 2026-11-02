@@ -79,8 +79,11 @@ R3_RULES_VERSION = "r3"
 # 查询串、作用域保底配额）逐字不动——r3 分支在本题下与 r3 时点逐字节相同。
 R4_RULES_VERSION = "r4"
 SUPPORTED_RULES_VERSIONS = (R3_RULES_VERSION, R4_RULES_VERSION)
-# 预注册 §3.7：生产默认 r4（DirectionSetter 经 DI 注入的实例即走默认）；
-# 历史锚点/回归路径显式传 rules_version="r3"。
+# 预注册 §3.7，按修订 A7 更正：r4 只是**构造函数默认值**——
+# `orchestrator/graph/cli.py` 构造 `DirectionSetter` 时从不传 `planner_recall`，
+# 全仓无第二个注入点，故 `PlannerRecall` 今日**没有生产消费者**。"生产默认 r4"
+# 仅指直接构造（判分器/参考模拟/测试）时生效；把它接进 setter/cli 属另一件事，
+# 须另立预注册。历史锚点/回归路径显式传 rules_version="r3"。
 DEFAULT_RULES_VERSION = R4_RULES_VERSION
 
 # 预注册 §3.5 词法语料：kb 路排除目录性文档（与 query_kb 的 include_index=False
@@ -422,8 +425,11 @@ class PlannerRecall:
     def _lexical_counts(self) -> tuple:
         """失效键（§3.6）：三路语料表的行数逐表比对，行数变化即重建索引。
 
-        kb 路用整表行数（语料的 doc_type 过滤是固定子集，行数单调，作失效键
-        与语料行数等价）；缺表/缺库记 0（不建表、不报错）。
+        kb 路用**整表行数**作失效键（不扫 doc_type 子集）：本仓 kb_chunks 的
+        doc_type 不就地改写，追加只发生在整表重建（`drop_existing` + 重灌）
+        路径上，故「总行数不变而 doc_type 翻转」不在生产路径内。这是**已知
+        边界**，不声称与语料行数等价——将来若出现就地改 doc_type 的写入，
+        本键会漏判（GATE1-LANE-A L7）。缺表/缺库记 0（不建表、不报错）。
         """
         counts: list[tuple[str, int]] = [
             ("kb", self.vector_engine.count_rows(KB_TABLE_NAME)),
@@ -489,10 +495,18 @@ class PlannerRecall:
           严格单调），此时返回的行对象与 ``dense_rows`` 逐 dict 相等。
         """
         dense_top = dense_rows[:top_k]
-        dense_ids = [str(r.get("id")) for r in dense_top]
+        # 缺 id 的稠密行在 RRF 里无法被标识：`str(r.get("id"))` 会静默变成
+        # 字面量 "None"，把多行并成一行、还会和词法侧同形 id 混淆。活库三表
+        # 的 id 恒非空，出现即装配缺陷，fail-closed 报错（GATE1-LANE-A L8）。
+        bad = [i for i, r in enumerate(dense_top) if r.get("id") is None]
+        if bad:
+            raise ValueError(
+                f"稠密行缺 id（下标 {bad}）：RRF 融合无法标识行，"
+                "不得记作字符串 'None'")
+        dense_ids = [str(r["id"]) for r in dense_top]
         lex = lexicon["index"].top(query, top_k)
         fused = rrf_fuse(dense_ids, lex, top_k=top_k)
-        dense_by_id = {str(r.get("id")): r for r in dense_top}
+        dense_by_id = {str(r["id"]): r for r in dense_top}
         lex_rank = {rid: rank for rank, (_s, rid) in enumerate(lex, 1)}
         out: list[dict] = []
         for _score, rid in fused:

@@ -192,6 +192,13 @@ def check_data_identity(ev: dict) -> dict:
         problems.append(
             "非授权戳记变化行数非 0 或未观测："
             f"{surface.get('gate_restamp_other_rows')!r}")
+    # 向量轴（GATE1-LANE-A C-1）：逐行哈希不覆盖 vector 列，同维重嵌入在
+    # 写入面比对里看起来干净。集合哈希必须**被观测**且不变，缺观测即判负。
+    vec = ev.get("vector_identity")
+    if not isinstance(vec, dict) or vec.get("observed") is not True:
+        problems.append("缺 vector_identity 或未观测（无法断言嵌入身份不变）")
+    elif vec.get("unchanged") is not True:
+        problems.append(f"四表向量集合哈希变化：{vec.get('mismatches')!r}")
     return {"ok": not problems, "problems": problems}
 
 
@@ -206,17 +213,25 @@ def check_engineering(ev: dict) -> dict:
     # 在 evidence 里，不在此处放水——ok 由执行方按实跑结论写入并被本脚本读取）。
     if hermetic.get("rc") != 0 or hermetic.get("ok") is not True:
         problems.append(f"两排除 hermetic 全套不合格：{hermetic}")
-    if not (ev.get("kbint") or {}).get("ok"):
-        problems.append(f"kbint 门不合格：{ev.get('kbint')}")
-    if not (ev.get("gate_static") or {}).get("ok"):
-        problems.append(f"gate_static 不合格：{ev.get('gate_static')}")
+    # kbint 门必须**绑到实跑 rc**（修订 A10-M1）：只认 rc==0，裸 ok 布尔不算。
+    # 证据机产器已改为解析 pytest 日志摘要得到 rc，此处再要求 rc 存在且为 0，
+    # 缺 rc（例如旧证据只有 {"ok": true}）一律判负。
+    kbint = ev.get("kbint") or {}
+    if kbint.get("rc") != 0 or kbint.get("ok") is not True:
+        problems.append(f"kbint 门不合格（须 rc==0）：{kbint}")
+    gate = ev.get("gate_static") or {}
+    if gate.get("ok") is not True:
+        problems.append(f"gate_static 不合格：{gate}")
     if ev.get("containers_present") != 0:
         problems.append(
             f"容器残留或未观测：{ev.get('containers_present')!r}"
             "（口径 = docker ps -a，含已退出容器，硬规则 5）")
     vram = ev.get("vram_mib")
-    if vram is None or vram > VRAM_CEILING_MIB:
-        problems.append(f"显存 {vram!r} MiB 超 {VRAM_CEILING_MIB} 或未测")
+    # 负值不是合法读数（异常驱动可能给 -1，天然落在上限内）——按未测处理
+    # （GATE1-LANE-A A10-L2）。
+    if not isinstance(vram, int) or vram < 0 or vram > VRAM_CEILING_MIB:
+        problems.append(
+            f"显存 {vram!r} MiB 超 {VRAM_CEILING_MIB}、为负或未测")
     if ev.get("provenance_restore") is not True:
         problems.append("PROC-7 门后溯源终复未完成")
     return {"ok": not problems, "problems": problems}
