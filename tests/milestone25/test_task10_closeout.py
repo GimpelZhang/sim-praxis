@@ -555,11 +555,26 @@ def _harden(root: Path) -> None:
 
 
 def _verdict_payload() -> dict:
+    """与真实判决件同构（五条件各为带 ok 的对象 + 预注册数值）。"""
     return {
         "verdict": "RETAIN_R4", "retain": True,
-        "conditions": {"1_thresholds": True, "2_h3_subset_h4": True,
-                       "3_residual_recovery": True, "4_data_identity": True,
-                       "5_engineering": True},
+        "conditions": {
+            "1_thresholds": {"ok": True, "all_pass": True, "detail": {
+                "overall": {"hits": 45, "total": 47, "gold_at_8": 0.9574,
+                            "pass": True},
+                "solution_route": {"hits": 18, "total": 18,
+                                   "gold_at_8": 1.0, "pass": True},
+                "learning_route": {"hits": 11, "total": 12,
+                                   "gold_at_8": 0.9167, "pass": True}}},
+            "2_h3_subset_h4": {"ok": True, "n_h3": 38, "n_h4": 45,
+                               "flip_loss": []},
+            "3_residual_recovery": {"ok": True, "n_residual": 9,
+                                    "n_recovered": 7, "n_gold_id_direct": 6,
+                                    "recovered": [{"id": f"r{i}"}
+                                                  for i in range(7)]},
+            "4_data_identity": {"ok": True, "problems": []},
+            "5_engineering": {"ok": True, "problems": []},
+        },
         "point_prediction_match": {"ok": True, "n_cases": 47, "mismatches": []},
         "iter5_sha256":
             "9a704e0081c62e1d938bd023bddc572eafac3768450f08327c7a8ad09fb59e16",
@@ -619,11 +634,24 @@ def test_judge_science_and_pack(tmp_path, monkeypatch):
     assert any("方法学失败" in p for p in problems)
     rec["methodology"]["per_task"]["t3"]["methodology_failure"] = False
 
-    # 五条件必须恰 5 键且全 True；点预测须 47 案逐字相符
+    # 五条件必须恰 5 键、每条 ok 为 true，且预注册数值逐项相符
     for mutate, needle in (
-        (lambda v: v["conditions"].update({"6_extra": True}), "条件键不符"),
-        (lambda v: v["conditions"].update({"5_engineering": False}),
-         "条件未全过"),
+        (lambda v: v["conditions"].update({"6_extra": {"ok": True}}),
+         "条件键不符"),
+        (lambda v: v["conditions"]["5_engineering"].update({"ok": False}),
+         "5_engineering 未过"),
+        (lambda v: v["conditions"]["1_thresholds"].update({"all_pass": False}),
+         "all_pass 非 true"),
+        (lambda v: v["conditions"]["1_thresholds"]["detail"]["overall"].update(
+            {"hits": 44}), "overall 命中 44/47"),
+        (lambda v: v["conditions"]["1_thresholds"]["detail"][
+            "learning_route"].update({"gold_at_8": 0.7}), "learning_route 闸未过"),
+        (lambda v: v["conditions"]["2_h3_subset_h4"].update(
+            {"flip_loss": [{"id": "sol_win10_exit"}]}), "翻失非空"),
+        (lambda v: v["conditions"]["3_residual_recovery"].update(
+            {"n_recovered": 6}), "残留/回收/直中"),
+        (lambda v: v["conditions"]["4_data_identity"].update(
+            {"ok": True, "problems": ["x"]}), "4_data_identity 残留问题"),
         (lambda v: v["point_prediction_match"].update({"n_cases": 46}),
          "点预测逐案不符"),
         (lambda v: v["point_prediction_match"].update(

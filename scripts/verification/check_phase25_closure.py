@@ -112,6 +112,59 @@ EXPECTED_ROWS = {"kb_chunks": 1542, "solution_chunks": 94,
                  "phase1_learnings": 44, "phase2_learnings": 1}
 _STAGE_B_CONDITIONS = {"1_thresholds", "2_h3_subset_h4", "3_residual_recovery",
                        "4_data_identity", "5_engineering"}
+# 预注册 §7 的数值承诺（判决件每条条件的 ok 之外，逐项钉死）：
+# 路由 = (hits, total, 阈值)；H3/H4 = 38/45 且零翻失；9 残留回收 7、gold_id 直中 6。
+_STAGE_B_ROUTES = {"overall": (45, 47, 0.80), "solution_route": (18, 18, 0.75),
+                   "learning_route": (11, 12, 0.75)}
+_STAGE_B_H3H4 = (38, 45)
+_STAGE_B_RESIDUAL = (9, 7, 6)     # n_residual, n_recovered, n_gold_id_direct
+
+
+def _stage_b_condition_problems(conds: dict) -> list[str]:
+    """五条件必须恰 5 键、每条 ok 为 true，且预注册数值逐项相符。"""
+    if set(conds) != _STAGE_B_CONDITIONS:
+        return [f"T6 Stage B 条件键不符（应恰 5 条）：{sorted(conds)}"]
+    problems = []
+    for k, c in conds.items():
+        if not isinstance(c, dict) or c.get("ok") is not True:
+            problems.append(f"T6 Stage B 条件 {k} 未过（ok 非 true）")
+    t1 = conds["1_thresholds"]
+    if t1.get("all_pass") is not True:
+        problems.append("T6 Stage B 条件 1 all_pass 非 true")
+    detail = t1.get("detail") or {}
+    for route, (hits, total, thr) in _STAGE_B_ROUTES.items():
+        d = detail.get(route) or {}
+        if (d.get("hits"), d.get("total")) != (hits, total):
+            problems.append(
+                f"T6 Stage B {route} 命中 {d.get('hits')}/{d.get('total')}"
+                f" ≠ 预注册 {hits}/{total}")
+        got = d.get("gold_at_8")
+        if d.get("pass") is not True or not isinstance(got, (int, float)) \
+                or got < thr:
+            problems.append(
+                f"T6 Stage B {route} 闸未过（gold_at_8={got} < {thr}）")
+    t2 = conds["2_h3_subset_h4"]
+    if (t2.get("n_h3"), t2.get("n_h4")) != _STAGE_B_H3H4:
+        problems.append(
+            f"T6 Stage B H3/H4 = {t2.get('n_h3')}/{t2.get('n_h4')} ≠ "
+            f"{_STAGE_B_H3H4[0]}/{_STAGE_B_H3H4[1]}")
+    if t2.get("flip_loss") != []:
+        problems.append(f"T6 Stage B 翻失非空：{t2.get('flip_loss')}")
+    t3 = conds["3_residual_recovery"]
+    got3 = (t3.get("n_residual"), t3.get("n_recovered"),
+            t3.get("n_gold_id_direct"))
+    if got3 != _STAGE_B_RESIDUAL:
+        problems.append(
+            f"T6 Stage B 残留/回收/直中 = {got3} ≠ {_STAGE_B_RESIDUAL}")
+    if len(t3.get("recovered") or []) != _STAGE_B_RESIDUAL[1]:
+        problems.append(
+            f"T6 Stage B 回收清单 {len(t3.get('recovered') or [])} 条 ≠ "
+            f"{_STAGE_B_RESIDUAL[1]}")
+    for k in ("4_data_identity", "5_engineering"):
+        if conds[k].get("problems"):
+            problems.append(
+                f"T6 Stage B 条件 {k} 残留问题：{conds[k]['problems']}")
+    return problems
 
 
 def check_tables(rec: dict, pre_vector_identity: "Path | None" = None) -> list[str]:
@@ -185,13 +238,7 @@ def check_science(rec: dict,
         v = json.loads(verdict_path.read_text(encoding="utf-8"))
         if v.get("verdict") != "RETAIN_R4" or v.get("retain") is not True:
             problems.append(f"T6 Stage B 判决非 RETAIN_R4：{v.get('verdict')}")
-        conds = v.get("conditions") or {}
-        if set(conds) != _STAGE_B_CONDITIONS:
-            problems.append(
-                f"T6 Stage B 条件键不符（应恰 5 条）：{sorted(conds)}")
-        bad = [k for k, c in conds.items() if c is not True]
-        if bad:
-            problems.append(f"T6 Stage B 条件未全过：{bad}")
+        problems += _stage_b_condition_problems(v.get("conditions") or {})
         ppm = v.get("point_prediction_match") or {}
         if not ppm.get("ok"):
             problems.append("T6 Stage B 点预测闸未过")
