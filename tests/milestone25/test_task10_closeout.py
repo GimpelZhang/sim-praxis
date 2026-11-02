@@ -367,6 +367,8 @@ def _synthetic_tree(tmp_path: Path) -> dict:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps({"synthetic": src_rel}), encoding="utf-8")
     for _prefix, _root, src_dir, _logical, _req, _ex in P.DIR_COPIES:
+        if not _req:          # 可选目录（如三签件）默认不造，留给各自用例
+            continue
         d = p25 / src_dir
         d.mkdir(parents=True, exist_ok=True)
         (d / "evidence.json").write_text("{}", encoding="utf-8")
@@ -424,6 +426,43 @@ def test_pack_build_manifest_modes_and_symlinks(tmp_path):
     # 收尾件尚未生成 → 如实登记缺口，绝不伪造绿件
     assert (pack / "closeout/closeout_reconcile_MISSING.json").is_file()
     assert J.check_pack(pack)[0] == []
+
+
+def test_pack_registers_not_executed_tasks_honestly(tmp_path):
+    """T7/T8/T9 用户停做：挂牌 NOT_EXECUTED，不用空目录冒充已执行。"""
+    tree = _synthetic_tree(tmp_path)
+    man = _build(tree, clean=True)
+    pack = tree["pack"]
+    for slug, task in (("task7_stages", "Task 7"),
+                       ("task8_drill", "Task 8"),
+                       ("task9_vla", "Task 9")):
+        rec = json.loads((pack / f"{slug}/NOT_EXECUTED.json").read_text())
+        assert rec["status"] == "stopped_by_user"
+        assert task in rec["task"]
+        assert rec["evidence_present"] is False
+        assert rec["would_have_included"], "须列出本应入包的证据项"
+        assert "2026-11-02" in rec["adjudication"]
+    listed = {r["path"] for r in man["files"]}
+    assert {"task7_stages/NOT_EXECUTED.json", "task8_drill/NOT_EXECUTED.json",
+            "task9_vla/NOT_EXECUTED.json"} <= listed
+    # 三签件未落时如实挂牌，落件后由 signs/* 取代
+    assert (pack / "task10_closeout/signs_MISSING.json").is_file()
+
+
+def test_pack_copies_signs_when_present(tmp_path):
+    tree = _synthetic_tree(tmp_path)
+    signs = tree["p25"] / "task10_milestone" / "signs"
+    signs.mkdir(parents=True)
+    (signs / "executor.json").write_text('{"role": "executor", "ok": true}\n')
+    (signs / "verifier.json").write_text('{"role": "verifier", "ok": true}\n')
+    man = _build(tree, clean=True)
+    pack = tree["pack"]
+    assert (pack / "task10_closeout/signs/executor.json").is_file()
+    assert (pack / "task10_closeout/signs/verifier.json").is_file()
+    assert not (pack / "task10_closeout/signs_MISSING.json").exists()
+    listed = {r["path"] for r in man["files"]}
+    assert {"task10_closeout/signs/executor.json",
+            "task10_closeout/signs/verifier.json"} <= listed
 
 
 def test_pack_missing_required_file_fail_closed(tmp_path):
@@ -517,6 +556,13 @@ def test_judge_science_and_pack(tmp_path, monkeypatch):
     pack = tmp_path / "pack"
     pack.mkdir()
     (pack / "a.txt").write_text("hello\n", encoding="utf-8")
+    # T7/T8/T9 停做挂牌是机判硬要求：缺挂牌即问题（见下一条断言）
+    for slug in ("task7_stages", "task8_drill", "task9_vla"):
+        (pack / slug).mkdir()
+        (pack / slug / "NOT_EXECUTED.json").write_text(
+            json.dumps({"task": slug, "status": "stopped_by_user",
+                        "adjudication": "用户 2026-11-02 裁决"},
+                       ensure_ascii=False), encoding="utf-8")
     man = {"git_commit": "abc",
            "evidence_roots": {"@runs/phase25/<thread>/stage_<id>/": {
                "tag": "@runs/", "subdir": "phase25", "rows_using": 0}},
@@ -531,6 +577,12 @@ def test_judge_science_and_pack(tmp_path, monkeypatch):
     problems, _gaps = J.check_pack(pack)
     assert any("evidence_roots" in p for p in problems)
     assert any("sha256 不符" in p for p in problems)
+
+    # 停做挂牌缺失 = 问题（缺证不许静默通过），且缺口入 provenance_limited
+    (pack / "task8_drill" / "NOT_EXECUTED.json").unlink()
+    problems, gaps = J.check_pack(pack)
+    assert any("task8_drill" in p for p in problems)
+    assert {g["what"] for g in gaps} == {"task7_stages", "task9_vla"}
 
 
 def test_judge_report_without_artifacts_is_not_green(tmp_path):

@@ -234,6 +234,21 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
             problems.append(f"包内 >10MB：{rec['path']}")
         if _sha256(p) != rec.get("sha256"):
             problems.append(f"sha256 不符：{rec['path']}")
+    # T7/T8/T9 用户停做：包内挂牌 NOT_EXECUTED，机判按证据缺口登记
+    # （provenance_limited，不计入通过）；缺失挂牌本身才算问题。
+    for slug in ("task7_stages", "task8_drill", "task9_vla"):
+        marker = pack_dir / slug / "NOT_EXECUTED.json"
+        if not marker.is_file():
+            problems.append(f"缺 {slug}/NOT_EXECUTED.json 或该任务证据")
+            continue
+        rec = json.loads(marker.read_text(encoding="utf-8"))
+        gaps.append({"what": rec.get("task") or slug,
+                     "path": str(marker),
+                     "why": f"{rec.get('status')}：{rec.get('adjudication')}"})
+    if (pack_dir / "task10_closeout/signs_MISSING.json").is_file():
+        gaps.append({"what": "Task 10 三签件",
+                     "path": str(pack_dir / "task10_closeout"),
+                     "why": "机判时点三签尚未落件（构建顺序：机判→三签→终建包）"})
     # 密钥双扫（包内文本）
     hits = []
     for p in pack_dir.rglob("*"):

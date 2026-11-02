@@ -163,6 +163,11 @@ DIR_COPIES: list[tuple[str, str, str, str, bool, tuple[str, ...]]] = [
     ("task5_walls/freeze", P25, "walls/t5_freeze", "M25.T5.2", True,
      ("gate_env/pyshim",)),
     ("task6_recall", P25, "task6_recall", "M25.T6.1", True, ()),
+    # 三签件（AC-T10-4：「三签件全入」）。可选：收尾链顺序为 对账→看板→
+    # 机判→三签→终建包，故首建包时该目录可以尚不存在，缺则如实由
+    # ``signs_MISSING`` 标记承担（见下方派生写）。
+    ("task10_closeout/signs", P25, "task10_milestone/signs", "M25.T10.3",
+     False, ()),
 ]
 
 # 证据根登记区（AC-T10-4）：标签 → 解析基准与当前使用行数。
@@ -466,6 +471,44 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
                            "note": "收尾件尚未生成（构建顺序：对账→看板→"
                                    "机判→证据包终建）"},
                           logical, src)
+
+    # T7/T8/T9：用户 2026-11-02 裁决不再进行 → 无证据实体。AC-T10-4 点名的
+    # 「drill 报告 / T9 战役证据」因此不存在；此处如实挂牌，不用空目录或
+    # 占位产物冒充已执行（硬规则 7）。
+    not_executed = {
+        "task7_stages": ("Task 7 stages[] 多阶段状态机",
+                         ["roadmap 契约测试件", "kill/resume 录证",
+                          "历史 golden（T7-2）", "脱敏 fixture"]),
+        "task8_drill": ("Task 8 飞书富卡 + 真人 drill",
+                        ["drill_report", "最大卡快照（字节帽 T8-5/9）",
+                         "P2P 降级法录证（T8-8）"]),
+        "task9_vla": ("Task 9 VLA LIBERO 多阶段战役",
+                      ["三档 venv 判决（T9-1/11）", "战役证据包 + Gate 记录",
+                       "负结果落库行（T9-12）"]),
+    }
+    for slug, (title, would_include) in not_executed.items():
+        write_derived(
+            f"{slug}/NOT_EXECUTED.json",
+            {"task": title,
+             "status": "stopped_by_user",
+             "adjudication": ("用户 2026-11-02 裁决「Task 6 Stage B确认立项，"
+                              "Task7/8/9不再继续进行」"),
+             "evidence_present": False,
+             "would_have_included": would_include,
+             "note": ("AC-T10-4 点名该证据项；任务未执行故无实体。本件替代"
+                      "空目录/占位产物，机判据此登记 provenance gap 而非"
+                      "记为通过。")},
+            "M25.T10.3", p25 / "task10_milestone")
+
+    # 三签件若尚未产出，同样如实挂牌（不伪装已签）。
+    signs_dir = p25 / "task10_milestone" / "signs"
+    if not signs_dir.is_dir():
+        write_derived("task10_closeout/signs_MISSING.json",
+                      {"missing": str(signs_dir),
+                       "note": ("三签（executor/reviewer/verifier）尚未落件；"
+                                "构建顺序为 机判→三签→终建包，终建包时本件"
+                                "应消失并被 signs/*.json 取代。")},
+                      "M25.T10.3", signs_dir)
 
     # 追溯矩阵与适配说明（派生件，逐件登记进 manifest）
     write_derived("traceability_matrix.json",
