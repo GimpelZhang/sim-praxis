@@ -79,13 +79,20 @@ R3_RULES_VERSION = "r3"
 # 查询串、作用域保底配额）逐字不动——r3 分支在本题下与 r3 时点逐字节相同。
 R4_RULES_VERSION = "r4"
 SUPPORTED_RULES_VERSIONS = (R3_RULES_VERSION, R4_RULES_VERSION)
-# 预注册 §3.7，按修订 A7 更正：r4 只是**构造函数默认值**——
-# `orchestrator/graph/cli.py` 构造 `DirectionSetter` 时从不传 `planner_recall`，
-# **生产代码**里没有第二个注入点（测试会直接构造 `PlannerRecall`，那不算生产
-# 消费者），故 `PlannerRecall` 今日**没有生产消费者**。"生产默认 r4"
-# 仅指直接构造（判分器/参考模拟/测试）时生效；把它接进 setter/cli 属另一件事，
-# 须另立预注册。历史锚点/回归路径显式传 rules_version="r3"。
+# 预注册 §3.7，按修订 A7 更正：r4 只是**构造函数默认值**。
+# 历史（Phase 2.5 时点）：`orchestrator/graph/cli.py` 构造 `DirectionSetter`
+# 时从不传 `planner_recall`，**生产代码**里没有第二个注入点（测试会直接构造
+# `PlannerRecall`，那不算生产消费者），故 `PlannerRecall` 当时**没有生产消费者**。
+# **自 Phase 2.6 Task 2 起**：`orchestrator/graph/cli.py::build_direction_setter`
+# 在生产构造点注入（`--recall-mode fourway` 缺省；`dual` 时 planner_recall=None
+# 回退 Phase 2 双路）；开发期 CLI（`orchestrator/direction/cli.py`）**不注入**。
+# 历史锚点/回归路径仍显式传 rules_version="r3"。
 DEFAULT_RULES_VERSION = R4_RULES_VERSION
+
+# Phase 2.6 Task 2（D2-3）：**生产接线**使用的规则版本单点常量。
+# 生产构造点引用此常量而不写 `"r4"` 字面量——将来升 r5 只改这一行，
+# 且可被测试断言（AC-T2-4c）。
+PRODUCTION_RULES_VERSION = R4_RULES_VERSION
 
 # 预注册 §3.5 词法语料：kb 路排除目录性文档（与 query_kb 的 include_index=False
 # 同集）；solutions/learnings 全表。

@@ -37,6 +37,12 @@ from memory_flywheel.vector_engine import VectorEngine
 from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.common.validators import validate_batch_id, validate_thread_id
 from orchestrator.direction.inputs import get_input
+from orchestrator.direction.planner_recall import (
+    PRODUCTION_RULES_VERSION,
+    TIER_PROBE,
+    TIERS,
+    PlannerRecall,
+)
 from orchestrator.direction.setter import DirectionSetter
 from orchestrator.gateway.quota_ledger import QuotaLedger, billing_context
 from orchestrator.gateway.router import ModelGateway
@@ -57,6 +63,12 @@ TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 sta
 TASK8 = 8             # Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）
 TASK7_VARIANT_LIBERO = "libero"  # Task7 B 线：LIBERO 第五平台（--variant 仅此值）
 TASK8_VARIANT_FLUID = "fluid"    # Task8 C 线：Q5 厨房倒水流体（--variant 仅 task=8）
+
+# Phase 2.6 Task2（D2-2）：生产规划召回模式。回退面必须显式落在命令行
+# （可追、可写进 checkpoint 元数据），不用环境变量。
+RECALL_FOURWAY = "fourway"       # 四路全量召回（kb 双 ns + solutions + 两学习库）
+RECALL_DUAL = "dual"             # 回退 Phase 2 双路（planner_recall=None）
+RECALL_MODES = (RECALL_FOURWAY, RECALL_DUAL)
 
 # H-2/C1：Gate2 卡片 30s 截窗（飞书侧视频大小/可看性约束）；纯函数
 # compute_gate2_trim 决定窗口，request_gate2_approval 的 trim 形参由
@@ -287,6 +299,31 @@ class _AgentEngineDispatcher:
         return run_agentic_for_runspec(spec, gateway=self._gateway)
 
 
+def build_direction_setter(gateway: Any, vector_engine: Any, recall: Any, *,
+                           recall_mode: str = RECALL_FOURWAY,
+                           **setter_kwargs: Any) -> DirectionSetter:
+    """按 `--recall-mode` 构造生产 `DirectionSetter`（Phase 2.6 Task2）。
+
+    - `fourway`（缺省）：注入 `PlannerRecall(recall, rules_version=PRODUCTION_RULES_VERSION)`
+      ⇒ Gate1 规划期走四路全量召回（kb 双 namespace + solutions + 两学习库）与三段 prompt。
+    - `dual`：`planner_recall=None` ⇒ prompt 与 Phase 2/2.1 **逐字节相同**（回退面，
+      Phase 2.5 AC-T6-6 的既有 golden 形态）。
+
+    抽成纯函数是为了让「旗标 → 构造实参」这一跳可被 hermetic 测试直接断言
+    （AC-T2-4c）；`_production_deps` 里只做一次调用。
+    """
+    if recall_mode not in RECALL_MODES:
+        raise ValueError(
+            f"未知 recall_mode：{recall_mode!r}（可选 {RECALL_MODES}）")
+    planner_recall = None
+    if recall_mode == RECALL_FOURWAY:
+        # r4 规则版本由常量单点给出；不在此处写 "r4" 字面量（D2-3）。
+        planner_recall = PlannerRecall(
+            recall, rules_version=PRODUCTION_RULES_VERSION)
+    return DirectionSetter(gateway, vector_engine, recall=recall,
+                           planner_recall=planner_recall, **setter_kwargs)
+
+
 def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     libero = getattr(args, "variant", None) == TASK7_VARIANT_LIBERO
     fluid = getattr(args, "variant", None) == TASK8_VARIANT_FLUID
@@ -323,7 +360,9 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
     vector_engine = VectorEngine()
     learning_store = LearningStore()
     recall = ProductionRecall(learning_store, vector_engine)
-    setter = DirectionSetter(gateway, vector_engine, recall=recall)
+    setter = build_direction_setter(
+        gateway, vector_engine, recall,
+        recall_mode=getattr(args, "recall_mode", RECALL_FOURWAY))
     thread = args.thread
     batch_id = args.batch_id
 
@@ -340,7 +379,10 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
             track=args.track, payload=payload, thread_id=thread,
             batch_id=batch_id, gate_round=int(state.get("gate1_rejects", 0)),
             human_notes=notes, prev_proposals=prev,
-            v1_archive=v1_archive, ascent_targets=ascent_targets)
+            v1_archive=v1_archive, ascent_targets=ascent_targets,
+            # Phase 2.6 Task2（D2-4）：规划提示词档位由 CLI 显式给出，
+            # 缺省 TIER_PROBE ⇒ 旧线程 macro prompt 逐字节不变。
+            planner_tier=getattr(args, "planner_tier", TIER_PROBE))
 
     # 飞书长连接网关：只在真正需要时构造（topology 不需要）
     # M2：Task6 卡片批准强制真人原文（空批准只 toast 不落决策），防
@@ -613,6 +655,16 @@ def main(argv: "list[str] | None" = None) -> int:
                             "runs/phase2/task7/stage0/stage0_compat_report.json "
                             "或 runs/phase2/task8/stage0/stage0_fluid_report.json）")
         p.add_argument("--task-title", default=None)
+        # Phase 2.6 Task2：生产召回模式与规划档位（D2-2 / D2-4）。
+        # choices 引用常量，不写字面量（TIERS 里没有 "policy" 这种值）。
+        p.add_argument("--recall-mode", dest="recall_mode", default=RECALL_FOURWAY,
+                       choices=RECALL_MODES,
+                       help="fourway=四路全量召回（默认）；"
+                            "dual=回退 Phase2 双路（planner_recall=None）")
+        p.add_argument("--planner-tier", dest="planner_tier", default=TIER_PROBE,
+                       choices=TIERS,
+                       help="规划提示词档位；policy_closed_loop 用于 policy "
+                            "闭环级任务（如 LIBERO 战役）")
 
     p_run = sub.add_parser("run", help="首次运行（gate 处阻塞等真人）")
     add_run(p_run)
