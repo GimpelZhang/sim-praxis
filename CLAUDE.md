@@ -256,3 +256,33 @@ Task7 已收官**——计划内 Phase 2 余项全部有终态（完成或诚实
 （计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
 t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 44）、
 run7c key-collapse 覆写 created_at、54b27b59 同类覆写）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
+
+## Phase 2.5（2026-10-28 用户立项；R2 smolagents 强 agentic 层）
+
+计划 `~/文档/Phase_2.5_Plan_detailed.md`（用户 2026-10-28 正式全部签收），执行台账
+`~/文档/Phase_2.5_Plan_Complete.md`（与 Plan 冲突以 Complete 为准）。独立账套命名空间
+`QuotaLedger.phase25()`（现 56 行）；提交 攢批108–133（`b70a2e2..e259436`，**本地攒批
+未推送**，main ahead origin 28，推送仅经用户显式窗口指示）。
+
+- **Task 0–5b 全闭**（开工基座/呼量 v2/看门狗 SOP/Stage0 探针/agentic 内环/历史墙 A-B
+  三态）：Task 5 判「不成立」（两墙干净触帽 16/16+9/9 共 25 呼），Task 5b 同冻结墙
+  重测支持 H1（空轮 9/25→0/25），矩阵维持 opt-in/冻结。
+- **Task 6 Stage A（换嵌入 mpnet/768→Qwen3-0.6B/1024）诚实负结果**：§7 五条件
+  1 PASS/2 FAIL/3 PASS/4 FAIL/5 PASS → 形态甲整目录回滚 mpnet/768（攢批122–128），
+  MF4 盲点点预测失准不救济。
+- **Task 6 Stage B（r4 = r3 稠密 top-8 ⊕ 精确词 BM25 top-8，RRF k=60）判 `RETAIN_R4`**
+  （2026-11-02 绑定跑唯一一次实呼，iter5 45/47=0.9574 / sol 18/18 / lrn 11/12，
+  H3=38⊆H4=45 零翻失，9 残留回收 7 其中 gold_id 直中 6，点预测 47/47 逐字相符，
+  四表/向量身份不变，ledger 恒 56）：r4 保留为 `PlannerRecall` 构造函数默认
+  （按修订 A7 今日无生产消费者，未接线 `DirectionSetter`）；证据
+  `/mnt/artifacts/simpraxis/phase25/task6_r4_window/2026-11-02T031952Z/`。
+- **Task 7/8/9 经用户 2026-11-02 裁决不再进行**；Phase 2.5 计划内余项只剩 Task 10 收尾。
+- **模型换供（硬规则 1，2026-11-02 用户逐字裁决 + 换供应商）**：端点 env 实读为
+  Tencent tokenhub（`ANTHROPIC_BASE_URL` 指 tokenhub，原火山方舟 `/api/coding`
+  不再使用）；macro=glm-5.3、coding_debug=deepseek-v4.1-flash-1017、
+  visual_rollout=deepseek-v4.1-flash-1017（攢批129 `8c7c754`）。stage_models.yaml
+  文件头注释为完整沿革与清点取证（新供应商无模型清单端点，GET /models、/v1/models
+  均 404，逐字采用用户给定 ID 并以 `--validate-models` 实呼为最终闸）。
+- 纪律不变：模型变更仍须 STOP→inventory→用户批准；实呼预算自批但逐次记账、批次件落
+  `quota/approvals/`；测试禁网、禁 skip/xfail/TODO；矛盾即结论不翻案；推送/公开是人工
+  STOP 门。Phase 2.5 尾债（T5/T6SA/T6SB 各 LOW、PROC-6/7/8）见 Complete §4/§8.1/§9.1。
