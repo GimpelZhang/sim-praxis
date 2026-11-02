@@ -305,6 +305,8 @@ run7c key-collapse 覆写 created_at、54b27b59 同类覆写）明细见 `~/文�
   三签 executor/reviewer/verifier 全 APPROVE 且绑定 `d196242`（R4 的 3 条 REJECT
   整目录留档 `_signs_r1_440cbc2_reject/`，修复见攢批143）。
   环境：容器 0、显存 14 MiB、/mnt 42G/500G(9%)、无看门狗残留。
-  `RunSpec.agentic` 保持 **opt-in/冻结**（Task 5 判「不成立」），待用户签收；
+  `RunSpec.agentic` 保持 **opt-in/冻结**（Task 5 判「不成立」），**已由用户 2026-11-02
+  逐字签收**；Phase 3 拟解冻须新预注册 + 新门 1 + 重跑 T4 契约与 T5/T5b 墙，本节签收
+  不构成解冻许可；
   偏差/坑表 P11–P16/方法学对账/R4 尾债 T10-M1..M4+L1/Open Items→Phase 3 backlog
   见 `Phase_2.5_Plan_Complete.md` §10。
