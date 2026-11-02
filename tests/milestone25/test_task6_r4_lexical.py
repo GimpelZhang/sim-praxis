@@ -490,15 +490,45 @@ def test_r3_path_never_touches_lexical_seams():
     assert planner._lexical_cache == {}
 
 
-def test_r4_without_lexical_hints_defaults_to_hints():
-    """retrieve_with_hints 缺省 lexical_hints = hints（向后兼容）。"""
+def test_r4_requires_explicit_lexical_hints():
+    """§3.4 修订 A4：r4 缺省 lexical_hints 一律 fail-closed。
+
+    原预注册「缺省 = hints（向后兼容）」与同节「词法通道一律用未扩展 base
+    hint」矛盾：缺省路径会让**已扩展** hint 静默充当词法查询串。改为必填，
+    不猜、不静默降级；生产入口 ``retrieve()`` 显式传三路同 base。
+    """
     engine = _mini_engine()
     store = _FakeStore("phase1_learnings")
     planner = _make(engine, store)
+    with pytest.raises(ValueError, match="r4 必须显式传 lexical_hints"):
+        planner.retrieve_with_hints(
+            {"kb": "pick_offset_angle", "solutions": "pick_offset_angle",
+             "learnings": "pick_offset_angle"}, site="direction")
+    # 失败发生在任何检索之前：不查库、不建索引
+    assert engine.count_calls == [] and engine.scan_calls == []
+    assert planner._lexical_cache == {}
+    # 传了就走通（同一 hint 作词法串）
     ret = planner.retrieve_with_hints(
         {"kb": "pick_offset_angle", "solutions": "pick_offset_angle",
-         "learnings": "pick_offset_angle"}, site="direction")
+         "learnings": "pick_offset_angle"}, site="direction",
+        lexical_hints={"kb": "pick_offset_angle",
+                       "solutions": "pick_offset_angle",
+                       "learnings": "pick_offset_angle"})
     assert "solA" in {r["id"] for r in ret["solution_hits"]}
+
+
+def test_r3_ignores_lexical_hints_entirely():
+    """r3 分支无词法通道 ⇒ 该参数可选，传了也不得改变任何返回行。"""
+    engine = _mini_engine()
+    store = _FakeStore("phase1_learnings")
+    planner = _make(engine, store, rules_version="r3")
+    hints = {"kb": "pick_offset_angle", "solutions": "pick_offset_angle",
+             "learnings": "pick_offset_angle"}
+    plain = planner.retrieve_with_hints(hints, site="direction")
+    with_hints = planner.retrieve_with_hints(
+        hints, site="direction", lexical_hints=dict(hints))
+    for key in ("kb_hits", "solution_hits", "learning_hits"):
+        assert plain[key] == with_hints[key], key
 
 
 def test_r4_rejects_empty_lexical_hint():
@@ -532,3 +562,87 @@ def test_r4_missing_solutions_table_is_tolerated():
     ret = planner.retrieve("track2", _base_payload(), tier="probe",
                            allow_missing_solutions=True)
     assert ret["solution_hits"] == []
+
+
+# ------------------------------------------------- M1 词法行渲染字段完整性
+# GATE1-LANE-A M1：词法通道把行提进 top-8 时，该行从 ``_lexical_corpus`` 原样
+# 复制，不走稠密查询；语料扫描列缺一列，prompt 里就出现 `?` 占位（硬规则 7 的
+# 「不得伪造来源」边界）。以下直接跑 setter 渲染器，断言渲染文本里没有 `?`。
+
+def test_lexical_kb_row_carries_renderer_fields():
+    from orchestrator.direction.setter import _planner_kb_block
+    engine = _FakeEngine(
+        kb_corpus=[{"id": "kbA", "text": "pick_offset_angle 参数说明。",
+                    "doc_type": "guide", "kb_relpath": "knowledge/a.md",
+                    "section_path": "Q3/LIBERO"},
+                   {"id": "kbB", "text": "无关正文。", "doc_type": "guide",
+                    "kb_relpath": "knowledge/b.md", "section_path": "Q1"}],
+        # 稠密行按真实查询形状给全字段（缺列是**稠密**侧的假象，不是本测标的）
+        kb_hits=[{"id": "kbB", "text": "无关正文。", "_distance": 0.1,
+                  "namespace": "capabilities", "project": "global",
+                  "doc_type": "guide", "kb_relpath": "knowledge/b.md",
+                  "section_path": "Q1"}])
+    planner = _make(engine, _FakeStore("phase1_learnings"))
+    ret = planner.retrieve("track2", _base_payload(), tier="probe")
+    row = {r["id"]: r for r in ret["kb_hits"]}["kbA"]
+    assert row["kb_relpath"] == "knowledge/a.md"
+    assert row["section_path"] == "Q3/LIBERO"
+    assert row["doc_type"] == "guide"
+    block = _planner_kb_block(ret["kb_hits"])
+    assert "?" not in block
+    assert "knowledge/a.md#Q3/LIBERO" in block
+
+
+def test_lexical_solution_row_carries_renderer_fields():
+    from orchestrator.direction.setter import _planner_solution_block
+    engine = _FakeEngine(
+        kb_corpus=[], kb_hits=[],
+        sol_corpus=[{"id": "solA", "text": "pick_offset_angle 实现。",
+                     "relpath": "solutions/track1/a.py", "kind": "code",
+                     "chunk_index": 3, "solution_id": "track1_tools"}],
+        # 稠密行按真实查询形状给全字段（缺列是稠密侧 fixture 的事）
+        sol_hits=[{"id": "solB", "text": "无关脚本文本。", "_distance": 0.1,
+                   "relpath": "solutions/b.py", "kind": "readme",
+                   "chunk_index": 0, "solution_id": "track1_tools"}])
+    planner = _make(engine, _FakeStore("phase1_learnings"))
+    ret = planner.retrieve("track2", _base_payload(), tier="probe")
+    row = {r["id"]: r for r in ret["solution_hits"]}["solA"]
+    assert row["kind"] == "code" and row["chunk_index"] == 3
+    assert row["solution_id"] == "track1_tools"
+    block = _planner_solution_block(ret["solution_hits"], 1)
+    assert "?" not in block
+    assert "solutions/track1/a.py#code/3" in block
+    assert "solution_id=track1_tools" in block
+
+
+def test_lexical_learning_row_carries_renderer_fields():
+    from orchestrator.direction.setter import _planner_learning_block
+    dense = {"id": "lrnB", "text": "无关学习行。",
+             "evidence_relpath": "@runs/b.json", "run_id": "run-b",
+             "gate_source": "gate2", "rung": 2}
+    lexical = {"id": "lrnA", "text": "pick_offset_angle 踩坑：偏移角要取负。",
+               "evidence_relpath": "@runs/a.json", "run_id": "run-a",
+               "gate_source": "gate2_human", "rung": 1}
+    store = _FakeStore("phase1_learnings", [dense, lexical])
+    planner = _make(_mini_engine(), store, learning_top_k=1)
+    ret = planner.retrieve("track2", _base_payload(), tier="probe")
+    assert [r["id"] for r in ret["learning_hits"]] == ["lrnA"]
+    row = ret["learning_hits"][0]
+    assert row["learning_table"] == "phase1_learnings"
+    assert row["run_id"] == "run-a"
+    assert row["gate_source"] == "gate2_human"
+    assert row["rung"] == 1
+    block = _planner_learning_block(ret["learning_hits"])
+    assert "?" not in block
+    assert "run_id=run-a" in block and "rung=1" in block
+
+
+def test_lexical_corpus_scan_columns_cover_renderer_fields():
+    """扫描列集合与渲染器所需字段的显式对账（缺列即红，防回归）。"""
+    from orchestrator.direction import planner_recall as pr
+    assert set(pr.LEXICAL_KB_COLUMNS) >= {
+        "id", "text", "doc_type", "kb_relpath", "section_path"}
+    assert set(pr.LEXICAL_SOLUTION_COLUMNS) >= {
+        "id", "text", "relpath", "kind", "chunk_index", "solution_id"}
+    assert set(pr.LEXICAL_LEARNING_COLUMNS) >= {
+        "id", "text", "evidence_relpath", "run_id", "gate_source", "rung"}

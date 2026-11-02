@@ -26,11 +26,15 @@
 用法：
   python scripts/phase25/task6_r4_reference_sim.py [--out PATH] [--check PATH]
 退出码：0=成功；2=前置不满足（锚点/活库/iter3 不一致）。
+契约边界（门 1 L5）：只有 `AnchorError` 被翻译成 rc=2；其余未预期异常按
+Python 默认 rc=1 + traceback 抛出——那是**实现崩溃**而不是「锚点不符」，
+不得当成判据继续（预注册 §7.1 首呼前允许修复重来）。
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import inspect
 import json
 import math
 import os
@@ -215,12 +219,21 @@ def _build_planner() -> PlannerRecall:
     if not ls.table_exists() or not es.table_exists():
         raise AnchorError("活库缺 phase1/phase2_learnings 表")
     prod = ProductionRecall(ls, ve, extra_learning_stores=(es,))
-    # r3 稠密语义钉子：引擎批后显式传 rules_version="r3"；落地前默认即 r3，
-    # 两种时序都能复现同一 r3 并集（脚本仍逐案强断言 == iter3 top8_ids）。
-    try:
-        return PlannerRecall(prod, rules_version="r3")
-    except TypeError:
-        return PlannerRecall(prod)
+    # r3 稠密语义钉子（GATE1-LANE-A L4）：引擎批已落地，`rules_version` 是
+    # 构造器正式参数。原先的 `try: ...(rules_version="r3") / except TypeError:
+    # ...()` 会在参数被改名时**静默**退回构造器默认（r4），把 r3 稠密基线换成
+    # 混合召回——那是一种看起来"能跑"的错。改为显式前置 + 事后核对，缺参数
+    # 或实际规则版本不符一律 AnchorError。
+    if "rules_version" not in inspect.signature(
+            PlannerRecall.__init__).parameters:
+        raise AnchorError(
+            "PlannerRecall 构造器无 rules_version 参数（r3 稠密基线不可钉）")
+    planner = PlannerRecall(prod, rules_version="r3")
+    if getattr(planner, "rules_version", None) != "r3":
+        raise AnchorError(
+            f"构造出的 planner rules_version="
+            f"{getattr(planner, 'rules_version', None)!r}，期望 'r3'")
+    return planner
 
 
 def _payload(case: dict) -> dict:

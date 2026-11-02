@@ -923,6 +923,26 @@ def _eval_mod():
                         "scripts/phase25/eval_planner_recall.py")
 
 
+def _build_r3_planner(mod):
+    """按判分器同一装配本地构造 **r3** 生产 planner（Stage B 暴露的锚点缺口）。
+
+    `mod.build_planner()` 是冻结件（sha `e73fe8b8…`）且不透传 `rules_version`
+    ——这是预注册 §6.3 修订 A2 明写的事实（`--rules-version` 只是报告标签）。
+    Stage B 把 `PlannerRecall` 的构造函数默认翻成 `r4` 后，任何经
+    `build_planner()` 装配的测试都会拿到 r4；本测断言的是 **r3 语义**
+    （逐案复现冻结 iter3 `f1c0e7f4…`），所以必须显式钉 `rules_version="r3"`。
+    装配逐字同 `build_planner()`（同一 VectorEngine + phase1 主库 + phase2
+    额外库 + 同一 solution 表存在性前置），只多一个版本参数。
+    """
+    ve = mod.VectorEngine()
+    ls = mod.LearningStore()
+    es = mod.EvolutionStore()
+    assert ve.solution_table_exists()
+    assert ls.table_exists() and es.table_exists()
+    prod = mod.ProductionRecall(ls, ve, extra_learning_stores=(es,))
+    return mod.PlannerRecall(prod, rules_version="r3")
+
+
 def test_eval_load_cases_rejects_bad_fixtures(tmp_path):
     mod = _eval_mod()
     good = json.loads(FIXTURE.read_text(encoding="utf-8"))
@@ -1265,7 +1285,7 @@ def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
     track = _embed_track()
     mod = _eval_mod()
     data = mod.load_cases(FIXTURE)
-    planner = mod.build_planner()
+    planner = _build_r3_planner(mod)
     results = mod.evaluate(planner, data["cases"])
     metrics = mod.summarize(data, results)
     if track == "mpnet768":

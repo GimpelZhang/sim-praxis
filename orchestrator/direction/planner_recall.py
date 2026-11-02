@@ -87,6 +87,15 @@ DEFAULT_RULES_VERSION = R4_RULES_VERSION
 # 同集）；solutions/learnings 全表。
 LEXICAL_EXCLUDED_DOC_TYPES = frozenset({"root_index", "index"})
 
+# 词法语料扫描列（预注册修订 A3 / GATE1-LANE-A M1）：必须覆盖 setter 渲染器
+# 读取的**全部**来源字段，否则词法行被提进 top-8 时 prompt 出现 `?` 占位。
+# 列名逐字对应三表 schema（kb_chunks / solution_chunks / *_learnings）。
+LEXICAL_KB_COLUMNS = ("id", "text", "doc_type", "kb_relpath", "section_path")
+LEXICAL_SOLUTION_COLUMNS = ("id", "text", "relpath", "kind", "chunk_index",
+                            "solution_id")
+LEXICAL_LEARNING_COLUMNS = ("id", "text", "evidence_relpath", "run_id",
+                            "gate_source", "rung")
+
 # AC-T6-4 r2 固定并行查询规则：synonyms.yaml 的 kb_projects 只允许活库既有
 # project 标签（fail-closed，防数据文件写出无意义 WHERE）。
 KB_PROJECT_TAGS = frozenset(
@@ -425,16 +434,26 @@ class PlannerRecall:
         return tuple(counts)
 
     def _lexical_corpus(self) -> dict[str, list[dict]]:
-        """§3.5 三路语料只读扫描（vector 列不入内存）。"""
+        """§3.5 三路语料只读扫描（vector 列不入内存）。
+
+        扫描列必须覆盖 **setter 渲染器要读的每一个来源字段**：词法通道把某行
+        提进 top-8 时，该行是从本语料原样复制来的（不走稠密查询），缺列就会让
+        prompt 里出现 `?` 占位（``_planner_kb_block`` 要 ``section_path``；
+        ``_planner_solution_block`` 要 ``kind``/``chunk_index``/``solution_id``；
+        ``_planner_learning_block`` 要 ``run_id``/``gate_source``/``rung``/
+        ``learning_table``，最后一项不是列而是按库注入的标签）。GATE1-LANE-A M1。
+        """
         kb_rows = self.vector_engine.scan_rows(
-            KB_TABLE_NAME, ["id", "text", "doc_type", "kb_relpath"])
+            KB_TABLE_NAME, list(LEXICAL_KB_COLUMNS))
         kb = [r for r in kb_rows
               if r.get("doc_type") not in LEXICAL_EXCLUDED_DOC_TYPES]
         sol = self.solutions_engine.scan_rows(
-            SOLUTION_TABLE_NAME, ["id", "text", "relpath"])
+            SOLUTION_TABLE_NAME, list(LEXICAL_SOLUTION_COLUMNS))
         lrn: list[dict] = []
         for store in (self.learning_store, *self.extra_learning_stores):
-            lrn.extend(store.scan_rows(["id", "text", "evidence_relpath"]))
+            label = _store_label(store)
+            for row in store.scan_rows(list(LEXICAL_LEARNING_COLUMNS)):
+                lrn.append(dict(row, learning_table=label))
         return {ROUTE_KB: kb, ROUTE_SOLUTIONS: sol, ROUTE_LEARNINGS: lrn}
 
     def _lexical_state(self) -> dict[str, dict]:
@@ -560,8 +579,14 @@ class PlannerRecall:
         生产 Task9 装配时表必在）。``matched_projects`` 为 r2 固定并行规则的
         项目识别结果（必须基于未扩展 base hint；缺省 = 只发全局探针）。
 
-        ``lexical_hints`` 仅 r4 使用（预注册 §3.4）：词法通道用**未扩展** base
-        hint，缺省 ``= hints``（向后兼容；``retrieve()`` 显式传三路同 base）。
+        ``lexical_hints`` 仅 r4 使用（预注册 §3.4）：词法通道**必须**用未扩展的
+        base hint，因此 r4 下该参数为**必填**（缺省即 ``ValueError``）。
+
+        预注册 §3.4 原先写「缺省 ``= hints``（向后兼容）」，与同节首条「词法
+        通道一律用未扩展的 base hint」自相矛盾：直接调本入口（不经
+        ``retrieve()``）的人会静默拿到**已扩展** hint 当词法查询串，等于一条
+        未登记的第二种语义。修订 A4 取 fail-closed：缺省不猜、显式传入。
+        r3 分支不使用词法通道，本参数保持可选（传了也忽略）。
         """
         if site not in SITES:
             raise ValueError(f"site 非法：{site!r}；白名单 {SITES}")
@@ -571,6 +596,11 @@ class PlannerRecall:
                 raise ValueError(f"hints[{route!r}] 必须是非空字符串")
         lex_hints = hints if lexical_hints is None else lexical_hints
         if self.rules_version == R4_RULES_VERSION:
+            if lexical_hints is None:
+                raise ValueError(
+                    "r4 必须显式传 lexical_hints（未扩展 base hint；预注册 "
+                    "§3.4 修订 A4 fail-closed——缺省 = hints 会让扩展串静默"
+                    "充当词法查询；生产入口 retrieve() 已显式传三路同 base）")
             for route in (ROUTE_KB, ROUTE_SOLUTIONS, ROUTE_LEARNINGS):
                 h = lex_hints.get(route)
                 if not isinstance(h, str) or not h.strip():

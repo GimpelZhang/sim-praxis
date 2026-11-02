@@ -32,6 +32,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -46,7 +47,9 @@ if str(REPO_ROOT) not in sys.path:
 TABLES = ("kb_chunks", "solution_chunks", "phase1_learnings",
           "phase2_learnings")
 SCHEMA = "simpraxis.phase25.task6_r4_window_evidence.v1"
-PROV_COLS = ("ingested_at", "source_commit")
+# 容器名分隔符归一（`sim_praxis_sandbox` → `simpraxissandbox`），见
+# `_simpraxis_container_names` 的放水说明。
+_SEP_RE = re.compile(r"[-_.]")
 
 
 class EvidenceError(RuntimeError):
@@ -93,8 +96,14 @@ def _q1q2q3(uri: str, prewindow: dict) -> dict:
     got = recall_snapshot(uri)
     mismatches = []
     for name, node in want.items():
+        expected = list(node.get("ids") or [])
+        # 空集恒等不是证据：窗口前快照若把召回存成 []，`[] == []` 会让这条
+        # 身份断言永远成立（GATE1-LANE-A L8）。三个查询在活库上必有命中。
+        if not expected:
+            raise EvidenceError(
+                f"窗口前快照 {name} 的召回 id 集为空（无法作身份断言）")
         cur = got.get(name) or {}
-        if list(node.get("ids") or []) != list(cur.get("ids") or []):
+        if expected != list(cur.get("ids") or []):
             mismatches.append({"query": name,
                                "expected": node.get("ids"),
                                "got": cur.get("ids")})
@@ -103,13 +112,43 @@ def _q1q2q3(uri: str, prewindow: dict) -> dict:
             "mismatches": mismatches, "unexpected_queries": extra}
 
 
+def _is_authorized_gate_restamp(table: str, x: dict, y: dict) -> bool:
+    """§7.3 唯一例外：**solution_chunks** 逐行**仅** `ingested_at` 变化。
+
+    判据必须分列（快照 per_row 的 `ingested_at_sha256` / `source_commit_sha256`）：
+    `meta_sha256` 变而 `meta_noprov_sha256` 不变，只说明"变的是某个戳记列"，
+    区分不出是 ingested_at 还是 source_commit。任一列的分列哈希缺失、或
+    source_commit 也变了、或表不是 solution_chunks → 都不是例外（按写入算）。
+    """
+    if table != "solution_chunks":
+        return False
+    keys = ("ingested_at_sha256", "source_commit_sha256")
+    if any(k not in x or k not in y for k in keys):
+        return False
+    return (x["ingested_at_sha256"] != y["ingested_at_sha256"]
+            and x["source_commit_sha256"] == y["source_commit_sha256"])
+
+
 def _write_surface(pre: dict, post: dict) -> dict:
-    """窗口前/后逐行归约哈希比对（见模块头）。"""
+    """窗口前/后逐行归约哈希比对（见模块头）。
+
+    两侧任一侧缺表（快照里 ``missing=True`` 或没有 ``rows``/``id_set_sha256``/
+    ``per_row`` 三键）即 ``EvidenceError``——**不能**因为"两边都缺"就判干净：
+    那不是"没写入"，是"没观测到"，把观测缺口记成零写入正是放水
+    （GATE1-LANE-A M6）。四表在活库里都存在，快照缺表本身即异常。
+    """
     pre_t, post_t = pre.get("tables") or {}, post.get("tables") or {}
     unexpected: list[dict] = []
     gate_restamp: list[dict] = []
+    unauthorized: list[dict] = []
+    need = ("rows", "id_set_sha256", "per_row")
     for name in TABLES:
         a, b = pre_t.get(name) or {}, post_t.get(name) or {}
+        for side, node in (("pre", a), ("post", b)):
+            if node.get("missing") is True or \
+                    any(k not in node for k in need):
+                raise EvidenceError(
+                    f"快照 {side} 侧缺表或残缺 {name}（观测缺口不得记作零写入）")
         if a.get("rows") != b.get("rows") or \
                 a.get("id_set_sha256") != b.get("id_set_sha256"):
             unexpected.append({"table": name, "reason": "行数或 id 集变化",
@@ -127,14 +166,25 @@ def _write_surface(pre: dict, post: dict) -> dict:
                     x.get("text_sha256") != y.get("text_sha256"):
                 unexpected.append({"table": name, "id": rid,
                                    "reason": "非戳记元数据或文本变化"})
-            elif x.get("meta_sha256") != y.get("meta_sha256"):
+                continue
+            if x.get("meta_sha256") == y.get("meta_sha256"):
+                continue
+            # 到这里：文本与非戳记元数据全等，仅戳记列有变。§7.3 只授权
+            # **solution_chunks 的 ingested_at 重戳**这一种；其余一切（别的表、
+            # 或者 source_commit 也变了）都是写入。没有分列哈希就无法区分，
+            # 此时一律按写入处理（fail-closed，不猜）。
+            if _is_authorized_gate_restamp(name, x, y):
                 gate_restamp.append({"table": name, "id": rid})
-    ingested_at_only = sum(1 for g in gate_restamp
-                           if g["table"] == "solution_chunks")
+            else:
+                unauthorized.append({"table": name, "id": rid,
+                                     "reason": "非授权戳记变化（仅 "
+                                               "solution_chunks.ingested_at "
+                                               "可为例外）"})
+    unexpected.extend(unauthorized)
     return {"unexpected": unexpected,
             "gate_restamp_rows": len(gate_restamp),
-            "gate_restamp_ingested_at_only_rows": ingested_at_only,
-            "gate_restamp_other_rows": len(gate_restamp) - ingested_at_only}
+            "gate_restamp_ingested_at_only_rows": len(gate_restamp),
+            "gate_restamp_other_rows": len(unauthorized)}
 
 
 def _ledger_rows() -> int:
@@ -146,26 +196,65 @@ def _ledger_rows() -> int:
                if line.strip())
 
 
-def _containers_running() -> int:
+def _simpraxis_container_names(raw: str) -> "list[str]":
+    """从 `docker ps --format {{.Names}}` 输出里挑 simpraxis 自有容器。
+
+    必须先把分隔符归一：compose 服务名是 ``sim-sandbox``，而
+    ``sandbox/docker-compose.yml`` 明写 ``container_name: sim_praxis_sandbox``
+    （下划线）。旧实现直接 ``"simpraxis" in name.lower()``，对
+    ``sim_praxis_sandbox`` 恒为 False——即便容器正在跑，证据字段也恒为 0，
+    即"断言放水"（硬规则 7；GATE1-LANE-A C2）。归一后
+    ``sim_praxis_sandbox``/``simpraxis-sandbox``/``SIM.PRAXIS.sandbox``
+    都算自有机，``alpasim_agent`` 之类不误伤（不含 "simpraxis" 字母序）。
+    """
+    hits: "list[str]" = []
+    for line in raw.splitlines():
+        name = line.strip()
+        if not name:
+            continue
+        if "simpraxis" in _SEP_RE.sub("", name).lower():
+            hits.append(name)
+    return hits
+
+
+def _containers_present() -> int:
+    """sim-praxis 自有容器**存量**计数（含已退出/created，`docker ps -a`）。
+
+    必须是 ``-a``：硬规则 5 的收尾口径是「含已退出容器不得残留」，裸
+    ``docker ps`` 只看运行中，退出后停在 ``Exited (0)`` 的容器会被漏检，
+    于是「零容器」这条证据又可空真（GATE1-LANE-A C2 附加缺陷）。改名
+    ``present`` 是为了让证据字段名与口径一致——它数的不是「在跑」。
+    """
     try:
         out = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
             check=True, capture_output=True, text=True).stdout
     except (OSError, subprocess.CalledProcessError) as exc:
-        raise EvidenceError(f"docker ps 失败：{exc}") from exc
-    names = [n for n in out.splitlines() if n.strip()]
-    return len([n for n in names if "simpraxis" in n.lower()])
+        raise EvidenceError(f"docker ps -a 失败：{exc}") from exc
+    return len(_simpraxis_container_names(out))
 
 
 def _vram_mib() -> int:
+    """全卡已用显存合计；**空输出即失败**，不得把"没读到"当 0 MiB。
+
+    原实现 ``sum([]) == 0``：nvidia-smi 返回空 stdout（驱动异常、被
+    mock、命令打错）时会安静地给出 0 MiB，而 0 ≤ 200 直接通过——这正是
+    「断言放水」（GATE1-LANE-A L10）。至少要读到一行合法数值才算数。
+    """
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=memory.used",
              "--format=csv,noheader,nounits"],
             check=True, capture_output=True, text=True).stdout
-        return sum(int(x.strip()) for x in out.splitlines() if x.strip())
-    except (OSError, subprocess.CalledProcessError, ValueError) as exc:
+    except (OSError, subprocess.CalledProcessError) as exc:
         raise EvidenceError(f"nvidia-smi 读取失败：{exc}") from exc
+    lines = [x.strip() for x in out.splitlines() if x.strip()]
+    if not lines:
+        raise EvidenceError("nvidia-smi 输出为空（读不到显存，不得记 0）")
+    try:
+        return sum(int(x) for x in lines)
+    except ValueError as exc:
+        raise EvidenceError(f"nvidia-smi 输出非数值：{exc}") from exc
 
 
 def _load_snapshot(path: str) -> dict:
@@ -193,7 +282,7 @@ def build(args) -> dict:
         "write_surface": surface,
         "live_writes_except_gate_restamp": len(surface["unexpected"]),
         "ledger_rows": _ledger_rows(),
-        "containers_running": _containers_running(),
+        "containers_present": _containers_present(),
         "vram_mib": _vram_mib(),
         "hermetic": {"rc": args.hermetic_rc, "ok": bool(args.hermetic_ok)},
         "kbint": {"ok": bool(args.kbint_ok)},
@@ -229,7 +318,7 @@ def main(argv: "list[str] | None" = None) -> int:
     print(f"live_writes_except_gate_restamp="
           f"{out['live_writes_except_gate_restamp']} "
           f"ledger_rows={out['ledger_rows']} "
-          f"containers={out['containers_running']} "
+          f"containers={out['containers_present']} "
           f"vram={out['vram_mib']}MiB "
           f"q1q2q3_ok={out['q1q2q3']['ok']}", file=sys.stderr)
     return 0

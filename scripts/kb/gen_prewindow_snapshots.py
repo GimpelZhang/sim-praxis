@@ -71,6 +71,16 @@ def table_snapshot(tbl) -> dict:
             "meta_sha256": _sha256_text(_canonical({c: r.get(c) for c in meta_cols})),
             "meta_noprov_sha256": _sha256_text(
                 _canonical({c: r.get(c) for c in noprov_cols})),
+            # 两个戳记列**分列**归约（Task 6 Stage B 门 1 规格 lane MAJOR-1）：
+            # 只有「ingested_at 变、source_commit 不变」才是 kbint 门幂等重灌的
+            # 授权例外；没有分列哈希时，postwindow 无法区分「重戳 ingested_at」
+            # 与「改了 source_commit」，例外范围就会被放宽成「任何戳记变化」。
+            "ingested_at_sha256": (
+                _sha256_text(_canonical(r.get("ingested_at")))
+                if "ingested_at" in meta_cols else None),
+            "source_commit_sha256": (
+                _sha256_text(_canonical(r.get("source_commit")))
+                if "source_commit" in meta_cols else None),
         })
         if "content_hash" in meta_cols and r.get("content_hash") is not None:
             content_hashes.append(str(r["content_hash"]))

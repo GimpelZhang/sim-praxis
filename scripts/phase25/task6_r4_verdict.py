@@ -42,6 +42,7 @@ PREDICTIONS_SHA256 = (
     "e7e1bc3853ac199bdc25bb99feabda19b1f688b5f4f214f10483f6a9d0740a76")
 EVAL_SCHEMA = "simpraxis.phase25.planner_gold_eval.v1"
 PRED_SCHEMA = "simpraxis.phase25.task6_r4_point_predictions.v1"
+EVIDENCE_SCHEMA = "simpraxis.phase25.task6_r4_window_evidence.v1"
 SCHEMA = "simpraxis.phase25.task6_r4_verdict.v1"
 
 # 预注册 §8 条件 3 的下限（不随结果可调）。
@@ -86,7 +87,7 @@ def load_inputs(args) -> tuple[dict, dict, dict, dict]:
     iter3 = _load(iter3_p, schema=EVAL_SCHEMA)
     iter5 = _load(iter5_p, schema=EVAL_SCHEMA)
     pred = _load(pred_p, schema=PRED_SCHEMA)
-    ev = _load(ev_p)
+    ev = _load(ev_p, schema=EVIDENCE_SCHEMA)
     if iter5.get("iteration") != 5:
         raise InputError(f"iter5 报告 iteration={iter5.get('iteration')!r}，期望 5")
     if iter5.get("rules_version") != "r4":
@@ -177,8 +178,20 @@ def check_data_identity(ev: dict) -> dict:
     if not q.get("ok"):
         problems.append(f"Q1/Q2/Q3 有序 13 id 集不恒等：{q}")
     writes = ev.get("live_writes_except_gate_restamp")
-    if writes not in (0, None):
-        problems.append(f"活库写入计数非 0：{writes!r}")
+    # 缺键/None 一律判负（fail-closed）：这是保留条件，观测不到不等于不存在
+    # （GATE1 规格 lane MAJOR-2——原 `not in (0, None)` 把缺数据当通过）。
+    if writes != 0:
+        problems.append(f"活库写入计数非 0 或未观测：{writes!r}")
+    # 授权例外（§7.3）的范围也要单独钉死：只有 solution_chunks.ingested_at
+    # 重戳可豁免，别的表/别的戳记列一旦变化，即便被折叠进 unexpected 也必须
+    # 显式核对计数为 0（GATE1-LANE-A C3(b)）。缺 write_surface 同样是观测缺口。
+    surface = ev.get("write_surface")
+    if not isinstance(surface, dict):
+        problems.append("缺 write_surface（无法核对 §7.3 授权例外范围）")
+    elif surface.get("gate_restamp_other_rows") != 0:
+        problems.append(
+            "非授权戳记变化行数非 0 或未观测："
+            f"{surface.get('gate_restamp_other_rows')!r}")
     return {"ok": not problems, "problems": problems}
 
 
@@ -197,8 +210,10 @@ def check_engineering(ev: dict) -> dict:
         problems.append(f"kbint 门不合格：{ev.get('kbint')}")
     if not (ev.get("gate_static") or {}).get("ok"):
         problems.append(f"gate_static 不合格：{ev.get('gate_static')}")
-    if ev.get("containers_running") not in (0, None):
-        problems.append(f"容器残留：{ev.get('containers_running')!r}")
+    if ev.get("containers_present") != 0:
+        problems.append(
+            f"容器残留或未观测：{ev.get('containers_present')!r}"
+            "（口径 = docker ps -a，含已退出容器，硬规则 5）")
     vram = ev.get("vram_mib")
     if vram is None or vram > VRAM_CEILING_MIB:
         problems.append(f"显存 {vram!r} MiB 超 {VRAM_CEILING_MIB} 或未测")
