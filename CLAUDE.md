@@ -263,8 +263,9 @@ t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest
 
 计划 `~/文档/Phase_2.5_Plan_detailed.md`（用户 2026-10-28 正式全部签收），执行台账
 `~/文档/Phase_2.5_Plan_Complete.md`（与 Plan 冲突以 Complete 为准）。独立账套命名空间
-`QuotaLedger.phase25()`（现 56 行）；提交 攢批108–133（`b70a2e2..e259436`，**本地攒批
-未推送**，main ahead origin 28，推送仅经用户显式窗口指示）。
+`QuotaLedger.phase25()`（现 56 行，**Phase 2.6 起已封存只读**）；提交 攢批108–133
+（`b70a2e2..e259436`，已随 2026-11-02 推送窗口上 origin/main，`main...origin/main`
+无分歧（至 `12538e4`））。
 
 - **Task 0–5b 全闭**（开工基座/呼量 v2/看门狗 SOP/Stage0 探针/agentic 内环/历史墙 A-B
   三态）：Task 5 判「不成立」（两墙干净触帽 16/16+9/9 共 25 呼），Task 5b 同冻结墙
@@ -288,7 +289,7 @@ t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest
 - 纪律不变：模型变更仍须 STOP→inventory→用户批准；实呼预算自批但逐次记账、批次件落
   `quota/approvals/`；测试禁网、禁 skip/xfail/TODO；矛盾即结论不翻案；推送/公开是人工
   STOP 门。Phase 2.5 尾债（T5/T6SA/T6SB 各 LOW、PROC-6/7/8）见 Complete §4/§8.1/§9.1。
-- **Task 10 收尾已闭（2026-11-02，攢批135–143 `f11b7f5..d196242`，本地未推送）**：
+- **Task 10 收尾已闭（2026-11-02，攢批135–143 `f11b7f5..d196242`，已推送至 `12538e4`）**：
   提交后冷跑两排除全套 **2057 passed/7 skipped/50 deselected/rc=0**（351.95s，HEAD
   `d196242`）+ kbint 活库套 **35 passed/2079 deselected/rc=0**（264.55s）；phase25 账
   56 行（seq 1..56 连续、ts 全严格 Z、54 ok/2 fail seq3/4、by_task T3=6/T5=50、
@@ -312,3 +313,18 @@ t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest
   不构成解冻许可；
   偏差/坑表 P11–P16/方法学对账/R4 尾债 T10-M1..M4+L1/Open Items→Phase 3 backlog
   见 `Phase_2.5_Plan_Complete.md` §10。
+
+## Phase 2.6（2026-11-02 用户正式全部签收；路线图状态机 + LIBERO VLA 多 Stage 战役）
+
+计划：`~/文档/Phase_2.6_Plan_detailed.md`（v1.4，3052 行 / 62 AC / 附录 C 53 条）；
+执行台账：`~/文档/Phase_2.6_Plan_Complete.md`（进行中；与 Plan 冲突以 Complete 为准）。
+独立账套命名空间 `QuotaLedger.phase26()`；**Phase 1/2/2.5 三本账自 Phase 2.6 起一律
+封存只读**（`runtime_paths.sealed_ledger_paths()`，写打开即 `SealedLedgerError`）。
+预算：受账实呼 Cap T4=28 / T7=16 / T8=70 / T9=2 = 116，`PHASE26_HARD_CAP=120`
+（独立字面量，不取 sum(caps)）、`PHASE26_NORMAL_BUDGET=120`；账外 `P26-B0`
+（`--validate-models`，恰 4 次付费 POST）⇒ 真实总量 116+4=120。
+开账行：生产账首行 `event="selfcheck"`、`seq=1`、`model=null`、`ok=true`，
+**占 seq 不计实呼**（机判用 `ledger_summary(..., allow_events=("selfcheck",))`，
+Task 9 对账按 `event != "call"` 排除），永不删除以保 seq 连续。
+看门狗缺省监护对象已换期到 phase26（`watched._default_ledger_path()` /
+`_default_pause_path()`），且长跑仍须显式传 `--ledger` / `--pause-state` 双保险。
