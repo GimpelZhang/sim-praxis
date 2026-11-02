@@ -225,6 +225,11 @@ def check_science(rec: dict,
                 / _STAGE_B_VERDICT.parent.name / "task6_r4_verdict.json")
         if cand.is_file():
             verdict_path = cand
+            if _STAGE_B_VERDICT.is_file() and \
+                    cand.read_bytes() != _STAGE_B_VERDICT.read_bytes():
+                gaps.append({"what": "T6 Stage B 判决件（包内副本）",
+                             "path": str(cand),
+                             "why": "与包外活件逐字节不一致"})
     if verdict_path is None:
         if not _STAGE_B_VERDICT.is_file():
             # 科学结论无任何可读判决件 → 不得判绿（缺证 = 问题，不是缺口）
@@ -242,7 +247,9 @@ def check_science(rec: dict,
         ppm = v.get("point_prediction_match") or {}
         if not ppm.get("ok"):
             problems.append("T6 Stage B 点预测闸未过")
-        if ppm.get("mismatches") or ppm.get("n_cases") != 47:
+        if not isinstance(ppm.get("mismatches"), list):
+            problems.append("T6 Stage B 点预测缺 mismatches 清单（不可判空）")
+        elif ppm.get("mismatches") or ppm.get("n_cases") != 47:
             problems.append(
                 f"T6 Stage B 点预测逐案不符：n={ppm.get('n_cases')} "
                 f"mismatches={ppm.get('mismatches')}")
@@ -258,6 +265,11 @@ def check_science(rec: dict,
     return problems, gaps
 
 
+# AC-T10-1：收尾全套必须是「两排除」命令，且规模不得塌到子集。
+SUITE_FILTERS = ("not test_04", "not paid and not kb_integration")
+MIN_FULL_SUITE_PASSED = 2000
+
+
 def check_dashboard(dash: dict, rec: dict) -> list[str]:
     problems = []
     if dash.get("schema") != "simpraxis.rsi_dashboard_phase25.v1":
@@ -265,10 +277,20 @@ def check_dashboard(dash: dict, rec: dict) -> list[str]:
     t = dash.get("tests")
     if t is None:
         problems.append("看板 tests 为 null（未喂入全套实跑结果）")
-    elif t.get("rc") != 0:
-        problems.append(f"看板 tests rc={t.get('rc')} 非 0")
-    elif int(t.get("passed") or 0) <= 0:
-        problems.append("看板 tests passed=0")
+    else:
+        cmd = str(t.get("command") or "")
+        missing = [f for f in SUITE_FILTERS if f not in cmd]
+        if missing:
+            problems.append(
+                f"看板 tests.command 未含收尾两排除项 {missing}：{cmd!r}")
+        if int(t.get("deselected") or 0) <= 0:
+            problems.append("看板 tests.deselected=0（不像两排除全套）")
+        if int(t.get("passed") or 0) < MIN_FULL_SUITE_PASSED:
+            problems.append(
+                f"看板 tests.passed={t.get('passed')} < 全套下限 "
+                f"{MIN_FULL_SUITE_PASSED}")
+        if t.get("rc") != 0:
+            problems.append(f"看板 tests rc={t.get('rc')} 非 0")
     pr = dash["paid_reconciliation"]
     if pr["ledger"]["n_calls"] != rec["ledger"]["n_calls"]:
         problems.append("看板账行数与对账件不符")
@@ -326,10 +348,15 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
     if ghost:
         problems.append(f"manifest 列件缺失 {len(ghost)} 个：{sorted(ghost)[:3]}")
     bad_modes = []
+    root_mode = stat.S_IMODE(pack_dir.lstat().st_mode)
+    if root_mode != 0o700:
+        problems.append(f"包根目录权限 {oct(root_mode)} ≠ 0700")
     for p in pack_dir.rglob("*"):
-        if p.name == "manifest.json":
+        if p.is_symlink():
+            # 目录符号链接在 manifest 遍历里可能只表现为一个"文件"，这里显式拦截
+            problems.append(f"包内符号链接：{p.relative_to(pack_dir)}")
             continue
-        mode = stat.S_IMODE(p.stat().st_mode)
+        mode = stat.S_IMODE(p.lstat().st_mode)
         want = 0o700 if p.is_dir() else 0o600
         if mode != want:
             bad_modes.append(f"{p.relative_to(pack_dir)}={oct(mode)}")
@@ -346,6 +373,29 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
             problems.append(f"包内 >10MB：{rec['path']}")
         if _sha256(p) != rec.get("sha256"):
             problems.append(f"sha256 不符：{rec['path']}")
+    # AC-T10-1：包内冻结的冷跑日志必须自证「两排除 + rc=0 + 规模下限」，
+    # 与看板 tests 段是两次独立读取（看板可被喂错日志，包内冻结件不行）。
+    log_path = pack_dir / "task10_closeout" / "task10_fullsuite.log"
+    if not log_path.is_file():
+        problems.append("包内缺收尾冷跑日志 task10_closeout/task10_fullsuite.log")
+    else:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        cmds = re.findall(r"^# cmd: (.+)$", text, re.M)
+        if len(cmds) != 1:
+            problems.append(f"冷跑日志 `# cmd:` 行应恰 1 条，实得 {len(cmds)}")
+        else:
+            miss = [f for f in SUITE_FILTERS if f not in cmds[0]]
+            if miss:
+                problems.append(f"冷跑日志命令未含收尾两排除项 {miss}")
+        rcs = re.findall(r"^rc=(\d+)$", text, re.M)
+        if rcs != ["0"]:
+            problems.append(f"冷跑日志 rc 行应恰为 rc=0：{rcs}")
+        passed = re.findall(r"^(\d+) passed", text, re.M)
+        if not passed or int(passed[-1]) < MIN_FULL_SUITE_PASSED:
+            problems.append(
+                f"冷跑日志 passed 摘要异常：{passed[-1:] or None}")
+        if not re.search(r"^\d+ passed.*\bdeselected\b", text, re.M):
+            problems.append("冷跑日志摘要缺 deselected 计数")
     # T7/T8/T9 用户停做：包内挂牌 NOT_EXECUTED，机判按证据缺口登记
     # （provenance_limited，不计入通过）；缺失挂牌本身才算问题。
     for slug in ("task7_stages", "task8_drill", "task9_vla"):
@@ -360,28 +410,51 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
                      "path": str(marker),
                      "why": f"{rec.get('status')}：{rec.get('adjudication')}"})
     signs_dir = pack_dir / "task10_closeout" / "signs"
-    if (pack_dir / "task10_closeout/signs_MISSING.json").is_file():
-        gaps.append({"what": "Task 10 三签件",
-                     "path": str(signs_dir),
-                     "why": "机判时点三签尚未落件（构建顺序：机判→三签→终建包）"})
+    signs_marker = pack_dir / "task10_closeout" / "signs_MISSING.json"
+    have_signs = signs_dir.is_dir() and any(signs_dir.glob("*.json"))
+    if signs_marker.is_file() and have_signs:
+        # 两态并存 = 状态自相矛盾，不许拿 MISSING 挂牌把实签件（含 REJECT）盖掉
+        problems.append("三签件同时存在 signs_MISSING.json 与实际签件")
+    if not have_signs:
+        if signs_marker.is_file():
+            gaps.append({"what": "Task 10 三签件", "path": str(signs_dir),
+                         "why": "机判时点三签尚未落件（构建顺序：机判→三签→终建包）"})
+        else:
+            problems.append(f"缺三签件目录且无 signs_MISSING 挂牌：{signs_dir}")
     else:
-        # 三签件齐备口径：executor/reviewer/verifier 三角色各一份且 verdict 可读
-        found = {}
+        # 三签件齐备口径：executor/reviewer/verifier 三角色各一份、内容自带 role
+        # 且与文件名一致、verdict 必须 APPROVE、commit 必须等于包冻结的
+        # manifest.git_commit（旧提交的签不能给新包作数）。
+        found: dict[str, dict] = {}
         for p in sorted(signs_dir.glob("*.json")) if signs_dir.is_dir() else []:
             try:
                 s = json.loads(p.read_text(encoding="utf-8"))
             except ValueError:
                 problems.append(f"三签件不可解析：{p.name}")
                 continue
-            found[s.get("role") or p.stem] = s
+            role = s.get("role")
+            if role != p.stem:
+                # role 必须自证：缺 role 时不得用文件名顶替
+                problems.append(
+                    f"三签件 {p.name} 的 role={role!r} 与文件名不符")
+                continue
+            found[role] = s
         missing = {"executor", "reviewer", "verifier"} - set(found)
         if missing:
             problems.append(f"三签件缺角色：{sorted(missing)}")
+        extra = set(found) - {"executor", "reviewer", "verifier"}
+        if extra:
+            problems.append(f"三签件出现未知角色：{sorted(extra)}")
         for role, s in found.items():
             if s.get("schema") != "simpraxis.phase25.sign.v1":
                 problems.append(f"三签件 {role} schema 不符")
-            if s.get("verdict") not in ("APPROVE", "REJECT"):
-                problems.append(f"三签件 {role} verdict 非法：{s.get('verdict')}")
+            if s.get("verdict") != "APPROVE":
+                problems.append(
+                    f"三签件 {role} 未 APPROVE：{s.get('verdict')}")
+            if s.get("commit") != man.get("git_commit"):
+                problems.append(
+                    f"三签件 {role} 绑定 commit {s.get('commit')} ≠ "
+                    f"manifest.git_commit {man.get('git_commit')}")
     # 密钥双扫（包内文本）
     hits = []
     for p in pack_dir.rglob("*"):
@@ -407,6 +480,25 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
     else:
         problems.append(f"缺 Complete 文档：{COMPLETE}")
     return problems, gaps
+
+
+def check_pack_vs_live(pack_dir: Path, rec: dict) -> list[str]:
+    """包内冻结件与对账件的活值互证：账副本 sha 必须等于 ledger_sha256。
+
+    check_ledger 复算活账、check_pack 复算包副本，两边都对却互相不一致时，
+    只有这一层能抓到（否则「账与包各自自洽」即可绿）。
+    """
+    man_path = pack_dir / "manifest.json"
+    if not man_path.is_file():
+        return []          # 缺 manifest 已由 check_pack 记问题
+    man = json.loads(man_path.read_text(encoding="utf-8"))
+    files = {r["path"]: r for r in (man.get("files") or [])}
+    entry = files.get("quota/ledger.jsonl")
+    if entry is None:
+        return ["包内缺 quota/ledger.jsonl（账不可审）"]
+    if entry.get("sha256") != rec.get("ledger_sha256"):
+        return ["包内账副本 sha256 与对账件 ledger_sha256 不符"]
+    return []
 
 
 def check_git_author() -> list[str]:
@@ -450,6 +542,8 @@ def build_report(*, reconcile: Path, dashboard: Path, pack: Path,
     pp, pg = check_pack(pack)
     problems += pp
     gaps += pg
+    if rec is not None:
+        problems += check_pack_vs_live(pack, rec)
     problems += check_git_author()
     return {
         "schema": "simpraxis.phase25.closure_judge.v1",

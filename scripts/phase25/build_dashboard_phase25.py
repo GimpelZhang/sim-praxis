@@ -130,6 +130,10 @@ def tests_state(result_path: "Path | None") -> "dict | None":
         raise DashboardError(
             f"测试结果里 rc= 行应恰 1 条，实得 {len(rcs)} 条：{result_path}")
     cmd = re.search(r"^# cmd: (.+)$", text, re.M)
+    if cmd is None:
+        # 无 `# cmd:` 头的日志无法证明跑的是哪套 → 不许拿规范命令串顶替
+        raise DashboardError(
+            f"测试结果里找不到 `# cmd:` 行（命令口径不可审）：{result_path}")
     return {
         "source": str(result_path),
         "summary": m.group("line").strip(),
@@ -137,9 +141,7 @@ def tests_state(result_path: "Path | None") -> "dict | None":
         "skipped": int(m.group("skipped") or 0),
         "deselected": int(m.group("deselected") or 0),
         "rc": int(rcs[0]),
-        "command": cmd.group(1).strip() if cmd else (
-            "pytest tests -q -k \"not test_04\" "
-            "-m \"not paid and not kb_integration\""),
+        "command": cmd.group(1).strip(),
     }
 
 

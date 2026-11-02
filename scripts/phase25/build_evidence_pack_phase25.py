@@ -480,6 +480,20 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
                                    "机判→证据包终建）"},
                           logical, src)
 
+    # AC-T10-1：收尾全套冷跑日志随包（命令口径/摘要/rc 三处可审，机判另读一遍
+    # 冻结副本，不靠看板的二手转述）。缺则如实挂牌，不伪造绿件。
+    suite_log = p25 / "task10_milestone" / "task10_fullsuite.log"
+    if suite_log.is_file():
+        m._copy_file(suite_log,
+                     pack / "task10_closeout/task10_fullsuite.log",
+                     "M25.T10.1", True, P25, manifest_files)
+    else:
+        write_derived("task10_closeout/task10_fullsuite_MISSING.json",
+                      {"missing": str(suite_log),
+                       "note": ("收尾两排除全套冷跑日志尚未生成；机判要求包内"
+                                "存在该日志且 `# cmd:` 含两排除项、rc=0。")},
+                      "M25.T10.1", suite_log)
+
     # T7/T8/T9：用户 2026-11-02 裁决不再进行 → 无证据实体。AC-T10-4 点名的
     # 「drill 报告 / T9 战役证据」因此不存在；此处如实挂牌，不用空目录或
     # 占位产物冒充已执行（硬规则 7）。

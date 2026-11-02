@@ -91,6 +91,17 @@ def _plan_text(pairs: list[tuple[int, int]]) -> str:
     return "\n".join(f"- AC-T{t}-{k}：合成判据" for t, k in pairs)
 
 
+_FULL_CMD = ('pytest tests -q -k "not test_04" '
+             '-m "not paid and not kb_integration"')
+
+
+def _full_suite_log(passed: int = 2044) -> str:
+    """收尾两排除全套日志的最小真实形态（命令头 + 摘要 + 单条 rc）。"""
+    return (f"# cmd: {_FULL_CMD}\n"
+            f"{passed} passed, 7 skipped, 50 deselected in 1.0s\n"
+            "rc=0\n")
+
+
 # ---------------------------------------------------------------------------
 # 1. 对账纯函数
 # ---------------------------------------------------------------------------
@@ -283,6 +294,11 @@ def test_tests_state_parses_summary_and_rc(tmp_path):
     log.write_text("20 passed in 2.0s\n", encoding="utf-8")
     with pytest.raises(D.DashboardError, match="rc= 行应恰 1 条"):
         D.tests_state(log)
+    # 无 `# cmd:` 头的日志无法证明跑的是哪套 → fail-closed（不许顶替规范命令串）
+    log.write_text("2044 passed, 7 skipped, 50 deselected in 1.0s\nrc=0\n",
+                   encoding="utf-8")
+    with pytest.raises(D.DashboardError, match="找不到 `# cmd:` 行"):
+        D.tests_state(log)
     assert D.tests_state(None) is None
 
 
@@ -315,8 +331,7 @@ def test_dashboard_build_and_fail_closed(tmp_path, monkeypatch):
     rec_path = tmp_path / "rec.json"
     rec_path.write_text(json.dumps(_synthetic_reconcile()), encoding="utf-8")
     log = tmp_path / "run.log"
-    log.write_text("100 passed, 1 skipped, 5 deselected in 9.1s\nrc=0\n",
-                   encoding="utf-8")
+    log.write_text(_full_suite_log(), encoding="utf-8")
 
     dash = D.build(reconcile_path=rec_path, tests_result=log,
                    plan_path=plan)
@@ -340,7 +355,9 @@ def test_dashboard_build_and_fail_closed(tmp_path, monkeypatch):
 def test_check_dashboard_flags_drift():
     rec = _synthetic_reconcile()
     good = {
-        "schema": D.SCHEMA, "tests": {"rc": 0, "passed": 10},
+        "schema": D.SCHEMA,
+        "tests": {"rc": 0, "passed": 2044, "deselected": 50,
+                  "command": _FULL_CMD},
         "paid_reconciliation": {
             "ledger": {"n_calls": rec["ledger"]["n_calls"]},
             "ledger_sha256": rec["ledger_sha256"]},
@@ -378,6 +395,9 @@ def _synthetic_tree(tmp_path: Path) -> dict:
         f = p25 / src_rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps({"synthetic": src_rel}), encoding="utf-8")
+    log = p25 / "task10_milestone" / "task10_fullsuite.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(_full_suite_log(), encoding="utf-8")
     for _prefix, _root, src_dir, _logical, _req, _ex in P.DIR_COPIES:
         if not _req:          # 可选目录（如三签件）默认不造，留给各自用例
             continue
@@ -599,7 +619,9 @@ def _minimal_pack(tmp_path: Path) -> Path:
     for role in ("executor", "reviewer", "verifier"):
         (signs / f"{role}.json").write_text(json.dumps({
             "schema": "simpraxis.phase25.sign.v1", "role": role,
-            "verdict": "APPROVE"}), encoding="utf-8")
+            "commit": "abc", "verdict": "APPROVE"}), encoding="utf-8")
+    (pack / "task10_closeout/task10_fullsuite.log").write_text(
+        _full_suite_log(), encoding="utf-8")
     (pack / "a.txt").write_text("hello\n", encoding="utf-8")
     _write_manifest(pack)
     _harden(pack)
@@ -613,7 +635,8 @@ def _write_manifest(pack: Path, **override) -> dict:
                "tag": "@runs/", "subdir": "phase25", "rows_using": 0}},
            "files": [{"path": str(p.relative_to(pack)),
                       "sha256": J._sha256(p)}
-                     for p in sorted(pack.rglob("*")) if p.is_file()]}
+                     for p in sorted(pack.rglob("*"))
+                     if p.is_file() and p.name != "manifest.json"]}
     man.update(override)
     (pack / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
     return man
@@ -690,14 +713,58 @@ def test_judge_pack_signs_and_modes(tmp_path):
     problems, _gaps = J.check_pack(pack)
     assert any("三签件缺角色" in p for p in problems)
 
-    # 非法 verdict → 问题
+    # 非法 verdict → 问题；REJECT 同样不得算作终态三签
+    for bad_verdict, needle in (("MAYBE", "未 APPROVE"), ("REJECT", "未 APPROVE")):
+        (pack / "task10_closeout/signs/verifier.json").write_text(
+            json.dumps({"schema": "simpraxis.phase25.sign.v1",
+                        "role": "verifier", "commit": "abc",
+                        "verdict": bad_verdict}), encoding="utf-8")
+        _write_manifest(pack)
+        _harden(pack)
+        problems, _gaps = J.check_pack(pack)
+        assert any(needle in p for p in problems), (bad_verdict, problems)
+
+    # 签绑定的 commit 必须是包冻结的 manifest.git_commit
     (pack / "task10_closeout/signs/verifier.json").write_text(
         json.dumps({"schema": "simpraxis.phase25.sign.v1",
-                    "role": "verifier", "verdict": "MAYBE"}), encoding="utf-8")
+                    "role": "verifier", "commit": "f" * 7,
+                    "verdict": "APPROVE"}), encoding="utf-8")
     _write_manifest(pack)
     _harden(pack)
     problems, _gaps = J.check_pack(pack)
-    assert any("verdict 非法" in p for p in problems)
+    assert any("绑定 commit" in p for p in problems)
+
+    # role 必须自证且与文件名一致；重复角色 fail-closed
+    (pack / "task10_closeout/signs/verifier.json").write_text(
+        json.dumps({"schema": "simpraxis.phase25.sign.v1",
+                    "role": "reviewer", "commit": "abc",
+                    "verdict": "APPROVE"}), encoding="utf-8")
+    _write_manifest(pack)
+    _harden(pack)
+    problems, _gaps = J.check_pack(pack)
+    assert any("与文件名不符" in p for p in problems)
+
+    (pack / "task10_closeout/signs/verifier.json").write_text(
+        json.dumps({"schema": "simpraxis.phase25.sign.v1",
+                    "role": "verifier", "commit": "abc",
+                    "verdict": "APPROVE"}), encoding="utf-8")
+    (pack / "task10_closeout/signs/reviewer.json").write_text(
+        json.dumps({"schema": "simpraxis.phase25.sign.v1",
+                    "role": "verifier", "commit": "abc",
+                    "verdict": "APPROVE"}), encoding="utf-8")
+    _write_manifest(pack)
+    _harden(pack)
+    problems, _gaps = J.check_pack(pack)
+    assert any("与文件名不符" in p for p in problems)
+
+    # 还原成合格三签，继续测权限/覆盖面
+    (pack / "task10_closeout/signs/reviewer.json").write_text(
+        json.dumps({"schema": "simpraxis.phase25.sign.v1",
+                    "role": "reviewer", "commit": "abc",
+                    "verdict": "APPROVE"}), encoding="utf-8")
+    _write_manifest(pack)
+    _harden(pack)
+    assert J.check_pack(pack)[0] == []
 
     # 权限放水（0644 文件 / 0755 目录）→ 问题
     (pack / "a.txt").chmod(0o644)
@@ -710,6 +777,84 @@ def test_judge_pack_signs_and_modes(tmp_path):
     (pack / "extra.txt").chmod(0o600)
     problems, _gaps = J.check_pack(pack)
     assert any("未登记文件" in p for p in problems)
+
+    # MISSING 挂牌与实签件并存 → 状态自相矛盾（不许挂牌盖掉 REJECT）
+    (pack / "extra.txt").unlink()
+    _write_manifest(pack)
+    (pack / "task10_closeout/signs_MISSING.json").write_text(
+        "{}", encoding="utf-8")
+    _write_manifest(pack)
+    _harden(pack)
+    problems, _gaps = J.check_pack(pack)
+    assert any("同时存在" in p for p in problems)
+
+    # 既无签件也无挂牌 → 问题（不是缺口）
+    (pack / "task10_closeout/signs_MISSING.json").unlink()
+    for p in (pack / "task10_closeout/signs").glob("*.json"):
+        p.unlink()
+    _write_manifest(pack)
+    _harden(pack)
+    problems, _gaps = J.check_pack(pack)
+    assert any("缺三签件目录且无 signs_MISSING" in p for p in problems)
+
+
+def test_judge_pack_requires_full_suite_log(tmp_path):
+    """AC-T10-1：包内冻结的冷跑日志必须自证两排除 + rc=0 + 规模下限。"""
+    pack = _minimal_pack(tmp_path)
+    log = pack / "task10_closeout/task10_fullsuite.log"
+    good = _full_suite_log()
+
+    cases = [
+        ("# cmd: pytest tests/milestone25 -q\n" + good.split("\n", 1)[1],
+         "两排除项"),
+        (good.replace("rc=0", "rc=1"), "rc 行应恰为 rc=0"),
+        (_full_suite_log(passed=25), "passed 摘要异常"),
+        (good.replace(", 50 deselected", ""), "缺 deselected 计数"),
+        (good + "# cmd: pytest tests -q\n", "`# cmd:` 行应恰 1 条"),
+    ]
+    for body, needle in cases:
+        log.write_text(body, encoding="utf-8")
+        _write_manifest(pack)
+        _harden(pack)
+        problems, _gaps = J.check_pack(pack)
+        assert any(needle in p for p in problems), (needle, problems)
+
+    log.unlink()
+    _write_manifest(pack)
+    _harden(pack)
+    problems, _gaps = J.check_pack(pack)
+    assert any("缺收尾冷跑日志" in p for p in problems)
+
+
+def test_judge_dashboard_asserts_suite_command(tmp_path):
+    """看板 tests 段不许只看 rc/passed：命令口径与去选数同样入判。"""
+    rec = _synthetic_reconcile()
+    good = {
+        "schema": D.SCHEMA,
+        "tests": {"rc": 0, "passed": 2044, "deselected": 50,
+                  "command": _FULL_CMD},
+        "paid_reconciliation": {
+            "ledger": {"n_calls": rec["ledger"]["n_calls"]},
+            "ledger_sha256": rec["ledger_sha256"]},
+        "lance_tables": {k: {"rows": v["rows"]}
+                         for k, v in rec["tables"].items()},
+        "ac_counts": {"total": J.DECLARED_TOTAL,
+                      "per_task": J.DECLARED_PER_TASK},
+        "tasks": [{"task": t, "status": "stopped_by_user"}
+                  for t in ("T7", "T8", "T9")],
+    }
+    assert J.check_dashboard(good, rec) == []
+
+    for mutate, needle in (
+        (lambda t: t.update({"command": "pytest tests -q"}), "两排除项"),
+        (lambda t: t.update({"command": 'pytest tests -q -k "not test_04"'}), "两排除项"),
+        (lambda t: t.update({"deselected": 0}), "deselected=0"),
+        (lambda t: t.update({"passed": 25}), "全套下限"),
+    ):
+        bad = json.loads(json.dumps(good))
+        mutate(bad["tests"])
+        assert any(needle in p for p in J.check_dashboard(bad, rec)), (
+            needle, J.check_dashboard(bad, rec))
 
 
 def test_judge_tables_pin_rows_and_vector_identity(tmp_path):
