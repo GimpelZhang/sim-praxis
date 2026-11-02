@@ -164,9 +164,10 @@ source scripts/00_env.sh                       # 凭据/路径注入，值不回
   relpath 前缀 `solutions/`，现 94 块（Task0b 首灌 82 块/4 方案 + Task7 攒批86
   追加 03_libero 12 块）；`python -m memory_flywheel.scripts.ingest_solutions`
   幂等先删后写，入库前后强对账 kb_chunks=1542/phase1_learnings=44 不变（fail-closed
-  期望值随活表基线，2026-10-28 Task8 结案活表基线对账；ingest_solutions CLI 历史默认
-  --expect-learnings 5 是 Task0b 时点默认，活库实跑须显式传当前活表行数（现 44），
-  LOW 债务清理）。资产包：
+  期望值随活表基线，2026-10-28 Task8 结案活表基线对账；ingest_solutions CLI 的
+  `--expect-learnings` 自 Task 6（攢批119）起为**必填无默认**（`required=True`，
+  `ingest_solutions.py:357`），活库实跑须显式传当前活表行数（现 44）——Task0b 时点的
+  默认 5 已修复，该 LOW 尾债关闭）。资产包：
   `scripts/kb/bundle_kb_asset.py --tier both` + `verify_bundle.py`（core=老两表，
   extended=全部表；sha256/行数/768 维/kb_sha/引擎 SHA 对账）。
 
@@ -254,8 +255,9 @@ Task7 已收官**——计划内 Phase 2 余项全部有终态（完成或诚实
 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
 自演进、实跑四 tour、SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定
 （计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
-t3 1 条、ingest_solutions CLI 默认 --expect-learnings 5 活库须显式传当前活表行数（现 44）、
-run7c key-collapse 覆写 created_at、54b27b59 同类覆写）明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
+t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest_solutions CLI
+`--expect-learnings` 必填已由 Task 6（攢批119）落地关闭，不再列尾债）
+明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
 
 ## Phase 2.5（2026-10-28 用户立项；R2 smolagents 强 agentic 层）
 
