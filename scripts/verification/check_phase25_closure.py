@@ -18,7 +18,11 @@ rc≠0；证据缺口如实挂牌 ``provenance_limited`` 并**不计入通过**�
    为 mpnet/768；T7/T8/T9 状态为 ``stopped_by_user``（用户裁决停，不虚报完成）；
 5. **证据包**（AC-T10-4）：``manifest.json`` 存在、``git_commit`` 非空、
    ``evidence_roots`` 注册 ``@runs/phase25/<thread>/stage_<id>/`` 标签、
-   逐件 sha256 复算一致、无 >10MB 文件、密钥双扫 0 命中、包内无符号链接。
+   逐件 sha256 复算一致、无 >10MB 文件、密钥双扫 0 命中、包内无符号链接、
+   无非普通文件（FIFO/socket/设备）；
+6. **交叉互证**：看板 ``git.commit`` 必须等于 ``manifest.git_commit``（同一
+   代码状态出证）；三签的 verifier 签若带 ``recomputed`` 块，其 AC 数/账数/
+   四表行数/批准总数必须与机判自身重算逐项相等。
 
 用法：
   python scripts/verification/check_phase25_closure.py [--report OUT.json]
@@ -120,27 +124,41 @@ _STAGE_B_H3H4 = (38, 45)
 _STAGE_B_RESIDUAL = (9, 7, 6)     # n_residual, n_recovered, n_gold_id_direct
 
 
-def _stage_b_condition_problems(conds: dict) -> list[str]:
-    """五条件必须恰 5 键、每条 ok 为 true，且预注册数值逐项相符。"""
-    if set(conds) != _STAGE_B_CONDITIONS:
-        return [f"T6 Stage B 条件键不符（应恰 5 条）：{sorted(conds)}"]
+def _is_num(x: object) -> bool:
+    """数值判定（评审 LOW-2：bool 是 int 子类，True 不得冒充 1.0 过闸）。"""
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
+def _stage_b_condition_problems(conds: object) -> list[str]:
+    """五条件必须恰 5 键、每条为对象且 ok 为 true，预注册数值逐项相符。"""
+    if not isinstance(conds, dict) or set(conds) != _STAGE_B_CONDITIONS:
+        return [f"T6 Stage B 条件键不符（应恰 5 条）：{conds!r}"[:200]]
+    # 非对象形态的条件无法做数值钉死：先整体判负再返回，绝不 .get 崩或跳过
+    non_dict = sorted(k for k, c in conds.items() if not isinstance(c, dict))
+    if non_dict:
+        return [f"T6 Stage B 条件 {non_dict} 不是对象（不可判定）"]
     problems = []
-    for k, c in conds.items():
-        if not isinstance(c, dict) or c.get("ok") is not True:
+    for k in sorted(conds):
+        if conds[k].get("ok") is not True:
             problems.append(f"T6 Stage B 条件 {k} 未过（ok 非 true）")
     t1 = conds["1_thresholds"]
     if t1.get("all_pass") is not True:
         problems.append("T6 Stage B 条件 1 all_pass 非 true")
-    detail = t1.get("detail") or {}
+    detail = t1.get("detail")
+    if not isinstance(detail, dict):
+        problems.append("T6 Stage B 条件 1 缺 detail 对象（三条路由不可审）")
+        detail = {}
     for route, (hits, total, thr) in _STAGE_B_ROUTES.items():
-        d = detail.get(route) or {}
+        d = detail.get(route)
+        if not isinstance(d, dict):
+            problems.append(f"T6 Stage B {route} 明细缺失（不可判定）")
+            continue
         if (d.get("hits"), d.get("total")) != (hits, total):
             problems.append(
                 f"T6 Stage B {route} 命中 {d.get('hits')}/{d.get('total')}"
                 f" ≠ 预注册 {hits}/{total}")
         got = d.get("gold_at_8")
-        if d.get("pass") is not True or not isinstance(got, (int, float)) \
-                or got < thr:
+        if d.get("pass") is not True or not _is_num(got) or got < thr:
             problems.append(
                 f"T6 Stage B {route} 闸未过（gold_at_8={got} < {thr}）")
     t2 = conds["2_h3_subset_h4"]
@@ -156,10 +174,11 @@ def _stage_b_condition_problems(conds: dict) -> list[str]:
     if got3 != _STAGE_B_RESIDUAL:
         problems.append(
             f"T6 Stage B 残留/回收/直中 = {got3} ≠ {_STAGE_B_RESIDUAL}")
-    if len(t3.get("recovered") or []) != _STAGE_B_RESIDUAL[1]:
+    rec_list = t3.get("recovered")
+    if not isinstance(rec_list, list) \
+            or len(rec_list) != _STAGE_B_RESIDUAL[1]:
         problems.append(
-            f"T6 Stage B 回收清单 {len(t3.get('recovered') or [])} 条 ≠ "
-            f"{_STAGE_B_RESIDUAL[1]}")
+            f"T6 Stage B 回收清单 {rec_list!r} 非 {_STAGE_B_RESIDUAL[1]} 条列表")
     for k in ("4_data_identity", "5_engineering"):
         if conds[k].get("problems"):
             problems.append(
@@ -356,7 +375,13 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
             # 目录符号链接在 manifest 遍历里可能只表现为一个"文件"，这里显式拦截
             problems.append(f"包内符号链接：{p.relative_to(pack_dir)}")
             continue
-        mode = stat.S_IMODE(p.lstat().st_mode)
+        st = p.lstat()
+        # 评审 LOW-3：FIFO/socket/设备既不在 is_file() 的 actual 集合里、
+        # 也不进密钥扫描，必须单独判负（否则可被用来绕过全覆盖与扫描）
+        if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+            problems.append(f"包内非普通文件：{p.relative_to(pack_dir)}")
+            continue
+        mode = stat.S_IMODE(st.st_mode)
         want = 0o700 if p.is_dir() else 0o600
         if mode != want:
             bad_modes.append(f"{p.relative_to(pack_dir)}={oct(mode)}")
@@ -470,16 +495,93 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
             hits.append(f"{p.relative_to(pack_dir)}::{name}::{matched[:24]}")
     if hits:
         problems.append(f"包内命中密钥正则 {len(hits)} 处：{hits[:3]}")
-    # Complete 文档关键段（仓外）
+    # Complete 文档关键段（仓外）。评审 MINOR-10：终态文档缺段是**问题**
+    # 而不是缺口——缺口不计入通过，等于把"文档没写"洗成"可以没有"。
     if COMPLETE.is_file():
         text = COMPLETE.read_text(encoding="utf-8")
         for needle in ("Task 6 Stage B", "RETAIN_R4", "T10"):
             if needle not in text:
-                gaps.append({"what": f"Complete 缺 {needle} 段",
-                             "path": str(COMPLETE), "why": "收尾文档待补"})
+                problems.append(f"Complete 文档缺 {needle} 段：{COMPLETE}")
     else:
         problems.append(f"缺 Complete 文档：{COMPLETE}")
     return problems, gaps
+
+
+def check_commit_binding(dash: dict, pack_dir: Path) -> list[str]:
+    """AC-T10-1 证据层：看板与证据包必须冻结在同一提交（评审 MINOR-9）。
+
+    绑定对象是 ``manifest.git_commit``（包在建包时自证的提交），不是活 HEAD——
+    终建包之后允许出现文档批，活 HEAD 前移不构成"包已过期"。但看板若与包
+    不是同一提交，则 tests/对账/四表三段证据来自两个不同代码状态，不许判绿。
+    """
+    man_path = pack_dir / "manifest.json"
+    if not man_path.is_file():
+        return []           # 缺 manifest 已由 check_pack 记问题
+    man = json.loads(man_path.read_text(encoding="utf-8"))
+    commit = man.get("git_commit")
+    got = (dash.get("git") or {}).get("commit")
+    if not got:
+        return ["看板 git.commit 缺失（AC-T10-1 证据层不可审）"]
+    if got != commit:
+        return [f"看板 git.commit={got} ≠ manifest.git_commit={commit}"]
+    return []
+
+
+# 评审 MINOR-7：verifier 签的 recomputed 块必须与机判自身重算的数逐项相等，
+# 否则"三签 APPROVE"可建立在与机判不同的账/表/AC 事实上。
+_VERIFIER_RECOMPUTED_PINS = (
+    ("ac_total", ("ac", "total")),
+    ("ac_per_task", ("ac", "per_task")),
+    ("ac_ids_sha256", ("ac", "ids_sha256")),
+)
+
+
+def check_verifier_recomputed(pack_dir: Path, ac: dict, rec: "dict | None") -> list[str]:
+    """把 verifier 签自报的 recomputed 数与机判自己的重算结果逐项对撞。"""
+    sign_path = pack_dir / "task10_closeout" / "signs" / "verifier.json"
+    if not sign_path.is_file():
+        return []           # 签件缺位/齐备性由 check_pack 判（含三态）
+    try:
+        sign = json.loads(sign_path.read_text(encoding="utf-8"))
+    except ValueError:
+        return []           # 不可解析已由 check_pack 记问题
+    rc = sign.get("recomputed")
+    if not isinstance(rc, dict):
+        return ["verifier 签缺 recomputed 块（三签不可与机判交叉互证）"]
+    problems = []
+    for key, (src, field) in _VERIFIER_RECOMPUTED_PINS:
+        got, want = rc.get(key), ac[field]
+        if got != want:
+            problems.append(
+                f"verifier 签 {key}={got!r} ≠ 机判重算 {want!r}")
+    led = rc.get("ledger")
+    if not isinstance(led, dict):
+        problems.append("verifier 签缺 ledger 重算块")
+    elif rec is not None:
+        for field in ("n_calls", "ok", "fail"):
+            if led.get(field) != rec["ledger"].get(field):
+                problems.append(
+                    f"verifier 签 ledger.{field}={led.get(field)!r} ≠ "
+                    f"对账件 {rec['ledger'].get(field)!r}")
+        if led.get("ledger_sha256") != rec.get("ledger_sha256"):
+            problems.append("verifier 签 ledger_sha256 与对账件不符")
+    if rec is not None:
+        tabs = rc.get("tables")
+        if not isinstance(tabs, dict):
+            problems.append("verifier 签缺 tables 重算块")
+        else:
+            for name, want in EXPECTED_ROWS.items():
+                got = (tabs.get(name) or {}).get("rows")
+                if got != want:
+                    problems.append(
+                        f"verifier 签 {name}.rows={got!r} ≠ 收尾活值 {want}")
+        appr = rc.get("approvals")
+        if not isinstance(appr, dict) or \
+                appr.get("total_approved") != rec["approvals"].get(
+                    "total_approved"):
+            problems.append(
+                "verifier 签 approvals.total_approved 与对账件不符")
+    return problems
 
 
 def check_pack_vs_live(pack_dir: Path, rec: dict) -> list[str]:
@@ -544,6 +646,9 @@ def build_report(*, reconcile: Path, dashboard: Path, pack: Path,
     gaps += pg
     if rec is not None:
         problems += check_pack_vs_live(pack, rec)
+        problems += check_verifier_recomputed(pack, ac, rec)
+    if dash is not None:
+        problems += check_commit_binding(dash, pack)
     problems += check_git_author()
     return {
         "schema": "simpraxis.phase25.closure_judge.v1",

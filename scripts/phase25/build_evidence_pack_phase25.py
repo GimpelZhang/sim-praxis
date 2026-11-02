@@ -354,7 +354,8 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
         if not required:
             continue
         src_base = roots[root_key] / src_dir
-        if not src_base.exists():
+        # 评审 LOW-1：目录位必须是真目录（同名普通文件/断链不算"存在"）
+        if not src_base.is_dir():
             raise PackError(f"必需证据目录缺失：{src_base}（逻辑编号 {logical}）")
 
     if clean:
@@ -397,7 +398,7 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
     for (pack_prefix, root_key, src_dir, logical, required,
          exclude) in DIR_COPIES:
         src_base = roots[root_key] / src_dir
-        if not src_base.exists():
+        if not src_base.is_dir():
             if required:
                 raise PackError(f"必需证据目录缺失：{src_base}")
             continue

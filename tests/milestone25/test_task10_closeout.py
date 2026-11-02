@@ -734,7 +734,7 @@ def test_judge_pack_signs_and_modes(tmp_path):
     problems, _gaps = J.check_pack(pack)
     assert any("绑定 commit" in p for p in problems)
 
-    # role 必须自证且与文件名一致；重复角色 fail-closed
+    # role 必须自证且与文件名一致（reviewer 签写成 role=verifier → 判负）
     (pack / "task10_closeout/signs/verifier.json").write_text(
         json.dumps({"schema": "simpraxis.phase25.sign.v1",
                     "role": "reviewer", "commit": "abc",
@@ -894,6 +894,147 @@ def test_judge_ledger_recomputes_file_sha(tmp_path):
 
     rec["ledger_path"] = str(tmp_path / "gone.jsonl")
     assert any("账文件不存在" in p for p in J.check_ledger(rec))
+
+
+def test_judge_stage_b_condition_type_guards(tmp_path, monkeypatch):
+    """评审 LOW-2：非对象条件/明细、bool 冒充数值一律判负，不许 .get 崩或放行。"""
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
+    rec = _synthetic_reconcile()
+    for mutate, needle in (
+        (lambda v: v["conditions"].update({"5_engineering": True}),
+         "不是对象"),
+        (lambda v: v["conditions"].update({"1_thresholds": {"ok": True,
+                                                           "all_pass": True}}),
+         "缺 detail 对象"),
+        (lambda v: v["conditions"]["1_thresholds"].update({"detail": []}),
+         "缺 detail 对象"),
+        (lambda v: v["conditions"]["1_thresholds"]["detail"].update(
+            {"overall": {"hits": 45, "total": 47, "pass": True,
+                         "gold_at_8": True}}), "overall 闸未过"),
+        (lambda v: v["conditions"]["3_residual_recovery"].update(
+            {"recovered": "abcdefg"}), "非 7 条列表"),
+    ):
+        v = _verdict_payload()
+        mutate(v)
+        bad = tmp_path / "bad_verdict.json"
+        bad.write_text(json.dumps(v), encoding="utf-8")
+        monkeypatch.setattr(J, "_STAGE_B_VERDICT", bad)
+        problems, _gaps = J.check_science(rec, tmp_path / "no_pack")
+        assert any(needle in p for p in problems), (needle, problems)
+        monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
+
+
+def test_judge_pack_flags_non_regular_files(tmp_path):
+    """评审 LOW-3：FIFO/socket 既不在 is_file() 全覆盖里也不进密钥扫描。"""
+    pack = _minimal_pack(tmp_path)
+    fifo = pack / "pipe.fifo"
+    os.mkfifo(fifo, 0o600)
+    problems, _gaps = J.check_pack(pack)
+    assert any("非普通文件" in p for p in problems)
+    fifo.unlink()
+
+
+def test_judge_commit_binding_dashboard_vs_manifest(tmp_path):
+    """评审 MINOR-9：看板与证据包必须冻结在同一提交。"""
+    pack = _minimal_pack(tmp_path)
+    dash = {"git": {"commit": "abc"}}
+    assert J.check_commit_binding(dash, pack) == []
+    for bad, needle in (
+        ({"git": {"commit": "def"}}, "≠ manifest.git_commit"),
+        ({"git": {}}, "git.commit 缺失"),
+        ({}, "git.commit 缺失"),
+    ):
+        assert any(needle in p for p in J.check_commit_binding(bad, pack)), bad
+    # 缺 manifest 由 check_pack 记问题，此处不重复报
+    assert J.check_commit_binding(dash, tmp_path / "no_pack") == []
+
+
+def test_judge_verifier_recomputed_crosscheck(tmp_path):
+    """评审 MINOR-7：verifier 签自报数与机判重算逐项对撞。"""
+    pack = _minimal_pack(tmp_path)
+    rec = _synthetic_reconcile()
+    ac = {"total": 102, "per_task": J.DECLARED_PER_TASK,
+          "ids_sha256": "5a6b46a5" + "0" * 56}
+    sign = pack / "task10_closeout/signs/verifier.json"
+
+    def _write(**override) -> None:
+        body = {
+            "schema": "simpraxis.phase25.sign.v1", "role": "verifier",
+            "commit": "abc", "verdict": "APPROVE",
+            "recomputed": {
+                "ac_total": 102, "ac_per_task": J.DECLARED_PER_TASK,
+                "ac_ids_sha256": "5a6b46a5" + "0" * 56,
+                "ledger": {"n_calls": rec["ledger"]["n_calls"],
+                           "ok": rec["ledger"]["ok"],
+                           "fail": rec["ledger"]["fail"],
+                           "ledger_sha256": rec["ledger_sha256"]},
+                "tables": {k: {"rows": v["rows"]}
+                           for k, v in rec["tables"].items()},
+                "approvals": {"total_approved":
+                              rec["approvals"]["total_approved"]},
+            },
+        }
+        body.update(override)
+        sign.write_text(json.dumps(body), encoding="utf-8")
+
+    _write()
+    assert J.check_verifier_recomputed(pack, ac, rec) == []
+
+    for path, value, needle in (
+        (("ac_total",), 101, "ac_total=101"),
+        (("ac_per_task",), {"T0": 0}, "ac_per_task="),
+        (("ac_ids_sha256",), "f" * 64, "ac_ids_sha256="),
+        (("ledger", "ok"), 99, "ledger.ok=99"),
+        (("ledger", "ledger_sha256"), "b" * 64, "ledger_sha256"),
+        (("tables", "solution_chunks", "rows"), 93, "solution_chunks.rows=93"),
+        (("approvals", "total_approved"), 1, "total_approved"),
+    ):
+        body = json.loads(sign.read_text())
+        node = body["recomputed"]
+        for key in path[:-1]:
+            node = node[key]
+        node[path[-1]] = value
+        sign.write_text(json.dumps(body), encoding="utf-8")
+        assert any(needle in p for p in
+                   J.check_verifier_recomputed(pack, ac, rec)), (path, needle)
+
+    # 缺 recomputed 块 = 三签不可与机判互证 → 问题
+    _write(recomputed=None)
+    assert any("缺 recomputed" in p
+               for p in J.check_verifier_recomputed(pack, ac, rec))
+    # 签件不在时不重复报（齐备性由 check_pack 判）
+    sign.unlink()
+    assert J.check_verifier_recomputed(pack, ac, rec) == []
+
+
+def test_pack_clean_precheck_requires_real_directory(tmp_path):
+    """评审 LOW-1：必需目录位被普通文件占据时，--clean 前即 fail-closed。"""
+    tree = _synthetic_tree(tmp_path)
+    _pfx, _root, src_dir, _logical, required, _ex = next(
+        d for d in P.DIR_COPIES if d[4])
+    victim = tree["p25"] / src_dir
+    if victim.exists():
+        import shutil
+        shutil.rmtree(victim)
+    victim.parent.mkdir(parents=True, exist_ok=True)
+    victim.write_text("not a dir\n", encoding="utf-8")
+    with pytest.raises(P.PackError, match="必需证据目录缺失"):
+        _build(tree, clean=True)
+
+
+def test_judge_complete_missing_sections_are_problems(tmp_path, monkeypatch):
+    """评审 MINOR-10：Complete 缺关键段是问题（缺口不计入通过≠可以没有）。"""
+    pack = _minimal_pack(tmp_path)
+    doc = tmp_path / "complete.md"
+    doc.write_text("有 Task 6 Stage B、RETAIN_R4、T10 三段\n", encoding="utf-8")
+    monkeypatch.setattr(J, "COMPLETE", doc)
+    assert J.check_pack(pack)[0] == []
+    doc.write_text("只有 RETAIN_R4\n", encoding="utf-8")
+    problems, _gaps = J.check_pack(pack)
+    assert any("缺 Task 6 Stage B 段" in p for p in problems)
+    assert any("缺 T10 段" in p for p in problems)
+    monkeypatch.setattr(J, "COMPLETE", tmp_path / "no_doc.md")
+    assert any("缺 Complete 文档" in p for p in J.check_pack(pack)[0])
 
 
 def test_judge_report_without_artifacts_is_not_green(tmp_path):
