@@ -492,6 +492,11 @@ class RunSpec:
     token_cap: int = 0         # 每 run 累计 token 帽（0=不显式限）
     # trace 线程目录相对 workdir 的 relpath；None=约定 agentic_traces/<thread>。
     agentic_trace_relpath: "str | None" = None
+    # Phase 2.6 Task3：四项修复的开关载体。None = 全关 = Phase 2.5 逐字节
+    # 旧行为（不 import agentic 包，类型只在鸭子读取处校验）。刻意不做
+    # __post_init__ 校验——RunSpec 不得依赖 agentic 包的 import 面（golden
+    # 回归锁死旧路径零 agentic / 零第三方 agent 框架依赖）。
+    agentic_config: "AgenticConfig | None" = None
 
     def __post_init__(self) -> None:
         # fail-closed：agentic 五字段非法值在出生时即拒（0/None/()＝未设置）。

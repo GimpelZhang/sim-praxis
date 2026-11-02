@@ -42,14 +42,21 @@ from orchestrator.gateway.quota_ledger import (
 )
 
 from .caps import BudgetTracker
+from .config import ALL_OFF, AgenticConfig
 from .forensics import TraceStore
 from .loop import engine_for, run_agentic_inner_loop
 from .policy import GrantTable
 
 # 与 loop.py 注册名逐字一致（裸授予串白名单）。
+# Phase 2.6 Task3：run_expr（F2，亦经 ``expr:`` 隐含授予）与
+# update_scratchpad（F4，只经裸名授予）入表。计划 §T3.4-E 只写了
+# 「TOOL_NAMES 加 run_expr（10 → 11）」，但 §T3.4-G 与 T3 的 Gate1 授予串
+# 明写「需 Gate1 授予 update_scratchpad」，而裸名授予必须先在 TOOL_NAMES
+# 内才不会被 ``AgenticWiringError`` 拒——故一并加入（12 项）。
 TOOL_NAMES = frozenset({
     "read_file", "list_dir", "grep", "write_file", "apply_patch",
     "run_cmd", "run_probe", "recall", "finish", "fail",
+    "run_expr", "update_scratchpad",
 })
 _WRITE_TOOLS = frozenset({"write_file", "apply_patch"})
 # workdir/FAILURE.json：与 agent_runner.runner.FAILURE_JSON、
@@ -107,6 +114,7 @@ def parse_grant_strings(grants: "tuple[str, ...]") -> GrantTable:
     write_roots: list[str] = []
     probes: set[str] = set()
     network_probes: set[str] = set()
+    expr_modules: set[str] = set()
     for raw in grants:
         if type(raw) is not str or not raw:
             raise AgenticWiringError(f"授予串必须是非空字符串：{raw!r}")
@@ -141,12 +149,26 @@ def parse_grant_strings(grants: "tuple[str, ...]") -> GrantTable:
             tools.add("run_probe")
             probes.add(name)
             network_probes.add(name)
+        elif raw.startswith("expr:"):
+            # Phase 2.6 Task3（F2）：模块白名单（完整点分名，逗号分隔），
+            # 隐含授予 run_expr。模块名只允许字母数字/下划线/点——空段、
+            # 连字符、引号等一律 ValueError（fail-closed）。
+            mods = tuple(raw[len("expr:"):].split(","))
+            if not mods or any(
+                    not m or m.startswith(".") or m.endswith(".")
+                    or ".." in m
+                    or not m.replace(".", "").replace("_", "").isalnum()
+                    for m in mods):
+                raise AgenticWiringError(f"expr 授予模块名非法：{raw!r}")
+            tools.add("run_expr")
+            expr_modules |= set(mods)
         else:
             raise AgenticWiringError(f"未知 Gate1 授予串：{raw!r}")
     return GrantTable(
         tools=frozenset(tools), run_argv=tuple(run_argv),
         write_roots=tuple(write_roots), probes=frozenset(probes),
-        network_probes=frozenset(network_probes))
+        network_probes=frozenset(network_probes),
+        expr_modules=frozenset(expr_modules))
 
 
 def _build_task_text(spec: Any) -> str:
@@ -186,14 +208,24 @@ def run_agentic_for_runspec(
         raise AgenticWiringError(
             "run_agentic_for_runspec 只能处理 agentic=True 的 RunSpec")
     grants = parse_grant_strings(tuple(spec.tool_grants))
+    # Phase 2.6 Task3：AgenticConfig 缺省 None = 全关 = Phase 2.5 旧行为。
+    cfg = getattr(spec, "agentic_config", None)
+    if cfg is not None and not isinstance(cfg, AgenticConfig):
+        raise AgenticWiringError(
+            f"RunSpec.agentic_config 必须是 AgenticConfig|None，收到 "
+            f"{type(cfg).__name__}")
+    if cfg is None:
+        cfg = ALL_OFF
     budget = BudgetTracker(
         step_cap=spec.step_cap, token_cap=spec.token_cap,
-        round_cap=max(int(spec.max_coding_rounds), 1))
+        round_cap=max(int(spec.max_coding_rounds), 1),
+        verify_repair_tail_rounds=(cfg.verify_repair_tail_rounds
+                                   if cfg.verify_repair_tail else 0))
     tracer = _open_trace(spec)
     if call_cache is None:
         # 与 AgentRunner 的默认 CallReplay 同一目录（runner.py 落点见
-        # test_task0_debt 白名单）：agentic-v2- 键空间与 coding_ 键空间
-        # 零交集（前缀分隔），历史 coding_/macro_ 键一字不动。
+        # test_task0_debt 白名单）：agentic-v2-/agentic-v3- 双纪元键空间
+        # 与 coding_ 键空间零交集（前缀分隔），历史 coding_/macro_ 键不动。
         call_cache = CallReplay(phase1_root() / ".call_cache")
     outcome = run_agentic_inner_loop(
         workdir=spec.workdir, task=_build_task_text(spec),
@@ -202,7 +234,8 @@ def run_agentic_for_runspec(
         probe_registry=probe_registry, recall_port=recall_port,
         call_cache=call_cache, nonprod=nonprod,
         # M5：只读实呼 seq 读取器（无 billing/全缓存轮 trace seq=null）。
-        seq_provider=build_seq_provider())
+        seq_provider=build_seq_provider(),
+        agentic_config=cfg)
 
     common = {
         "coding_round": outcome.rounds_used,

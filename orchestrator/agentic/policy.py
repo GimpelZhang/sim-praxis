@@ -32,10 +32,15 @@ GRANT_SOURCE_CONTROL = "control_primitive"
 GRANT_SOURCE_DENY = "policy_deny"
 
 # 六组工具 + 两个控制原语的全集；GrantTable.tools 只授六组。
+# Phase 2.6 Task3 增两项（均为 Gate1 逐项授予）：run_expr（F2 内联探针，
+# 走 run_backend，**不**并入 run_cmd 的 argv 闸——其 -c 会被
+# ``_PY_DENY_FLAGS`` 判死，两者授权模型完全不同）与 update_scratchpad
+# （F4 跨轮记忆写，走 write_file 同款 write-roots 闸）。
 SIDE_EFFECT_TOOLS = frozenset({
     "read_file", "list_dir", "grep",
     "write_file", "apply_patch",
     "run_cmd", "run_probe", "recall",
+    "run_expr", "update_scratchpad",
 })
 CONTROL_TOOLS = frozenset({"finish", "fail"})
 
@@ -86,6 +91,7 @@ class GrantTable:
     - write_roots:  写允许的 workdir 相对前缀；``("",)`` 表整个 workdir。
     - probes:       允许的白名单探针名（须同时在 ProbeRegistry 内）。
     - network_probes: 允许触网的探针名（默认空；须 Gate1 逐项授权）。
+    - expr_modules: run_expr 程序可 import 的模块完整点分名白名单（默认空）。
     """
 
     tools: frozenset[str] = field(default_factory=frozenset)
@@ -93,6 +99,7 @@ class GrantTable:
     write_roots: tuple[str, ...] = ()
     probes: frozenset[str] = field(default_factory=frozenset)
     network_probes: frozenset[str] = field(default_factory=frozenset)
+    expr_modules: frozenset[str] = field(default_factory=frozenset)
 
     def write_roots_resolved(self, workdir: Path) -> list[Path]:
         roots: list[Path] = []
@@ -131,6 +138,9 @@ class ToolContext:
     probe_registry: "ProbeRegistry | None" = None
     recall_port: "RecallPort | None" = None
     nonprod: bool = False
+    # Phase 2.6 Task3（F3）：仅在 AgenticConfig.tolerant_patch=True 时置真；
+    # 不可变 bool，工具层据此决定 unified_diff 通道是否启用唯一命中回退。
+    tolerant_patch: bool = False
     jail: PathJail = field(init=False)
 
     def __post_init__(self) -> None:
@@ -163,7 +173,7 @@ class PreToolUsePolicy:
             return PolicyDecision.deny(
                 f"工具 {tool} 不在 Gate1 授予表内（授予："
                 f"{sorted(self.grants.tools) or '空'}）")
-        if tool in ("write_file", "apply_patch"):
+        if tool in ("write_file", "apply_patch", "update_scratchpad"):
             decision = self._check_write(tool, resolved_path)
             if decision.decision == "deny":
                 return decision

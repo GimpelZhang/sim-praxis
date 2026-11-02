@@ -163,6 +163,103 @@ def apply_patch(ctx: ToolContext, **kwargs) -> ToolResult:
         return _deny(f"补丁被拒（{kind}）：{str(exc)[:500]}")
 
 
+def _tolerant_key(line: str) -> str:
+    """F3 归一化：CRLF 已由 splitlines 剥；行首制表符 4 空格 + 行尾空白剥离。"""
+    return line.replace("\t", "    ").rstrip()
+
+
+def _collapsed_keys(lines: list[str]) -> list[tuple[str, int]]:
+    """(归一化行, 原始行号) 序列；连续空行折叠为一条（保留首个原行号）。"""
+    out: list[tuple[str, int]] = []
+    for idx, line in enumerate(lines):
+        key = _tolerant_key(line)
+        if key == "" and out and out[-1][0] == "":
+            continue
+        out.append((key, idx))
+    return out
+
+
+def _hunk_blocks(section: str) -> list[list[str]]:
+    """切出 unified_diff 的 hunk 体（@@ 头之间的行；忽略文件头/元行）。"""
+    hunks: list[list[str]] = []
+    cur: "list[str] | None" = None
+    for line in section.splitlines():
+        if line.startswith("@@"):
+            if cur is not None:
+                hunks.append(cur)
+            cur = []
+            continue
+        if cur is None:
+            continue
+        if line.startswith("\\"):        # "\ No newline at end of file"
+            continue
+        if line[:1] in (" ", "-", "+"):
+            cur.append(line)
+    if cur is not None:
+        hunks.append(cur)
+    return hunks
+
+
+def _apply_tolerant(text: str, patch: str) -> "tuple[str, dict] | None":
+    """标准 unified_diff 失败后的模糊回退（唯一命中才应用，D3-6）。
+
+    归一化：行尾空白剥离、连续空行折叠为单空行、CRLF→LF、行首制表符按
+    4 空格展开。定位：对每个 hunk 的上下文＋删除行序列做「归一化后子串
+    **唯一**匹配」；命中数 != 1 即返回 None（不改原语义，调用方仍抛
+    PatchApplyFailed 同族错误）。应用：以匹配位置为锚，保留未触及行原文，
+    逐行替换 hunk 的 +/ 行。
+
+    hunk 逐个应用并每次重新归一化，故多 hunk 的行号位移天然成立。
+    """
+    hunks = _hunk_blocks(patch)
+    if not hunks:
+        return None
+    current = text
+    applied = 0
+    for hunk in hunks:
+        lines = current.splitlines()
+        collapsed = _collapsed_keys(lines)
+        old_seq = [_tolerant_key(ln[1:]) for ln in hunk if ln[:1] in (" ", "-")]
+        if not old_seq:
+            return None                    # 纯新增无锚点，无法唯一定位
+        # 折叠 hunk 序列内的连续空行（与文件侧同规则）。
+        old_keys: list[str] = []
+        for key in old_seq:
+            if key == "" and old_keys and old_keys[-1] == "":
+                continue
+            old_keys.append(key)
+        file_keys = [k for k, _ in collapsed]
+        hits = [i for i in range(len(file_keys) - len(old_keys) + 1)
+                if file_keys[i:i + len(old_keys)] == old_keys]
+        if len(hits) != 1:
+            return None                    # 0 = 缺锚点；>1 = 多处歧义
+        pos = hits[0]
+        if pos + len(old_keys) < len(collapsed):
+            end_orig = collapsed[pos + len(old_keys)][1]
+        else:
+            end_orig = len(lines)
+        start_orig = collapsed[pos][1]
+        middle: list[str] = []
+        cursor = pos
+        for ln in hunk:
+            tag = ln[:1]
+            if tag == " ":
+                middle.append(lines[collapsed[cursor][1]])
+                cursor += 1
+            elif tag == "-":
+                cursor += 1
+            elif tag == "+":
+                middle.append(ln[1:])
+        current = "\n".join(lines[:start_orig] + middle + lines[end_orig:])
+        if text.endswith(("\n", "\r")) and not current.endswith("\n"):
+            current += "\n"
+        applied += 1
+    if applied == 0:
+        return None
+    return current, {"mode": "tolerant", "hunks": applied,
+                     "whitespace_normalized": True}
+
+
 def _apply(ctx: ToolContext, raw: str, workdir: Path) -> ToolResult:
     # ---- replace.v1 围栏通道（_apply_replace_staged 内置重 parse AST 闸） ----
     if REPLACE_FENCE_NUCLEUS in raw:
@@ -183,6 +280,7 @@ def _apply(ctx: ToolContext, raw: str, workdir: Path) -> ToolResult:
         raise PatchTransportError("补丁不是 JSON 对象")
     staged: dict[str, str] = {}
     applied: list[str] = []
+    tolerant_stats: list[dict] = []
     if "unified_diff" in obj:
         diff = obj["unified_diff"]
         if not isinstance(diff, str) or not diff.strip():
@@ -192,11 +290,32 @@ def _apply(ctx: ToolContext, raw: str, workdir: Path) -> ToolResult:
             if not section.strip():
                 continue
             m = _PLUS3_RE.search(section)
+            target: "Path | None" = None
             if m:
                 gated = _gate_target(ctx, m.group(1).strip())
                 if isinstance(gated, ToolResult):
                     return gated
-            rel = _stage_unified_section(staged, workdir, section)
+                target = gated
+            try:
+                rel = _stage_unified_section(staged, workdir, section)
+            except (PatchAnchorError, PatchTransportError) as exc:
+                # Phase 2.6 F3：仅 cfg.tolerant_patch=True 且能定位目标文件
+                # 时启用唯一命中回退；否则原异常原样上抛（零语义漂移）。
+                if not ctx.tolerant_patch or target is None:
+                    raise
+                base = staged.get(str(target))
+                if base is None:
+                    base = target.read_text(encoding="utf-8",
+                                            errors="replace")
+                tol = _apply_tolerant(base, section)
+                if tol is None:
+                    raise PatchSafetyError(
+                        f"{exc} | tolerant: 唯一命中失败（缺锚点或多处歧义）"
+                    ) from exc
+                new_text, stats = tol
+                staged[str(target)] = new_text
+                rel = m.group(1).strip()
+                tolerant_stats.append({"relpath": rel, **stats})
             if rel is not None:
                 applied.append(rel)
     else:
@@ -223,5 +342,7 @@ def _apply(ctx: ToolContext, raw: str, workdir: Path) -> ToolResult:
     if reason:
         raise PatchTransportError(reason)
     _commit_staged(staged, workdir)
-    return ToolResult.allow_result(
-        f"[apply_patch] 已应用：{sorted(set(applied))}")
+    msg = f"[apply_patch] 已应用：{sorted(set(applied))}"
+    if tolerant_stats:
+        msg += f"；tolerant 回退：{tolerant_stats}"
+    return ToolResult.allow_result(msg)

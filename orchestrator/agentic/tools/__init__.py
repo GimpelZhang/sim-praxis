@@ -17,6 +17,15 @@ from dataclasses import dataclass
 from ..policy import PolicyDecision, deny_observation
 
 
+class AgenticToolError(RuntimeError):
+    """工具层自身装配/IO 完整性失败（不是模型可自修错，不转 deny 观察）。
+
+    Phase 2.6 Task3：目前只有 scratchpad 写后回读不一致使用——那意味着
+    磁盘内容与入参不同（原子写静默失败/编码漂移），属引擎错误，必须
+    fail-closed 到 engine_error，而不是伪装成一次可重试的 POLICY DENY。
+    """
+
+
 @dataclass
 class ToolResult:
     output: str                       # 模型可见观察（必要时已截断）

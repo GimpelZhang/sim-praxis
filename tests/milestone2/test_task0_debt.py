@@ -776,7 +776,10 @@ CALL_CACHE_ALLOWLIST = {
     # 两处 cache_key f-string 改调同一函数，0 新增落点/网关调用，键串逐字节不变。
     # Phase 2.5 Task4（LEAD 方案 A）：RunSpec 五字段 + __post_init__ 插入
     # （+35 行）纯位移 2272→2307，构造表达式逐字未改；agentic 第六落点见下。
-    ("orchestrator/agent_runner/runner.py", 2307),
+    # Phase 2.6 Task3（§T3.4-K）：RunSpec 第 6 个 agentic 字段 agentic_config
+    # （+5 行含溯源注释，全在构造点之前）纯位移 2307→2312；构造表达式
+    # CallReplay(phase1_root() / ".call_cache") 逐字未改，0 新增落点。
+    ("orchestrator/agent_runner/runner.py", 2312),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
@@ -814,7 +817,10 @@ CALL_CACHE_ALLOWLIST = {
     # docstring 扩写与惰性命名空间回退（phase25→phase26，防「读错账把实呼记成
     # 缓存命中」），全部在构造点之前，纯位移（190→197，+7 行）；构造表达式
     # 逐字未改，0 新增落点、0 新增网关调用。
-    ("orchestrator/agentic/wiring.py", 197),
+    # Phase 2.6 Task3（F1–F4）：TOOL_NAMES 10→12、expr 授予解析与
+    # agentic_config 类型校验全部插在构造点之前（+32 行），纯位移
+    # 197→229；构造表达式逐字未改，0 新增落点。
+    ("orchestrator/agentic/wiring.py", 229),
 }
 
 

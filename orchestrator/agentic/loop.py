@@ -19,6 +19,8 @@
 """
 from __future__ import annotations
 
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,22 +36,27 @@ from smolagents.monitoring import LogLevel
 from smolagents.tools import Tool
 
 from .caps import (
+    KIND_BIRTH_ABSENT,
     KIND_ENGINE_ERROR,
     KIND_FAIL,
     KIND_FINISH,
     KIND_ROUND_CAP,
+    KIND_ROUND_TAIL,
     KIND_STEP_CAP,
     KIND_TOKEN_CAP,
     BudgetTracker,
     CapExceeded,
 )
+from .config import ALL_OFF, AgenticConfig
 from .executor import HardenedLocalPythonExecutor, TerminateSignal
 from .forensics import (
     ANSWER_TOOL,
     CACHE_LOGICAL_PREFIX,
+    CACHE_LOGICAL_PREFIX_LEGACY,
     CONDENSE_TOOL,
     MODEL_ROUND_TOOL,
     TraceStore,
+    cache_epoch,
     canonical_json,
     iter_trajectory,
     normalize_observation,
@@ -70,6 +77,12 @@ from .tools.read import read_file as t_read_file
 from .tools.probe import run_probe as t_run_probe
 from .tools.recall import recall as t_recall
 from .tools.run import run_cmd as t_run_cmd
+from .tools.run_expr import MAX_EXPR_CHARS, run_expr as t_run_expr
+from .tools.scratchpad import (
+    SCRATCHPAD_MAX_CHARS,
+    SCRATCHPAD_REL,
+    update_scratchpad as t_update_scratchpad,
+)
 from .tools.terminate import fail as t_fail
 from .tools.terminate import finish as t_finish
 from .tools.write import apply_patch as t_apply_patch
@@ -77,6 +90,85 @@ from .tools.write import write_file as t_write_file
 
 KIND_SUPPLIER_ERROR = "supplier_error"
 KIND_MAX_STEPS = "max_steps_error"
+
+# ---------------------------------------------------------------------------
+# Phase 2.6 Task3（F1）：出生判定与验证-修复尾
+# ---------------------------------------------------------------------------
+
+# 入口脚本的**唯一真值**（本文件定名；其他段落/测试只引用不重复字面量）。
+ENTRYPOINT = ".entrypoint.py"
+ENTRYPOINT_MIN_BYTES = 200
+TAIL_DIRECTIVE = ("【验证-修复尾】入口脚本已出生，剩余轮次只用于运行测试、"
+                  "阅读报错、应用补丁。\n不要再新建文件，不要重写无关模块；"
+                  "每轮必须以一次验证命令开头。")
+
+
+def _entrypoint_ready(workdir: Path, name: str = ENTRYPOINT) -> bool:
+    """三条件全真才算「出生」：存在 + 体积达标 + 编译通过。
+
+    编译语义与 py_compile 同源（``py_compile.compile`` 内部就是
+    ``compile(source_bytes, cfile, dfile)``），但不落 ``.pyc``：
+
+    锁内适配（Phase 2.6 Task3，计划 §T3.4-I 示例行）：计划写的是
+    ``-m py_compile``，那会在 workdir 里写 ``__pycache__``（每次出生检测
+    都污染工作目录）；改 ``cfile='/dev/null'`` 又被 py_compile 直接拒
+    （``FileExistsError: /dev/null is a non-regular file``，实测）。故只做
+    ``compile()`` 解析/编译这一步、不写字节码——同样的 SyntaxError 判定，
+    零副作用。``-I`` 隔离模式防工作目录里的影子模块劫持（与 run_expr 同向），
+    解释器与执行镜像同版本（容器内外版本差异会把合法语法判成 SyntaxError，
+    这是 §T3.6「失败处理」第一条）。
+    """
+    p = Path(workdir) / name
+    try:
+        if not p.is_file() or p.stat().st_size < ENTRYPOINT_MIN_BYTES:
+            return False
+    except OSError:
+        return False
+    code = ("import sys;"
+            "compile(open(sys.argv[1], 'rb').read(), sys.argv[1], 'exec')")
+    try:
+        r = subprocess.run([sys.executable, "-I", "-c", code, str(p)],
+                           capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
+
+
+def _read_scratchpad(workdir: Path, *, enabled: bool
+                     ) -> "tuple[str, bool]":
+    """读一次 scratchpad（返回 (文本, 是否截断)）；未启用恒 ("", False)。
+
+    截断发生在读取侧：``update_scratchpad`` 已拒 >4000 字符的写入，这里
+    只防外部直接编辑文件把 scratchpad 变成绕过 token_cap 的后门（D3-8）。
+    """
+    if not enabled:
+        return "", False
+    p = Path(workdir) / SCRATCHPAD_REL
+    try:
+        data = p.read_bytes()
+    except OSError:
+        # 不存在 / 不是普通文件 / 读不了：都当「没有记忆」，不拦 run。
+        return "", False
+    text = data.decode("utf-8", errors="replace")
+    if len(text) > SCRATCHPAD_MAX_CHARS:
+        return text[:SCRATCHPAD_MAX_CHARS], True
+    return text, False
+
+
+def _tool_docs(cfg: "AgenticConfig | None") -> str:
+    """开关开启时才追加的工具说明（全关时 prompt 与旧版逐字节相同）。"""
+    if cfg is None or not cfg.any_enabled:
+        return ""
+    docs = ""
+    if cfg.run_expr:
+        docs += (f"- run_expr(src)：在隔离容器里执行一个小程序（≤{MAX_EXPR_CHARS}"
+                 " 字符；只允许 import 白名单模块 + 表达式语句；"
+                 "禁止赋值/定义/控制流/dunder）。\n")
+    if cfg.scratchpad:
+        docs += (f"- update_scratchpad(content)：整体覆盖写跨轮记忆 "
+                 f"{SCRATCHPAD_REL}（≤{SCRATCHPAD_MAX_CHARS} 字符）；下一轮"
+                 "生效，压缩旧轮不会丢它。\n")
+    return ("\n本 run 追加工具：\n" + docs) if docs else ""
 
 # C3：loop 唯一信任的真终局信号 kind 白名单——来源只能是硬化执行器
 # _terminal_sig（TerminateSignal/CapExceeded 两个 BaseException，模型 blob
@@ -87,7 +179,7 @@ KIND_MAX_STEPS = "max_steps_error"
 # fail-closed 合成 TerminateSignal（见 executor.py __call__ 第三 clause）。
 TERMINAL_SIG_KINDS = frozenset({
     KIND_FINISH, KIND_FAIL, KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP,
-    KIND_ENGINE_ERROR})
+    KIND_ROUND_TAIL, KIND_BIRTH_ABSENT, KIND_ENGINE_ERROR})
 
 # AC-T4-12：上下文工程常量的集中配置点（另见 forensics.OBS_*_CHARS）。
 KEEP_FULL_ROUNDS = 2
@@ -158,6 +250,9 @@ _TOOL_FNS: dict[str, Callable[..., ToolResult]] = {
     "recall": t_recall,
     "finish": t_finish,
     "fail": t_fail,
+    # Phase 2.6 Task3：F2/F4（按 cfg 动态出现在授予面，见 granted_tool_names）。
+    "run_expr": t_run_expr,
+    "update_scratchpad": t_update_scratchpad,
 }
 
 _TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -239,6 +334,22 @@ _TOOL_SPECS: dict[str, dict[str, Any]] = {
         "description": "确认不可恢复时诚实终局。",
         "inputs": {
             "reason": {"type": "string", "description": "不可恢复原因"},
+        },
+    },
+    "run_expr": {
+        "description": ("在隔离容器里执行一个小程序（只允许 import 白名单模块 + "
+                        "若干表达式语句）并返回 stdout；禁止赋值/定义/控制流/"
+                        "任何 dunder。"),
+        "inputs": {
+            "src": {"type": "string",
+                    "description": f"程序源码（≤{MAX_EXPR_CHARS} 字符）"},
+        },
+    },
+    "update_scratchpad": {
+        "description": (f"整体覆盖写跨轮记忆 {SCRATCHPAD_REL}"
+                        f"（≤{SCRATCHPAD_MAX_CHARS} 字符，下一轮生效）。"),
+        "inputs": {
+            "content": {"type": "string", "description": "完整 scratchpad 内容"},
         },
     },
 }
@@ -372,9 +483,54 @@ class _FailTool(BoundTool):
         return super().forward()
 
 
+class _RunExprTool(BoundTool):
+    name = "run_expr"
+
+    def forward(self, src: str) -> str:
+        return super().forward()
+
+
+class _UpdateScratchpadTool(BoundTool):
+    name = "update_scratchpad"
+
+    def forward(self, content: str) -> str:
+        return super().forward()
+
+
+class RoundMeta:
+    """每-run 的轮面元数据（F1 追授 + F4 scratchpad + 缓存纪元）。
+
+    与 :class:`RoundState` 同族：只活在 loop/模型工厂的闭包细胞里，模型
+    代码无名字可达。``any_enabled`` 为假时 trace args 与旧版逐字节相同
+    （AC-T3-5）；为真时才追加 phase/scratchpad/tail 元数据。
+    """
+
+    __slots__ = ("any_enabled", "cache_version", "cache_logical_prefix",
+                 "phase", "tail_granted", "effective_round_cap",
+                 "scratchpad_enabled", "scratchpad_text",
+                 "scratchpad_sha256", "scratchpad_chars",
+                 "scratchpad_truncated", "directive")
+
+    def __init__(self, cfg: AgenticConfig, *, cache_version: str,
+                 cache_logical_prefix: str) -> None:
+        self.any_enabled = cfg.any_enabled
+        self.cache_version = cache_version
+        self.cache_logical_prefix = cache_logical_prefix
+        self.phase = "explore"
+        self.tail_granted = False
+        self.effective_round_cap = 0
+        self.scratchpad_enabled = cfg.scratchpad
+        self.scratchpad_text = ""
+        self.scratchpad_sha256 = ""
+        self.scratchpad_chars = 0
+        self.scratchpad_truncated = False
+        self.directive = ""
+
+
 def _make_invoker(name: str, *, ctx: ToolContext, model: Any,
                   tracer: "TraceStore | None", budget: "BudgetTracker | None",
-                  round_state: RoundState, step_counter: list[int]
+                  round_state: RoundState, step_counter: list[int],
+                  on_step: "Callable[[], None] | None" = None
                   ) -> Callable[..., str]:
     """造一个工具名的**无属性裸闭包**（C2 核心）。
 
@@ -424,6 +580,9 @@ def _make_invoker(name: str, *, ctx: ToolContext, model: Any,
                 tool=name, args=safe, observation=result.full,
                 policy=result.decision.as_trace(), latency_ms=latency_ms,
                 raw_response_ref=round_state.current_raw_ref)
+        if on_step is not None:
+            # F1：每轮工具执行结束后做一次出生检测（追授后自动空转成 no-op）。
+            on_step()
         return result.output
 
     # 字符串槽（不进函数 __dict__）：safer_func 包装后错误/trace 仍可读名。
@@ -433,26 +592,42 @@ def _make_invoker(name: str, *, ctx: ToolContext, model: Any,
     return invoker
 
 
-def granted_tool_names(ctx: ToolContext) -> tuple[str, ...]:
-    """本次授予的工具名（六组按授予表 + finish/fail 恒在）。"""
+def granted_tool_names(ctx: ToolContext,
+                       cfg: "AgenticConfig | None" = None) -> tuple[str, ...]:
+    """本次授予的工具名（按授予表 + 开关面 + finish/fail 恒在）。
+
+    Phase 2.6 Task3：``run_expr`` 只在 ``cfg.run_expr``、``update_scratchpad``
+    只在 ``cfg.scratchpad`` 时出现——cfg 为 None/全关时工具面与旧版逐项
+    相同（AC-T3-5）。
+    """
+    enabled: set[str] = set()
+    if cfg is not None and cfg.run_expr:
+        enabled.add("run_expr")
+    if cfg is not None and cfg.scratchpad:
+        enabled.add("update_scratchpad")
     names = tuple(n for n in ("read_file", "list_dir", "grep", "write_file",
                               "apply_patch", "run_cmd", "run_probe", "recall")
                   if n in ctx.grants.tools)
-    return names + ("finish", "fail")
+    extra = tuple(n for n in ("run_expr", "update_scratchpad")
+                  if n in enabled and n in ctx.grants.tools)
+    return names + extra + ("finish", "fail")
 
 
 def build_tool_invokers(*, ctx: ToolContext, model: Any,
                         tracer: "TraceStore | None",
                         budget: "BudgetTracker | None",
                         round_state: RoundState,
-                        step_counter: list[int]
+                        step_counter: list[int],
+                        cfg: "AgenticConfig | None" = None,
+                        on_step: "Callable[[], None] | None" = None
                         ) -> dict[str, Callable[..., str]]:
     """按授予表装配「工具名 → 无属性裸闭包」（执行器侧实际可调用面）。"""
     return {
         name: _make_invoker(
             name, ctx=ctx, model=model, tracer=tracer, budget=budget,
-            round_state=round_state, step_counter=step_counter)
-        for name in granted_tool_names(ctx)
+            round_state=round_state, step_counter=step_counter,
+            on_step=on_step)
+        for name in granted_tool_names(ctx, cfg)
     }
 
 
@@ -467,6 +642,8 @@ _BOUND_CLASSES: dict[str, type[BoundTool]] = {
     "recall": _RecallTool,
     "finish": _FinishTool,
     "fail": _FailTool,
+    "run_expr": _RunExprTool,
+    "update_scratchpad": _UpdateScratchpadTool,
 }
 
 
@@ -482,7 +659,8 @@ def _safe_args(kwargs: Any) -> dict[str, Any]:
     return out
 
 
-def build_bound_tools(ctx: ToolContext) -> list[BoundTool]:
+def build_bound_tools(ctx: ToolContext,
+                      cfg: "AgenticConfig | None" = None) -> list[BoundTool]:
     """按授予表装配**schema 工具**（六组仅授表内者出现；finish/fail 恒在）。
 
     C2：这些 Tool 实例只给 CodeAgent 生成工具清单/参数 schema；模型 blob
@@ -490,7 +668,7 @@ def build_bound_tools(ctx: ToolContext) -> list[BoundTool]:
     名替换）。
     """
     tools: list[BoundTool] = []
-    for name in granted_tool_names(ctx):
+    for name in granted_tool_names(ctx, cfg):
         tools.append(_BOUND_CLASSES[name]())
     return tools
 
@@ -585,6 +763,7 @@ class AgenticOutcome:
     def is_failure_artifact(self) -> bool:
         return self.kind in (
             KIND_FAIL, KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP,
+            KIND_ROUND_TAIL, KIND_BIRTH_ABSENT,
             KIND_SUPPLIER_ERROR, KIND_ENGINE_ERROR, KIND_MAX_STEPS)
 
 
@@ -592,8 +771,8 @@ class AgenticOutcome:
 # 引擎装配与运行
 # ---------------------------------------------------------------------------
 
-def _make_recorder(tracer: TraceStore, round_state: RoundState
-                   ) -> Callable[..., str]:
+def _make_recorder(tracer: TraceStore, round_state: RoundState,
+                   meta: "RoundMeta | None" = None) -> Callable[..., str]:
     def record_round(round_idx: int, raw_text: str,
                      usage: "tuple[int,int] | None", cache_hit: bool,
                      latency_ms: int, disk_key: "str | None",
@@ -610,16 +789,32 @@ def _make_recorder(tracer: TraceStore, round_state: RoundState
         if seq is not None:
             round_state.current_seq = seq
         round_state.current_raw_ref = ref
+        # 16 字段契约（NF-6）禁止加列：版本串与本地截断证据放 args 内。
+        # cache_namespace 逐字保留逻辑版本串（盘键无冒号，见 forensics）。
+        round_args: dict[str, Any] = {
+            "cache_hit": cache_hit, "empty_response": not raw_text,
+            "disk_key": disk_key,
+            "cache_namespace": (meta.cache_logical_prefix if meta is not None
+                                else CACHE_LOGICAL_PREFIX),
+            "stopped_by_local": stopped_by_local,
+            "stop_sequence_hit": stop_sequence_hit,
+        }
+        if meta is not None and meta.any_enabled:
+            # Task3 元数据只在开关开启时出现——全关时 args 逐字节同旧版。
+            round_args.update({
+                "phase": meta.phase,
+                "tail_granted": meta.tail_granted,
+                "effective_round_cap": meta.effective_round_cap,
+                "scratchpad_chars": meta.scratchpad_chars,
+                "scratchpad_sha256": meta.scratchpad_sha256,
+                "scratchpad_truncated": meta.scratchpad_truncated,
+            })
+            if meta.directive:
+                round_args["tail_directive"] = meta.directive
         tracer.record(
             seq=seq, round_idx=round_idx, step=0,
             tool=MODEL_ROUND_TOOL,
-            # 16 字段契约（NF-6）禁止加列：版本串与本地截断证据放 args 内。
-            # cache_namespace 逐字保留逻辑版本串（盘键无冒号，见 forensics）。
-            args={"cache_hit": cache_hit, "empty_response": not raw_text,
-                  "disk_key": disk_key,
-                  "cache_namespace": CACHE_LOGICAL_PREFIX,
-                  "stopped_by_local": stopped_by_local,
-                  "stop_sequence_hit": stop_sequence_hit},
+            args=round_args,
             observation=raw_text,
             policy={"decision": "allow", "reason": "",
                     "grant_source": GRANT_SOURCE_CONTROL},
@@ -635,7 +830,9 @@ def build_agent(*, ctx: ToolContext, model: Any,
                 round_state: RoundState,
                 instructions: str, max_steps: int,
                 step_counter: "list[int] | None" = None,
-                step_callbacks: "list[Callable] | None" = None
+                step_callbacks: "list[Callable] | None" = None,
+                cfg: "AgenticConfig | None" = None,
+                on_step: "Callable[[], None] | None" = None
                 ) -> tuple[CodeAgent, list[BoundTool], list[int]]:
     """构造产品化 CodeAgent（注入硬化执行器；不触发任何模型调用）。
 
@@ -644,10 +841,11 @@ def build_agent(*, ctx: ToolContext, model: Any,
     BoundTool 被 HardenedLocalPythonExecutor.send_tools 按名替换。
     """
     step_counter = step_counter if step_counter is not None else [0]
-    tools = build_bound_tools(ctx)
+    tools = build_bound_tools(ctx, cfg)
     invokers = build_tool_invokers(
         ctx=ctx, model=model, tracer=tracer, budget=budget,
-        round_state=round_state, step_counter=step_counter)
+        round_state=round_state, step_counter=step_counter,
+        cfg=cfg, on_step=on_step)
     executor = HardenedLocalPythonExecutor(
         max_print_outputs_length=MAX_PRINT_OUTPUTS, timeout_seconds=30,
         tool_invokers=invokers)
@@ -675,30 +873,82 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
                            nonprod: bool = False,
                            system_extra: str = "",
                            max_steps: "int | None" = None,
-                           seq_provider: "Callable[[], int | None] | None" = None
+                           seq_provider: "Callable[[], int | None] | None" = None,
+                           agentic_config: "AgenticConfig | None" = None
                            ) -> AgenticOutcome:
-    """跑一次 agentic 内环（本 Task 全部测试用 fake gateway/backend，0 付费）。"""
+    """跑一次 agentic 内环（本 Task 全部测试用 fake gateway/backend，0 付费）。
+
+    Phase 2.6 Task3：``agentic_config`` 缺省/全关时全面等价 Phase 2.5
+    （工具面、prompt、缓存纪元 v2、trace args 逐字节；AC-T3-5）。
+    """
     workdir = Path(workdir)
+    cfg = agentic_config if agentic_config is not None else ALL_OFF
+    cache_version, cache_prefix, _disk_prefix = cache_epoch(cfg.any_enabled)
+    meta = RoundMeta(cfg, cache_version=cache_version,
+                     cache_logical_prefix=cache_prefix)
     # C2：ctx frozen、不携预算/轮态；预算只在闭包细胞，轮态在私有 holder。
     ctx = ToolContext(
         workdir=workdir, grants=grants, thread_id=thread_id, tracer=tracer,
         run_backend=run_backend,
         probe_registry=probe_registry, recall_port=recall_port,
-        nonprod=nonprod)
+        nonprod=nonprod, tolerant_patch=cfg.tolerant_patch)
     round_state = RoundState()
+
+    def _on_step() -> None:
+        """F1：每轮工具执行结束后做一次出生检测（追授后自动 no-op）。"""
+        meta.effective_round_cap = budget.effective_round_cap
+        if not cfg.verify_repair_tail or budget.tail_granted:
+            return
+        if _entrypoint_ready(workdir, ENTRYPOINT):
+            budget.mark_born(budget.rounds_used)
+            budget.grant_verify_tail()
+            meta.tail_granted = True
+            meta.phase = "verify_repair"
+            meta.directive = TAIL_DIRECTIVE
+            meta.effective_round_cap = budget.effective_round_cap
+
+    def _round_context() -> dict[str, Any]:
+        """每轮**读一次** scratchpad，同一份文本喂模型请求面与指纹面。"""
+        text, truncated = _read_scratchpad(workdir, enabled=cfg.scratchpad)
+        meta.scratchpad_text = text
+        meta.scratchpad_sha256 = sha256_text(text)
+        meta.scratchpad_chars = len(text)
+        meta.scratchpad_truncated = truncated
+        meta.effective_round_cap = budget.effective_round_cap
+        return {"scratchpad_text": text, "prompt_extra": meta.directive}
+
     model = build_gateway_model(
         gateway, budget=budget, call_cache=call_cache,
-        recorder=_make_recorder(tracer, round_state),
-        seq_provider=seq_provider)
-    model.configure(system_prompt=system_contract(extra=system_extra), task=task)
+        recorder=_make_recorder(tracer, round_state, meta),
+        seq_provider=seq_provider, cache_version=cache_version,
+        round_context=_round_context)
+    instructions = system_contract(extra=system_extra) + _tool_docs(cfg)
+    model.configure(system_prompt=instructions, task=task)
 
-    steps_max = max_steps if max_steps is not None else max(budget.round_cap, 1)
+    if max_steps is not None:
+        # 显式 max_steps 优先，逐字同旧版（调用方自担外壳容量）。
+        steps_max = max_steps
+    elif cfg.verify_repair_tail:
+        # Task3 §T3.4-B：外壳必须容纳「恰好 round_cap + tail」轮模型调用。
+        # 最后一轮由 budget.add_round 以 round_tail / birth_absent 终局
+        # （STOP-3b：先记账后判帽），故再给 1 步——否则尾轮在 smolagents
+        # 外壳层先撞 max_steps，kind 会被错记为 max_steps 而非 tail 分类。
+        if budget.verify_repair_tail_rounds <= 0:
+            # 开关与预算不一致会让「追授」永不可达（add_round 仍按旧版
+            # round_cap 分类）；装配期 fail-closed，不静默降级。
+            raise ValueError(
+                "AgenticConfig.verify_repair_tail=True 但 BudgetTracker."
+                "verify_repair_tail_rounds<=0：追授永不生效")
+        steps_max = (max(budget.round_cap, 1)
+                     + budget.verify_repair_tail_rounds + 1)
+    else:
+        # 全关路径逐字节同 Phase 2.5。
+        steps_max = max(budget.round_cap, 1)
     condenser = Condenser(tracer)
     agent, _tools, step_counter = build_agent(
         ctx=ctx, model=model, tracer=tracer, budget=budget,
-        round_state=round_state,
-        instructions=system_contract(extra=system_extra),
-        max_steps=steps_max)
+        round_state=round_state, instructions=instructions,
+        max_steps=steps_max, cfg=cfg, on_step=_on_step)
     # 显式按 ActionStep 类型注册（CallbackRegistry 不支持 append）。
     agent.step_callbacks.register(ActionStep, condenser)
 
@@ -749,7 +999,8 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
     except CapExceeded as exc:
         # BaseException：不被 CodeAgent 的 except Exception 包装，原样到达。
         kind = exc.kind if exc.kind in (
-            KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP) else KIND_FAIL
+            KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP,
+            KIND_ROUND_TAIL, KIND_BIRTH_ABSENT) else KIND_FAIL
         reason = exc.reason
     except TerminateSignal as exc:  # 理论上执行器已映射；防御性兜底
         kind = exc.kind

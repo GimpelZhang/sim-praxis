@@ -23,7 +23,10 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.agentic.forensics import CACHE_DISK_PREFIX
+from orchestrator.agentic.forensics import (
+    CACHE_DISK_PREFIX,
+    CACHE_DISK_PREFIX_LEGACY,
+)
 from orchestrator.agent_runner.runner import coding_call_cache_key
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -78,7 +81,11 @@ def test_golden_cache_keys_stay_in_legacy_coding_namespace():
             assert r["cache_key"] == expected
             assert r["cache_key"].startswith("coding_")
             assert not r["cache_key"].startswith(CACHE_DISK_PREFIX)
-    assert CACHE_DISK_PREFIX == "agentic-v2-"
+            # 双纪元（Phase 2.6 Task3 / P26-R1）下两个 agentic 前缀
+            # 都不得与旧 coding_ 键空间相交。
+            assert not r["cache_key"].startswith(CACHE_DISK_PREFIX_LEGACY)
+    assert CACHE_DISK_PREFIX == "agentic-v3-"
+    assert CACHE_DISK_PREFIX_LEGACY == "agentic-v2-"
 
 
 # ---------------------------------------------------------------------------
@@ -116,13 +123,15 @@ def test_oldpath_imports_never_load_agentic_or_smolagents():
 _AGENTIC_FIELDS = (
     "agentic", "tool_grants", "step_cap", "token_cap",
     "agentic_trace_relpath",
+    # Phase 2.6 Task3 §T3.4-K：纯加法第 6 个 agentic 字段。
+    "agentic_config",
 )
 
 
 def test_runspec_agentic_fields_landed_opt_in(tmp_path):
     RunSpec = golden_mod.runner_mod.RunSpec
     fields = {f.name: f for f in dataclasses.fields(RunSpec)}
-    assert len(fields) == 30                      # 25 旧字段 + 5 新字段
+    assert len(fields) == 31                      # 25 旧字段 + 6 新字段
     for name in _AGENTIC_FIELDS:
         assert name in fields
     spec = RunSpec(thread_id="t", workdir=tmp_path, cmd=["python", "x.py"],
@@ -130,6 +139,8 @@ def test_runspec_agentic_fields_landed_opt_in(tmp_path):
     # 默认出生契约逐字旧行为：False/空元组/0/0/None。
     assert (spec.agentic, spec.tool_grants, spec.step_cap, spec.token_cap,
             spec.agentic_trace_relpath) == (False, (), 0, 0, None)
+    # 第 6 字段默认 None = 全关 = Phase 2.5 逐字节旧行为。
+    assert spec.agentic_config is None
 
 
 @pytest.mark.parametrize("kwargs", [

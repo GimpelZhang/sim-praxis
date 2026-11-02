@@ -39,12 +39,43 @@ _TRUNC_MARKER = (
     "(obs_full_relpath)，对模型不可见 ...\n")
 
 # 缓存逻辑前缀（计划 AC-T4-9 字面量）。CallReplay 磁盘键字符集
-# ^[A-Za-z0-9_.-]{1,160}$ 不含冒号，故磁盘键形如 agentic-v2-<sha256>，
-# 逻辑名 agentic-v2: 只出现在本模块常量与证据说明中——
+# ^[A-Za-z0-9_.-]{1,160}$ 不含冒号，故磁盘键形如 agentic-v3-<sha256>，
+# 逻辑名 agentic-v3: 只出现在本模块常量与证据说明中——
 # 锁内适配（Phase 2.5）：冒号不落盘，旧 coding_ 键空间一字不动。
-CACHE_VERSION = "agentic-v2"
-CACHE_LOGICAL_PREFIX = "agentic-v2:"
-CACHE_DISK_PREFIX = "agentic-v2-"
+#
+# 锁内适配（Phase 2.6 Task3，计划 §T3.4-H vs I3-2/AC-T3-5 冲突）：
+# 计划 §T3.4-H 要求把 CACHE_VERSION 无条件改成 agentic-v3，而 I3-2 与
+# AC-T3-5 要求「四个开关全关时缓存指纹与 Phase 2.5 逐字节相同」——
+# 指纹载荷里含 "v" 与逻辑前缀，无条件换纪元两者不可能同时成立。
+# 故采用**双纪元**：CACHE_VERSION 常量本身是 v3（AC-T3-6 断言不变），
+# 实际纪元由 :func:`cache_epoch` 按 AgenticConfig.any_enabled 选择——全关
+# 走 LEGACY(v2) 保持逐字节回滚面，任一开关开启走 v3（I3-3，不得半开
+# 共享 v2 键）。Task 4 的判决配置四开关全开，落 v3。
+CACHE_VERSION = "agentic-v3"
+CACHE_LOGICAL_PREFIX = "agentic-v3:"
+CACHE_DISK_PREFIX = "agentic-v3-"
+CACHE_VERSION_LEGACY = "agentic-v2"
+CACHE_LOGICAL_PREFIX_LEGACY = "agentic-v2:"
+CACHE_DISK_PREFIX_LEGACY = "agentic-v2-"
+
+
+def cache_epoch(any_enabled: bool) -> tuple[str, str, str]:
+    """按开关面选纪元：任一开启 → v3；全关 → v2（旧行为逐字节回滚面）。"""
+    if type(any_enabled) is not bool:
+        raise ValueError("any_enabled 必须是 bool")
+    if any_enabled:
+        return CACHE_VERSION, CACHE_LOGICAL_PREFIX, CACHE_DISK_PREFIX
+    return (CACHE_VERSION_LEGACY, CACHE_LOGICAL_PREFIX_LEGACY,
+            CACHE_DISK_PREFIX_LEGACY)
+
+
+def cache_prefixes(version: str) -> tuple[str, str]:
+    """纪元版本串 → (逻辑前缀, 磁盘前缀)；未知版本 fail-closed。"""
+    if version == CACHE_VERSION:
+        return CACHE_LOGICAL_PREFIX, CACHE_DISK_PREFIX
+    if version == CACHE_VERSION_LEGACY:
+        return CACHE_LOGICAL_PREFIX_LEGACY, CACHE_DISK_PREFIX_LEGACY
+    raise ValueError(f"未知缓存纪元：{version!r}")
 
 MODEL_ROUND_TOOL = "__model_round__"
 CONDENSE_TOOL = "__condense__"
@@ -180,21 +211,38 @@ def advance_prefix(prefix_hex: str, *, step: int, tool: str,
 def agentic_cache_fingerprint(*, stage: str, model: str, system_prompt: str,
                               task: str, round_idx: int, prefix_hex: str,
                               max_tokens: int, temperature: float,
-                              thinking: dict | None) -> str:
-    """单轮模型调用的逻辑指纹（含工具轨迹前缀 + 规范化历史）。"""
-    return sha256_text(canonical_json({
-        "v": CACHE_VERSION,
+                              thinking: dict | None,
+                              version: str = CACHE_VERSION,
+                              scratchpad_sha256: str = "",
+                              scratchpad_chars: int = 0,
+                              prompt_extra_sha256: str = "") -> str:
+    """单轮模型调用的逻辑指纹（含工具轨迹前缀 + 规范化历史）。
+
+    Phase 2.6 Task3（D3-7）：scratchpad 内容必须进指纹，否则不同
+    scratchpad 撞同一缓存键会返回上一轮答案（静默腐化）。空串时（v3
+    内）键仍参与计算，保证「有/无 scratchpad」的键必然可分。v2 载荷
+    逐字节保持旧形状（三个新键不出现），这是 I3-2 的可靠回滚面。
+    """
+    payload: dict = {
+        "v": version,
         "stage": stage, "model": model,
         "system_prompt": system_prompt, "task": task,
         "round": round_idx, "prefix": prefix_hex,
         "max_tokens": max_tokens, "temperature": temperature,
         "thinking": thinking or {},
-    }))
+    }
+    if version != CACHE_VERSION_LEGACY:
+        payload["scratchpad_sha256"] = scratchpad_sha256
+        payload["scratchpad_chars"] = scratchpad_chars
+        # 追授尾指令等提示面附加段也必须进指纹（提示变 → 键必变）。
+        payload["prompt_extra_sha256"] = prompt_extra_sha256
+    return sha256_text(canonical_json(payload))
 
 
-def to_disk_key(fingerprint_hex: str) -> str:
-    """逻辑指纹 → CallReplay 合法磁盘键（agentic-v2-<sha256>）。"""
-    key = CACHE_DISK_PREFIX + fingerprint_hex
+def to_disk_key(fingerprint_hex: str, *,
+                prefix: str = CACHE_DISK_PREFIX) -> str:
+    """逻辑指纹 → CallReplay 合法磁盘键（agentic-v3-<sha256>）。"""
+    key = prefix + fingerprint_hex
     if len(key) > 160:  # CallReplay 键正则上限；当前 12+64=76，防御性守卫。
         raise ValueError(f"agentic cache key 超长：{len(key)} > 160")
     return key

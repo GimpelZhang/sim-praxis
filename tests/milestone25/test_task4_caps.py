@@ -14,9 +14,11 @@ import pytest
 
 from orchestrator.agentic.caps import (
     FAILURE_KINDS,
+    KIND_BIRTH_ABSENT,
     KIND_FAIL,
     KIND_FINISH,
     KIND_ROUND_CAP,
+    KIND_ROUND_TAIL,
     KIND_STEP_CAP,
     KIND_TOKEN_CAP,
     BudgetTracker,
@@ -212,8 +214,12 @@ def test_fail_primitive_is_failure_artifact(workdir, tracer):
 
 def test_failure_kind_set_completeness():
     # loop 的失败件分类必须覆盖四帽 + fail；finish 永不在内。
+    # Phase 2.6 Task3 §T3.4-B：新增 round_tail（尾轮内仍未通过验证）与
+    # birth_absent（探索帽耗尽仍无出生）两个更可诊断的停机 kind——
+    # 两者不是新停机条件，只替换 kind 值（Task 4 按 kind 分类统计墙型）。
     assert FAILURE_KINDS == frozenset(
-        {KIND_FAIL, KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP})
+        {KIND_FAIL, KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP,
+         KIND_ROUND_TAIL, KIND_BIRTH_ABSENT})
     for kind in FAILURE_KINDS:
         assert AgenticOutcome(kind=kind).is_failure_artifact
     assert not AgenticOutcome(kind=KIND_FINISH).is_failure_artifact

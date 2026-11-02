@@ -809,6 +809,9 @@ def test_runspec_field_set_frozen_with_five_optin_agentic_fields():
         "repair_full_source", "repair_prior_refs", "full_source_relpaths",
         "agentic", "tool_grants", "step_cap", "token_cap",
         "agentic_trace_relpath",
+        # Phase 2.6 Task3 §T3.4-K：纯加法第 6 个 agentic 字段
+        # （默认 None = 全关 = Phase 2.5 逐字节旧行为）。
+        "agentic_config",
     }
     assert fields == frozen_fields
 

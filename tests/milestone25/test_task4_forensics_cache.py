@@ -282,9 +282,12 @@ def test_fingerprint_version_and_disk_key_shape():
         round_idx=0, prefix_hex="0" * 64, max_tokens=8192,
         temperature=0.6, thinking={"type": "disabled"})
     key = to_disk_key(fp)
-    assert CACHE_VERSION == "agentic-v2"
-    assert CACHE_LOGICAL_PREFIX == "agentic-v2:"
-    assert re.fullmatch(r"agentic-v2-[0-9a-f]{64}", key)
+    # Phase 2.6 Task3（P26-R1 指纹纪元纪律）：默认 epoch 升 v3（F2/F4 改变
+    # 指纹输入面，跨纪元不得引用旧命中率）。v2 常量保留给「全关＝旧行为」
+    # 的 legacy 纪元（cache_epoch / CACHE_*_LEGACY），见 AC-T3-6。
+    assert CACHE_VERSION == "agentic-v3"
+    assert CACHE_LOGICAL_PREFIX == "agentic-v3:"
+    assert re.fullmatch(r"agentic-v3-[0-9a-f]{64}", key)
     assert ":" not in key  # CallReplay 键正则不含冒号（锁内适配留痕）
     assert re.fullmatch(r"[A-Za-z0-9_.-]{1,160}", key)
     # 轨迹/轮/模型任一变，指纹必变。

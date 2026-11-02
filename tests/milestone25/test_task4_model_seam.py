@@ -25,6 +25,7 @@ from smolagents.models import ChatMessage, MessageRole, Model
 from orchestrator.agentic import model as model_mod
 from orchestrator.agentic.forensics import (
     CACHE_DISK_PREFIX,
+    CACHE_DISK_PREFIX_LEGACY,
     CACHE_LOGICAL_PREFIX,
     CACHE_VERSION,
 )
@@ -236,9 +237,12 @@ def test_cache_hit_means_zero_network_and_disk_key_shape():
     disk_key = keys[0]
     assert re.fullmatch(r"agentic-v2-[0-9a-f]{64}", disk_key)
     assert cache.data[disk_key]["fingerprint"] == r1.raw["fingerprint"]
-    assert CACHE_VERSION == "agentic-v2"
-    assert CACHE_LOGICAL_PREFIX == "agentic-v2:"
-    assert disk_key.startswith(CACHE_DISK_PREFIX)
+    # Phase 2.6 Task3（P26-R1）：默认 epoch 常量升 v3；本测试的
+    # build_gateway_model(...) 未传 cache_version，落 legacy v2 纪元
+    # （全关＝Phase 2.5 逐字节旧行为，AC-T3-5/AC-T3-6）。
+    assert CACHE_VERSION == "agentic-v3"
+    assert CACHE_LOGICAL_PREFIX == "agentic-v3:"
+    assert disk_key.startswith(CACHE_DISK_PREFIX_LEGACY)
     # 第二实例同输入同轨迹 → 命中、0 触网。
     gw2 = FakeGateway(responses=["SHOULD NOT BE SEEN"])
     m2 = _model(gw2, call_cache=cache)

@@ -1,0 +1,13 @@
+{
+  "fixture": "task3_my_check_historical.py",
+  "sha256": "c7df2e6c7f1b53b52ac426f77ef3aedfd68d89341becf052d347c0fbe1840890",
+  "bytes": 4098,
+  "source_trace": "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T133751Z/traces/t5b-wallb-20261030T133751Z/trace.jsonl",
+  "source_tool": "write_file",
+  "source_seq": 53,
+  "source_round": 6,
+  "source_thread": "t5b-wallb-20261030T133751Z",
+  "extracted_at": "2026-11-03",
+  "note": "Phase 2.6 Task3 AC-T3-3 目标文件：逐字取自 Phase 2.5 Task5b wallB 生产 trace 的 write_file args.content（只读取证，未改一个字节）。",
+  "corpus_gap": "该 trace 语料中 apply_patch 行仅 1 条（seq 56，Aider '*** Begin Patch' 格式，被 JSONDecodeError 拒），不存在 unified-diff 历史失败样例；AC-T3-3 的三类正例补丁按计划 §T3.4-F 归一化表在本文件真实内容上构造（锁内适配，见 Phase_2.6_Plan_Complete.md 偏差表）。"
+}

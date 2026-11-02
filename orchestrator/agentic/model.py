@@ -43,6 +43,7 @@
 """
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any, Callable
 
@@ -62,8 +63,11 @@ from orchestrator.gateway.router import (
 from .caps import CapExceeded, BudgetTracker
 from .forensics import (
     CACHE_VERSION,
+    CACHE_VERSION_LEGACY,
     agentic_cache_fingerprint,
+    cache_prefixes,
     canonical_json,
+    sha256_text,
     to_disk_key,
 )
 
@@ -184,6 +188,64 @@ def local_stop_truncate(text: str, stop_sequences: Any
     return text[:best_idx], best_seq
 
 
+def _role_str(role_obj: Any) -> str:
+    return role_obj.value if hasattr(role_obj, "value") else str(role_obj)
+
+
+def _inject_context(messages: list[Any], *, prompt_extra: str = "",
+                    scratchpad_text: str = "") -> list[Any]:
+    """把尾指令/scratchpad 追加到**第一条 system 消息**（无则插到队首）。
+
+    Phase 2.6 F4（D3-7）：注入点在 ``messages`` 上、且在
+    :func:`flatten_text_messages` **之前**——只改 payload 不改 messages 会
+    「指纹变、请求没变」，只改 system_prompt 闭包则「指纹变、请求没变」。
+    这里返回新列表，不改调用方持有的对象。
+    """
+    blocks: list[str] = []
+    if prompt_extra:
+        blocks.append(prompt_extra.strip())
+    if scratchpad_text:
+        blocks.append("【跨轮 scratchpad】以本段为准，压缩不会丢它：\n"
+                      + scratchpad_text)
+    if not blocks:
+        return list(messages)
+    block = "\n\n".join(blocks)
+    out = list(messages)
+    for idx, m in enumerate(out):
+        role = getattr(m, "role", None)
+        content = getattr(m, "content", None)
+        if role is None and isinstance(m, dict):
+            role, content = m.get("role"), m.get("content")
+        if _role_str(role) != "system":
+            continue
+        if isinstance(m, dict):
+            if isinstance(content, str):
+                out[idx] = {**m, "content": (content + "\n\n" + block
+                                             if content else block)}
+            elif isinstance(content, list):
+                out[idx] = {**m, "content": list(content) + [
+                    {"type": "text", "text": block}]}
+            else:
+                out[idx] = {**m, "content": block}
+        else:
+            # 不复用/不改写调用方对象：ChatMessage 可能跨轮复用，原地追加会
+            # 让 scratchpad 每轮重复累加（同一条消息越滚越长）。
+            clone = copy.copy(m)
+            if isinstance(content, str):
+                clone.content = ((content + "\n\n" + block) if content
+                                 else block)
+            elif isinstance(content, list):
+                clone.content = list(content) + [
+                    {"type": "text", "text": block}]
+            else:
+                clone.content = block
+            out[idx] = clone
+        return out
+    new_msg = {"role": "system", "content": block}
+    out.insert(0, new_msg)
+    return out
+
+
 def build_gateway_model(gateway: Any, *, stage: str = STAGE,
                         max_tokens: int = DEFAULT_MAX_TOKENS,
                         temperature: float = DEFAULT_TEMPERATURE,
@@ -192,7 +254,9 @@ def build_gateway_model(gateway: Any, *, stage: str = STAGE,
                         budget: "BudgetTracker | None" = None,
                         call_cache: Any = None,
                         recorder: "Recorder | None" = None,
-                        seq_provider: "Callable[[], int | None] | None" = None
+                        seq_provider: "Callable[[], int | None] | None" = None,
+                        cache_version: str = CACHE_VERSION_LEGACY,
+                        round_context: "Callable[[], dict] | None" = None
                         ) -> "GatewayModel":
     """构造 coding_debug stage 的文本模型缝（**工厂**，C2 评审返修）。
 
@@ -212,6 +276,8 @@ def build_gateway_model(gateway: Any, *, stage: str = STAGE,
     bool 不是 int）。
     """
     # --- 敏感配置：仅工厂局部细胞，方法闭包捕获，不落实例 ---
+    if cache_version not in (CACHE_VERSION, CACHE_VERSION_LEGACY):
+        raise ValueError(f"未知缓存纪元：{cache_version!r}")
     system_prompt = ""
     task_text = ""
     prefix = "0" * 64
@@ -219,15 +285,27 @@ def build_gateway_model(gateway: Any, *, stage: str = STAGE,
     calls: list[dict[str, Any]] = []
     counters = {"cache_hits": 0, "supplier_errors": 0, "empty_responses": 0}
 
-    def fingerprint() -> tuple[str, str]:
+    def fingerprint(*, scratchpad_text: str = "", prompt_extra: str = ""
+                    ) -> tuple[str, str]:
+        if cache_version == CACHE_VERSION_LEGACY and (scratchpad_text
+                                                      or prompt_extra):
+            # v2 载荷不含这两项：放行等于不同内容撞同一缓存键（静默腐化）。
+            raise ValueError(
+                "legacy(agentic-v2) 纪元不允许 scratchpad/prompt_extra，"
+                "开启 F1/F4 必须同时切到 agentic-v3")
         model_id = gateway.model_id(stage)
+        is_v3 = cache_version != CACHE_VERSION_LEGACY
         fp = agentic_cache_fingerprint(
             stage=stage, model=model_id,
             system_prompt=system_prompt, task=task_text,
             round_idx=round_no, prefix_hex=prefix,
             max_tokens=max_tokens, temperature=temperature,
-            thinking=thinking)
-        return to_disk_key(fp), fp
+            thinking=thinking, version=cache_version,
+            scratchpad_sha256=(sha256_text(scratchpad_text) if is_v3 else ""),
+            scratchpad_chars=(len(scratchpad_text) if is_v3 else 0),
+            prompt_extra_sha256=(sha256_text(prompt_extra) if is_v3 else ""))
+        _logical, disk_prefix = cache_prefixes(cache_version)
+        return to_disk_key(fp, prefix=disk_prefix), fp
 
     def read_round_seq() -> "int | None":
         """M5：实呼后只读一次本轮 ledger seq；无 provider/无 billing → None。"""
@@ -363,12 +441,22 @@ def build_gateway_model(gateway: Any, *, stage: str = STAGE,
                 raise ValueError(
                     f"GatewayModel 收到未知 kwarg：{sorted(kwargs)}")
 
+            # Phase 2.6 Task3（F4）：每轮读一次上下文（loop 提供的读取器），
+            # 展平前注入到 messages；同一份文本随后进指纹（D3-7 同源）。
+            ctx_values = round_context() if round_context is not None else {}
+            scratchpad_text = str(ctx_values.get("scratchpad_text") or "")
+            prompt_extra = str(ctx_values.get("prompt_extra") or "")
+            if scratchpad_text or prompt_extra:
+                messages = _inject_context(
+                    messages, prompt_extra=prompt_extra,
+                    scratchpad_text=scratchpad_text)
             payload = flatten_text_messages(messages)
             if budget is not None:
                 budget.add_round()
             round_idx = advance_round()
 
-            disk_key, fp = fingerprint()
+            disk_key, fp = fingerprint(
+                scratchpad_text=scratchpad_text, prompt_extra=prompt_extra)
             cached = None
             if call_cache is not None:
                 cached = call_cache.get(disk_key, fp)
@@ -399,7 +487,7 @@ def build_gateway_model(gateway: Any, *, stage: str = STAGE,
                     # 哨兵命中证据且与哨兵集版本耦合。
                     model_id = gateway.model_id(stage)
                     call_cache.put(
-                        disk_key, kind=CACHE_VERSION, model=model_id, raw=text,
+                        disk_key, kind=cache_version, model=model_id, raw=text,
                         usage=(usage[0] or 0, usage[1] or 0), fingerprint=fp)
             latency_ms = int((time.monotonic() - t0) * 1000)
 
