@@ -337,6 +337,71 @@ def parse_suite_log(text: str) -> "tuple[dict | None, list[str]]":
     return got, problems
 
 
+# AC-T10-1 另一条腿：kb_integration 活库套必须显式跑绿（不能靠「默认 skip」
+# 冒充）。下限同样是里程碑人签 tripwire，不从日志反推。
+MIN_KBINT_PASSED = 30
+KBINT_TOKENS = ("SIMPRAXIS_KB_INTEGRATION=1", "-m kb_integration")
+
+
+def parse_kbint_log(text: str) -> "tuple[dict | None, list[str]]":
+    """解析收尾 kbint 活库套日志（与冷跑日志同口径，命令特征不同）。"""
+    problems: list[str] = []
+    cmds = re.findall(r"^# cmd: (.+)$", text, re.M)
+    if len(cmds) != 1:
+        problems.append(f"kbint 日志 `# cmd:` 行应恰 1 条，实得 {len(cmds)}")
+    cmd = cmds[0].strip() if len(cmds) == 1 else ""
+    if cmd:
+        miss = [t for t in KBINT_TOKENS if t not in cmd]
+        if miss:
+            problems.append(f"kbint 日志命令未含活库开关/选择器 {miss}")
+    rcs = re.findall(r"^rc=(\d+)$", text, re.M)
+    if rcs != ["0"]:
+        problems.append(f"kbint 日志 rc 行应恰为 rc=0：{rcs}")
+    lines = [ln.strip() for ln in text.splitlines()
+             if re.match(r"^\d+ passed", ln.strip())]
+    if not lines:
+        problems.append("kbint 日志缺 pytest 摘要行（不可判规模）")
+        return None, problems
+    summary = lines[-1]
+    m = re.match(r"^(\d+) passed", summary)
+    assert m is not None                       # 由过滤正则保证
+    got = {"command": cmd, "passed": int(m.group(1)),
+           "rc": int(rcs[0]) if rcs == ["0"] else None, "summary": summary}
+    if got["passed"] < MIN_KBINT_PASSED:
+        problems.append(
+            f"kbint 日志 passed={got['passed']} < 活库套下限 "
+            f"{MIN_KBINT_PASSED}")
+    return got, problems
+
+
+def check_proc7(pack_dir: Path) -> list[str]:
+    """P11/PROC-7：kbint 是重盖章器，必须用同口径快照差异自证「只动戳记」。
+
+    包内缺件、差异件自称不 ok、或四表行数崩塌，一律判负——这条不许用
+    「kbint 跑绿了」口头替代（跑绿恰恰会重盖章，必须看差异）。
+    """
+    path = pack_dir / "closeout" / "proc7_restamp_diff.json"
+    if not path.is_file():
+        return ["包内缺 PROC-7 重盖章差异件 closeout/proc7_restamp_diff.json"]
+    try:
+        diff = json.loads(path.read_text(encoding="utf-8"))
+    except ValueError:
+        return ["PROC-7 差异件不可解析"]
+    problems: list[str] = []
+    if diff.get("ok") is not True:
+        problems.append(f"PROC-7 差异件未自证 ok：problems={diff.get('problems')!r}")
+    if diff.get("problems") not in (None, []):
+        problems.append(f"PROC-7 差异件挂问题：{diff.get('problems')!r}")
+    if diff.get("q1q2q3_recall_equal") is not True:
+        problems.append("PROC-7 差异件未自证召回快照恒等")
+    tabs = diff.get("tables") or {}
+    for name, want in EXPECTED_ROWS.items():
+        rows = (tabs.get(name) or {}).get("rows_after")
+        if rows != want:
+            problems.append(f"PROC-7 差异件 {name}.rows_after={rows!r} ≠ {want}")
+    return problems
+
+
 def check_tests_cross(pack_dir: Path, dash: dict) -> list[str]:
     """R3 口径 (a)：两个独立读者（看板 tests 段 vs 包内冻结日志）逐字段互证。
 
@@ -479,6 +544,19 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
         problems += log_problems
         if _fields is not None and _fields["deselected"] == 0:
             problems.append("冷跑日志摘要缺 deselected 计数")
+    # AC-T10-1 第二条腿：kbint 活库套必须显式跑绿并随包（否则「默认 skip」
+    # 与「跑了绿」在包里分不出来）。
+    kbint_path = pack_dir / "task10_closeout" / "task10_kbint.log"
+    if not kbint_path.is_file():
+        problems.append("包内缺收尾 kbint 活库套日志 "
+                        "task10_closeout/task10_kbint.log")
+    else:
+        _kb, kb_problems = parse_kbint_log(
+            kbint_path.read_text(encoding="utf-8", errors="replace"))
+        problems += kb_problems
+    # AC-T10-1 第三条腿：kbint 会重盖章 solution_chunks（P11/PROC-7），
+    # 差异件必须随包证明「只动戳记」。
+    problems += check_proc7(pack_dir)
     # T7/T8/T9 用户停做：包内挂牌 NOT_EXECUTED，机判按证据缺口登记
     # （provenance_limited，不计入通过）；缺失挂牌本身才算问题。
     for slug in ("task7_stages", "task8_drill", "task9_vla"):

@@ -102,6 +102,34 @@ def _full_suite_log(passed: int = 2044) -> str:
             "rc=0\n")
 
 
+_KBINT_CMD = ("SIMPRAXIS_KB_INTEGRATION=1 pytest tests -m kb_integration "
+              "-q")
+
+
+def _kbint_log(passed: int = 35) -> str:
+    """收尾 kbint 活库套日志的最小真实形态（活库开关 + 选择器 + rc）。"""
+    return (f"# cmd: {_KBINT_CMD}\n"
+            f"{passed} passed, 2063 deselected in 1.0s\n"
+            "rc=0\n")
+
+
+def _proc7_payload() -> dict:
+    """PROC-7 重盖章差异件的最小真实形态：四表行数不变、ok 自证。"""
+    rows = {"kb_chunks": 1542, "solution_chunks": 94,
+            "phase1_learnings": 44, "phase2_learnings": 1}
+    return {
+        "schema": "simpraxis.phase25.proc7_restamp_diff.v1",
+        "tables": {k: {"rows_before": v, "rows_after": v,
+                       "text_changed": [], "meta_noprov_changed": [],
+                       "ingested_at_changed_count":
+                       (v if k == "solution_chunks" else 0)}
+                   for k, v in rows.items()},
+        "q1q2q3_recall_equal": True,
+        "problems": [],
+        "ok": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 1. 对账纯函数
 # ---------------------------------------------------------------------------
@@ -398,6 +426,11 @@ def _synthetic_tree(tmp_path: Path) -> dict:
     log = p25 / "task10_milestone" / "task10_fullsuite.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     log.write_text(_full_suite_log(), encoding="utf-8")
+    # AC-T10-1 的另一条腿与 P11/PROC-7 差异件：同样是包内硬要求
+    (p25 / "task10_milestone/task10_kbint.log").write_text(
+        _kbint_log(), encoding="utf-8")
+    (p25 / "task10_milestone/proc7_restamp_diff.json").write_text(
+        json.dumps(_proc7_payload()), encoding="utf-8")
     for _prefix, _root, src_dir, _logical, _req, _ex in P.DIR_COPIES:
         if not _req:          # 可选目录（如三签件）默认不造，留给各自用例
             continue
@@ -622,6 +655,12 @@ def _minimal_pack(tmp_path: Path) -> Path:
             "commit": "abc", "verdict": "APPROVE"}), encoding="utf-8")
     (pack / "task10_closeout/task10_fullsuite.log").write_text(
         _full_suite_log(), encoding="utf-8")
+    # AC-T10-1 两条腿 + P11/PROC-7：kbint 日志与重盖章差异件同为包内硬要求
+    (pack / "task10_closeout/task10_kbint.log").write_text(
+        _kbint_log(), encoding="utf-8")
+    (pack / "closeout").mkdir()
+    (pack / "closeout/proc7_restamp_diff.json").write_text(
+        json.dumps(_proc7_payload()), encoding="utf-8")
     (pack / "a.txt").write_text("hello\n", encoding="utf-8")
     _write_manifest(pack)
     _harden(pack)
@@ -886,6 +925,53 @@ def test_judge_suite_log_deselected_floor(tmp_path):
               "2044 passed, 7 skipped, 8 deselected in 1.0s\nrc=0\n")
     _fields, problems = J.parse_suite_log(single)
     assert any("deselected=8" in p for p in problems)
+
+
+def test_judge_kbint_log_parser(tmp_path):
+    """kbint 日志：活库开关/选择器/rc/规模四件缺一不可，默认 skip 冒充不了。"""
+    fields, problems = J.parse_kbint_log(_kbint_log())
+    assert fields["passed"] == 35 and problems == []
+    # 少活库开关（裸跑 kbint 选择器会全 skip）→ 判负
+    no_env = ("# cmd: pytest tests -m kb_integration -q\n"
+              "35 passed, 2063 deselected in 1.0s\nrc=0\n")
+    _f, problems = J.parse_kbint_log(no_env)
+    assert any("活库开关" in p for p in problems)
+    # rc 非 0 / 重复 rc → 判负
+    _f, problems = J.parse_kbint_log(_kbint_log().replace("rc=0", "rc=1"))
+    assert any("kbint 日志 rc 行应恰为 rc=0" in p for p in problems)
+    _f, problems = J.parse_kbint_log(_kbint_log() + "rc=0\n")
+    assert any("kbint 日志 rc 行应恰为 rc=0" in p for p in problems)
+    # 规模塌到个位数（等价于大部分被 skip）→ 判负
+    _f, problems = J.parse_kbint_log(_kbint_log(passed=3))
+    assert any("活库套下限" in p for p in problems)
+    # 包内缺 kbint 日志 = 问题（不能靠「默认 skip」蒙混）
+    pack = _minimal_pack(tmp_path)
+    (pack / "task10_closeout/task10_kbint.log").unlink()
+    _write_manifest(pack)
+    assert any("缺收尾 kbint 活库套日志" in p
+               for p in J.check_pack(pack)[0])
+
+
+def test_judge_proc7_diff(tmp_path):
+    """P11/PROC-7：kbint 重盖章必须由差异件自证「只动戳记」。"""
+    pack = _minimal_pack(tmp_path)
+    assert J.check_proc7(pack) == []
+    path = pack / "closeout/proc7_restamp_diff.json"
+    for mutate, needle in (
+        (lambda d: d.update({"ok": False}), "未自证 ok"),
+        (lambda d: d.update({"problems": ["solution_chunks 文本变化"]}),
+         "挂问题"),
+        (lambda d: d.update({"q1q2q3_recall_equal": False}), "召回快照恒等"),
+        (lambda d: d["tables"]["kb_chunks"].update({"rows_after": 1541}),
+         "kb_chunks.rows_after"),
+    ):
+        d = _proc7_payload()
+        mutate(d)
+        path.write_text(json.dumps(d), encoding="utf-8")
+        assert any(needle in p for p in J.check_proc7(pack)), needle
+    path.unlink()
+    _write_manifest(pack)
+    assert any("缺 PROC-7 重盖章差异件" in p for p in J.check_pack(pack)[0])
 
 
 def test_judge_dashboard_asserts_suite_command(tmp_path):

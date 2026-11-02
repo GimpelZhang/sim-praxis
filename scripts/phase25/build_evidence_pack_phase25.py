@@ -468,6 +468,10 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
         ("closeout/dashboard_phase25.json", "dashboard_phase25.json",
          "M25.T10.2"),
         ("closeout/closure_judge.json", "closure_judge.json", "M25.T10.2"),
+        # P11/PROC-7：kbint 是重盖章器，收尾必须附同口径快照差异件
+        # （「只动 ingested_at/source_commit 两戳记」由包内件自证）。
+        ("closeout/proc7_restamp_diff.json", "proc7_restamp_diff.json",
+         "M25.T10.1"),
     ]
     for pack_rel, name, logical in derived_specs:
         src = p25 / "task10_milestone" / name
@@ -494,6 +498,22 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
                        "note": ("收尾两排除全套冷跑日志尚未生成；机判要求包内"
                                 "存在该日志且 `# cmd:` 含两排除项、rc=0。")},
                       "M25.T10.1", suite_log)
+
+    # AC-T10-1 第二条腿：kbint 活库套显式跑绿的日志随包（默认 skip 与
+    # 「跑了绿」在包里必须分得出来）。
+    kbint_log = p25 / "task10_milestone" / "task10_kbint.log"
+    if kbint_log.is_file():
+        m._copy_file(kbint_log,
+                     pack / "task10_closeout/task10_kbint.log",
+                     "M25.T10.1", True, P25, manifest_files)
+    else:
+        write_derived("task10_closeout/task10_kbint_MISSING.json",
+                      {"missing": str(kbint_log),
+                       "note": ("收尾 kbint 活库套日志尚未生成；机判要求包内"
+                                "存在该日志且 `# cmd:` 含 "
+                                "SIMPRAXIS_KB_INTEGRATION=1 与 "
+                                "-m kb_integration、rc=0。")},
+                      "M25.T10.1", kbint_log)
 
     # T7/T8/T9：用户 2026-11-02 裁决不再进行 → 无证据实体。AC-T10-4 点名的
     # 「drill 报告 / T9 战役证据」因此不存在；此处如实挂牌，不用空目录或
