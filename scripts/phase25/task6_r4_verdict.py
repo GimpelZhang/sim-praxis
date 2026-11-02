@@ -14,9 +14,13 @@
 1. ``thresholds``  三门阈值全过（读 iter5.metrics.*.pass 与 all_pass）
 2. ``h3_subset_h4``  r3 的每个命中案在 iter5 仍命中（翻失 = 违例，明细列出）
 3. ``residual_recovery``  r3 的 9 个残留里回收 ≥6 且 gold_id 直中 ≥5
-4. ``data_identity``  四表行数/dim/id 集 sha + Q1Q2Q3 有序 id 集恒等（读 evidence）
+4. ``data_identity``  四表行数/dim/id 集 sha + Q1Q2Q3 有序 id 集恒等 +
+   四表**向量集合 sha 逐字等于 §5 基线**（读 evidence；只判
+   ``observed ∧ unchanged`` 证明不了基线本身没被动过，见
+   ``EXPECTED_VECTOR_SET_SHA``）
 5. ``engineering``  0 付费 ledger 恒 56 + 两排除全套 rc0 + kbint 门绿 +
-   gate_static 绿 + 容器 0 + 显存 ≤200 MiB（读 evidence）
+   gate_static 绿（三者均须带实跑日志 sha256）+ 容器 0 + 显存 ≤200 MiB
+   （读 evidence）
 
 本脚本**不判分、不连库、不载模、不写任何输入件**；输出一份 JSON 到 stdout
 （或 ``--out``）。任何输入缺失/损坏即 exit 2（不作判据）。
@@ -34,6 +38,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -55,8 +60,22 @@ EXPECTED_ID_SHA8 = {"kb_chunks": "35d4bf61", "solution_chunks": "cdab79c7",
                     "phase1_learnings": "022341f7",
                     "phase2_learnings": "82058d2f"}
 EXPECTED_DIM = 768
+# 预注册 §5 / §8.4 冻结的四表**向量集合** sha（GATE1 规格 lane 第二轮 #2）。
+# 只判 `observed ∧ unchanged` 证明的是"取证时 == 传入的基线文件"——若基线
+# 本身就是嵌入改动**之后**重出的，它仍然 unchanged=true，§5 的绝对锚点等于
+# 没判。这把四个字面量放进机判，与 §8.4「与 §5 基线全等」逐字对应。
+EXPECTED_VECTOR_SET_SHA = {
+    "kb_chunks": "554652ee98a90819126732db4aa033066d69590dc993447a143e130688c18f53",
+    "solution_chunks": "81eff42e22a1c263197398f61d4baea52803e739650c27512ec8ae999c4cb369",
+    "phase1_learnings": "5271de376eebf483f354945f22a4d5c9a3f914d3c403fb703575c607d74d2799",
+    "phase2_learnings": "42eb43a1484acc9eb36502690c81f407b39b6cf514603395753371454e544f2f",
+}
 EXPECTED_LEDGER_ROWS = 56
 VRAM_CEILING_MIB = 200
+# 门禁三项必须绑到同次实跑日志（修订 A11）：解析出的 rc/标记之外，日志本身
+# 的 sha256 必须是 64 位小写 hex——手写 `{"ok": true, "rc": 0}` 或把 sha 字段
+# 留空的证据一律判负，否则「绑日志」只停在生成器侧（GATE1-LANE-A 第二轮 LOW-1）。
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class InputError(RuntimeError):
@@ -199,6 +218,19 @@ def check_data_identity(ev: dict) -> dict:
         problems.append("缺 vector_identity 或未观测（无法断言嵌入身份不变）")
     elif vec.get("unchanged") is not True:
         problems.append(f"四表向量集合哈希变化：{vec.get('mismatches')!r}")
+    else:
+        # 绝对锚点：取证时实算的四表集合哈希必须**逐字等于** §5 冻结值。
+        # 基线不可信（例如嵌入改动后重出）时 `unchanged` 仍会为真，只有这一
+        # 条能抓住（GATE1 规格 lane 第二轮 #2）。
+        got = vec.get("tables")
+        if not isinstance(got, dict):
+            problems.append(f"vector_identity.tables 缺失或非对象：{got!r}")
+        else:
+            for name, want in EXPECTED_VECTOR_SET_SHA.items():
+                if got.get(name) != want:
+                    problems.append(
+                        f"{name} 向量集合 sha 与 §5 基线不等："
+                        f"{got.get(name)!r} != {want}")
     return {"ok": not problems, "problems": problems}
 
 
@@ -213,6 +245,17 @@ def check_engineering(ev: dict) -> dict:
     # 在 evidence 里，不在此处放水——ok 由执行方按实跑结论写入并被本脚本读取）。
     if hermetic.get("rc") != 0 or hermetic.get("ok") is not True:
         problems.append(f"两排除 hermetic 全套不合格：{hermetic}")
+    # 门禁三项都必须绑到**同次实跑日志**（修订 A11）：rc/标记之外还要有日志
+    # sha256 + 解析出的摘要行/标记。只查 rc/ok 的话，手写证据照样能过，
+    # 「绑日志」就只停在生成器侧（GATE1-LANE-A 第二轮 LOW-1）。
+    for key in ("hermetic", "kbint", "gate_static"):
+        node = ev.get(key) or {}
+        log_sha = node.get("log_sha256")
+        if not isinstance(log_sha, str) or not _HEX64_RE.match(log_sha):
+            problems.append(f"{key} 缺实跑日志 sha256（64 位小写 hex）："
+                            f"{log_sha!r}")
+    if not (ev.get("kbint") or {}).get("summary"):
+        problems.append("kbint 缺解析出的 pytest 摘要行")
     # kbint 门必须**绑到实跑 rc**（修订 A10-M1）：只认 rc==0，裸 ok 布尔不算。
     # 证据机产器已改为解析 pytest 日志摘要得到 rc，此处再要求 rc 存在且为 0，
     # 缺 rc（例如旧证据只有 {"ok": true}）一律判负。
@@ -220,7 +263,7 @@ def check_engineering(ev: dict) -> dict:
     if kbint.get("rc") != 0 or kbint.get("ok") is not True:
         problems.append(f"kbint 门不合格（须 rc==0）：{kbint}")
     gate = ev.get("gate_static") or {}
-    if gate.get("ok") is not True:
+    if gate.get("ok") is not True or gate.get("marker") is not True:
         problems.append(f"gate_static 不合格：{gate}")
     if ev.get("containers_present") != 0:
         problems.append(

@@ -18,7 +18,7 @@
 0 下载（离线三开关 setdefault）、只读（不建表/不写库/不调网关）。
 用法：
   python scripts/phase25/gen_task6_r4_vector_identity.py [--out PATH] [--check PATH]
-退出码：0=成功；2=前置不满足（缺表/维度不一致/缺 id）。
+退出码：0=成功；2=前置不满足（缺表/维度不一致/缺 id/重复 id）。
 """
 from __future__ import annotations
 
@@ -73,6 +73,19 @@ def table_identity(tbl, name: str) -> dict:
         pairs.append((str(r["id"]), vec))
     if len(dims) != 1:
         raise IdentityError(f"{name} 行间维度不一致：{sorted(dims)}")
+    # 重复 id 会让集合哈希依赖行序：`sorted` 对同 id 是稳定的，但活库扫描
+    # 顺序一旦变化，两行同 id 的先后就换了，哈希帧随之漂移——既可能假阳
+    # （同一数据两次不同）也可能掩盖写入（GATE1-LANE-A 第二轮 LOW-5）。
+    seen: set = set()
+    dup = []
+    for rid, _vec in pairs:
+        if rid in seen:
+            dup.append(rid)
+        else:
+            seen.add(rid)
+    if dup:
+        raise IdentityError(
+            f"{name} 存在重复 id（集合哈希口径无法区分同 id 多行）：{dup[:5]}")
     dim = dims.pop()
     if dim != EXPECTED_DIM:
         raise IdentityError(f"{name} 维度 {dim} ≠ 冻结值 {EXPECTED_DIM}")

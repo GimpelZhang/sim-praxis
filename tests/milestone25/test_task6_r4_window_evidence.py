@@ -11,8 +11,10 @@
 """
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
+import pathlib
 import sys
 from pathlib import Path
 
@@ -329,9 +331,21 @@ def _write_snaps(tmp_path, pre, post):
     return a, b
 
 
-_KBINT_OK_LOG = "1234 passed, 7 skipped, 50 deselected in 11.2s\n"
-_KBINT_BAD_LOG = "1 failed, 1233 passed in 11.2s\n"
-_GATE_OK_LOG = "== [gate 1/6] ... ==\n[STATIC GATE OK]\n"
+_HERMETIC_CMD = ('pytest tests -q -k "not test_04" '
+                 '-m "not paid and not kb_integration"')
+_KBINT_CMD = "SIMPRAXIS_KB_INTEGRATION=1 pytest tests -q -m kb_integration"
+_KBINT_OK_LOG = (
+    f"# T6R4-GATE: kbint cmd={_KBINT_CMD}\n"
+    "1234 passed, 7 skipped, 50 deselected in 11.2s\n")
+_KBINT_BAD_LOG = (
+    f"# T6R4-GATE: kbint cmd={_KBINT_CMD}\n"
+    "1 failed, 1233 passed in 11.2s\n")
+_HERMETIC_OK_LOG = (
+    f"# T6R4-GATE: hermetic cmd={_HERMETIC_CMD}\n"
+    "2009 passed, 7 skipped, 50 deselected in 302.79s\n")
+_GATE_OK_LOG = ("# T6R4-GATE: gate_static "
+                "cmd=bash scripts/verification/gate_static.sh\n"
+                "== [gate 1/6] ... ==\n[STATIC GATE OK]\n")
 
 
 def _write_log(tmp_path, name, text):
@@ -346,7 +360,9 @@ def _args(tmp_path, pre, post, **kw):
     return argparse.Namespace(
         prewindow=str(a), postwindow=str(b), out=None,
         pre_vector=kw.get("pre_vector"),
-        hermetic_rc=kw.get("hermetic_rc", 0),
+        hermetic_log=kw.get("hermetic_log",
+                            _write_log(tmp_path, "hermetic.log",
+                                       _HERMETIC_OK_LOG)),
         kbint_log=kw.get("kbint_log",
                          _write_log(tmp_path, "kbint.log", _KBINT_OK_LOG)),
         gate_static_log=kw.get("gate_static_log",
@@ -365,15 +381,15 @@ def test_build_emits_exactly_the_keys_the_verdict_reads(monkeypatch, tmp_path):
         assert key in out, key
     assert out["live_writes_except_gate_restamp"] == 0
     assert out["ledger_rows"] == 56
-    assert out["hermetic"] == {"rc": 0, "ok": True}
-    # 门禁绑实跑工件（A10-M1）：kbint 带解析出的 rc 与日志 sha，gate_static 带标记
-    assert out["kbint"]["rc"] == 0 and out["kbint"]["ok"] is True
-    assert len(out["kbint"]["log_sha256"]) == 64
-    assert "passed" in out["kbint"]["summary"]
-    assert out["gate_static"]["ok"] is True
-    assert len(out["gate_static"]["log_sha256"]) == 64
+    # 门禁三项全部绑实跑工件（A11）：各自带解析出的 rc/标记 + 日志 sha256
+    for key in ("hermetic", "kbint", "gate_static"):
+        assert out[key]["ok"] is True, key
+        assert len(out[key]["log_sha256"]) == 64, key
+    assert out["hermetic"]["rc"] == 0 and "passed" in out["hermetic"]["summary"]
+    assert out["kbint"]["rc"] == 0 and "passed" in out["kbint"]["summary"]
+    assert out["gate_static"]["marker"] is True
     assert out["provenance_restore"] is True
-    # 只有 provenance_restore 仍是声明项（其余三项已绑工件）
+    # 只剩 provenance_restore 一个声明项
     assert out["declared_by_executor"] == ["provenance_restore"]
 
 
@@ -396,11 +412,17 @@ def test_gate_flags_are_read_from_artifacts_not_defaulted_true(monkeypatch,
     _stub_live(monkeypatch)
     out = ev_mod.build(_args(
         tmp_path, _baseline(), _baseline(),
-        hermetic_rc=1,
+        hermetic_log=_write_log(
+            tmp_path, "hbad.log",
+            f"# T6R4-GATE: hermetic cmd={_HERMETIC_CMD}\n"
+            "1 failed, 2008 passed in 302.0s\n"),
         kbint_log=_write_log(tmp_path, "bad.log", _KBINT_BAD_LOG),
-        gate_static_log=_write_log(tmp_path, "g.log", "no marker here\n"),
+        gate_static_log=_write_log(
+            tmp_path, "g.log",
+            "# T6R4-GATE: gate_static cmd=bash gate_static.sh\n"
+            "no marker here\n"),
         provenance_restore=False))
-    assert out["hermetic"]["ok"] is False        # 由 rc==1 推出
+    assert out["hermetic"]["ok"] is False        # 由摘要里的 failed 推出
     assert out["kbint"]["ok"] is False           # 由摘要里的 failed 推出
     assert out["gate_static"]["ok"] is False     # 缺标记
     assert out["provenance_restore"] is False    # 仍是声明项
@@ -408,7 +430,7 @@ def test_gate_flags_are_read_from_artifacts_not_defaulted_true(monkeypatch,
 
 # --- D. CLI 契约 ----------------------------------------------------------- #
 
-def test_cli_requires_hermetic_rc():
+def test_cli_requires_hermetic_log():
     with pytest.raises(SystemExit) as exc:
         ev_mod.main(["--prewindow", "a", "--postwindow", "b"])
     assert exc.value.code == 2
@@ -420,7 +442,8 @@ def test_cli_exit_2_on_bad_input(tmp_path, capsys):
     post = tmp_path / "post.json"
     post.write_text(json.dumps(_baseline()), encoding="utf-8")
     rc = ev_mod.main(["--prewindow", str(pre), "--postwindow", str(post),
-                      "--hermetic-rc", "0",
+                      "--hermetic-log",
+                      _write_log(tmp_path, "h.log", _HERMETIC_OK_LOG),
                       "--kbint-log", _write_log(tmp_path, "k.log", _KBINT_OK_LOG),
                       "--gate-static-log",
                       _write_log(tmp_path, "g.log", _GATE_OK_LOG)])
@@ -435,7 +458,7 @@ def test_cli_writes_deterministic_json(monkeypatch, tmp_path):
     for path in (out1, out2):
         rc = ev_mod.main(["--prewindow", args.prewindow,
                           "--postwindow", args.postwindow,
-                          "--hermetic-rc", "0",
+                          "--hermetic-log", args.hermetic_log,
                           "--kbint-log", args.kbint_log,
                           "--gate-static-log", args.gate_static_log,
                           "--pre-vector", "ignored-because-stubbed",
@@ -591,6 +614,13 @@ def _vec_baseline(tmp_path, hashes=None):
     return str(path)
 
 
+def _pin_baseline_sha(monkeypatch, path):
+    """把冻结基线 sha 换成本测试临时件的 sha（真实常量另有一条负向用例）。"""
+    monkeypatch.setattr(
+        ev_mod, "PRE_VECTOR_BASELINE_SHA256",
+        hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest())
+
+
 def _stub_vec_live(monkeypatch, hashes=None):
     mod = importlib.import_module("scripts.phase25.gen_task6_r4_vector_identity")
     hashes = hashes or {n: f"sha-{n}" for n in VEC_TABLES}
@@ -603,7 +633,9 @@ def _stub_vec_live(monkeypatch, hashes=None):
 
 def test_vector_identity_ok_when_hashes_match(monkeypatch, tmp_path):
     _stub_vec_live(monkeypatch)
-    got = ev_mod._vector_identity(_vec_baseline(tmp_path), "x")
+    path = _vec_baseline(tmp_path)
+    _pin_baseline_sha(monkeypatch, path)
+    got = ev_mod._vector_identity(path, "x")
     assert got["observed"] is True
     assert got["unchanged"] is True
     assert got["mismatches"] == []
@@ -614,7 +646,9 @@ def test_vector_identity_detects_same_dim_reembed(monkeypatch, tmp_path):
     changed = {n: f"sha-{n}" for n in VEC_TABLES}
     changed["solution_chunks"] = "other-sha"
     _stub_vec_live(monkeypatch, changed)
-    got = ev_mod._vector_identity(_vec_baseline(tmp_path), "x")
+    path = _vec_baseline(tmp_path)
+    _pin_baseline_sha(monkeypatch, path)
+    got = ev_mod._vector_identity(path, "x")
     assert got["observed"] is True
     assert got["unchanged"] is False
     assert [m["table"] for m in got["mismatches"]] == ["solution_chunks"]
@@ -630,15 +664,42 @@ def test_vector_identity_rejects_foreign_schema(monkeypatch, tmp_path):
     path = tmp_path / "v.json"
     path.write_text(json.dumps({"schema": "nope", "tables": {}}),
                     encoding="utf-8")
+    _pin_baseline_sha(monkeypatch, path)
     with pytest.raises(ev_mod.EvidenceError, match=mod.SCHEMA):
         ev_mod._vector_identity(str(path), "x")
 
 
-def test_vector_identity_rejects_baseline_missing_a_table_hash(tmp_path):
+def test_vector_identity_pins_baseline_file_sha(monkeypatch, tmp_path):
+    """基线件本身按 sha256 钉死：内容看着对、但已经不是窗前那份 → 拒（A11）。"""
+    _stub_vec_live(monkeypatch)
+    with pytest.raises(ev_mod.EvidenceError, match="基线件 sha256"):
+        ev_mod._vector_identity(_vec_baseline(tmp_path), "x")
+
+
+def test_vector_identity_converges_identity_error_to_evidence_error(
+        monkeypatch, tmp_path):
+    """活库缺表/混维是观测失败（exit 2），不是脚本 bug（traceback/rc 1）。"""
+    mod = importlib.import_module("scripts.phase25.gen_task6_r4_vector_identity")
+    hashes = {n: f"sha-{n}" for n in VEC_TABLES}
+    path = _vec_baseline(tmp_path, hashes)
+    monkeypatch.setattr(ev_mod, "PRE_VECTOR_BASELINE_SHA256",
+                        hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest())
+
+    def _boom(uri=None):
+        raise mod.IdentityError("活库缺表：['phase2_learnings']")
+
+    monkeypatch.setattr(mod, "build", _boom)
+    with pytest.raises(ev_mod.EvidenceError, match="phase2_learnings"):
+        ev_mod._vector_identity(path, "x")
+
+
+def test_vector_identity_rejects_baseline_missing_a_table_hash(monkeypatch,
+                                                               tmp_path):
     baseline = _vec_baseline(tmp_path)
     data = json.loads(open(baseline, encoding="utf-8").read())
     data["tables"]["phase2_learnings"]["vector_set_sha256"] = None
     open(baseline, "w", encoding="utf-8").write(json.dumps(data))
+    _pin_baseline_sha(monkeypatch, baseline)
     with pytest.raises(ev_mod.EvidenceError, match="phase2_learnings"):
         ev_mod._vector_identity(baseline, "x")
 
@@ -658,7 +719,10 @@ def test_kbint_log_without_pytest_summary_is_evidence_error(monkeypatch,
                                                             tmp_path):
     """日志里没有摘要行 = 没跑过（或被截断），不得写成"跑过了"。"""
     args = _args(tmp_path, _baseline(), _baseline(),
-                 kbint_log=_write_log(tmp_path, "empty.log", "collected 0 items\n"))
+                 kbint_log=_write_log(
+                     tmp_path, "empty.log",
+                     f"# T6R4-GATE: kbint cmd={_KBINT_CMD}\n"
+                     "collected 0 items\n"))
     with pytest.raises(ev_mod.EvidenceError, match="摘要行"):
         ev_mod.build(args)
 
@@ -673,7 +737,10 @@ def test_kbint_log_missing_file_is_evidence_error(tmp_path):
 def test_gate_static_log_without_ok_marker_is_not_ok(monkeypatch, tmp_path):
     _stub_live(monkeypatch)
     args = _args(tmp_path, _baseline(), _baseline(),
-                 gate_static_log=_write_log(tmp_path, "g.log", "[STATIC GATE FAIL]\n"))
+                 gate_static_log=_write_log(
+                 tmp_path, "g.log",
+                 "# T6R4-GATE: gate_static cmd=bash gate_static.sh\n"
+                 "[STATIC GATE FAIL]\n"))
     out = ev_mod.build(args)
     assert out["gate_static"]["ok"] is False
 
@@ -687,6 +754,75 @@ def test_pytest_summary_pick_ignores_noise_lines():
     got = ev_mod._pytest_summary_rc(text, "t")
     assert got["rc"] == 0
     assert got["summary"].endswith("(0:00:02)")
+
+
+def test_concatenated_summaries_are_evidence_errors():
+    """拼接两次运行（旧失败 + 新通过）不得被读成绿（GATE1-LANE-A LOW-2）。"""
+    text = ("1 failed, 1233 passed in 11.2s\n"
+            "1234 passed in 10.9s\n")
+    with pytest.raises(ev_mod.EvidenceError, match="摘要行"):
+        ev_mod._pytest_summary_rc(text, "t")
+
+
+# ---- 哨兵行：绿日志不得跨门冒充（GATE1-LANE-A 第二轮 B2） ----
+
+def test_hermetic_log_cannot_stand_in_for_kbint(monkeypatch, tmp_path):
+    """两排除全套的绿日志塞进 kbint 槽位必须被哨兵行挡住。"""
+    _stub_live(monkeypatch)
+    args = _args(
+        tmp_path, _baseline(), _baseline(),
+        kbint_log=_write_log(tmp_path, "swap.log", _HERMETIC_OK_LOG))
+    with pytest.raises(ev_mod.EvidenceError, match="不是 kbint"):
+        ev_mod.build(args)
+
+
+def test_kbint_log_requires_the_marker_selection(monkeypatch, tmp_path):
+    """哨兵行写着 kbint，但命令没选 -m kb_integration → 判不了绿。"""
+    _stub_live(monkeypatch)
+    log = ("# T6R4-GATE: kbint cmd=pytest tests -q\n"
+           "1234 passed in 11.2s\n")
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 kbint_log=_write_log(tmp_path, "nomark.log", log))
+    with pytest.raises(ev_mod.EvidenceError, match="kb_integration"):
+        ev_mod.build(args)
+
+
+def test_kbint_log_rejects_negated_selection(monkeypatch, tmp_path):
+    """哨兵行写着 kbint 却用 `not kb_integration` 排除它 → 判不了绿。"""
+    _stub_live(monkeypatch)
+    log = ('# T6R4-GATE: kbint cmd=pytest tests -m "not kb_integration"\n'
+           "1234 passed in 11.2s\n")
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 kbint_log=_write_log(tmp_path, "neg.log", log))
+    with pytest.raises(ev_mod.EvidenceError, match="kb_integration"):
+        ev_mod.build(args)
+
+
+def test_hermetic_log_must_be_the_two_exclusion_command(monkeypatch, tmp_path):
+    _stub_live(monkeypatch)
+    log = ("# T6R4-GATE: hermetic cmd=pytest tests -q\n"
+           "2009 passed in 302.0s\n")
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 hermetic_log=_write_log(tmp_path, "h.log", log))
+    with pytest.raises(ev_mod.EvidenceError, match="not test_04"):
+        ev_mod.build(args)
+    # 只排除 kbint、不排除 paid/test_04 同样不算「两排除」
+    log = (f"# T6R4-GATE: hermetic cmd=pytest tests -q "
+           f'-m "not kb_integration"\n'
+           "2009 passed in 302.0s\n")
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 hermetic_log=_write_log(tmp_path, "h2.log", log))
+    with pytest.raises(ev_mod.EvidenceError, match="not test_04"):
+        ev_mod.build(args)
+
+
+def test_gate_log_without_sentinel_is_evidence_error(monkeypatch, tmp_path):
+    _stub_live(monkeypatch)
+    args = _args(tmp_path, _baseline(), _baseline(),
+                 gate_static_log=_write_log(tmp_path, "g.log",
+                                            "[STATIC GATE OK]\n"))
+    with pytest.raises(ev_mod.EvidenceError, match="哨兵行"):
+        ev_mod.build(args)
 
 
 # ---------- I：ledger seq 连续性（A10-L3） ----------

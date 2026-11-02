@@ -88,6 +88,9 @@ def _iter5(*, recovered_gold_id=5, recovered_gold_text=1, miss_total=9,
     return out, pred
 
 
+_LOG_SHA = "0f" * 32  # 64 位小写 hex：门禁日志 sha256 的形状
+
+
 def _evidence(**over):
     ev = {
         "schema": vd.EVIDENCE_SCHEMA,
@@ -101,11 +104,14 @@ def _evidence(**over):
                           "gate_restamp_ingested_at_only_rows": 0,
                           "gate_restamp_other_rows": 0},
         "vector_identity": {"observed": True, "unchanged": True,
-                            "mismatches": [], "tables": {}},
+                            "mismatches": [],
+                            "tables": dict(vd.EXPECTED_VECTOR_SET_SHA)},
         "ledger_rows": vd.EXPECTED_LEDGER_ROWS,
-        "hermetic": {"rc": 0, "ok": True},
-        "kbint": {"ok": True, "rc": 0},
-        "gate_static": {"ok": True},
+        "hermetic": {"rc": 0, "ok": True, "log_sha256": _LOG_SHA,
+                     "summary": "2009 passed, 7 skipped in 302.79s"},
+        "kbint": {"ok": True, "rc": 0, "log_sha256": _LOG_SHA,
+                  "summary": "32 passed in 11.2s"},
+        "gate_static": {"ok": True, "marker": True, "log_sha256": _LOG_SHA},
         "containers_present": 0,
         "vram_mib": 14,
         "provenance_restore": True,
@@ -230,6 +236,46 @@ def test_data_identity_requires_observed_vector_identity():
     got = vd.check_data_identity(ev)
     assert got["ok"] is False and any("向量集合哈希" in p
                                       for p in got["problems"])
+
+
+def test_data_identity_pins_vector_set_hash_to_frozen_baseline():
+    """四表向量集合哈希必须逐字等于 §5 冻结值（规格 lane 第二轮 #2）。
+
+    只判 ``observed ∧ unchanged`` 证明"取证时 == 传入的基线"；若基线本身是
+    嵌入改动之后重出的，它照样 unchanged=true。§8.4 要的是"与 §5 基线全等"，
+    所以四个哈希必须有机器常量。
+    """
+    assert vd.check_data_identity(_evidence())["ok"] is True
+    for name in vd.EXPECTED_VECTOR_SET_SHA:
+        ev = _evidence()
+        ev["vector_identity"]["tables"][name] = "f" * 64
+        got = vd.check_data_identity(ev)
+        assert got["ok"] is False, name
+        assert any(name in p for p in got["problems"]), name
+    # 表键整体缺失同样判负（不得把"没列出"读成"没变化"）
+    ev = _evidence()
+    ev["vector_identity"]["tables"] = {}
+    assert vd.check_data_identity(ev)["ok"] is False
+
+
+def test_engineering_requires_gate_log_sha256():
+    """门禁三项都必须带实跑日志 sha256（A11）：裸 rc/ok 不算绑工件。"""
+    for key in ("hermetic", "kbint", "gate_static"):
+        ev = _evidence()
+        ev[key].pop("log_sha256")
+        got = vd.check_engineering(ev)
+        assert got["ok"] is False, key
+        assert any(key in p for p in got["problems"]), key
+        # 形状不对（大写/短 hex/非字符串）同样判负
+        ev = _evidence()
+        ev[key]["log_sha256"] = "ABC"
+        assert vd.check_engineering(ev)["ok"] is False, key
+    ev = _evidence()
+    ev["kbint"].pop("summary")
+    assert vd.check_engineering(ev)["ok"] is False
+    ev = _evidence()
+    ev["gate_static"].pop("marker")
+    assert vd.check_engineering(ev)["ok"] is False
 
 
 def test_data_identity_pins_rows_dims_and_id_sha():

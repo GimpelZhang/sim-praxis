@@ -4,18 +4,20 @@
 把预注册 ``scripts/phase25/task6_r4_prereg.md`` §8 条件 4/5 所需的**可观测**
 事实一次性采集，供 ``task6_r4_verdict.py --evidence`` 机判。凡是本脚本能自己
 量的都自己量（四表身份、Q1/Q2/Q3 有序 id 集、活库写入面、ledger 行数、
-容器、显存）。四项门禁里**三项绑定到实跑工件**（修订 A10-M1）：
+容器、显存）。四项门禁**全部绑定到实跑工件**（修订 A11，收口 A10-M1 的措辞不实）：
 
-- ``hermetic`` ← 调用方传入的两排除全套 rc（int，``ok`` 由 ``rc == 0`` 推出，
-  不接受独立的 ok 布尔）；
-- ``kbint`` / ``gate_static`` ← ``--kbint-log`` / ``--gate-static-log`` 指向的
-  **原始输出文件**：脚本自己解析（pytest 摘要行 / ``[STATIC GATE OK]`` 标记），
-  记录解析出的 rc/ok 与日志 sha256；文件读不到、或日志里找不到摘要行，
-  一律 ``EvidenceError``——"没跑过"不得写成"跑过了"。
-- ``provenance_restore``（PROC-7 溯源源终复）仍是**执行方声明**：它是执行方
+- ``hermetic`` / ``kbint`` / ``gate_static`` ← ``--hermetic-log`` /
+  ``--kbint-log`` / ``--gate-static-log`` 指向的**原始输出文件**：脚本自己
+  解析（pytest 摘要行 / ``[STATIC GATE OK]`` 标记），记录解析出的 rc/ok 与
+  日志 sha256；文件读不到、或日志里找不到摘要行、或摘要行多于一条（拼接
+  日志），一律 ``EvidenceError``——"没跑过"不得写成"跑过了"。每份日志还须
+  带**唯一的哨兵行** ``# T6R4-GATE: <gate> cmd=<实际命令>``，命令里必须含
+  该门的判别串（kbint 须真选 ``-m kb_integration``，hermetic 须是排除
+  kbint 的那条）——否则两排除全套的绿日志可以被冒充成 kbint 门绿。
+- ``provenance_restore``（PROC-7 溯源终复）仍是**执行方声明**：它是执行方
   对活库做的一次动作，没有可解析的第三方工件；此项作为登记残余留在
   ``declared_by_executor`` 里，由门 2 人工复核兜底
-  （预注册 §13.6 末尾已登记，修订 A10-M1 维持）。
+  （预注册 §13.6 末尾已登记，修订 A10-M1 维持；A11 起它是**唯一**残余）。
 
 活库写入面（§8.4 唯一例外的判别）：对比窗口前/后的
 ``gen_prewindow_snapshots.py`` 快照逐行 ``meta_sha256`` 与剔除
@@ -32,7 +34,8 @@ sort_keys + indent=2 + 单一尾换行，无时间戳（窗口时点由调用方
   python scripts/phase25/gen_task6_r4_window_evidence.py \
       --prewindow <pre.json> --postwindow <post.json> \
       --pre-vector <pre_vector_identity.json> \
-      --hermetic-rc 0 --kbint-log <kbint.log> --gate-static-log <gate.log> \
+      --hermetic-log <hermetic.log> --kbint-log <kbint.log> \
+      --gate-static-log <gate.log> \
       --provenance-restore [--out PATH]
 退出码：0=采集成功（是否满足保留条件是判分器的事）；2=输入/装配失败。
 """
@@ -57,6 +60,10 @@ if str(REPO_ROOT) not in sys.path:
 TABLES = ("kb_chunks", "solution_chunks", "phase1_learnings",
           "phase2_learnings")
 SCHEMA = "simpraxis.phase25.task6_r4_window_evidence.v1"
+# 窗口前向量身份基线件本身的 sha256（预注册 §5 / §11 登记值）：基线一旦重出
+# （哪怕内容"看起来对"）就不许再产出证据（GATE1 规格 lane 第二轮 #2）。
+PRE_VECTOR_BASELINE_SHA256 = (
+    "ea896f6474ffeaeb68098461aa0448a213d8171e581915f2bff85036f9e07d6e")
 # 容器名分隔符归一（`sim_praxis_sandbox` → `simpraxissandbox`），见
 # `_simpraxis_container_names` 的放水说明。
 _SEP_RE = re.compile(r"[-_.]")
@@ -354,20 +361,70 @@ def _read_log(path: "str | None", what: str) -> tuple:
     return text, _sha256_text(text)
 
 
+# 门禁日志**哨兵行**：窗口 runner 在落日志时先写一行
+#   ``# T6R4-GATE: <gate> cmd=<真正执行的命令>``
+# 解析侧要求它恰好出现一次、名字与所传参数一致、命令里含该门的判别串——
+# 否则两排除全套的绿日志可以被当成 kbint 门用（`-m kb_integration` 与
+# `-m "not paid and not kb_integration"` 的摘要行在形状上无法区分，
+# GATE1-LANE-A 第二轮 B2）。
+_GATE_MARK = "# T6R4-GATE:"
+_GATE_RULES = {
+    # 两排除全套：须是 §8.5 逐字那两条排除（少一条就不是「两排除」）
+    "hermetic": {"must": ("not test_04", "not paid", "not kb_integration"),
+                 "must_not": ()},
+    # kb_integration 门：命令里必须真的选了 kb_integration 标记
+    "kbint": {"must": ("-m kb_integration",),
+              "must_not": ("not kb_integration",)},
+    # 六步静态门：标记即命令自证
+    "gate_static": {"must": (), "must_not": ()},
+}
+
+
+def _read_gate_log(path: "str | None", what: str) -> tuple:
+    """读门禁日志并校验哨兵行 → ``(text, sha256)``（修订 A11）。"""
+    text, sha = _read_log(path, what)
+    marks = [ln.strip() for ln in text.splitlines()
+             if ln.strip().startswith(_GATE_MARK)]
+    if len(marks) != 1:
+        raise EvidenceError(
+            f"{what} 日志应有且仅有一条哨兵行"
+            f"（`{_GATE_MARK} {what} cmd=…`），实得 {len(marks)} 条")
+    body = marks[0][len(_GATE_MARK):].strip()
+    head, _, cmd = body.partition(" ")
+    if head.strip() != what:
+        raise EvidenceError(
+            f"{what} 日志的哨兵行标的是 {head.strip()!r}，不是 {what}")
+    rule = _GATE_RULES[what]
+    for needle in rule["must"]:
+        if needle not in cmd:
+            raise EvidenceError(
+                f"{what} 哨兵行的命令缺 {needle!r}：{cmd!r}")
+    for needle in rule["must_not"]:
+        if needle in cmd:
+            raise EvidenceError(
+                f"{what} 哨兵行的命令不得含 {needle!r}：{cmd!r}")
+    return text, sha
+
+
 def _pytest_summary_rc(text: str, what: str) -> dict:
     """从 pytest ``-q`` 日志里解析**摘要行**并推出 rc（GATE1-LANE-A A10-M1）。
 
-    只认最后一条含 ``passed``/``failed``/``error`` 且以耗时结尾的行：
-    那是 pytest 的终局摘要。找不到摘要 → ``EvidenceError``（"没跑过"不得
-    写成"跑过且绿"）。摘要里出现 ``failed``/``error`` → rc=1。
+    只认含 ``passed``/``failed``/``error`` 且以耗时结尾的行：那是 pytest 的
+    终局摘要。找不到摘要 → ``EvidenceError``（"没跑过"不得写成"跑过且绿"）。
+    摘要行**多于一条**同样报错：拼接日志里旧跑的 "N passed" 会把新跑的失败
+    盖成绿（GATE1-LANE-A 第二轮 LOW-2），单次门禁只能有一份终局摘要。
+    摘要里出现 ``failed``/``error`` → rc=1。
     """
-    summary = None
-    for line in text.splitlines():
-        if _PYTEST_TAIL_RE.search(line.strip()):
-            summary = line.strip()
-    if summary is None:
+    summaries = [line.strip() for line in text.splitlines()
+                 if _PYTEST_TAIL_RE.search(line.strip())]
+    if not summaries:
         raise EvidenceError(
             f"{what} 日志里找不到 pytest 摘要行（未跑/日志被截断，视为未观测）")
+    if len(summaries) > 1:
+        raise EvidenceError(
+            f"{what} 日志里有 {len(summaries)} 条 pytest 摘要行"
+            f"（疑似拼接多次运行）：{summaries}")
+    summary = summaries[0]
     low = summary.lower()
     bad = any(w in low for w in ("failed", "error", "no tests ran"))
     rc = 1 if bad else 0
@@ -388,13 +445,26 @@ def _vector_identity(pre_vector: "str | None", uri: str) -> dict:
     在写入面比对里看起来是干净的。这里用 ``gen_task6_r4_vector_identity.py``
     在窗口前产出的基线做集合级比对，缺基线/缺表/口径不符一律
     ``EvidenceError``（没观测到 ≠ 没变化）。
+
+    基线件本身还要**按 sha256 钉死**：只比"实算 == 传入的基线"证明不了基线
+    没被动过——若基线是在嵌入改动之后重出的，比对照样通过（GATE1 规格 lane
+    第二轮 #2）。绝对锚点由本常量与 verdict 的 §5 四表哈希两侧共同看住。
     """
     if not pre_vector:
         raise EvidenceError(
             "缺 --pre-vector：窗口前向量基线未提供，无法断言嵌入身份不变")
+    try:
+        base_sha = hashlib.sha256(Path(pre_vector).read_bytes()).hexdigest()
+    except OSError as exc:
+        raise EvidenceError(f"读不了向量基线 {pre_vector}：{exc}") from exc
+    if base_sha != PRE_VECTOR_BASELINE_SHA256:
+        raise EvidenceError(
+            f"向量基线件 sha256 与冻结值不符：{base_sha}"
+            f" != {PRE_VECTOR_BASELINE_SHA256}（基线被动过，或不是窗前那份）")
     base = _load_snapshot(pre_vector)
     from scripts.phase25.gen_task6_r4_vector_identity import (
-        SCHEMA as VEC_SCHEMA, TABLES as VEC_TABLES, build as vec_build)
+        SCHEMA as VEC_SCHEMA, TABLES as VEC_TABLES, IdentityError as VecError,
+        build as vec_build)
     if base.get("schema") != VEC_SCHEMA:
         raise EvidenceError(
             f"向量基线 schema 不符 {VEC_SCHEMA}：{base.get('schema')!r}")
@@ -404,7 +474,12 @@ def _vector_identity(pre_vector: "str | None", uri: str) -> dict:
         if not isinstance(node.get("vector_set_sha256"), str) or \
                 not node["vector_set_sha256"]:
             raise EvidenceError(f"向量基线缺 {name} 的集合哈希（观测缺口）")
-    live = vec_build(uri)
+    try:
+        live = vec_build(uri)
+    except VecError as exc:
+        # 缺表/缺 id/缺 vector/混维都是**输入观测失败**，须与"脚本有 bug"
+        # 区分开：统一成 EvidenceError → exit 2（GATE1-LANE-A 第二轮 LOW-3）。
+        raise EvidenceError(f"活库向量身份取不出来：{exc}") from exc
     mismatches = []
     for name in VEC_TABLES:
         want = pre_tables[name]
@@ -434,10 +509,13 @@ def build(args) -> dict:
     uri = str(default_lancedb_uri())
     live = _live_tables(uri)
     surface = _write_surface(pre, post)
-    kbint_text, kbint_sha = _read_log(args.kbint_log, "kbint")
+    hermetic_text, hermetic_sha = _read_gate_log(args.hermetic_log, "hermetic")
+    hermetic = {**_pytest_summary_rc(hermetic_text, "hermetic"),
+                "log_sha256": hermetic_sha}
+    kbint_text, kbint_sha = _read_gate_log(args.kbint_log, "kbint")
     kbint = {**_pytest_summary_rc(kbint_text, "kbint"),
              "log_sha256": kbint_sha}
-    gate_text, gate_sha = _read_log(args.gate_static_log, "gate_static")
+    gate_text, gate_sha = _read_gate_log(args.gate_static_log, "gate_static")
     gate_static = {"ok": "[STATIC GATE OK]" in gate_text,
                    "marker": "[STATIC GATE OK]" in gate_text,
                    "log_sha256": gate_sha}
@@ -453,10 +531,9 @@ def build(args) -> dict:
         "ledger_rows": _ledger_rows(),
         "containers_present": _containers_present(),
         "vram_mib": _vram_mib(),
-        # 门禁三项绑定实跑工件（A10-M1）：hermetic 只收 rc（ok 由 rc 推出），
-        # kbint/gate_static 由本脚本解析日志得到——不接受任何独立的 ok 布尔。
-        "hermetic": {"rc": args.hermetic_rc,
-                     "ok": args.hermetic_rc == 0},
+        # 门禁三项全部绑定实跑工件（A10-M1 → A11）：三项都从原始日志解析 rc/
+        # 标记并记 log_sha256，不接受任何调用方传入的 rc 或独立 ok 布尔。
+        "hermetic": hermetic,
         "kbint": kbint,
         "gate_static": gate_static,
         "provenance_restore": bool(args.provenance_restore),
@@ -470,8 +547,9 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--postwindow", required=True)
     ap.add_argument("--pre-vector", default=None,
                     help="窗口前四表向量身份基线（gen_task6_r4_vector_identity.py）")
-    ap.add_argument("--hermetic-rc", type=int, required=True,
-                    help="两排除 hermetic 全套的 shell rc（ok 由 rc==0 推出）")
+    ap.add_argument("--hermetic-log", required=True,
+                    help="两排除 hermetic 全套的原始 pytest 输出（本脚本解析"
+                         "摘要行得 rc，并记入 log_sha256）")
     ap.add_argument("--kbint-log", required=True,
                     help="kb_integration 门的原始 pytest 输出（本脚本解析摘要行）")
     ap.add_argument("--gate-static-log", required=True,

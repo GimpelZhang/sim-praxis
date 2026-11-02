@@ -81,7 +81,8 @@ R4_RULES_VERSION = "r4"
 SUPPORTED_RULES_VERSIONS = (R3_RULES_VERSION, R4_RULES_VERSION)
 # 预注册 §3.7，按修订 A7 更正：r4 只是**构造函数默认值**——
 # `orchestrator/graph/cli.py` 构造 `DirectionSetter` 时从不传 `planner_recall`，
-# 全仓无第二个注入点，故 `PlannerRecall` 今日**没有生产消费者**。"生产默认 r4"
+# **生产代码**里没有第二个注入点（测试会直接构造 `PlannerRecall`，那不算生产
+# 消费者），故 `PlannerRecall` 今日**没有生产消费者**。"生产默认 r4"
 # 仅指直接构造（判分器/参考模拟/测试）时生效；把它接进 setter/cli 属另一件事，
 # 须另立预注册。历史锚点/回归路径显式传 rules_version="r3"。
 DEFAULT_RULES_VERSION = R4_RULES_VERSION
@@ -498,7 +499,10 @@ class PlannerRecall:
         # 缺 id 的稠密行在 RRF 里无法被标识：`str(r.get("id"))` 会静默变成
         # 字面量 "None"，把多行并成一行、还会和词法侧同形 id 混淆。活库三表
         # 的 id 恒非空，出现即装配缺陷，fail-closed 报错（GATE1-LANE-A L8）。
-        bad = [i for i, r in enumerate(dense_top) if r.get("id") is None]
+        # 扫描**全部** dense_rows 而不只是 dense_top：尾席（第 9 行起）同样会
+        # 被追加进最终结果，尾行缺 id 时下面的 `str(r.get("id")) not in
+        # emitted` 一样会把 None 当普通 id（GATE1-LANE-A 第二轮 LOW-2）。
+        bad = [i for i, r in enumerate(dense_rows) if r.get("id") is None]
         if bad:
             raise ValueError(
                 f"稠密行缺 id（下标 {bad}）：RRF 融合无法标识行，"

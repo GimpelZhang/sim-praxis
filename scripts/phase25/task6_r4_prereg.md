@@ -339,14 +339,14 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
 - `retain` = **五条件 ∧ `point_prediction_match`**（见修订 A5/§13）。
 
 **首呼前登记的五个件 sha**（登记后改动即黑名单命中；下表为门 1 修复轮后的
-**最终登记值**，见修订 A8/§13.6、A9/§13.7 与 A10/§13.8）：
+**最终登记值**，见修订 A8/§13.6、A9/§13.7、A10/§13.8 与 A11/§13.9）：
 
 | 件 | sha256 |
 |---|---|
-| `scripts/phase25/task6_r4_verdict.py` | `23c473472465a5007ac25b7d5e2dfca95530180e65a4362c7c33b9cb70f3772d` |
+| `scripts/phase25/task6_r4_verdict.py` | `ee9b2d01080fdc5ab1b7f8df939883e4406d727c380d2f309012dbc7c80571f8` |
 | `scripts/phase25/task6_r4_reference_sim.py` | `836cf8a4198c164e6989a9b65d329e27876f67b76fd5f247228faa1341b1143f` |
-| `scripts/phase25/gen_task6_r4_window_evidence.py` | `6086d1603479e76ad17707d8183c250dd00a0703f10e93d283b22a3d80aae51c` |
-| `scripts/phase25/gen_task6_r4_vector_identity.py` | `32d376dbc358cc9149fa91117ebacf896339b1cd5ee292c9ebaa55164e9a2216` |
+| `scripts/phase25/gen_task6_r4_window_evidence.py` | `6e89bf1574baa47adae0a030fa1010bfb798c50e49d4d65efef53de597f64f28` |
+| `scripts/phase25/gen_task6_r4_vector_identity.py` | `a58b3de4399f6eac0cd1fa1791380dd785fedef31d8122cbd04e4c1ce165c83a` |
 | `scripts/kb/gen_prewindow_snapshots.py` | `e1f21597a30c5f632dd8004cd9e7c9d15bea51ce4b8d895e7d9fbc4fe72be8cd` |
 
 一致性机判：`tests/milestone25/test_task6_r4_registration.py` 逐字解析本表并
@@ -425,8 +425,12 @@ kbint**。终复不加跑任何门；32 passed 类结论只依赖内容/身份�
   kbint 前后四表全列快照与终复比对件、窗口前向量身份基线
   `pre_vector_identity.json`（0600，修订 A9-C1）+ 同刻快照重跑件
   `snapshot_contemporaneity_check.json`（证明基线时点 = 窗前快照状态）、
-  门禁原始日志 `kbint_gate.log` 与 `gate_static.log`（0600；证据机产器解析
-  它们的 rc/标记并记 sha256，修订 A10-M1）；
+  门禁原始日志 `hermetic_gate.log`、`kbint_gate.log` 与 `gate_static.log`
+  （0600；证据机产器解析它们的 rc/标记并记 sha256，修订 A11/§13.9）。
+  三份日志**各须含且仅含一行哨兵** `# T6R4-GATE: <门名> cmd=<实跑命令>`：
+  机产器据此断言「这份日志确实由该门、该命令产出」，而不是任意一份 pytest
+  输出——kbint 门须含 `-m kb_integration` 且不含 `not kb_integration`，
+  hermetic 门须含 `-k "not test_04"` 与 `-m "not paid and not kb_integration"`；
 - 收尾：`docker compose down`（无容器则跳过并记录）、显存 ≤200 MiB、
   两排除全套冷跑、`check_git_author.sh`、author/trailer 合规则；
 - 提交策略：本地攒批（main ahead origin 26 → 递增），**push 永远人工 STOP 门**。
@@ -598,7 +602,7 @@ fixture/阈值（§5）、点预测（§6）**零改动**，冻结锚点（fixtu
 
 | 编号 | 位置 | 性质 | 处置 |
 |---|---|---|---|
-| A10-C1 | 向量轴（承接 A9-C1） | CRITICAL（laneA 复述件） | **实现形式与 laneA 建议不同，理由见下**：laneA 建议在快照 `per_row` 增 `vector_sha256`；本轮改用**独立机产器 + 独立判据轴**（`gen_task6_r4_vector_identity.py` 四表集合哈希 + verdict `vector_identity.observed ∧ unchanged`）。二者可观测面等价（任何向量字节变化都会翻转集合哈希），但独立件不必改动 **Stage A 已钉的** `scripts/kb/gen_prewindow_snapshots.py`，也不必让窗前快照作废重出；同时性由「同一时刻重跑快照生成器得 `9228269a…` 逐字节相同」作旁证。laneA 的失败场景（kbint 重嵌入 94 行、非向量列全等）在本实现下判**负**，由 `test_data_identity_requires_observed_vector_identity` 与 `test_vector_identity_detects_same_dim_reembed` 锁存 |
+| A10-C1 | 向量轴（承接 A9-C1） | CRITICAL（laneA 复述件） | **实现形式与 laneA 建议不同，理由见下**：laneA 建议在快照 `per_row` 增 `vector_sha256`；本轮改用**独立机产器 + 独立判据轴**（`gen_task6_r4_vector_identity.py` 四表集合哈希 + verdict `vector_identity.observed ∧ unchanged`）。二者可观测面等价（任何向量字节变化都会翻转集合哈希），但独立件**在 A10 轮不再改动** `scripts/kb/gen_prewindow_snapshots.py`（该件已按 A9-D3 增补 `per_row` 并登记为 `e1f21597…`——此处指「A10 轮不再碰它」，不是「自 Stage A 零改动」；原措辞有歧义，见 §13.9 A11-L6 更正），也不必让窗前快照作废重出；同时性由「同一时刻重跑快照生成器得 `9228269a…` 逐字节相同」作旁证。laneA 的失败场景（kbint 重嵌入 94 行、非向量列全等）在本实现下判**负**，由 `test_data_identity_requires_observed_vector_identity` 与 `test_vector_identity_detects_same_dim_reembed` 锁存 |
 | A10-M1 | 四项门禁全是执行方声明 | MAJOR（第一轮 M4 残余） | 三项改**绑实跑工件**：`hermetic` 只收 `--hermetic-rc`（`ok` 由 `rc == 0` 推出，不再有独立布尔）；`kbint` 收 `--kbint-log`，脚本自行解析 pytest 终局摘要行（须含结果词与耗时），记 `rc`/`ok`/`summary`/`log_sha256`，读不到或找不到摘要 → `EvidenceError`；`gate_static` 收 `--gate-static-log`，须含 `[STATIC GATE OK]`，记 `ok`/`log_sha256`。verdict 侧 `kbint.rc != 0` 即判负（裸 `{"ok": true}` 无 rc 也判负）。`provenance_restore` 无第三方工件可解析，**仍为声明项**并如实留在 `declared_by_executor == ["provenance_restore"]` |
 | A10-L1 | 快照生成器承重却未登记 | LOW | 登记为第 5 件；注册测试目录白名单放宽到 `scripts/phase25` 与 `scripts/kb`，并断言恰五件、同件不重复 |
 | A10-L2 | 显存负值在 verdict 侧仍可通过 | LOW | `check_engineering` 增 `isinstance(int) ∧ 0 <= vram <= 200`（证据侧 A9-L10 已拒收负值读数） |
@@ -609,3 +613,38 @@ fixture/阈值（§5）、点预测（§6）**零改动**，冻结锚点（fixtu
 **本轮作废的旧值**：A9 轮登记的 verdict `4a07d67b…` 与 window_evidence
 `0fd46928…` 因本轮改动作废，最终值见 §7.2（五件表）。仍未首呼，不构成
 §7.1 黑名单事件。
+
+### 13.9 A11 门 1（r2 双 lane）遗留项收口（2026-11-02，首呼前）
+
+A10 落地并复钉后，`gate1-spec-r2` 仍持 **HOLD(2)**、`gate1-laneA-r2`
+复述件给出 **HOLD(B1/B2)**。四项全部落在「证据是否真绑到工件」上，
+不触碰 §3 规则形、§5 冻结锚点、§6 点预测与 §8 判据——不构成第二变量，
+不需要重跑参考模拟（`--check` 仍 byte-identical）。方向一律更严。
+
+| 编号 | 位置 | 性质 | 处置 |
+|---|---|---|---|
+| A11-S1 | hermetic 门（spec HOLD #1） | 阻塞 | 原 `--hermetic-rc` 只是执行方给的一个整数，与「真跑过全套」无绑定。改为 `--hermetic-log <path>`：机产器读日志、要求**恰一条**哨兵 `# T6R4-GATE: hermetic cmd=…`，且 cmd 必须含 `-k "not test_04"` 与 `-m "not paid and not kb_integration"`；再解析 pytest 终局摘要（**恰一条**，零条或多条均 `EvidenceError`）得 rc。`--hermetic-rc` 已删。 |
+| A11-S2 | §5 向量基线未进机判（spec HOLD #2） | 阻塞 | `verdict.check_data_identity` 增**机器常量** `EXPECTED_VECTOR_SET_SHA`（四表逐字等于 §5 值）。原实现只判 `observed ∧ unchanged`：若基线本身是改嵌入之后重出的，它照样 `unchanged=true`。现在「与 §5 基线全等」是硬条件；`vector_identity.tables` 缺键/非对象同样判负。 |
+| A11-B2 | kbint 日志未绑选择器（laneA B2） | 阻塞 | kbint 门同样走哨兵校验：cmd 须含 `-m kb_integration`、**不得**含 `not kb_integration`；否则把 hermetic 日志冒充 kbint 日志即可蒙混。 |
+| A11-M1 | 三门只带 rc/ok | MAJOR | 三门一律要求 64 位小写 hex 的 `log_sha256`；`kbint.summary` 必须存在；`gate_static.marker` 必须为 `True`（`[STATIC GATE OK]` 解析结果）。verdict 侧缺任一项即条件 5 判负。 |
+| A11-M2 | 基线文件自身未钉 | MAJOR | 证据侧 `PRE_VECTOR_BASELINE_SHA256` 逐字节钉死窗前基线件 `ea896f64…`：基线件被重写（例如事后按新活库重出）即 `EvidenceError`，而不是「拿新基线比新活库」的假干净。 |
+| A11-L1 | 向量集合哈希对重复 id 不设防 | LOW | `vector_set_sha256` 口径对同 id 多行依赖 `sorted` 稳定性，活库扫描序一变即漂。`table_identity` 增重复 id 守卫（`IdentityError`）。 |
+| A11-L2 | 活库异常以 rc=1 逃出机产器 | LOW | 取活库身份的 `IdentityError` 统一收敛为 `EvidenceError`（exit 2 = 输入不可用，不是判据；与 A10-L4 同一口径）。 |
+| A11-L3 | 摘要行「取最后一条」 | LOW | 改为一律要求恰一条并与 rc 判定配套（拼接两份跑分日志不再能冒充单次实跑）。 |
+| A11-L4 | L8 尾席只查 `dense_top` | LOW | 守卫面放宽到全部 `dense_rows`（任何一条稠密行在词法索引缺 id 都视为语料不一致）。**纯防御性收窄，规则行为未变**：参考模拟 `--check` 对 §6 点预测仍逐字节相同。 |
+| A11-L5 | D5 注释把测试算作生产消费者 | LOW | 注释改为「生产代码里没有第二个注入点（测试直接构造 `PlannerRecall`，不算生产消费者）」。 |
+| A11-L6 | §13.8 A10-C1 措辞有歧义 | LOW | 「不必改动 Stage A 已钉的 `gen_prewindow_snapshots.py`」易读成「自 Stage A 零改动」；实情是该件在 **A9** 轮已按 A9-D3 增补 `per_row`（`bb1031c4…`→`e1f21597…`）并登记。已就地更正为「A10 轮不再改动」。 |
+| A11-B1 | 树在 A11 中途是脏的（laneA B1） | 程序 | 收口提交（攢批133）落盘并复钉 sha 后，**干净树**再冷跑两排除全套与门禁；绑定跑只在干净树上发。 |
+
+**哨兵协议的位置**：机产器 `_read_gate_log()` 是唯一入口，三门共用同一
+校验结构（`_GATE_RULES`），新增一门只需加一行规则，不会漏检。
+
+**复钉**：五件 sha 见 §7.2（本轮 verdict `ee9b2d01…`、window_evidence
+`6e89bf15…`、vector_identity `a58b3de4…` 三件重算；reference_sim 与
+`gen_prewindow_snapshots.py` 未改）。注册测试 `test_task6_r4_registration.py`
+继续逐字比对五件。仍未首呼，不构成 §7.1 黑名单事件。
+
+**测试面**：窗口取证测由 61 增至 **67** 全绿（新增哨兵/拼接摘要/向量锚点/基线 sha
+收敛等 6 条负向用例；「两排除少一条」作为第三档断言加在既有
+`test_hermetic_log_must_be_the_two_exclusion_command` 内），判据测 24 全绿，向量身份测 11 全绿。
+
