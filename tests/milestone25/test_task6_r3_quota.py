@@ -119,6 +119,9 @@ class _FakeProd:
 
 
 def _planner(engine, **kwargs):
+    # 本文件全部是 r3 保底配额语义锚点；r4 默认上线后显式钉 r3
+    # （task6_r4_prereg.md §10，断言一字不改）。
+    kwargs.setdefault("rules_version", "r3")
     return PlannerRecall(_FakeProd(engine), **kwargs)
 
 

@@ -167,6 +167,43 @@ class VectorEngine:
             for row in tbl.to_pandas()[[column]].value_counts().reset_index(name="count").to_dict("records")
         } if self.count() else {}
 
+    # ---------- read: 任意表只读扫描缝（Phase 2.5 Task6 Stage B 词法通道） ----------
+
+    def count_rows(self, table_name: str) -> int:
+        """任意表的行数（只读；缺表返回 0，与 ``count()`` 同语义）。
+
+        用途：r4 词法索引的失效键。Lance 行数是元数据读取，不扫数据、不载模。
+        """
+        if not isinstance(table_name, str) or not table_name:
+            raise ValueError(f"table_name 必须是非空字符串，收到 {table_name!r}")
+        if table_name not in self.db.table_names():
+            return 0
+        return self.db.open_table(table_name).count_rows()
+
+    def scan_rows(self, table_name: str, columns: list[str], *,
+                  limit: int = 10 ** 6) -> list[dict[str, Any]]:
+        """只读全表扫描指定列（**不建表、不写、不 embed、不触网**）。
+
+        Phase 2.5 Task6 Stage B 的 BM25 语料读取口：词法通道需要全表 vocabulary
+        与文本长度，但不参与向量检索，故不进 ``query_*`` 通道。缺表返回 []，
+        与 ``query_solutions`` 的缺表 fail-closed 不同——本方法只服务「有则用、
+        无则空」的可选通道，调用方自行判断语义。
+        """
+        if not isinstance(table_name, str) or not table_name:
+            raise ValueError(f"table_name 必须是非空字符串，收到 {table_name!r}")
+        cols = list(columns)
+        if not cols or any(not isinstance(c, str) or not c for c in cols):
+            raise ValueError(f"columns 必须是非空字符串列表，收到 {columns!r}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError(f"limit 必须是正整数，收到 {limit!r}")
+        if table_name not in self.db.table_names():
+            return []
+        rows = (self.db.open_table(table_name).search(None)
+                .select(cols).limit(limit).to_list())
+        for row in rows:
+            row.pop("vector", None)     # 双保险：显式 select 已不含 vector
+        return rows
+
     def query_kb(self, query: str, *, namespace: str | None = None,
                  project: str | None = None, doc_types: list[str] | None = None,
                  top_k: int = 5, include_index: bool = False) -> list[dict[str, Any]]:

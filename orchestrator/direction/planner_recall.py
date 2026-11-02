@@ -42,7 +42,12 @@ from memory_flywheel.recall import (
     SITES,
     ProductionRecall,
 )
-from memory_flywheel.vector_engine import NAMESPACES
+from memory_flywheel.vector_engine import (
+    NAMESPACES,
+    SOLUTION_TABLE_NAME,
+    TABLE_NAME as KB_TABLE_NAME,
+)
+from orchestrator.direction.lexical_index import Bm25Index, rrf_fuse
 
 SYNONYMS_PATH = Path(__file__).with_name("synonyms.yaml")
 
@@ -67,6 +72,20 @@ DEFAULT_LEARNING_TOP_K = 8
 # 配额；matched_projects 为空时与 r2 距离合并逐字节相同；生产 retrieve()
 # 与判分器走同一实现，无 eval 专用分支。
 R3_RULES_VERSION = "r3"
+
+# Task6 Stage B（用户 2026-11-02 裁决立项，预注册
+# scripts/phase25/task6_r4_prereg.md）：在 r3 之上**只加**一条精确术语词法
+# 通道（BM25 全表倒排）并与 r3 稠密 top-8 做 RRF 秩融合。稠密侧（探针深度、
+# 查询串、作用域保底配额）逐字不动——r3 分支在本题下与 r3 时点逐字节相同。
+R4_RULES_VERSION = "r4"
+SUPPORTED_RULES_VERSIONS = (R3_RULES_VERSION, R4_RULES_VERSION)
+# 预注册 §3.7：生产默认 r4（DirectionSetter 经 DI 注入的实例即走默认）；
+# 历史锚点/回归路径显式传 rules_version="r3"。
+DEFAULT_RULES_VERSION = R4_RULES_VERSION
+
+# 预注册 §3.5 词法语料：kb 路排除目录性文档（与 query_kb 的 include_index=False
+# 同集）；solutions/learnings 全表。
+LEXICAL_EXCLUDED_DOC_TYPES = frozenset({"root_index", "index"})
 
 # AC-T6-4 r2 固定并行查询规则：synonyms.yaml 的 kb_projects 只允许活库既有
 # project 标签（fail-closed，防数据文件写出无意义 WHERE）。
@@ -252,7 +271,8 @@ class PlannerRecall:
                  solutions_engine: "Any | None" = None,
                  kb_top_k: int = DEFAULT_KB_TOP_K,
                  solution_top_k: int = DEFAULT_SOLUTION_TOP_K,
-                 learning_top_k: int = DEFAULT_LEARNING_TOP_K):
+                 learning_top_k: int = DEFAULT_LEARNING_TOP_K,
+                 rules_version: str = DEFAULT_RULES_VERSION):
         self.prod = production_recall
         self.vector_engine = production_recall.vector_engine
         self.solutions_engine = solutions_engine or production_recall.vector_engine
@@ -263,9 +283,16 @@ class PlannerRecall:
                           ("learning_top_k", learning_top_k)):
             if isinstance(val, bool) or not isinstance(val, int) or val <= 0:
                 raise ValueError(f"{name} 必须是正整数，收到 {val!r}")
+        if rules_version not in SUPPORTED_RULES_VERSIONS:
+            raise ValueError(
+                f"rules_version 非法：{rules_version!r}；白名单 "
+                f"{SUPPORTED_RULES_VERSIONS}")
         self.kb_top_k = kb_top_k
         self.solution_top_k = solution_top_k
         self.learning_top_k = learning_top_k
+        self.rules_version = rules_version
+        # r4 词法索引缓存（预注册 §3.6）：{失效键: (行数元组, 索引状态)}。
+        self._lexical_cache: dict[str, tuple[tuple, dict]] = {}
 
     # ---------- 采纳遥测：透传 ProductionRecall 单一写入方 ----------
 
@@ -372,6 +399,99 @@ class PlannerRecall:
                 break
         return reserved + open_segment
 
+    # ---------- r4 词法通道（预注册 §3；r3 路径绝不触碰以下任何方法） ----------
+
+    @staticmethod
+    def _lexical_relpath(route: str, row: dict) -> "str | None":
+        """词法行 → 与稠密行同口径的 relpath（§3.3 注解补全）。"""
+        if route == ROUTE_KB:
+            return row.get("kb_relpath")
+        if route == ROUTE_SOLUTIONS:
+            return row.get("relpath")
+        return row.get("evidence_relpath")
+
+    def _lexical_counts(self) -> tuple:
+        """失效键（§3.6）：三路语料表的行数逐表比对，行数变化即重建索引。
+
+        kb 路用整表行数（语料的 doc_type 过滤是固定子集，行数单调，作失效键
+        与语料行数等价）；缺表/缺库记 0（不建表、不报错）。
+        """
+        counts: list[tuple[str, int]] = [
+            ("kb", self.vector_engine.count_rows(KB_TABLE_NAME)),
+            ("sol", self.solutions_engine.count_rows(SOLUTION_TABLE_NAME)),
+        ]
+        for store in (self.learning_store, *self.extra_learning_stores):
+            counts.append((_store_label(store), store.count()))
+        return tuple(counts)
+
+    def _lexical_corpus(self) -> dict[str, list[dict]]:
+        """§3.5 三路语料只读扫描（vector 列不入内存）。"""
+        kb_rows = self.vector_engine.scan_rows(
+            KB_TABLE_NAME, ["id", "text", "doc_type", "kb_relpath"])
+        kb = [r for r in kb_rows
+              if r.get("doc_type") not in LEXICAL_EXCLUDED_DOC_TYPES]
+        sol = self.solutions_engine.scan_rows(
+            SOLUTION_TABLE_NAME, ["id", "text", "relpath"])
+        lrn: list[dict] = []
+        for store in (self.learning_store, *self.extra_learning_stores):
+            lrn.extend(store.scan_rows(["id", "text", "evidence_relpath"]))
+        return {ROUTE_KB: kb, ROUTE_SOLUTIONS: sol, ROUTE_LEARNINGS: lrn}
+
+    def _lexical_state(self) -> dict[str, dict]:
+        """惰性构建并复用三路词法索引（行数不变即命中缓存）。"""
+        counts = self._lexical_counts()
+        cached = self._lexical_cache.get("state")
+        if cached is not None and cached[0] == counts:
+            return cached[1]
+        corpus = self._lexical_corpus()
+        state = {
+            route: {"index": Bm25Index(rows),
+                    "by_id": {str(r.get("id")): r for r in rows}}
+            for route, rows in corpus.items()
+        }
+        self._lexical_cache["state"] = (counts, state)
+        return state
+
+    def _fuse_route(self, route: str, dense_rows: list[dict],
+                    lexicon: dict, query: str, top_k: int) -> list[dict]:
+        """§3.3：r3 稠密前 ``top_k`` 行 ⊕ 词法 top-``top_k``，RRF 融合。
+
+        - 稠密侧 id 序 D = ``dense_rows[:top_k]``（r3 生产结果，语义与注解不变）；
+        - 融合后 id 在 D 中 → 沿用 D 的原行对象（保留 ``_distance``/
+          ``scoped_*`` 等稠密注解）；否则取词法扫描到的原始行并补
+          ``source_route``/``relpath``/``lexical_rank``；
+        - **尾席保持（预注册 §3.3 修订 A1）**：``dense_rows`` 长度超过
+          ``top_k`` 时（learning 路 = 主库 8 + 额外库去重后可达 9 行，
+          ``_learning_route`` 不截断、setter 不切片），超出部分按 r3 原序**追加**
+          在融合段之后。理由：融合只定义最终 top-8（§3.3 / §6 点预测按 8 行冻结），
+          而 r3 生产会把第 9 行（phase2 演化志）一并注入；若不追加，r4 会在
+          11/12 个 learning 案上静默改变注入内容，构成未声明的第二变量。
+        - 退化性质：词法列表为空时融合 id 序 == D 逐位相等（稠密分 1/(60+r)
+          严格单调），此时返回的行对象与 ``dense_rows`` 逐 dict 相等。
+        """
+        dense_top = dense_rows[:top_k]
+        dense_ids = [str(r.get("id")) for r in dense_top]
+        lex = lexicon["index"].top(query, top_k)
+        fused = rrf_fuse(dense_ids, lex, top_k=top_k)
+        dense_by_id = {str(r.get("id")): r for r in dense_top}
+        lex_rank = {rid: rank for rank, (_s, rid) in enumerate(lex, 1)}
+        out: list[dict] = []
+        for _score, rid in fused:
+            row = dense_by_id.get(rid)
+            if row is None:
+                raw = dict(lexicon["by_id"].get(rid) or {})
+                raw.pop("vector", None)
+                row = _annotate(
+                    raw, route=route, relpath=self._lexical_relpath(route, raw),
+                    lexical_rank=lex_rank.get(rid))
+            out.append(row)
+        # 尾席按 r3 原序追加，但跳过已进融合段的行（词法通道可能把第 9 行
+        # 提到 top-8 内，此时不得重复注入同一 id）。
+        emitted = {str(r.get("id")) for r in out}
+        out.extend(r for r in dense_rows[top_k:]
+                   if str(r.get("id")) not in emitted)
+        return out
+
     # ---------- kb 路（双 namespace 全局并查 + r2 项目作用域并行探针） ----------
 
     def _kb_route(self, hint: str,
@@ -431,6 +551,7 @@ class PlannerRecall:
                             site: str = "direction",
                             allow_missing_solutions: bool = False,
                             matched_projects: "list[dict] | None" = None,
+                            lexical_hints: "dict[str, str] | None" = None,
                             ) -> dict[str, list[dict] | dict]:
         """按已构造好的三路查询串执行四路召回。
 
@@ -438,6 +559,9 @@ class PlannerRecall:
         ``allow_missing_solutions=True`` 时该路返 []（仅彩排/特殊容错用，
         生产 Task9 装配时表必在）。``matched_projects`` 为 r2 固定并行规则的
         项目识别结果（必须基于未扩展 base hint；缺省 = 只发全局探针）。
+
+        ``lexical_hints`` 仅 r4 使用（预注册 §3.4）：词法通道用**未扩展** base
+        hint，缺省 ``= hints``（向后兼容；``retrieve()`` 显式传三路同 base）。
         """
         if site not in SITES:
             raise ValueError(f"site 非法：{site!r}；白名单 {SITES}")
@@ -445,6 +569,13 @@ class PlannerRecall:
             h = hints.get(route)
             if not isinstance(h, str) or not h.strip():
                 raise ValueError(f"hints[{route!r}] 必须是非空字符串")
+        lex_hints = hints if lexical_hints is None else lexical_hints
+        if self.rules_version == R4_RULES_VERSION:
+            for route in (ROUTE_KB, ROUTE_SOLUTIONS, ROUTE_LEARNINGS):
+                h = lex_hints.get(route)
+                if not isinstance(h, str) or not h.strip():
+                    raise ValueError(
+                        f"lexical_hints[{route!r}] 必须是非空字符串（r4）")
         kb_hits, cap_hits, tb_hits = self._kb_route(
             hints[ROUTE_KB], matched_projects)
         try:
@@ -455,6 +586,17 @@ class PlannerRecall:
                 raise
             solution_hits = []
         learning_hits = self._learning_route(hints[ROUTE_LEARNINGS])
+        if self.rules_version == R4_RULES_VERSION:
+            state = self._lexical_state()
+            kb_hits = self._fuse_route(
+                ROUTE_KB, kb_hits, state[ROUTE_KB],
+                lex_hints[ROUTE_KB], self.kb_top_k)
+            solution_hits = self._fuse_route(
+                ROUTE_SOLUTIONS, solution_hits, state[ROUTE_SOLUTIONS],
+                lex_hints[ROUTE_SOLUTIONS], self.solution_top_k)
+            learning_hits = self._fuse_route(
+                ROUTE_LEARNINGS, learning_hits, state[ROUTE_LEARNINGS],
+                lex_hints[ROUTE_LEARNINGS], self.learning_top_k)
         return {
             "hints": dict(hints),
             "kb_hits": kb_hits,
@@ -471,10 +613,16 @@ class PlannerRecall:
         """查询构造 + 四路召回（生产 Task9 主入口；0 付费）。"""
         hints = build_route_hints(track, payload, tier=tier)
         projects = matched_projects(track, payload)
+        lexical_hints = None
+        if self.rules_version == R4_RULES_VERSION:
+            base = legacy_direction_hint(track, payload)
+            lexical_hints = {ROUTE_KB: base, ROUTE_SOLUTIONS: base,
+                             ROUTE_LEARNINGS: base}
         return self.retrieve_with_hints(
             hints, site=site,
             allow_missing_solutions=allow_missing_solutions,
-            matched_projects=projects)
+            matched_projects=projects,
+            lexical_hints=lexical_hints)
 
 
 def route_segments(result: dict) -> dict[str, list[dict]]:

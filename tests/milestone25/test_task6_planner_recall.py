@@ -348,6 +348,9 @@ def _lr_row(rid, *, table=None, text=None, evidence="@runs/phase1/x.json",
 def _planner(ve, main_store, extra=(), **kw):
     prod = ProductionRecall(main_store, ve,
                             extra_learning_stores=tuple(extra))
+    # 本文件的断言全部是 r2/r3 语义锚点；r4 默认上线后显式钉 r3，
+    # 断言内容一字不改（task6_r4_prereg.md §10）。
+    kw.setdefault("rules_version", "r3")
     return PlannerRecall(prod, **kw), prod
 
 
@@ -474,7 +477,8 @@ def test_retrieve_hints_and_topk_validation():
     for bad in (0, -1, True):
         with pytest.raises(ValueError):
             PlannerRecall(ProductionRecall(
-                FakeLearningStore("phase1_learnings"), ve), kb_top_k=bad)
+                FakeLearningStore("phase1_learnings"), ve), kb_top_k=bad,
+                rules_version="r3")
 
 
 def test_record_adoption_delegates_single_writer(tmp_path):
@@ -1139,7 +1143,8 @@ def test_live_task6_3_libero_scoped_seam_12_prod_union_3(monkeypatch):
     assert union_seam == LIBERO_12_PREFIXES  # 作用域缝 12/12 全覆盖
 
     planner = PlannerRecall(ProductionRecall(
-        LearningStore(), ve, extra_learning_stores=(EvolutionStore(),)))
+        LearningStore(), ve, extra_learning_stores=(EvolutionStore(),)),
+        rules_version="r3")   # 历史锚点钉子（task6_r4_prereg.md §10）
     union_prod: set[str] = set()
     live_per_query: dict[str, list[str]] = {}
     for q in LIBERO_VLA_QUERIES:

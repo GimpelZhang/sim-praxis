@@ -370,6 +370,24 @@ class LearningStore:
             row.pop("vector", None)
         return rows
 
+    def scan_rows(self, columns, *, limit: int = 10 ** 6) -> list[dict[str, Any]]:
+        """只读全表扫描指定列（不 embed、不建表、不写）。
+
+        Phase 2.5 Task6 Stage B 的词法语料口（本表与 ``EvolutionStore`` 继承同
+        语义）；缺表返回 []，与 ``table_exists`` 同语义，绝不触发表创建。
+        """
+        cols = list(columns)
+        if not cols or any(not isinstance(c, str) or not c for c in cols):
+            raise ValueError(f"columns 必须是非空字符串列表，收到 {columns!r}")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError(f"limit 必须是正整数，收到 {limit!r}")
+        if not self.table_exists():
+            return []
+        rows = (self.table().search(None).select(cols).limit(limit).to_list())
+        for row in rows:
+            row.pop("vector", None)
+        return rows
+
     def snapshot(self) -> dict[str, Any]:
         """取证用：表名/行数/维度（Task6 隔离证据）。"""
         exists = self.table_exists()

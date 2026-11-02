@@ -102,7 +102,8 @@ def build(uri: str | None = None) -> dict:
     cfg = select_embedding()
     ve = VectorEngine(uri=uri)
     planner = PlannerRecall(ProductionRecall(
-        LearningStore(), ve, extra_learning_stores=(EvolutionStore(),)))
+        LearningStore(), ve, extra_learning_stores=(EvolutionStore(),)),
+        rules_version="r3")   # 历史锚点钉子：本快照是 r3 语义，不随生产默认漂移
 
     scoped_prefixes: set[str] = set()
     per_query = []
