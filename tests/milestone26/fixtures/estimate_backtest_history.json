@@ -1,0 +1,246 @@
+{
+ "cross_checks": {
+  "p25_task3_equals_6": true,
+  "p25_task5_wallA_cap_hit": true,
+  "p2_task8_matches_ledger": true,
+  "walls_sum_equals_task5_ledger": true
+ },
+ "row_count": 12,
+ "rows": [
+  {
+   "born": null,
+   "cap": 24,
+   "cap_hit": true,
+   "derivation": "phase2 台账 event=call 且 task==4 的整数 seq 行数；cap=PHASE2_TASK_CAPS[4]=24；rc0=该 task 最后一条 call 行 ok=true；born/selfcheck_written=null（phase2 无逐轮 trace，不猜）",
+   "observed_calls": 24,
+   "phase": 2,
+   "rc0": false,
+   "selfcheck_written": null,
+   "source": {
+    "kind": "ledger_task",
+    "path": "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl",
+    "task": 4
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl"
+   ],
+   "task": "p2_task4_visual_probe"
+  },
+  {
+   "born": null,
+   "cap": 227,
+   "cap_hit": false,
+   "derivation": "phase2 台账 event=call 且 task==6 的整数 seq 行数；cap=PHASE2_TASK_CAPS[6]=227；rc0=该 task 最后一条 call 行 ok=true；born/selfcheck_written=null（phase2 无逐轮 trace，不猜）",
+   "observed_calls": 210,
+   "phase": 2,
+   "rc0": true,
+   "selfcheck_written": null,
+   "source": {
+    "kind": "ledger_task",
+    "path": "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl",
+    "task": 6
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl"
+   ],
+   "task": "p2_task6_generation"
+  },
+  {
+   "born": null,
+   "cap": 76,
+   "cap_hit": false,
+   "derivation": "phase2 台账 event=call 且 task==7 的整数 seq 行数；cap=PHASE2_TASK_CAPS[7]=76；rc0=该 task 最后一条 call 行 ok=true；born/selfcheck_written=null（phase2 无逐轮 trace，不猜）",
+   "observed_calls": 74,
+   "phase": 2,
+   "rc0": true,
+   "selfcheck_written": null,
+   "source": {
+    "kind": "ledger_task",
+    "path": "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl",
+    "task": 7
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl"
+   ],
+   "task": "p2_task7_libero"
+  },
+  {
+   "born": null,
+   "cap": 140,
+   "cap_hit": false,
+   "derivation": "phase2 台账 event=call 且 task==8 的整数 seq 行数；cap=PHASE2_TASK_CAPS[8]=140；rc0=该 task 最后一条 call 行 ok=true；born/selfcheck_written=null（phase2 无逐轮 trace，不猜）",
+   "observed_calls": 128,
+   "phase": 2,
+   "rc0": true,
+   "selfcheck_written": null,
+   "source": {
+    "kind": "ledger_task",
+    "path": "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl",
+    "task": 8
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase2/quota/ledger.jsonl"
+   ],
+   "task": "p2_task8_fluid"
+  },
+  {
+   "born": null,
+   "cap": 6,
+   "cap_hit": true,
+   "derivation": "phase25 台账 task==3 的整数 seq 行数；cap=PHASE25_TASK_CAPS[3]=6；rc0=末行 ok=true；born/selfcheck_written=null（探针无逐轮 trace 落盘）",
+   "observed_calls": 6,
+   "phase": 25,
+   "rc0": true,
+   "selfcheck_written": null,
+   "source": {
+    "kind": "ledger_task",
+    "path": "/mnt/artifacts/simpraxis/phase25/quota/ledger.jsonl",
+    "task": 3
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/quota/ledger.jsonl"
+   ],
+   "task": "p25_task3_stage0_probe"
+  },
+  {
+   "born": true,
+   "cap": 16,
+   "cap_hit": true,
+   "derivation": "trace.jsonl 中 tool==__model_round__ 的行数（= 模型轮数 = 实呼数）；cap=子帽 16（half_up_subcaps(60,30)→16/9）；rc0=verdict verdict-20261030T092635Z.json engineering_verdict.per_wall.wallA.passed；born=trace 含 write_file/apply_patch；selfcheck_written=trace 含 run_cmd",
+   "observed_calls": 16,
+   "phase": 25,
+   "rc0": false,
+   "selfcheck_written": true,
+   "source": {
+    "kind": "trace_rounds",
+    "path": "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T090948Z/traces/t5-walla-20261030T090948Z/trace.jsonl"
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T090948Z/traces/t5-walla-20261030T090948Z/trace.jsonl"
+   ],
+   "task": "p25_task5_wallA_r1"
+  },
+  {
+   "born": true,
+   "cap": 9,
+   "cap_hit": true,
+   "derivation": "trace.jsonl 中 tool==__model_round__ 的行数（= 模型轮数 = 实呼数）；cap=子帽 9（half_up_subcaps(60,30)→16/9）；rc0=verdict verdict-20261030T092635Z.json engineering_verdict.per_wall.wallB.passed；born=trace 含 write_file/apply_patch；selfcheck_written=trace 含 run_cmd",
+   "observed_calls": 9,
+   "phase": 25,
+   "rc0": false,
+   "selfcheck_written": true,
+   "source": {
+    "kind": "trace_rounds",
+    "path": "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T092227Z/traces/t5-wallb-20261030T092227Z/trace.jsonl"
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T092227Z/traces/t5-wallb-20261030T092227Z/trace.jsonl"
+   ],
+   "task": "p25_task5_wallB_r1"
+  },
+  {
+   "born": true,
+   "cap": 16,
+   "cap_hit": true,
+   "derivation": "trace.jsonl 中 tool==__model_round__ 的行数（= 模型轮数 = 实呼数）；cap=子帽 16（half_up_subcaps(60,30)→16/9）；rc0=verdict verdict-20261030T134350Z.json engineering_verdict.per_wall.wallA.passed；born=trace 含 write_file/apply_patch；selfcheck_written=trace 含 run_cmd",
+   "observed_calls": 16,
+   "phase": 25,
+   "rc0": false,
+   "selfcheck_written": true,
+   "source": {
+    "kind": "trace_rounds",
+    "path": "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T133330Z/traces/t5b-walla-20261030T133330Z/trace.jsonl"
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T133330Z/traces/t5b-walla-20261030T133330Z/trace.jsonl"
+   ],
+   "task": "p25_task5_wallA_r2"
+  },
+  {
+   "born": true,
+   "cap": 9,
+   "cap_hit": true,
+   "derivation": "trace.jsonl 中 tool==__model_round__ 的行数（= 模型轮数 = 实呼数）；cap=子帽 9（half_up_subcaps(60,30)→16/9）；rc0=verdict verdict-20261030T134350Z.json engineering_verdict.per_wall.wallB.passed；born=trace 含 write_file/apply_patch；selfcheck_written=trace 含 run_cmd",
+   "observed_calls": 9,
+   "phase": 25,
+   "rc0": true,
+   "selfcheck_written": true,
+   "source": {
+    "kind": "trace_rounds",
+    "path": "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T133751Z/traces/t5b-wallb-20261030T133751Z/trace.jsonl"
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T133751Z/traces/t5b-wallb-20261030T133751Z/trace.jsonl"
+   ],
+   "task": "p25_task5_wallB_r2"
+  },
+  {
+   "born": true,
+   "cap": 28,
+   "cap_hit": false,
+   "derivation": "同一战役两墙 trace 的 __model_round__ 之和；cap=池 28（子帽 16+9 + 储备 3）；rc0=verdict verdict-20261030T092635Z.json engineering_verdict.verdict=='成立'",
+   "observed_calls": 25,
+   "phase": 25,
+   "rc0": false,
+   "selfcheck_written": true,
+   "source": {
+    "kind": "sum_traces",
+    "paths": [
+     "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T090948Z/traces/t5-walla-20261030T090948Z/trace.jsonl",
+     "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T092227Z/traces/t5-wallb-20261030T092227Z/trace.jsonl"
+    ]
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T090948Z/traces/t5-walla-20261030T090948Z/trace.jsonl",
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T092227Z/traces/t5-wallb-20261030T092227Z/trace.jsonl"
+   ],
+   "task": "p25_task5_pool_r1"
+  },
+  {
+   "born": true,
+   "cap": 28,
+   "cap_hit": false,
+   "derivation": "同一战役两墙 trace 的 __model_round__ 之和；cap=池 28（子帽 16+9 + 储备 3）；rc0=verdict verdict-20261030T134350Z.json engineering_verdict.verdict=='成立'",
+   "observed_calls": 25,
+   "phase": 25,
+   "rc0": false,
+   "selfcheck_written": true,
+   "source": {
+    "kind": "sum_traces",
+    "paths": [
+     "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T133330Z/traces/t5b-walla-20261030T133330Z/trace.jsonl",
+     "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T133751Z/traces/t5b-wallb-20261030T133751Z/trace.jsonl"
+    ]
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallA/20261030T133330Z/traces/t5b-walla-20261030T133330Z/trace.jsonl",
+    "/mnt/artifacts/simpraxis/phase25/walls/t5_freeze/runs/wallB/20261030T133751Z/traces/t5b-wallb-20261030T133751Z/trace.jsonl"
+   ],
+   "task": "p25_task5_pool_r2"
+  },
+  {
+   "born": false,
+   "cap": 2,
+   "cap_hit": false,
+   "derivation": "phase25 台账中 task==10 的整数 seq 行数（缺省 0 呼即达标）；cap=PHASE25_TASK_CAPS[10]=2；rc0=true（无需实呼）",
+   "observed_calls": 0,
+   "phase": 25,
+   "rc0": true,
+   "selfcheck_written": false,
+   "source": {
+    "kind": "ledger_task_absent",
+    "path": "/mnt/artifacts/simpraxis/phase25/quota/ledger.jsonl",
+    "task": 10
+   },
+   "source_relpaths": [
+    "/mnt/artifacts/simpraxis/phase25/quota/ledger.jsonl"
+   ],
+   "task": "p25_task10_closeout"
+  }
+ ],
+ "schema": "simpraxis.phase26.backtest_history.v1",
+ "source_roots": [
+  "/mnt/artifacts/simpraxis/phase2",
+  "/mnt/artifacts/simpraxis/phase25"
+ ]
+}
