@@ -1,0 +1,542 @@
+"""Phase 2.5 Task 10 收尾件契约测试（AC-T10-1/2/3/4/6/7；全部 0 付费）。
+
+四层（全部 hermetic：不联网、不读活库、不碰凭据内容）：
+1. 对账纯函数（closeout_reconcile）——账 seq/ts 严格性、批准件逐批对账、
+   缓存窗口口径、方法学 v2 区间落位、环境读数解析，合成输入反证；
+2. 对账硬失败——seq 不连续 / 非 Z 后缀一律 ReconcileError（绝不产出"半绿"）；
+3. 看板（build_dashboard_phase25）——测试摘要解析、AC 重数与声明比对不符即
+   DashboardError；与对账件字段不符即 DashboardError；
+4. 证据包与机判（build_evidence_pack_phase25 / check_phase25_closure）——
+   manifest 全覆盖、0700/0600 权限、符号链接只登记不复制、必需件缺失/单件
+   超限/越界删除/句柄守卫 fail-closed；证据根标签登记；AC 独立重数。
+"""
+from __future__ import annotations
+
+import json
+import os
+import stat
+from pathlib import Path
+
+import pytest
+
+from scripts.phase25 import build_dashboard_phase25 as D
+from scripts.phase25 import build_evidence_pack_phase25 as P
+from scripts.phase25 import closeout_reconcile as R
+from scripts.verification import check_phase25_closure as J
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+# ---------------------------------------------------------------------------
+# 合成件
+# ---------------------------------------------------------------------------
+
+def _call(seq: int, *, ok: bool = True, ts: str = "2026-11-02T05:00:0{}Z",
+          batch: str = "P25-B1", task: int = 3, stage: str = "coding_debug",
+          approved: int = 6, used: int = 1) -> dict:
+    return {"event": "call", "seq": seq, "ts_iso": ts.format(seq % 10),
+            "ok": ok, "batch_id": batch, "task": task, "stage": stage,
+            "batch_approved": approved, "batch_used_after": used,
+            "tokens_in": 10, "tokens_out": 2,
+            "tokens_cache_read": 0, "tokens_cache_create": 0,
+            "err": None if ok else "EmptyResponseError"}
+
+
+def _write_ledger(path: Path, rows: list[dict]) -> Path:
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n",
+                    encoding="utf-8")
+    return path
+
+
+def _synthetic_reconcile() -> dict:
+    return {
+        "schema": R.SCHEMA,
+        "ledger_path": "/x/ledger.jsonl",
+        "ledger_sha256": "a" * 64,
+        "ledger": {
+            "n_rows": 3, "n_calls": 3, "events": {"call": 3},
+            "seq_first": 1, "seq_last": 3, "seq_contiguous_from_1": True,
+            "ts_all_strict_z": True, "ts_non_z_seqs": [],
+            "ok": 2, "fail": 1,
+            "fail_rows": [{"seq": 2}],
+            "by_task": {"3": 3}, "by_stage": {"coding_debug": 3},
+            "by_batch": {"P25-B1": 3},
+            "tokens": {"tokens_in": 30, "tokens_out": 6,
+                       "tokens_cache_read": 0, "tokens_cache_create": 0},
+            "first_ts_iso": "2026-11-02T05:00:01Z",
+            "last_ts_iso": "2026-11-02T05:00:03Z",
+        },
+        "approvals": {"batches": {}, "total_approved": 3,
+                      "problems": [], "ok": True},
+        "call_cache": {"exists": True, "n_entries_total": 3,
+                       "n_entries_in_window": [],
+                       "n_entries_in_window_count": 0,
+                       "coding_hits_structurally_unobservable": True},
+        "tables": {k: {"rows": v, "dim": 768, "vector_set_sha256": "b" * 64}
+                   for k, v in (("kb_chunks", 1542), ("solution_chunks", 94),
+                                ("phase1_learnings", 44),
+                                ("phase2_learnings", 1))},
+        "methodology": {"per_task": {
+            "t3": {"actual": 3, "status": "within_p50_p90",
+                   "methodology_failure": False}},
+            "problems": [], "ok": True},
+        "env": {"containers_present": 0, "container_ids": [],
+                "vram_mib": 14, "vram_ok_le_200": True,
+                "mnt": {"total_bytes": 1, "used_bytes": 1,
+                        "avail_bytes": 1}},
+    }
+
+
+def _plan_text(pairs: list[tuple[int, int]]) -> str:
+    return "\n".join(f"- AC-T{t}-{k}：合成判据" for t, k in pairs)
+
+
+# ---------------------------------------------------------------------------
+# 1. 对账纯函数
+# ---------------------------------------------------------------------------
+
+def test_ledger_stats_counts_and_flags():
+    rows = [_call(1), _call(2, ok=False), {"event": "preflight_blocked",
+                                           "seq": None}]
+    led = R.ledger_stats(rows)
+    assert led["n_calls"] == 2 and led["n_rows"] == 3
+    assert led["events"] == {"call": 2, "preflight_blocked": 1}
+    assert led["ok"] == 1 and led["fail"] == 1
+    assert [(f["seq"], f["err"]) for f in led["fail_rows"]] == [
+        (2, "EmptyResponseError")]
+    assert led["seq_contiguous_from_1"] is True
+    assert led["ts_all_strict_z"] is True
+    assert led["by_task"] == {"3": 2}
+    assert led["by_stage"] == {"coding_debug": 2}
+    assert led["by_batch"] == {"P25-B1": 2}
+    assert led["tokens"]["tokens_in"] == 20
+
+
+def test_ledger_stats_detects_gap_and_non_z():
+    rows = [_call(1), _call(3, ts="2026-11-02T05:00:03+00:00")]
+    led = R.ledger_stats(rows)
+    assert led["seq_contiguous_from_1"] is False
+    assert led["ts_all_strict_z"] is False
+    assert led["ts_non_z_seqs"] == [3]
+
+
+def test_approvals_state_ok_and_mismatches(tmp_path):
+    adir = tmp_path / "approvals"
+    adir.mkdir()
+    (adir / "P25-B1.json").write_text(json.dumps(
+        {"batch_id": "P25-B1", "approved": 2, "task": "3",
+         "ledger_phase": 25}), encoding="utf-8")
+    calls = [_call(1, approved=2, used=1), _call(2, approved=2, used=2)]
+    st = R.approvals_state(calls, adir)
+    assert st["ok"] is True and st["total_approved"] == 2
+    assert st["batches"]["P25-B1"]["used"] == 2
+
+    (adir / "P25-B1.json").write_text(json.dumps(
+        {"batch_id": "P25-B1", "approved": 1, "task": "3",
+         "ledger_phase": 2}), encoding="utf-8")
+    st = R.approvals_state(calls, adir)
+    assert st["ok"] is False
+    assert any("ledger_phase" in p for p in st["problems"])
+    assert any("approved" in p for p in st["problems"])
+    assert any("超批准" in p for p in st["problems"])
+
+    st = R.approvals_state(calls, tmp_path / "absent")
+    assert st["ok"] is False and "缺批准件" in st["problems"][0]
+
+
+def test_cache_state_window_and_missing_dir(tmp_path):
+    first = "2026-11-02T05:00:01Z"
+    st = R.cache_state(tmp_path / "absent", first, 3)
+    assert st["exists"] is False
+    assert st["n_entries_in_window"] == []
+    assert st["coding_hits_structurally_unobservable"] is True
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "old.json").write_text(
+        json.dumps({"ts_iso": "2026-10-28T00:00:00Z"}), encoding="utf-8")
+    (cache / "new.json").write_text(
+        json.dumps({"ts_iso": "2026-11-02T06:00:00Z"}), encoding="utf-8")
+    st = R.cache_state(cache, first, 3)
+    assert st["n_entries_total"] == 2
+    assert [e["file"] for e in st["n_entries_in_window"]] == ["new.json"]
+    assert st["n_entries_in_window_count"] == 1
+
+
+def test_methodology_state_three_way(tmp_path):
+    for name, p50, p90 in (("interval_t3", 4, 6), ("interval_t5", 22, 28),
+                           ("interval_t9", 70, 101),
+                           ("interval_t10", 1, 2)):
+        (tmp_path / f"{name}.json").write_text(json.dumps(
+            {"estimate": {"p50": p50, "p90": p90}}), encoding="utf-8")
+    calls = [_call(i) for i in range(1, 6)]
+    st = R.methodology_state(calls, tmp_path)
+    assert st["per_task"]["t3"]["status"] == "within_p50_p90"
+    assert st["per_task"]["t3"]["methodology_failure"] is False
+    assert st["ok"] is True
+    # t9 未执行：不判负、不改区间
+    assert st["per_task"]["t9"]["status"] == "not_executed"
+    assert st["per_task"]["t5b"]["status"] == "not_covered_new_experiment"
+
+    st = R.methodology_state([_call(i) for i in range(1, 8)], tmp_path)
+    assert st["per_task"]["t3"]["status"] == "above_p90"
+    assert st["per_task"]["t3"]["methodology_failure"] is True
+    assert st["ok"] is False
+    assert any("方法学失败" in p for p in st["problems"])
+
+    st = R.methodology_state([_call(1)], tmp_path)
+    assert st["per_task"]["t3"]["status"] == "below_p50"
+    assert st["per_task"]["t3"]["methodology_failure"] is False
+
+    empty = tmp_path / "empty_estimates"
+    empty.mkdir()
+    st = R.methodology_state([_call(1)], empty)
+    assert st["ok"] is False
+    assert any("缺区间件" in p for p in st["problems"])
+
+
+def test_env_state_parsers():
+    st = R.env_state(
+        docker_ps=lambda: "abc\ndef\n",
+        nvidia_smi=lambda: "14\n14\n",
+        df=lambda: ("Filesystem 1B-blocks Used Available Capacity Mounted\n"
+                    "/dev/sda1 500000000 42000000 458000000 9% /mnt\n"))
+    assert st["containers_present"] == 2
+    assert st["vram_mib"] == 14 and st["vram_ok_le_200"] is True
+    assert st["mnt"]["avail_bytes"] == 458000000
+
+    st = R.env_state(docker_ps=lambda: "", nvidia_smi=lambda: "350\n",
+                     df=lambda: "")
+    assert st["containers_present"] == 0
+    assert st["vram_ok_le_200"] is False
+    assert st["mnt"] is None
+
+    st = R.env_state(docker_ps=lambda: "", nvidia_smi=lambda: "",
+                     df=lambda: "")
+    assert st["vram_mib"] is None  # 空输出按未测处理，不当 0
+
+
+def test_build_fail_closed(tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "tables_state", lambda uri: {
+        "kb_chunks": {"rows": 1542, "dim": 768, "vector_set_sha256": "c" * 64},
+        "_schema": "simpraxis.t7_2.vector_identity.v1"})
+    adir = tmp_path / "approvals"
+    adir.mkdir()
+    (adir / "P25-B1.json").write_text(json.dumps(
+        {"batch_id": "P25-B1", "approved": 2, "task": "3",
+         "ledger_phase": 25}), encoding="utf-8")
+    est = tmp_path / "est"
+    est.mkdir()
+    (est / "interval_t3.json").write_text(json.dumps(
+        {"estimate": {"p50": 1, "p90": 6}}), encoding="utf-8")
+    env = {"containers_present": 0, "container_ids": [], "vram_mib": 14,
+           "vram_ok_le_200": True, "mnt": None}
+
+    good = _write_ledger(tmp_path / "good.jsonl", [_call(1), _call(2)])
+    out = R.build(ledger_path=good, approvals_dir=adir,
+                  cache_dir=tmp_path / "cache", estimates_dir=est, env=env)
+    assert out["schema"] == R.SCHEMA
+    assert out["ledger"]["n_calls"] == 2
+    assert out["tables"]["kb_chunks"]["rows"] == 1542
+
+    gap = _write_ledger(tmp_path / "gap.jsonl", [_call(1), _call(3)])
+    with pytest.raises(R.ReconcileError, match="seq 不连续"):
+        R.build(ledger_path=gap, approvals_dir=adir,
+                cache_dir=tmp_path / "cache", estimates_dir=est, env=env)
+
+    bad_ts = _write_ledger(tmp_path / "z.jsonl",
+                           [_call(1, ts="2026-11-02T05:00:01+08:00")])
+    with pytest.raises(R.ReconcileError, match="严格 Z"):
+        R.build(ledger_path=bad_ts, approvals_dir=adir,
+                cache_dir=tmp_path / "cache", estimates_dir=est, env=env)
+
+    empty = _write_ledger(tmp_path / "empty.jsonl", [])
+    with pytest.raises(R.ReconcileError, match="为空"):
+        R.build(ledger_path=empty, approvals_dir=adir,
+                cache_dir=tmp_path / "cache", estimates_dir=est, env=env)
+
+
+# ---------------------------------------------------------------------------
+# 3. 看板
+# ---------------------------------------------------------------------------
+
+def test_tests_state_parses_summary_and_rc(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("xxxx\n1875 passed, 7 skipped, 47 deselected in 321.45s\n"
+                   "rc=0\n", encoding="utf-8")
+    st = D.tests_state(log)
+    assert st["passed"] == 1875 and st["skipped"] == 7
+    assert st["deselected"] == 47 and st["rc"] == 0
+
+    log.write_text("no summary here\n", encoding="utf-8")
+    with pytest.raises(D.DashboardError, match="找不到 pytest 摘要"):
+        D.tests_state(log)
+    assert D.tests_state(None) is None
+
+
+def test_ac_counts_match_and_mismatch(tmp_path, monkeypatch):
+    pairs = [(0, k) for k in range(1, 4)] + [(10, 1)]
+    plan = tmp_path / "plan.md"
+    plan.write_text(_plan_text(pairs + pairs), encoding="utf-8")  # 重复去重
+    monkeypatch.setattr(D, "DECLARED_AC_TOTAL", 4)
+    monkeypatch.setattr(D, "DECLARED_AC_PER_TASK",
+                        {"T0": 3, "T10": 1, **{f"T{i}": 0
+                                              for i in range(1, 10)}})
+    counts = D.ac_counts(plan)
+    assert counts["total"] == 4 and counts["matches_declared"] is True
+    assert counts["per_task"]["T0"] == 3
+
+    monkeypatch.setattr(D, "DECLARED_AC_TOTAL", 5)
+    assert D.ac_counts(plan)["matches_declared"] is False
+
+
+def test_dashboard_build_and_fail_closed(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.md"
+    pairs = [(0, k) for k in range(1, 4)]
+    plan.write_text(_plan_text(pairs), encoding="utf-8")
+    monkeypatch.setattr(D, "DECLARED_AC_TOTAL", 3)
+    monkeypatch.setattr(D, "DECLARED_AC_PER_TASK",
+                        {"T0": 3, **{f"T{i}": 0 for i in range(1, 11)}})
+    monkeypatch.setattr(J, "DECLARED_TOTAL", 3)
+    monkeypatch.setattr(J, "DECLARED_PER_TASK",
+                        {"T0": 3, **{f"T{i}": 0 for i in range(1, 11)}})
+    rec_path = tmp_path / "rec.json"
+    rec_path.write_text(json.dumps(_synthetic_reconcile()), encoding="utf-8")
+    log = tmp_path / "run.log"
+    log.write_text("100 passed, 1 skipped, 5 deselected in 9.1s\nrc=0\n",
+                   encoding="utf-8")
+
+    dash = D.build(reconcile_path=rec_path, tests_result=log,
+                   plan_path=plan)
+    assert dash["schema"] == D.SCHEMA
+    assert dash["tests"]["rc"] == 0
+    assert dash["ac_counts"]["total"] == 3
+    # 看板与对账件同口径 → 机判不看板判负
+    assert J.check_dashboard(dash, _synthetic_reconcile()) == []
+
+    with pytest.raises(D.DashboardError, match="缺收尾对账件"):
+        D.build(reconcile_path=tmp_path / "absent.json", tests_result=None,
+                plan_path=plan)
+
+    bad = _synthetic_reconcile()
+    bad["schema"] = "other"
+    rec_path.write_text(json.dumps(bad), encoding="utf-8")
+    with pytest.raises(D.DashboardError, match="schema"):
+        D.build(reconcile_path=rec_path, tests_result=None, plan_path=plan)
+
+
+def test_check_dashboard_flags_drift():
+    rec = _synthetic_reconcile()
+    good = {
+        "schema": D.SCHEMA, "tests": {"rc": 0, "passed": 10},
+        "paid_reconciliation": {
+            "ledger": {"n_calls": rec["ledger"]["n_calls"]},
+            "ledger_sha256": rec["ledger_sha256"]},
+        "lance_tables": {k: {"rows": v["rows"]}
+                         for k, v in rec["tables"].items()},
+        "ac_counts": {"total": J.DECLARED_TOTAL,
+                      "per_task": J.DECLARED_PER_TASK},
+        "tasks": [{"task": t, "status": "stopped_by_user"}
+                  for t in ("T7", "T8", "T9")],
+    }
+    assert J.check_dashboard(good, rec) == []
+    bad = json.loads(json.dumps(good))
+    bad["tests"]["rc"] = 1
+    bad["paid_reconciliation"]["ledger"]["n_calls"] = 99
+    bad["lance_tables"]["kb_chunks"]["rows"] = 1
+    bad["tasks"].append({"task": "T6", "status": "stopped_by_user"})
+    problems = J.check_dashboard(bad, rec)
+    assert len(problems) == 4
+
+
+# ---------------------------------------------------------------------------
+# 4. 证据包
+# ---------------------------------------------------------------------------
+
+def _synthetic_tree(tmp_path: Path) -> dict:
+    p25 = tmp_path / "phase25"
+    runs25 = tmp_path / "runs25"
+    repo = tmp_path / "repo"
+    p1 = tmp_path / "p1"
+    runs25.mkdir()
+    p1.mkdir()
+    for pack_rel, _root, src_rel, _logical, required in P.FILES:
+        if not required:
+            continue
+        f = p25 / src_rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"synthetic": src_rel}), encoding="utf-8")
+    for _prefix, _root, src_dir, _logical, _req, _ex in P.DIR_COPIES:
+        d = p25 / src_dir
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "evidence.json").write_text("{}", encoding="utf-8")
+    for rel in ("scripts/phase25/task6_r4_prereg.md",
+                "scripts/phase25/snapshots/task6_r4_point_predictions.json",
+                "scripts/phase25/task6_r4_reference_sim.py"):
+        f = repo / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("synthetic\n", encoding="utf-8")
+    # 环境接线：绝对且 broken 的符号链接（墙 A 只读 tour 源）
+    pyshim = p25 / "walls/t5_freeze/gate_env/pyshim"
+    pyshim.mkdir(parents=True)
+    os.symlink("/opt/libero_tour/libero", pyshim / "libero")
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    return {"p25": p25, "runs25": runs25, "repo": repo, "p1": p1,
+            "pack": p25 / "task10_milestone/evidence_pack",
+            "lance": str(tmp_path / "lancedb"), "proc": str(proc)}
+
+
+def _build(tree: dict, **kw) -> dict:
+    return P.build_pack(p25=tree["p25"], runs25=tree["runs25"],
+                        repo=tree["repo"], p1=tree["p1"], pack=tree["pack"],
+                        lance_uri=tree["lance"], proc_root=tree["proc"], **kw)
+
+
+def test_pack_build_manifest_modes_and_symlinks(tmp_path):
+    tree = _synthetic_tree(tmp_path)
+    man = _build(tree, clean=True)
+    pack = tree["pack"]
+    assert man["schema"] == P.SCHEMA and man["milestone"] == "2.5"
+    template = next(k for k in man["evidence_roots"]
+                    if k.startswith(J.REQUIRED_EVIDENCE_ROOT_TAG))
+    assert template == "@runs/phase25/<thread>/stage_<id>/"
+    assert man["evidence_roots"][template]["rows_using"] == 0
+    assert man["policy"]["symlinks_in_pack"] is False
+    assert man["policy"]["modes"]["files"] == "0600"
+    assert man["secrets_scan_hits"] == []
+
+    listed = {r["path"] for r in man["files"]}
+    actual = {str(p.relative_to(pack)) for p in pack.rglob("*")
+              if p.is_file()}
+    assert listed == actual - {"manifest.json"}, "manifest 必须逐件覆盖"
+    assert man["n_files"] == len(man["files"])
+
+    for p in pack.rglob("*"):
+        assert not p.is_symlink(), f"包内混入符号链接：{p}"
+        mode = stat.S_IMODE(p.stat().st_mode)
+        assert mode == (0o700 if p.is_dir() else 0o600), f"{p} mode={oct(mode)}"
+
+    excl = json.loads((pack / "symlinks_excluded.json").read_text())
+    inside = excl["items"][0]["symlinks_inside"][0]
+    assert inside["target"] == "/opt/libero_tour/libero"
+    assert inside["absolute"] is True and inside["copied"] is False
+    # 收尾件尚未生成 → 如实登记缺口，绝不伪造绿件
+    assert (pack / "closeout/closeout_reconcile_MISSING.json").is_file()
+    assert J.check_pack(pack)[0] == []
+
+
+def test_pack_missing_required_file_fail_closed(tmp_path):
+    tree = _synthetic_tree(tmp_path)
+    victim = tree["p25"] / P.FILES[0][2]
+    victim.unlink()
+    with pytest.raises(P.PackError, match="必需证据缺失"):
+        _build(tree, clean=True)
+
+
+def test_pack_undeclared_symlink_is_fatal(tmp_path):
+    tree = _synthetic_tree(tmp_path)
+    target = tree["p25"] / "watchdog/leak.txt"
+    os.symlink("/etc/hostname", target)
+    with pytest.raises(SystemExit, match="H-11"):
+        _build(tree, clean=True)
+
+
+def test_pack_oversize_file_fail_closed(tmp_path, monkeypatch):
+    tree = _synthetic_tree(tmp_path)
+    monkeypatch.setattr(P, "MAX_FILE_BYTES", 16)
+    with pytest.raises(P.PackError, match=">10MB"):
+        _build(tree, clean=True)
+
+
+def test_pack_clean_guard_holders_and_bounds(tmp_path, monkeypatch):
+    tree = _synthetic_tree(tmp_path)
+    monkeypatch.setattr(P.M2, "_processes_holding_paths",
+                        lambda *a, **k: [{"pid": 1, "fd": 3,
+                                          "open_path": "/x", "cmdline": "y"}])
+    with pytest.raises(P.PackError, match="拒绝 --clean"):
+        _build(tree, clean=True)
+
+    monkeypatch.undo()
+    outside = tmp_path / "outside_pack"
+    with pytest.raises(P.PackError, match="不在 phase25 根内"):
+        P.build_pack(p25=tree["p25"], runs25=tree["runs25"],
+                     repo=tree["repo"], p1=tree["p1"], pack=outside,
+                     lance_uri=tree["lance"], proc_root=tree["proc"],
+                     clean=True)
+
+
+def test_pack_secrets_scan_fail_closed(tmp_path):
+    tree = _synthetic_tree(tmp_path)
+    leak = tree["p25"] / "watchdog/alerts.jsonl"
+    # 合成密钥在运行期拼接，文件里不出现可被仓库扫描命中的字面量。
+    leak.write_text("api_key = sk-" + "e" * 48 + "\n", encoding="utf-8")
+    with pytest.raises(P.PackError, match="密钥正则"):
+        _build(tree, clean=True)
+
+
+# ---------------------------------------------------------------------------
+# 4b. 机判（独立重数 + 证据逐字节互证）
+# ---------------------------------------------------------------------------
+
+def test_judge_count_acs_independent(tmp_path, monkeypatch):
+    plan = tmp_path / "plan.md"
+    pairs = [(0, 1), (0, 2), (1, 1)]
+    plan.write_text(_plan_text(pairs), encoding="utf-8")
+    monkeypatch.setattr(J, "DECLARED_TOTAL", 3)
+    monkeypatch.setattr(J, "DECLARED_PER_TASK",
+                        {"T0": 2, "T1": 1, **{f"T{i}": 0
+                                             for i in range(2, 11)}})
+    counts, problems = J.count_acs(plan)
+    assert problems == []
+    assert counts["total"] == 3 and counts["per_task"]["T0"] == 2
+    assert len(counts["ids_sha256"]) == 64
+
+    monkeypatch.setattr(J, "DECLARED_TOTAL", 4)
+    _counts, problems = J.count_acs(plan)
+    assert any("AC 总数" in p for p in problems)
+
+
+def test_judge_science_and_pack(tmp_path, monkeypatch):
+    verdict = tmp_path / "verdict.json"
+    verdict.write_text(json.dumps({
+        "verdict": "RETAIN_R4", "retain": True,
+        "conditions": {"threshold": {"ok": True}, "no_flip_loss": {"ok": True}},
+        "point_prediction_match": {"ok": True},
+        "iter5_sha256":
+            "9a704e0081c62e1d938bd023bddc572eafac3768450f08327c7a8ad09fb59e16",
+    }), encoding="utf-8")
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", verdict)
+    rec = _synthetic_reconcile()
+    assert J.check_science(rec) == ([], [])
+
+    rec["methodology"]["per_task"]["t3"]["methodology_failure"] = True
+    problems, _gaps = J.check_science(rec)
+    assert any("方法学失败" in p for p in problems)
+
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    (pack / "a.txt").write_text("hello\n", encoding="utf-8")
+    man = {"git_commit": "abc",
+           "evidence_roots": {"@runs/phase25/<thread>/stage_<id>/": {
+               "tag": "@runs/", "subdir": "phase25", "rows_using": 0}},
+           "files": [{"path": "a.txt",
+                      "sha256": J._sha256(pack / "a.txt")}]}
+    (pack / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    assert J.check_pack(pack)[0] == []
+
+    man["evidence_roots"] = {"@runs/": {}}
+    man["files"][0]["sha256"] = "0" * 64
+    (pack / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    problems, _gaps = J.check_pack(pack)
+    assert any("evidence_roots" in p for p in problems)
+    assert any("sha256 不符" in p for p in problems)
+
+
+def test_judge_report_without_artifacts_is_not_green(tmp_path):
+    report = J.build_report(reconcile=tmp_path / "no_rec.json",
+                            dashboard=tmp_path / "no_dash.json",
+                            pack=tmp_path / "no_pack")
+    assert report["ok"] is False
+    assert report["schema"] == "simpraxis.phase25.closure_judge.v1"
+    assert any("缺收尾对账件" in p for p in report["problems"])
