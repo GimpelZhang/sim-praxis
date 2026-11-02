@@ -642,20 +642,40 @@ def _write_manifest(pack: Path, **override) -> dict:
     return man
 
 
+def _verdict_in(pack: Path) -> Path:
+    return (pack / "task6_stage_b/window" / J._STAGE_B_VERDICT.parent.name
+            / "task6_r4_verdict.json")
+
+
 def test_judge_science_and_pack(tmp_path, monkeypatch):
-    # 包外兜底路径置空：本用例只认包内副本（证据自足）
+    # 包外活件置空：判决件只认包内副本（证据自足，无包外兜底）
     monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
     rec = _synthetic_reconcile()
     pack = _minimal_pack(tmp_path)
     assert J.check_science(rec, pack) == ([], [])
-    # 包内缺副本且包外活件也不在 → 缺证即问题，不许静默跳过
+    # 包内缺副本即问题——即使包外活件存在也不许兜底
+    live = tmp_path / "live.json"
+    live.write_text(json.dumps(_verdict_payload()), encoding="utf-8")
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", live)
     problems, _gaps = J.check_science(rec, tmp_path / "no_pack")
-    assert any("判决件缺失" in p for p in problems)
+    assert any("包内缺 T6 Stage B 判决件" in p for p in problems)
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
 
     rec["methodology"]["per_task"]["t3"]["methodology_failure"] = True
     problems, _gaps = J.check_science(rec, pack)
     assert any("方法学失败" in p for p in problems)
     rec["methodology"]["per_task"]["t3"]["methodology_failure"] = False
+
+    # 包内副本与包外活件逐字节一致 → 绿；不一致 → 问题（R3 口径 (b)）
+    live.write_text(_verdict_in(pack).read_text(encoding="utf-8"),
+                    encoding="utf-8")
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", live)
+    assert J.check_science(rec, pack) == ([], [])
+    live.write_text(json.dumps(_verdict_payload(), indent=1) + "\n",
+                    encoding="utf-8")     # 语义等价、字节不同
+    problems, _gaps = J.check_science(rec, pack)
+    assert any("逐字节不一致" in p for p in problems)
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
 
     # 五条件必须恰 5 键、每条 ok 为 true，且预注册数值逐项相符
     for mutate, needle in (
@@ -682,12 +702,11 @@ def test_judge_science_and_pack(tmp_path, monkeypatch):
     ):
         v = _verdict_payload()
         mutate(v)
-        bad = tmp_path / "bad_verdict.json"
-        bad.write_text(json.dumps(v), encoding="utf-8")
-        monkeypatch.setattr(J, "_STAGE_B_VERDICT", bad)
-        problems, _gaps = J.check_science(rec, tmp_path / "no_pack")
+        _verdict_in(pack).write_text(json.dumps(v), encoding="utf-8")
+        problems, _gaps = J.check_science(rec, pack)
         assert any(needle in p for p in problems), (needle, problems)
-    monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
+    _verdict_in(pack).write_text(json.dumps(_verdict_payload()),
+                                 encoding="utf-8")
 
     assert J.check_pack(pack)[0] == []
 
@@ -808,7 +827,7 @@ def test_judge_pack_requires_full_suite_log(tmp_path):
         ("# cmd: pytest tests/milestone25 -q\n" + good.split("\n", 1)[1],
          "两排除项"),
         (good.replace("rc=0", "rc=1"), "rc 行应恰为 rc=0"),
-        (_full_suite_log(passed=25), "passed 摘要异常"),
+        (_full_suite_log(passed=25), "passed=25 < 全套下限"),
         (good.replace(", 50 deselected", ""), "缺 deselected 计数"),
         (good + "# cmd: pytest tests -q\n", "`# cmd:` 行应恰 1 条"),
     ]
@@ -824,6 +843,49 @@ def test_judge_pack_requires_full_suite_log(tmp_path):
     _harden(pack)
     problems, _gaps = J.check_pack(pack)
     assert any("缺收尾冷跑日志" in p for p in problems)
+
+
+def test_judge_tests_cross_two_readers(tmp_path):
+    """R3 口径 (a)：看板 tests 段必须与包内冻结日志逐字段相等。
+
+    两个独立读者各自成立还不够——看板被喂了另一份日志时，passed/命令口径
+    会分叉，这一层专抓该情形；deselected 下限挡住 `-k` 单排除的子集跑。
+    """
+    pack = _minimal_pack(tmp_path)
+    dash = {"tests": {"command": _FULL_CMD, "passed": 2044, "skipped": 7,
+                      "deselected": 50, "rc": 0,
+                      "summary": "2044 passed, 7 skipped, 50 deselected "
+                                 "in 1.0s"}}
+    assert J.check_tests_cross(pack, dash) == []
+
+    for key, value, needle in (
+        ("command", 'pytest tests -q -k "not paid and not kb_integration"',
+         "tests.command"),
+        ("passed", 1875, "tests.passed"),
+        ("skipped", 1, "tests.skipped"),
+        ("deselected", 47, "tests.deselected"),
+        ("rc", 1, "tests.rc"),
+        ("summary", "1875 passed, 7 skipped, 47 deselected in 1.0s",
+         "tests.summary"),
+    ):
+        bad = json.loads(json.dumps(dash))
+        bad["tests"][key] = value
+        assert any(needle in p for p in J.check_tests_cross(pack, bad)), key
+
+    # tests=null / 日志缺失：各自检查已记问题，此处不重复报
+    assert J.check_tests_cross(pack, {"tests": None}) == []
+    (pack / "task10_closeout/task10_fullsuite.log").unlink()
+    assert J.check_tests_cross(pack, dash) == []
+
+
+def test_judge_suite_log_deselected_floor(tmp_path):
+    """`-k "not test_04"` 单排除只有个位数去选——收尾必须是两排除全套。"""
+    fields, problems = J.parse_suite_log(_full_suite_log())
+    assert fields["deselected"] == 50 and problems == []
+    single = ("# cmd: pytest tests -q -k \"not test_04\"\n"
+              "2044 passed, 7 skipped, 8 deselected in 1.0s\nrc=0\n")
+    _fields, problems = J.parse_suite_log(single)
+    assert any("deselected=8" in p for p in problems)
 
 
 def test_judge_dashboard_asserts_suite_command(tmp_path):
@@ -900,6 +962,7 @@ def test_judge_stage_b_condition_type_guards(tmp_path, monkeypatch):
     """评审 LOW-2：非对象条件/明细、bool 冒充数值一律判负，不许 .get 崩或放行。"""
     monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
     rec = _synthetic_reconcile()
+    pack = _minimal_pack(tmp_path)
     for mutate, needle in (
         (lambda v: v["conditions"].update({"5_engineering": True}),
          "不是对象"),
@@ -916,12 +979,9 @@ def test_judge_stage_b_condition_type_guards(tmp_path, monkeypatch):
     ):
         v = _verdict_payload()
         mutate(v)
-        bad = tmp_path / "bad_verdict.json"
-        bad.write_text(json.dumps(v), encoding="utf-8")
-        monkeypatch.setattr(J, "_STAGE_B_VERDICT", bad)
-        problems, _gaps = J.check_science(rec, tmp_path / "no_pack")
+        _verdict_in(pack).write_text(json.dumps(v), encoding="utf-8")
+        problems, _gaps = J.check_science(rec, pack)
         assert any(needle in p for p in problems), (needle, problems)
-        monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
 
 
 def test_judge_pack_flags_non_regular_files(tmp_path):

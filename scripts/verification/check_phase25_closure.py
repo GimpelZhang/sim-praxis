@@ -13,16 +13,20 @@ rc≠0；证据缺口如实挂牌 ``provenance_limited`` 并**不计入通过**�
    批准件逐批齐备且用量不超批、phase25 窗口内缓存条目 0、容器存量 0、
    显存 ≤200 MiB 且有合法读数；
 3. **数据层**（AC-T10-3）：四表存在且行数/维度与对账件一致，kb 表 1542 不动；
-4. **科学结论**（AC-T10-7 三态段）：T6 Stage B 判决件 ``verdict=RETAIN_R4``
-   与 ``retain=true``、五条件全 true、点预测逐案相符；Stage A 回滚后嵌入配置
-   为 mpnet/768；T7/T8/T9 状态为 ``stopped_by_user``（用户裁决停，不虚报完成）；
+4. **科学结论**（AC-T10-7 三态段）：T6 Stage B 判决件**只认包内副本**
+   （``verdict=RETAIN_R4`` 与 ``retain=true``、五条件全 true、点预测逐案相符；
+   副本与包外活件逐字节不一致即 problem——包外兜底会让缺科学证据的包判绿）；
+   Stage A 回滚后嵌入配置为 mpnet/768；T7/T8/T9 状态为 ``stopped_by_user``
+   （用户裁决停，不虚报完成）；
 5. **证据包**（AC-T10-4）：``manifest.json`` 存在、``git_commit`` 非空、
    ``evidence_roots`` 注册 ``@runs/phase25/<thread>/stage_<id>/`` 标签、
    逐件 sha256 复算一致、无 >10MB 文件、密钥双扫 0 命中、包内无符号链接、
    无非普通文件（FIFO/socket/设备）；
 6. **交叉互证**：看板 ``git.commit`` 必须等于 ``manifest.git_commit``（同一
-   代码状态出证）；三签的 verifier 签若带 ``recomputed`` 块，其 AC 数/账数/
-   四表行数/批准总数必须与机判自身重算逐项相等。
+   代码状态出证）；看板 ``tests`` 段与包内冻结日志逐字段相等（命令口径/规模/
+   rc/摘要），且两侧都要求恰 1 条 ``# cmd:`` 与恰 1 条 ``rc=``；三签的 verifier
+   签必须带 ``recomputed`` 块，其 AC 数/账数/四表行数/批准总数与机判自身重算
+   逐项相等。
 
 用法：
   python scripts/verification/check_phase25_closure.py [--report OUT.json]
@@ -236,28 +240,24 @@ def check_science(rec: dict,
     for task, v in method.items():
         if v.get("methodology_failure"):
             problems.append(f"{task} 实际超 P90（方法学失败结论须入 Complete）")
-    # T6 Stage B 判决件：优先读包内已入 sha256 台账的副本（证据自足），
-    # 包外活件只作缺口兜底——不能只凭包外活件判绿。
+    # T6 Stage B 判决件：**只认包内副本**（证据自足；R3 口径 (b)：包外活件
+    # 兜底会让「包里缺科学证据」的包判绿）。副本与活件并存时逐字节比对，
+    # 不一致＝问题（无法判断哪份是当次结论），不是缺口。
     verdict_path = None
-    if pack_dir is not None:
+    if pack_dir is None:
+        problems.append("未指定证据包，无法核对 T6 Stage B 判决件")
+    else:
         cand = (pack_dir / "task6_stage_b" / "window"
                 / _STAGE_B_VERDICT.parent.name / "task6_r4_verdict.json")
-        if cand.is_file():
+        if not cand.is_file():
+            problems.append(f"包内缺 T6 Stage B 判决件副本：{cand}")
+        else:
             verdict_path = cand
             if _STAGE_B_VERDICT.is_file() and \
                     cand.read_bytes() != _STAGE_B_VERDICT.read_bytes():
-                gaps.append({"what": "T6 Stage B 判决件（包内副本）",
-                             "path": str(cand),
-                             "why": "与包外活件逐字节不一致"})
-    if verdict_path is None:
-        if not _STAGE_B_VERDICT.is_file():
-            # 科学结论无任何可读判决件 → 不得判绿（缺证 = 问题，不是缺口）
-            problems.append(f"T6 Stage B 判决件缺失：{_STAGE_B_VERDICT}")
-        else:
-            verdict_path = _STAGE_B_VERDICT
-            gaps.append({"what": "T6 Stage B 判决件（包外活件）",
-                         "path": str(_STAGE_B_VERDICT),
-                         "why": "包内未提供副本，按包外活件判定"})
+                problems.append(
+                    "T6 Stage B 判决件：包内副本与包外活件逐字节不一致"
+                    "（无法判断哪份是当次科学结论）")
     if verdict_path is not None:
         v = json.loads(verdict_path.read_text(encoding="utf-8"))
         if v.get("verdict") != "RETAIN_R4" or v.get("retain") is not True:
@@ -286,7 +286,75 @@ def check_science(rec: dict,
 
 # AC-T10-1：收尾全套必须是「两排除」命令，且规模不得塌到子集。
 SUITE_FILTERS = ("not test_04", "not paid and not kb_integration")
+# 规模下限是「跑成子集」的兜底 tripwire（R3 口径 (a)）：Task 10 收尾实测
+# 2041 passed / 50 deselected（2026-11-02）；每次里程碑由人签上调，**不从日志
+# 反推下限**（反推＝循环论证）。真正的硬约束是下面 parse_suite_log 与看板
+# tests 段的逐字段互证。
 MIN_FULL_SUITE_PASSED = 2000
+MIN_FULL_SUITE_DESELECTED = 40
+
+
+def parse_suite_log(text: str) -> "tuple[dict | None, list[str]]":
+    """解析冻结冷跑日志（机判对日志的唯一口径，看板另有自己的一套实现）。
+
+    要求：恰 1 条 ``# cmd:``（含两排除项）、恰 1 条 ``^rc=(\\d+)$``、至少一条
+    pytest 摘要（取最后一条）、rc=0、passed/deselected 有下限。
+    """
+    problems: list[str] = []
+    cmds = re.findall(r"^# cmd: (.+)$", text, re.M)
+    if len(cmds) != 1:
+        problems.append(f"冷跑日志 `# cmd:` 行应恰 1 条，实得 {len(cmds)}")
+    cmd = cmds[0].strip() if len(cmds) == 1 else ""
+    if cmd:
+        miss = [f for f in SUITE_FILTERS if f not in cmd]
+        if miss:
+            problems.append(f"冷跑日志命令未含收尾两排除项 {miss}")
+    rcs = re.findall(r"^rc=(\d+)$", text, re.M)
+    if rcs != ["0"]:
+        problems.append(f"冷跑日志 rc 行应恰为 rc=0：{rcs}")
+    lines = [ln.strip() for ln in text.splitlines()
+             if re.match(r"^\d+ passed", ln.strip())]
+    if not lines:
+        problems.append("冷跑日志缺 pytest 摘要行（不可判规模与去选数）")
+        return None, problems
+    summary = lines[-1]
+    m = re.match(r"^(\d+) passed(?:, (\d+) skipped)?"
+                 r"(?:, (\d+) deselected)?", summary)
+    assert m is not None                       # 由过滤正则保证
+    got = {"command": cmd, "passed": int(m.group(1)),
+           "skipped": int(m.group(2) or 0),
+           "deselected": int(m.group(3) or 0),
+           "rc": int(rcs[0]) if rcs == ["0"] else None,
+           "summary": summary}
+    if got["passed"] < MIN_FULL_SUITE_PASSED:
+        problems.append(
+            f"冷跑日志 passed={got['passed']} < 全套下限 "
+            f"{MIN_FULL_SUITE_PASSED}")
+    if got["deselected"] < MIN_FULL_SUITE_DESELECTED:
+        problems.append(
+            f"冷跑日志 deselected={got['deselected']} < 收尾下限 "
+            f"{MIN_FULL_SUITE_DESELECTED}（-k 单排除只有个位数）")
+    return got, problems
+
+
+def check_tests_cross(pack_dir: Path, dash: dict) -> list[str]:
+    """R3 口径 (a)：两个独立读者（看板 tests 段 vs 包内冻结日志）逐字段互证。
+
+    只看板、只包内日志各自成立还不够——看板被喂了另一份日志时，两边的
+    passed/命令口径会分叉，这一层专抓该情形。
+    """
+    log_path = pack_dir / "task10_closeout" / "task10_fullsuite.log"
+    t = dash.get("tests")
+    if not log_path.is_file() or not isinstance(t, dict):
+        return []              # 缺日志/看板 tests=null 已由各自检查记问题
+    fields, _problems = parse_suite_log(
+        log_path.read_text(encoding="utf-8", errors="replace"))
+    if fields is None:
+        return []
+    return [f"看板 tests.{k}={t.get(k)!r} ≠ 包内冻结日志 {fields[k]!r}"
+            for k in ("command", "passed", "skipped", "deselected", "rc",
+                      "summary")
+            if t.get(k) != fields[k]]
 
 
 def check_dashboard(dash: dict, rec: dict) -> list[str]:
@@ -302,8 +370,10 @@ def check_dashboard(dash: dict, rec: dict) -> list[str]:
         if missing:
             problems.append(
                 f"看板 tests.command 未含收尾两排除项 {missing}：{cmd!r}")
-        if int(t.get("deselected") or 0) <= 0:
-            problems.append("看板 tests.deselected=0（不像两排除全套）")
+        if int(t.get("deselected") or 0) < MIN_FULL_SUITE_DESELECTED:
+            problems.append(
+                f"看板 tests.deselected={t.get('deselected')} < 收尾下限 "
+                f"{MIN_FULL_SUITE_DESELECTED}（-k 单排除只有个位数）")
         if int(t.get("passed") or 0) < MIN_FULL_SUITE_PASSED:
             problems.append(
                 f"看板 tests.passed={t.get('passed')} < 全套下限 "
@@ -404,22 +474,10 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
     if not log_path.is_file():
         problems.append("包内缺收尾冷跑日志 task10_closeout/task10_fullsuite.log")
     else:
-        text = log_path.read_text(encoding="utf-8", errors="replace")
-        cmds = re.findall(r"^# cmd: (.+)$", text, re.M)
-        if len(cmds) != 1:
-            problems.append(f"冷跑日志 `# cmd:` 行应恰 1 条，实得 {len(cmds)}")
-        else:
-            miss = [f for f in SUITE_FILTERS if f not in cmds[0]]
-            if miss:
-                problems.append(f"冷跑日志命令未含收尾两排除项 {miss}")
-        rcs = re.findall(r"^rc=(\d+)$", text, re.M)
-        if rcs != ["0"]:
-            problems.append(f"冷跑日志 rc 行应恰为 rc=0：{rcs}")
-        passed = re.findall(r"^(\d+) passed", text, re.M)
-        if not passed or int(passed[-1]) < MIN_FULL_SUITE_PASSED:
-            problems.append(
-                f"冷跑日志 passed 摘要异常：{passed[-1:] or None}")
-        if not re.search(r"^\d+ passed.*\bdeselected\b", text, re.M):
+        _fields, log_problems = parse_suite_log(
+            log_path.read_text(encoding="utf-8", errors="replace"))
+        problems += log_problems
+        if _fields is not None and _fields["deselected"] == 0:
             problems.append("冷跑日志摘要缺 deselected 计数")
     # T7/T8/T9 用户停做：包内挂牌 NOT_EXECUTED，机判按证据缺口登记
     # （provenance_limited，不计入通过）；缺失挂牌本身才算问题。
@@ -649,6 +707,7 @@ def build_report(*, reconcile: Path, dashboard: Path, pack: Path,
         problems += check_verifier_recomputed(pack, ac, rec)
     if dash is not None:
         problems += check_commit_binding(dash, pack)
+        problems += check_tests_cross(pack, dash)
     problems += check_git_author()
     return {
         "schema": "simpraxis.phase25.closure_judge.v1",
