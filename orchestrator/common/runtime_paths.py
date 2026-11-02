@@ -11,8 +11,10 @@ Phase 2 起台账类路径（ledger/counters/approvals）统一由本模块解�
   $SIMPRAXIS_PHASE25_ROOT/quota/ledger.jsonl     # Phase 2.5 独立新账（空账，seq 从 0）
   $SIMPRAXIS_PHASE2_ROOT/runs/                   # Phase 2 实跑产物根
   $SIMPRAXIS_PHASE25_ROOT/runs/                  # Phase 2.5 实跑产物根
+  $SIMPRAXIS_PHASE26_ROOT/runs/                  # Phase 2.6 实跑产物根
   $SIMPRAXIS_GATEWAY_STATE/quota_pause.json      # Phase1/2 熔断态（沿用，不随账分根）
   $SIMPRAXIS_PHASE25_ROOT/quota/gateway_state/   # Phase 2.5 独立熔断态目录
+  $SIMPRAXIS_PHASE26_ROOT/quota/gateway_state/   # Phase 2.6 独立熔断态目录
 
 未导出 SIMPRAXIS_PHASE2_ROOT/SIMPRAXIS_PHASE25_ROOT 时回退到 phase1 根的同级
 ``phase2/``、``phase25/``：生产默认布局即
@@ -23,6 +25,11 @@ SIMPRAXIS_PHASE1_ROOT 指向临时根，新账自动落在临时根兄弟下，�
 Phase 2.5（Task0，D-1）：Phase 1/2 账【封存只读】——新代码写账一律走
 phase25_ledger_path()；assert_not_sealed_ledger()/open_ledger_append() 是
 唯一追加写入口，对 Phase 1/2 账路径直接 SealedLedgerError。
+
+Phase 2.6（Task0，D0-2）：封存集扩为 {phase1, phase2, phase25}，三账【永不再写】；
+新代码写账一律走 phase26_ledger_path()（open_ledger_append 的缺省目标亦已换期）。
+四根隔离算法只保有一份（_assert_roots_isolated，D0-3），phase25/phase26 两侧都是
+薄包装。
 """
 from __future__ import annotations
 
@@ -36,10 +43,11 @@ _GATEWAY_STATE_ENV = "SIMPRAXIS_GATEWAY_STATE"
 _PHASE1_ENV = "SIMPRAXIS_PHASE1_ROOT"
 _PHASE2_ENV = "SIMPRAXIS_PHASE2_ROOT"
 _PHASE25_ENV = "SIMPRAXIS_PHASE25_ROOT"
+_PHASE26_ENV = "SIMPRAXIS_PHASE26_ROOT"
 
 
 class SealedLedgerError(PermissionError):
-    """封存台账被以写方式打开（Phase 1/2 账只读，Phase 2.5 起一律 phase25 新账）。"""
+    """封存台账被以写方式打开（Phase 1/2/2.5 账只读，Phase 2.6 起一律 phase26 新账）。"""
 
 
 class PhaseRootAliasedError(PermissionError):
@@ -53,18 +61,21 @@ class PhaseRootAliasedError(PermissionError):
     """
 
 
-def assert_phase25_roots_isolated() -> None:
-    """phase25/phase2/phase1 三根必须两两互异且互不嵌套，否则 fail-fast。
+def _assert_roots_isolated(active: Path, sealed: "tuple[Path, ...]", *,
+                           label: str, message: str) -> None:
+    """活跃根与全部封存根两两互异且互不嵌套，否则 fail-fast（唯一实现，D0-3）。
 
     路径按调用时点 env 做 resolve(strict=False)（不存在也归一，已存在组件
     中的符号链接被解析），与 sealed_ledger_paths() 同一口径；嵌套判定用
     Path.relative_to（相等或一方为另一方后代即拒，故
-    PHASE25_ROOT=$PHASE2_ROOT/quota 这类嵌套同样被拦）。
+    PHASE25_ROOT=$PHASE2_ROOT/quota 这类嵌套同样被拦）。**封存根之间也两两
+    互查**——保留相位 2.5 原实现对 (p25,p2,p1) 全配对的检查强度。
+
+    label/message 由各期包装逐字给定：phase25 的报错文案必须与相位 2.5
+    时点逐字节相同（历史断言与运维手册引用了它）。
     """
-    p1 = phase1_root().resolve(strict=False)
-    p2 = phase2_root().resolve(strict=False)
-    p25 = phase25_root().resolve(strict=False)
-    roots = (p25, p2, p1)
+    roots = (Path(active).resolve(strict=False),
+             *(Path(p).resolve(strict=False) for p in sealed))
     aliased = False
     for i, a in enumerate(roots):
         for b in roots[i + 1:]:
@@ -84,9 +95,33 @@ def assert_phase25_roots_isolated() -> None:
             else:
                 aliased = True
     if aliased:
-        raise PhaseRootAliasedError(
-            "SIMPRAXIS_PHASE25_ROOT 必须与 Phase 1/2 根互异且互不嵌套"
-            f"（解析后）：phase1={p1} phase2={p2} phase25={p25}")
+        raise PhaseRootAliasedError(f"{label} {message}")
+
+
+def assert_phase25_roots_isolated() -> None:
+    """phase25/phase2/phase1 三根必须两两互异且互不嵌套，否则 fail-fast。"""
+    p1 = phase1_root().resolve(strict=False)
+    p2 = phase2_root().resolve(strict=False)
+    p25 = phase25_root().resolve(strict=False)
+    _assert_roots_isolated(
+        phase25_root(), (phase2_root(), phase1_root()),
+        label="SIMPRAXIS_PHASE25_ROOT",
+        message=("必须与 Phase 1/2 根互异且互不嵌套"
+                 f"（解析后）：phase1={p1} phase2={p2} phase25={p25}"))
+
+
+def assert_phase26_roots_isolated() -> None:
+    """phase26 与三份封存根（phase1/phase2/phase25）两两互异且互不嵌套。"""
+    p1 = phase1_root().resolve(strict=False)
+    p2 = phase2_root().resolve(strict=False)
+    p25 = phase25_root().resolve(strict=False)
+    p26 = phase26_root().resolve(strict=False)
+    _assert_roots_isolated(
+        phase26_root(), (phase1_root(), phase2_root(), phase25_root()),
+        label="SIMPRAXIS_PHASE26_ROOT",
+        message=("必须与 Phase 1/2/2.5 封存根互异且互不嵌套"
+                 f"（解析后）：phase1={p1} phase2={p2} phase25={p25} "
+                 f"phase26={p26}"))
 
 
 def phase1_root() -> Path:
@@ -162,6 +197,45 @@ def phase25_gateway_state_path() -> Path:
     return phase25_gateway_state_dir() / "quota_pause.json"
 
 
+# ---- Phase 2.6 路径族（D0-1 复制而非泛化；env 缺省回退兄弟 phase26/） ----
+
+def phase26_root() -> Path:
+    """Phase 2.6 根：显式 env 优先；否则取 phase1 根同级 ``phase26/``（不建目录）。"""
+    root = os.environ.get(_PHASE26_ENV)
+    if root:
+        return Path(root)
+    return phase1_root().parent / "phase26"
+
+
+def phase26_runs_root() -> Path:
+    return phase26_root() / "runs"
+
+
+def phase26_quota_dir() -> Path:
+    return ensure_private_dir(phase26_root() / "quota")
+
+
+def phase26_ledger_path() -> Path:
+    return phase26_quota_dir() / "ledger.jsonl"
+
+
+def phase26_counters_path() -> Path:
+    return phase26_quota_dir() / "counters.json"
+
+
+def phase26_approvals_dir() -> Path:
+    return ensure_private_dir(phase26_quota_dir() / "approvals")
+
+
+def phase26_gateway_state_dir() -> Path:
+    # Phase 2.6 熔断态随本账命名空间隔离（不读不写全局 SIMPRAXIS_GATEWAY_STATE）。
+    return ensure_private_dir(phase26_root() / "quota" / "gateway_state")
+
+
+def phase26_gateway_state_path() -> Path:
+    return phase26_gateway_state_dir() / "quota_pause.json"
+
+
 # ---- 熔断态（沿用独立 env/默认根，Task0 只统一入口、不改 env 契约） ----
 
 def gateway_state_dir() -> Path:
@@ -180,34 +254,38 @@ def phase1_ledger_path() -> Path:
 
 
 def sealed_ledger_paths() -> frozenset[Path]:
-    """Phase 1/2 封存账的绝对路径集（resolve 归一；strict=False 允许账体不在场）。
+    """Phase 1/2/2.5 封存账的绝对路径集（resolve 归一；strict=False 允许账体不在场）。
 
-    路径以【调用时点】env 解析为准：测试把 SIMPRAXIS_PHASE{1,2}_ROOT 指向
+    路径以【调用时点】env 解析为准：测试把 SIMPRAXIS_PHASE{1,2,25}_ROOT 指向
     临时根时，守卫随之指向临时根里的账，绝不误判真实 /mnt 账。
+
+    Phase 2.6（D0-2）：phase25 已结案封存，本集扩为三份；任何写入一律走
+    phase26_ledger_path()。
     """
     return frozenset({
         phase1_ledger_path().resolve(strict=False),
         phase2_ledger_path().resolve(strict=False),
+        phase25_ledger_path().resolve(strict=False),
     })
 
 
 def assert_not_sealed_ledger(path: "str | Path") -> Path:
-    """写打开前置守卫：目标解析到 Phase 1/2 封存账即抛 SealedLedgerError。"""
+    """写打开前置守卫：目标解析到 Phase 1/2/2.5 封存账即抛 SealedLedgerError。"""
     p = Path(path)
     if p.resolve(strict=False) in sealed_ledger_paths():
         raise SealedLedgerError(
-            f"封存台账禁止以写方式打开：{p}（Phase 1/2 账只读；"
-            "Phase 2.5 新写账必须走 phase25_ledger_path()）")
+            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5 封存账只读；"
+            "Phase 2.6 新写账必须走 phase26_ledger_path()）")
     return p
 
 
 def open_ledger_append(path: "str | Path | None" = None):
     """台账追加写唯一入口：先过封存守卫，再以 "a" 打开，文件权限收敛 0600。
 
-    缺省目标是 phase25 新账；调用方显式传 path 时同样先过封存守卫，
-    因此任何经本入口的写都不可能落到 Phase 1/2 封存账。
+    缺省目标是 phase26 新账；调用方显式传 path 时同样先过封存守卫，
+    因此任何经本入口的写都不可能落到 Phase 1/2/2.5 封存账。
     """
-    target = path if path is not None else phase25_ledger_path()
+    target = path if path is not None else phase26_ledger_path()
     p = assert_not_sealed_ledger(target)
     ensure_private_dir(p.parent)
     fh = open(p, "a", encoding="utf-8")  # noqa: SIM115 —— 调用方负责关闭

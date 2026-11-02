@@ -61,24 +61,31 @@ class AgenticWiringError(ValueError):
     """出生契约装配失败（授予串非法等）：fail-closed，不进内环。"""
 
 
-def build_seq_provider() -> "Callable[[], int | None]":
+def build_seq_provider(
+        *, ledger: "QuotaLedger | None" = None) -> "Callable[[], int | None]":
     """M5（2026-10-30 评审）：构造只读 seq 读取器。
 
     语义＝模型轮 int|null：实呼轮取该轮真实 ledger 整数 seq（含网关侧
     已记 ok=false 的 EmptyResponseError 行——seq 已被账套占用），缓存命中
     轮由 GatewayModel 显式传 null。读取面复用既有只读件，不新增 ledger
     接口、不改 router：``current_billing()`` 的 task/batch_id/thread_id
-    身份 + 模块级 ``call_lines/read_lines`` 过滤 phase25 账整数 seq 行取
+    身份 + 模块级 ``call_lines/read_lines`` 过滤本命名空间账整数 seq 行取
     max。无 billing 上下文时零 IO 直接返 None（hermetic 测试路径）。
+
+    Phase 2.6（T0.4-G）：命名空间由构造参数显式给定，缺省 phase26 新账。
+    写死 phase25 会造成**静默证据腐化**——实呼已写进 phase26 账，而读取器
+    仍盯封存的 phase25 账 ⇒ 恒返 None，而 trace 里 ``seq=null`` 的既定语义
+    是「全缓存命中」，于是每一次真实付费调用都会被记成缓存命中。
     """
     holder: dict[str, QuotaLedger] = {}
+    explicit = ledger
 
     def _read_seq() -> int | None:
         billing = current_billing()
         if billing is None:
             return None
         if "ledger" not in holder:
-            holder["ledger"] = QuotaLedger.phase25()  # 只借命名空间解析账路径
+            holder["ledger"] = explicit or QuotaLedger.phase26()  # 只借命名空间解析账路径
         ledger = holder["ledger"]
         rows = call_lines(read_lines(ledger.ns.ledger_path_fn()))
         same_identity = [

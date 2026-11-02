@@ -59,6 +59,7 @@ from orchestrator.common.runtime_paths import (
     gateway_state_dir as router_state_dir,  # 统一入口：暂停态目录
     gateway_state_path as router_state_path,
     assert_phase25_roots_isolated,  # M-B：三根别名/嵌套 fail-fast
+    assert_phase26_roots_isolated,  # Phase 2.6：四根互异互斥 fail-fast
     open_ledger_append,  # Phase 2.5：带封存守卫的唯一追加写入口
     phase1_root as phase1_root,  # 转出：外部只读使用者取 Phase 1 封存账根
     phase25_approvals_dir,
@@ -67,6 +68,12 @@ from orchestrator.common.runtime_paths import (
     phase25_gateway_state_path,
     phase25_ledger_path,
     phase25_quota_dir,
+    phase26_approvals_dir,
+    phase26_counters_path,
+    phase26_gateway_state_dir,
+    phase26_gateway_state_path,
+    phase26_ledger_path,
+    phase26_quota_dir,
     phase2_approvals_dir,
     phase2_counters_path,
     phase2_ledger_path,
@@ -503,6 +510,23 @@ PHASE25_HARD_CAP = sum(PHASE25_TASK_CAPS.values())
 # 任务帽/批次帽/全局帽三道硬计数门不变。
 PHASE25_NORMAL_BUDGET = PHASE25_HARD_CAP
 
+# ---- Phase 2.6：D0-1 独立新账（照 PHASE25 复制，不泛化；两期绝不并表） ----
+LEDGER_PHASE26 = 26       # phase26 批准件/恢复流水的 phase 断言标记
+# 计划 §6.1 四个非零 Cap：T4=28 / T7=16 / T8=70 / T9=2。
+# **不列 Cap=0 的 Task**：preflight 第 4 道闸取 `cap = ns.task_caps.get(task)`，
+# 把 0 写进映射会让该任务第一条预检行就撞帽（含 AC-T0-2 的开账行）。0 付费
+# 任务由第 2 道闸（批次批准件必须存在）真正兜住。注意 PHASE25_TASK_CAPS 的
+# {10: 2} 是先例——0 付费任务也可以有帽；真实规则是「Cap=0 ⇒ 不设帽」。
+PHASE26_TASK_CAPS = types.MappingProxyType({4: 28, 7: 16, 8: 70, 9: 2})
+# 全案硬熔断（A-14）。**不写成 sum(PHASE26_TASK_CAPS.values())**（那是 116）：
+# 本 Phase 的 120 是独立常量，与计划 §6.1 表末行一致（账行 116 + 账外
+# --validate-models 4 = 真实付费 120）。
+PHASE26_HARD_CAP = 120
+# 与 PHASE25_NORMAL_BUDGET 同语义，**取与硬帽同值 120**（不复用四个 Cap 的合计
+# 116：取 116 会让第 117 呼命中休眠中的第 5 道闸 `global_used >= normal_budget
+# and not beyond_normal`，凭空多造一道门；取 120 时第 5 道闸永不先于第 3 道。
+PHASE26_NORMAL_BUDGET = PHASE26_HARD_CAP
+
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
 # 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
 # 模板 scripts/milestone2/quota_pause_schema_v2.template.json）的书面签收并
@@ -599,6 +623,19 @@ PHASE25_NAMESPACE = _LedgerNamespace(
     task_caps=PHASE25_TASK_CAPS,
     hard_cap=PHASE25_HARD_CAP,
     normal_budget=PHASE25_NORMAL_BUDGET,
+)
+
+PHASE26_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_PHASE26,
+    quota_dir_fn=phase26_quota_dir,
+    ledger_path_fn=phase26_ledger_path,
+    counters_path_fn=phase26_counters_path,
+    approvals_dir_fn=phase26_approvals_dir,
+    pause_dir_fn=phase26_gateway_state_dir,
+    pause_path_fn=phase26_gateway_state_path,
+    task_caps=PHASE26_TASK_CAPS,
+    hard_cap=PHASE26_HARD_CAP,
+    normal_budget=PHASE26_NORMAL_BUDGET,
 )
 
 
@@ -724,8 +761,8 @@ def _write_budget_pause(reason: str, trigger: dict[str, Any], *,
 
 def _append_line(row: dict[str, Any]) -> None:
     # L2（2026-10-29 评审修单）：本函数仅为封存期 Phase 2 历史路径保留，
-    # 禁止新增调用方；新代码（Phase 2.5 起）一律走 QuotaLedger.phase25()
-    # 的 _append（open_ledger_append 带封存守卫/0600 收敛）。
+    # 禁止新增调用方；新代码（Phase 2.5 起，Phase 2.6 继续）一律走
+    # QuotaLedger.phase26() 的 _append（open_ledger_append 带封存守卫/0600 收敛）。
     p = ledger_path()
     with open(p, "a", encoding="utf-8") as fh:
         fh.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -798,7 +835,9 @@ class QuotaLedger:
 
     namespace 缺省 PHASE2_NAMESPACE：Phase 1/2 路径/暂停态/caps 逐字节保留；
     Phase 2.5 用 QuotaLedger(PHASE25_NAMESPACE) 或 QuotaLedger.phase25()，
-    账/锁/凭据/暂停态/任务帽全部落在 phase25 命名空间（D-1，两账绝不串写）。
+    账/锁/凭据/暂停态/任务帽全部落在 phase25 命名空间（D-1，两账绝不串写）；
+    Phase 2.6 起一律 QuotaLedger(PHASE26_NAMESPACE) 或 QuotaLedger.phase26()
+    （phase25 已随 2.5 结案封存，写入即 SealedLedgerError）。
     """
 
     def __init__(self, namespace: "_LedgerNamespace | None" = None) -> None:
@@ -808,6 +847,9 @@ class QuotaLedger:
             # SIMPRAXIS_PHASE25_ROOT 别名/嵌套封存根时把 approvals/
             # degraded/gateway_state/lock/runs 落进封存树）。
             assert_phase25_roots_isolated()
+        elif ns.phase == LEDGER_PHASE26:
+            # Phase 2.6：同一卡口，四根口径（phase26 对 phase1/2/2.5 封存根）。
+            assert_phase26_roots_isolated()
         self.ns = ns
         self.quota_dir = self.ns.quota_dir_fn()
 
@@ -815,6 +857,11 @@ class QuotaLedger:
     def phase25(cls) -> "QuotaLedger":
         """Phase 2.5 独立账构造入口（D-1）。"""
         return cls(PHASE25_NAMESPACE)
+
+    @classmethod
+    def phase26(cls) -> "QuotaLedger":
+        """Phase 2.6 独立账构造入口（D0-1；phase25 已随 Phase 2.5 结案封存）。"""
+        return cls(PHASE26_NAMESPACE)
 
     # ---- 命名空间内寻址（所有 IO 经 ns 间接，函数每次调用读 env） ----
 
@@ -832,8 +879,8 @@ class QuotaLedger:
         return is_paused(stage, state_path=self.ns.pause_path_fn())
 
     def _append(self, row: "dict[str, Any]") -> None:
-        if self.ns.phase == LEDGER_PHASE25:
-            # Phase 2.5：带封存守卫的唯一追加入口（Phase 1/2 账写打开即拒，0600）。
+        if self.ns.phase in (LEDGER_PHASE25, LEDGER_PHASE26):
+            # Phase 2.5/2.6：带封存守卫的唯一追加入口（封存账写打开即拒，0600）。
             with open_ledger_append(self._ledger_path()) as fh:
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
         else:
@@ -890,7 +937,9 @@ class QuotaLedger:
             task_used = sum(1 for r in rows if r.get("task") == task)
             # Phase 2.5：null-seq blocked 占批次（§11/AC-T0-7）——批次用量统计
             # 全部行；Phase 2 旧口径只数整数 seq 行，逐字节保留。
-            batch_source = self._read_rows() if self.ns.phase == LEDGER_PHASE25 else rows
+            batch_source = (self._read_rows()
+                            if self.ns.phase in (LEDGER_PHASE25, LEDGER_PHASE26)
+                            else rows)
             batch_used = sum(1 for r in batch_source
                              if r.get("batch_id") == batch_id)
 
@@ -959,7 +1008,7 @@ class QuotaLedger:
             except QuotaError:
                 # 正常不会发生（preflight 已拦）；记账不允许因凭据缺失而丢失
                 batch_approved, approval_ref = None, None
-            if self.ns.phase == LEDGER_PHASE25:
+            if self.ns.phase in (LEDGER_PHASE25, LEDGER_PHASE26):
                 # blocked 占批次：含 null-seq 行（§11/AC-T0-7）。
                 batch_prior = sum(1 for r in self._read_rows()
                                   if r.get("batch_id") == batch_id)
@@ -1041,8 +1090,8 @@ class QuotaLedger:
         call_rows = self._call_rows()
         all_rows = self._read_rows()
         global_used = max((r["global_used_after"] for r in call_rows), default=0)
-        if self.ns.phase == LEDGER_PHASE25:
-            # Phase 2.5（Plan §11/AC-T0-7）：blocked 占批次不占实呼——批次计数
+        if self.ns.phase in (LEDGER_PHASE25, LEDGER_PHASE26):
+            # Phase 2.5/2.6（Plan §11/AC-T0-7）：blocked 占批次不占实呼——批次计数
             # 必须同时数整数 seq 行与 null-seq blocked 行；global/task 只数实呼。
             batch_rows = all_rows
         else:
@@ -1172,7 +1221,8 @@ class BillingGate:
 # ---------- Phase 2.5 AC-T0-7：台账机判（seq 连续 + blocked 分列） ----------
 
 def validate_ledger_rows(rows: "list[dict[str, Any]]", *,
-                         label: str = "phase25 ledger") -> None:
+                         label: str = "phase25 ledger",
+                         allow_events: "tuple[str, ...]" = ()) -> None:
     """机判台账行：
 
     1. 整数 seq 行（event=call）从空账 0 次实呼起，首行 seq=1，排序后必须恰为
@@ -1182,17 +1232,22 @@ def validate_ledger_rows(rows: "list[dict[str, Any]]", *,
     3. 每行 ts_iso 必须是严格 UTC Z（clock.parse_ts_iso_strict，吸取 +0000/+0800
        混写教训）。
 
-    只用于 phase25 新账机判；Phase 1/2 历史账封存，不拿本判据回溯。
+    ``allow_events``（Phase 2.6 T0 新增）：允许占整数 seq 但不计实呼的显式事件
+    （现仅 ``"selfcheck"`` 开账行）。**缺省空元组 = phase25 原判据逐字节不变**，
+    只有 phase26 的调用点显式放行，绝不放宽封存账的判据。
+
+    只用于 phase25/phase26 新账机判；Phase 1/2 历史账封存，不拿本判据回溯。
     """
     errors: list[str] = []
     int_seqs: list[int] = []
+    allowed = frozenset(allow_events)
     for idx, row in enumerate(rows):
         seq = row.get("seq")
         event = row.get("event")
         if isinstance(seq, bool):
             errors.append(f"第 {idx} 行 seq 不得为 bool：{seq!r}")
         elif isinstance(seq, int):
-            if event != "call":
+            if event != "call" and event not in allowed:
                 errors.append(
                     f"第 {idx} 行 seq={seq}：整数 seq 行 event 必须为 call，"
                     f"收到 {event!r}")
@@ -1228,20 +1283,34 @@ def validate_ledger_rows(rows: "list[dict[str, Any]]", *,
 
 
 def ledger_summary(rows: "list[dict[str, Any]]", *,
-                   validate: bool = True) -> dict[str, Any]:
+                   validate: bool = True,
+                   allow_events: "tuple[str, ...]" = ()) -> dict[str, Any]:
     """两栏并陈汇总：整数 seq 实呼行 / null-seq preflight_blocked 行。
 
     blocked 占批次不占实呼：batches.<id>.rows = calls + blocked，与 preflight
     批次门的计数口径一致；call_rows 永不把 blocked 计入。
+
+    Phase 2.6 T0：``allow_events`` 透传给机判（现仅 ``"selfcheck"`` 开账行）；
+    非 call 的整数 seq 行（selfcheck）单列 ``selfcheck_rows``，**不计入
+    call_rows / calls_ok / calls_by_* / batches**。缺省空元组时与 phase25
+    原行为逐字节相同。
     """
     if validate:
-        validate_ledger_rows(rows)
+        validate_ledger_rows(rows, allow_events=allow_events)
 
     def _is_call(r: dict[str, Any]) -> bool:
         seq = r.get("seq")
-        return isinstance(seq, int) and not isinstance(seq, bool)
+        return (isinstance(seq, int) and not isinstance(seq, bool)
+                and r.get("event") == "call")
 
+    def _is_selfcheck(r: dict[str, Any]) -> bool:
+        return r.get("event") == "selfcheck"
+
+    int_seq_rows = [r for r in rows
+                    if isinstance(r.get("seq"), int)
+                    and not isinstance(r.get("seq"), bool)]
     calls = [r for r in rows if _is_call(r)]
+    selfchecks = [r for r in int_seq_rows if _is_selfcheck(r)]
     blocked = [r for r in rows
                if r.get("seq") is None and r.get("event") == "preflight_blocked"]
 
@@ -1264,12 +1333,16 @@ def ledger_summary(rows: "list[dict[str, Any]]", *,
         elif r.get("event") == "preflight_blocked":
             cell["blocked"] += 1
     ok_true = sum(1 for r in calls if r.get("ok") is True)
+    seqs = [int(r["seq"]) for r in int_seq_rows]
     return {
         "call_rows": len(calls),
+        "selfcheck_rows": len(selfchecks),
         "blocked_rows": len(blocked),
         "total_rows": len(rows),
-        "seq_first": 1 if calls else None,
-        "seq_last": len(calls) if calls else None,
+        # seq 端点按**整数 seq 行**取（含 selfcheck 开账行）：Phase 2.6 的开账行
+        # 占 seq=1 但不计实呼，用 len(calls) 当 seq_last 会把「账尾 seq」说小。
+        "seq_first": min(seqs) if seqs else None,
+        "seq_last": max(seqs) if seqs else None,
         "calls_by_task": _tally("task"),
         "calls_by_stage": _tally("stage"),
         "calls_ok": {"true": ok_true, "false": len(calls) - ok_true},
@@ -1288,6 +1361,9 @@ def write_approval(*, batch_id: str, task: int, stage: str, approved: int,
         # M-B：模块级 CLI 直连函数不经 QuotaLedger.__init__，卡口单设；
         # 必须在 caps 校验/读账/approvals_dir_fn() 建目录之前。
         assert_phase25_roots_isolated()
+    elif ns.phase == LEDGER_PHASE26:
+        # Phase 2.6：同一卡口，四根口径。
+        assert_phase26_roots_isolated()
     # 任务编号必须在【本命名空间】caps 字典内——phase25 的 3/5/9/10 与旧编号
     # 碰撞，绝不回退 TASK_HARD_CAPS（D-1 严格隔离）。
     if task not in ns.task_caps:
@@ -1341,6 +1417,9 @@ def resume(*, ticket: str, batch_id: "str | None" = None,
         # M-B：同上，resume 也是模块级 CLI 直连；须在 pause_path_fn()
         # （phase25 侧会 ensure_private_dir）与 resume_audit 写之前。
         assert_phase25_roots_isolated()
+    elif ns.phase == LEDGER_PHASE26:
+        # Phase 2.6：同一卡口，四根口径。
+        assert_phase26_roots_isolated()
     if not ticket or len(ticket) < 8:
         raise QuotaError("--ticket 必须是非空 uuid（>=8 字符）")
     pause = ns.pause_path_fn()
@@ -1392,23 +1471,26 @@ def resume(*, ticket: str, batch_id: "str | None" = None,
 def _namespace_for_cli(phase: int) -> _LedgerNamespace:
     if phase == LEDGER_PHASE25:
         return PHASE25_NAMESPACE
+    if phase == LEDGER_PHASE26:
+        return PHASE26_NAMESPACE
     return PHASE2_NAMESPACE
 
 
 def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(
-        description="配额账本（批准凭据/恢复/计数；Phase 1/2 账已封存；"
-                    "--ledger-phase 25 走 Phase 2.5 独立新账）")
-    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25 为 Phase 2.5 独立账。
+        description="配额账本（批准凭据/恢复/计数；Phase 1/2/2.5 账已封存；"
+                    "--ledger-phase 26 走 Phase 2.6 独立新账）")
+    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25/26 为各期独立账。
     p.add_argument("--ledger-phase", type=int, default=LEDGER_PHASE,
-                   choices=(LEDGER_PHASE, LEDGER_PHASE25),
-                   help="台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 独立新账")
+                   choices=(LEDGER_PHASE, LEDGER_PHASE25, LEDGER_PHASE26),
+                   help=("台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 "
+                         "封存账，26=Phase 2.6 独立新账"))
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    # Task0：--task choices 取两期 caps 并集仅为通过 argparse；写侧 write_approval
-    # 再按 --ledger-phase 的本命名空间严格校验（task 9 在两期 cap 不同，绝不并表）。
+    # Task0：--task choices 取各期 caps 并集仅为通过 argparse；写侧 write_approval
+    # 再按 --ledger-phase 的本命名空间严格校验（task 9 在不同期 cap 不同，绝不并表）。
     all_tasks = sorted(set(PHASE1_TASK_CAPS) | set(PHASE2_TASK_CAPS)
-                       | set(PHASE25_TASK_CAPS))
+                       | set(PHASE25_TASK_CAPS) | set(PHASE26_TASK_CAPS))
     pa = sub.add_parser("approve", help="写入一批书面批准凭据（显式参数，无默认值）")
     pa.add_argument("--batch-id", required=True)
     pa.add_argument("--task", type=int, required=True, choices=all_tasks)
@@ -1444,9 +1526,12 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"[quota ERROR] {exc}", file=sys.stderr)
         return 2
     rows = read_lines(ns.ledger_path_fn())
-    # 严格机判只用于 phase25 新账（validate_ledger_rows 契约：Phase 1/2 封存账
-    # 不拿本判据回溯）；旧账 status 只汇总、不判序。
-    summary = ledger_summary(rows, validate=(ns.phase == LEDGER_PHASE25))
+    # 严格机判只用于 phase25/phase26 新账（validate_ledger_rows 契约：Phase 1/2
+    # 封存账不拿本判据回溯）；旧账 status 只汇总、不判序。phase26 额外放行
+    # 开账 selfcheck 行（占 seq、不计实呼）。
+    summary = ledger_summary(
+        rows, validate=(ns.phase in (LEDGER_PHASE25, LEDGER_PHASE26)),
+        allow_events=(("selfcheck",) if ns.phase == LEDGER_PHASE26 else ()))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:

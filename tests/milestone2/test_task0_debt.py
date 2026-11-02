@@ -810,7 +810,11 @@ CALL_CACHE_ALLOWLIST = {
     # 措辞修订纯位移（151→152，+1 行），构造表达式逐字未改，0 新增落点。
     # 2026-10-30 T4 评审返修 M5：只读 seq 读取器 build_seq_provider +
     # quota_ledger 导入块插入，纯位移（152→190，+38 行），0 新增落点。
-    ("orchestrator/agentic/wiring.py", 190),
+    # Phase 2.6 Task0（T0.4-G，D26-21）：build_seq_provider 增 ledger 形参、
+    # docstring 扩写与惰性命名空间回退（phase25→phase26，防「读错账把实呼记成
+    # 缓存命中」），全部在构造点之前，纯位移（190→197，+7 行）；构造表达式
+    # 逐字未改，0 新增落点、0 新增网关调用。
+    ("orchestrator/agentic/wiring.py", 197),
 }
 
 

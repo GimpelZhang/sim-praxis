@@ -396,9 +396,9 @@ def _pid_alive(pid: int) -> "bool | None":
 def default_watchdog_root() -> Path:
     try:
         from orchestrator.common import runtime_paths as rp
-        return rp.phase25_root() / "watchdog"
+        return rp.phase26_root() / "watchdog"
     except Exception:
-        return Path(os.environ.get("SIMPRAXIS_PHASE25_ROOT", ".")) / \
+        return Path(os.environ.get("SIMPRAXIS_PHASE26_ROOT", ".")) / \
             "watchdog"
 
 
@@ -661,18 +661,18 @@ class WatchConfig:
 def _default_ledger_path() -> Path:
     try:
         from orchestrator.common import runtime_paths as rp
-        return rp.phase25_ledger_path()
+        return rp.phase26_ledger_path()
     except Exception:
-        return Path(os.environ.get("SIMPRAXIS_PHASE25_ROOT", ".")) / \
+        return Path(os.environ.get("SIMPRAXIS_PHASE26_ROOT", ".")) / \
             "quota" / "ledger.jsonl"
 
 
 def _default_pause_path() -> Path:
     try:
         from orchestrator.common import runtime_paths as rp
-        return rp.phase25_gateway_state_path()
+        return rp.phase26_gateway_state_path()
     except Exception:
-        return Path(os.environ.get("SIMPRAXIS_PHASE25_ROOT", ".")) / \
+        return Path(os.environ.get("SIMPRAXIS_PHASE26_ROOT", ".")) / \
             "quota" / "gateway_state" / "quota_pause.json"
 
 

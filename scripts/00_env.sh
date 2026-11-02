@@ -282,3 +282,50 @@ fi
 chmod 600 "$SIMPRAXIS_PHASE25_ROOT/quota/ledger.jsonl" 2>/dev/null || true
 _sp_writable_probe "$SIMPRAXIS_PHASE25_ROOT/quota" || return 1
 echo "[00_env] Phase2.5：独立新账根=$SIMPRAXIS_PHASE25_ROOT（私目录族 700；空账 ledger.jsonl 600，seq 从 0；Phase1/2 账封存只读）"
+
+# ---- Phase 2.6 Task0：独立新账根与私目录族（纯加法，Phase1/2/2.5 行零改动）----
+export SIMPRAXIS_PHASE26_ROOT="${SIMPRAXIS_PHASE26_ROOT:-$SIMPRAXIS_DATA_ROOT/phase26}"
+# 四根互异互斥：phase26 不得与三份封存根同体或互相嵌套（任何 mkdir/写之前）
+_sp26_root="$(readlink -f "$SIMPRAXIS_PHASE26_ROOT")"
+for _sp_sealed in "$(readlink -f "$SIMPRAXIS_PHASE1_ROOT")" \
+                  "$(readlink -f "$SIMPRAXIS_PHASE2_ROOT")" \
+                  "$(readlink -f "$SIMPRAXIS_PHASE25_ROOT")"; do
+  if [ "$_sp26_root" = "$_sp_sealed" ]; then
+    echo "[00_env STOP] SIMPRAXIS_PHASE26_ROOT 与封存根同体：$_sp26_root" >&2
+    return 1
+  fi
+  case "$_sp26_root" in
+    "$_sp_sealed"/*) echo "[00_env STOP] PHASE26 嵌套在封存根内：$_sp26_root" >&2; return 1 ;;
+  esac
+  case "$_sp_sealed" in
+    "$_sp26_root"/*) echo "[00_env STOP] 封存根嵌套在 PHASE26 内：$_sp_sealed" >&2; return 1 ;;
+  esac
+done
+mkdir -p "$SIMPRAXIS_PHASE26_ROOT"/quota/approvals \
+         "$SIMPRAXIS_PHASE26_ROOT"/quota/gateway_state \
+         "$SIMPRAXIS_PHASE26_ROOT"/estimates \
+         "$SIMPRAXIS_PHASE26_ROOT"/watchdog/incidents \
+         "$SIMPRAXIS_PHASE26_ROOT"/watchdog/triage_bundles \
+         "$SIMPRAXIS_PHASE26_ROOT"/agentic_traces \
+         "$SIMPRAXIS_PHASE26_ROOT"/walls \
+         "$SIMPRAXIS_PHASE26_ROOT"/task9_milestone \
+         "$SIMPRAXIS_PHASE26_ROOT"/runs \
+         "$SIMPRAXIS_RUN_DIR/phase26"
+chmod 700 "$SIMPRAXIS_PHASE26_ROOT" \
+          "$SIMPRAXIS_PHASE26_ROOT"/quota \
+          "$SIMPRAXIS_PHASE26_ROOT"/quota/approvals \
+          "$SIMPRAXIS_PHASE26_ROOT"/quota/gateway_state \
+          "$SIMPRAXIS_PHASE26_ROOT"/estimates \
+          "$SIMPRAXIS_PHASE26_ROOT"/watchdog \
+          "$SIMPRAXIS_PHASE26_ROOT"/watchdog/incidents \
+          "$SIMPRAXIS_PHASE26_ROOT"/watchdog/triage_bundles \
+          "$SIMPRAXIS_PHASE26_ROOT"/agentic_traces \
+          "$SIMPRAXIS_PHASE26_ROOT"/walls \
+          "$SIMPRAXIS_PHASE26_ROOT"/task9_milestone \
+          "$SIMPRAXIS_PHASE26_ROOT"/runs \
+          "$SIMPRAXIS_RUN_DIR/phase26"
+# 只 touch 不截断：已有账（含开账 selfcheck 行）不能被本脚本清零。
+touch "$SIMPRAXIS_PHASE26_ROOT/quota/ledger.jsonl"
+chmod 600 "$SIMPRAXIS_PHASE26_ROOT/quota/ledger.jsonl" 2>/dev/null || true
+_sp_writable_probe "$SIMPRAXIS_PHASE26_ROOT/quota" || return 1
+echo "[00_env] Phase2.6：新账根=$SIMPRAXIS_PHASE26_ROOT（全族 700）；四根互异互斥检查通过"
