@@ -95,6 +95,15 @@ def _source_snapshot(script_text: str, shared_root: Path) -> dict:
         "SIMPRAXIS_GATEWAY_STATE": str(data_root / "gateway_state"),
         "SIMPRAXIS_TOURS_DIR": str(shared_root / "tours"),
         "SIMPRAXIS_USE_PROXY": "0",
+        # 凭据形状钉成方舟遗留 host（锁内适配，2026-11-02）：本测只对账
+        # env/文件树 delta，与凭据内容无关；但父本金 efc08a3 的 host 白名单
+        # 只有 ark/mimo 两家，而 2026-11-02 用户换供应商 tokenhub 后活
+        # ~/.bashrc 会让**历史 blob** 的 source 直接失败（不是本测要测的
+        # 东西）。按脚本既有优先级显式导出 SIMPRAXIS_LLM_*，让两侧都吃同一
+        # 合成值。合成 token 为低熵重复串，非真密钥。
+        "SIMPRAXIS_LLM_BASE_URL": "https://ark.cn-beijing.volces.com/api/coding",
+        "SIMPRAXIS_LLM_TOKEN": "ark-" + "T" * 48,
+        "SIMPRAXIS_LLM_DEFAULT_MODEL": "synthetic-test-model",
     })
     # 三个 phase 根一律不预置，强制走脚本默认值（data 根下 phase1/2/25），
     # 既测默认契约也杜绝测试串到外层 shell 的真实 /mnt 根。
