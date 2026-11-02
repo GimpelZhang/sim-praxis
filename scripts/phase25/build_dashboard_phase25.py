@@ -17,7 +17,8 @@ schema ``simpraxis.rsi_dashboard_phase25.v1``。只读活件 + 吃两份外部�
 - ``methodology``：方法学 v2 区间件 P50/P90 vs 实际（AC-T1-7）；
 - ``ac_counts``：从 Plan 正文去重提取的 AC-Tn-k 计数（逐 Task 与总数），
   与 §9 追溯矩阵声明值对账；
-- ``closeout``：容器存量/显存//mnt/gate_static/作者/密钥扫描。
+- ``closeout``：容器存量/显存//mnt（gate_static 六步、作者校验、密钥双扫
+  由机判 ``check_phase25_closure.py`` 承担并在其报告里落证）。
 
 ``--strict``：任一段缺失或与对账件不符即 exit 2（收尾期默认开）。
 """
@@ -122,16 +123,23 @@ def tests_state(result_path: "Path | None") -> "dict | None":
     if not matches:
         raise DashboardError(f"测试结果里找不到 pytest 摘要行：{result_path}")
     m = matches[-1]
-    rc = re.search(r"^rc=(\d+)$", text, re.M)
+    rcs = re.findall(r"^rc=(\d+)$", text, re.M)
+    if len(rcs) != 1:
+        # 多段日志的 rc 与"最后一条摘要"会错配（前段 0 / 后段 1）；
+        # 恰好一条 rc 才允许配对，否则 fail-closed。
+        raise DashboardError(
+            f"测试结果里 rc= 行应恰 1 条，实得 {len(rcs)} 条：{result_path}")
+    cmd = re.search(r"^# cmd: (.+)$", text, re.M)
     return {
         "source": str(result_path),
         "summary": m.group("line").strip(),
         "passed": int(m.group("passed")),
         "skipped": int(m.group("skipped") or 0),
         "deselected": int(m.group("deselected") or 0),
-        "rc": int(rc.group(1)) if rc else None,
-        "command": "pytest tests -q -k \"not test_04\" "
-                   "-m \"not paid and not kb_integration\"",
+        "rc": int(rcs[0]),
+        "command": cmd.group(1).strip() if cmd else (
+            "pytest tests -q -k \"not test_04\" "
+            "-m \"not paid and not kb_integration\""),
     }
 
 

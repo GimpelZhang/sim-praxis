@@ -286,3 +286,20 @@ run7c key-collapse 覆写 created_at、54b27b59 同类覆写）明细见 `~/文�
 - 纪律不变：模型变更仍须 STOP→inventory→用户批准；实呼预算自批但逐次记账、批次件落
   `quota/approvals/`；测试禁网、禁 skip/xfail/TODO；矛盾即结论不翻案；推送/公开是人工
   STOP 门。Phase 2.5 尾债（T5/T6SA/T6SB 各 LOW、PROC-6/7/8）见 Complete §4/§8.1/§9.1。
+- **Task 10 收尾已闭（2026-11-02，攢批135 `f11b7f5` + 136 `fcc5615`，本地未推送）**：
+  提交后冷跑两排除全套 **2041 passed/7 skipped/50 deselected/rc=0**（346.25s）+
+  kbint 活库套 35 passed/rc=0；phase25 账 56 行（seq 1..56 连续、ts 全严格 Z、
+  54 ok/2 fail seq3/4、by_task T3=6/T5=50、by_stage coding_debug×56、
+  5 张批准件批批齐备）；四表 1542/94/44/1（768 维，kb 恒 1542）；
+  kbint 的 PROC-7 重盖章已逐行取证（`proc7_restamp_diff.json`：solution_chunks
+  94 行仅 `ingested_at` 变，id/文本/meta_noprov/向量集/召回全等，其余三表 0 变化）；
+  证据包 `--clean` 落 `phase25/task10_milestone/evidence_pack`（manifest 逐件
+  sha256/0700-0600/无符号链接/无 >10MB/密钥 0 命中，证据根登记区含
+  `@runs/phase25/<thread>/stage_<id>/` tag=@runs/ subdir=phase25 rows_using=0）；
+  机判 `scripts/verification/check_phase25_closure.py --report …/closure_judge.json`
+  **rc=0 problems=0**，AC 去重计数 102 与逐 Task 7/7/8/8/18/7/8/8/9/12/10 由看板与
+  机判两套独立实现互证（ids_sha256 `5a6b46a5…`）；T7/T8/T9 用户停做 →
+  包内 `NOT_EXECUTED.json` 三件挂牌 + 机判 provenance_limited（缺挂牌即 problems）。
+  环境：容器 0、显存 14 MiB、/mnt 42G/500G(9%)、无看门狗残留。
+  `RunSpec.agentic` 保持 **opt-in/冻结**（Task 5 判「不成立」），待用户签收；
+  偏差/坑表 P11–P14/方法学对账/Open Items→Phase 3 backlog 见 `Phase_2.5_Plan_Complete.md` §10。

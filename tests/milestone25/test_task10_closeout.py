@@ -262,14 +262,26 @@ def test_build_fail_closed(tmp_path, monkeypatch):
 
 def test_tests_state_parses_summary_and_rc(tmp_path):
     log = tmp_path / "run.log"
-    log.write_text("xxxx\n1875 passed, 7 skipped, 47 deselected in 321.45s\n"
+    log.write_text("# cmd: pytest tests -q\n"
+                   "xxxx\n1875 passed, 7 skipped, 47 deselected in 321.45s\n"
                    "rc=0\n", encoding="utf-8")
     st = D.tests_state(log)
     assert st["passed"] == 1875 and st["skipped"] == 7
     assert st["deselected"] == 47 and st["rc"] == 0
+    assert st["command"] == "pytest tests -q"
 
     log.write_text("no summary here\n", encoding="utf-8")
     with pytest.raises(D.DashboardError, match="找不到 pytest 摘要"):
+        D.tests_state(log)
+
+    # 多段日志：前段 rc=1 / 后段 rc=0 会与"最后一条摘要"错配 → fail-closed
+    log.write_text("10 failed, 2 passed in 1.0s\nrc=1\n"
+                   "20 passed in 2.0s\nrc=0\n", encoding="utf-8")
+    with pytest.raises(D.DashboardError, match="rc= 行应恰 1 条"):
+        D.tests_state(log)
+    # 单摘要但缺 rc 行同样不许静默当 0
+    log.write_text("20 passed in 2.0s\n", encoding="utf-8")
+    with pytest.raises(D.DashboardError, match="rc= 行应恰 1 条"):
         D.tests_state(log)
     assert D.tests_state(None) is None
 
@@ -536,41 +548,99 @@ def test_judge_count_acs_independent(tmp_path, monkeypatch):
     assert any("AC 总数" in p for p in problems)
 
 
-def test_judge_science_and_pack(tmp_path, monkeypatch):
-    verdict = tmp_path / "verdict.json"
-    verdict.write_text(json.dumps({
+def _harden(root: Path) -> None:
+    """把合成包拨到 0700/0600（机判逐件复算权限，不接受 umask 默认值）。"""
+    for p in [root, *sorted(root.rglob("*"))]:
+        p.chmod(0o600 if p.is_file() else 0o700)
+
+
+def _verdict_payload() -> dict:
+    return {
         "verdict": "RETAIN_R4", "retain": True,
-        "conditions": {"threshold": {"ok": True}, "no_flip_loss": {"ok": True}},
-        "point_prediction_match": {"ok": True},
+        "conditions": {"1_thresholds": True, "2_h3_subset_h4": True,
+                       "3_residual_recovery": True, "4_data_identity": True,
+                       "5_engineering": True},
+        "point_prediction_match": {"ok": True, "n_cases": 47, "mismatches": []},
         "iter5_sha256":
             "9a704e0081c62e1d938bd023bddc572eafac3768450f08327c7a8ad09fb59e16",
-    }), encoding="utf-8")
-    monkeypatch.setattr(J, "_STAGE_B_VERDICT", verdict)
-    rec = _synthetic_reconcile()
-    assert J.check_science(rec) == ([], [])
+    }
 
-    rec["methodology"]["per_task"]["t3"]["methodology_failure"] = True
-    problems, _gaps = J.check_science(rec)
-    assert any("方法学失败" in p for p in problems)
 
+def _minimal_pack(tmp_path: Path) -> Path:
     pack = tmp_path / "pack"
-    pack.mkdir()
-    (pack / "a.txt").write_text("hello\n", encoding="utf-8")
-    # T7/T8/T9 停做挂牌是机判硬要求：缺挂牌即问题（见下一条断言）
+    win = pack / "task6_stage_b/window" / J._STAGE_B_VERDICT.parent.name
+    win.mkdir(parents=True)
+    (win / "task6_r4_verdict.json").write_text(
+        json.dumps(_verdict_payload()), encoding="utf-8")
+    # T7/T8/T9 停做挂牌是机判硬要求：缺挂牌即问题
     for slug in ("task7_stages", "task8_drill", "task9_vla"):
         (pack / slug).mkdir()
         (pack / slug / "NOT_EXECUTED.json").write_text(
             json.dumps({"task": slug, "status": "stopped_by_user",
                         "adjudication": "用户 2026-11-02 裁决"},
                        ensure_ascii=False), encoding="utf-8")
+    signs = pack / "task10_closeout/signs"
+    signs.mkdir(parents=True)
+    for role in ("executor", "reviewer", "verifier"):
+        (signs / f"{role}.json").write_text(json.dumps({
+            "schema": "simpraxis.phase25.sign.v1", "role": role,
+            "verdict": "APPROVE"}), encoding="utf-8")
+    (pack / "a.txt").write_text("hello\n", encoding="utf-8")
+    _write_manifest(pack)
+    _harden(pack)
+    return pack
+
+
+def _write_manifest(pack: Path, **override) -> dict:
+    """按包内实有文件重建 manifest（全覆盖；manifest.json 自身不登记）。"""
     man = {"git_commit": "abc",
            "evidence_roots": {"@runs/phase25/<thread>/stage_<id>/": {
                "tag": "@runs/", "subdir": "phase25", "rows_using": 0}},
-           "files": [{"path": "a.txt",
-                      "sha256": J._sha256(pack / "a.txt")}]}
+           "files": [{"path": str(p.relative_to(pack)),
+                      "sha256": J._sha256(p)}
+                     for p in sorted(pack.rglob("*")) if p.is_file()]}
+    man.update(override)
     (pack / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    return man
+
+
+def test_judge_science_and_pack(tmp_path, monkeypatch):
+    # 包外兜底路径置空：本用例只认包内副本（证据自足）
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
+    rec = _synthetic_reconcile()
+    pack = _minimal_pack(tmp_path)
+    assert J.check_science(rec, pack) == ([], [])
+    # 包内缺副本且包外活件也不在 → 缺证即问题，不许静默跳过
+    problems, _gaps = J.check_science(rec, tmp_path / "no_pack")
+    assert any("判决件缺失" in p for p in problems)
+
+    rec["methodology"]["per_task"]["t3"]["methodology_failure"] = True
+    problems, _gaps = J.check_science(rec, pack)
+    assert any("方法学失败" in p for p in problems)
+    rec["methodology"]["per_task"]["t3"]["methodology_failure"] = False
+
+    # 五条件必须恰 5 键且全 True；点预测须 47 案逐字相符
+    for mutate, needle in (
+        (lambda v: v["conditions"].update({"6_extra": True}), "条件键不符"),
+        (lambda v: v["conditions"].update({"5_engineering": False}),
+         "条件未全过"),
+        (lambda v: v["point_prediction_match"].update({"n_cases": 46}),
+         "点预测逐案不符"),
+        (lambda v: v["point_prediction_match"].update(
+            {"mismatches": [{"case": 1}]}), "点预测逐案不符"),
+    ):
+        v = _verdict_payload()
+        mutate(v)
+        bad = tmp_path / "bad_verdict.json"
+        bad.write_text(json.dumps(v), encoding="utf-8")
+        monkeypatch.setattr(J, "_STAGE_B_VERDICT", bad)
+        problems, _gaps = J.check_science(rec, tmp_path / "no_pack")
+        assert any(needle in p for p in problems), (needle, problems)
+    monkeypatch.setattr(J, "_STAGE_B_VERDICT", tmp_path / "live_absent.json")
+
     assert J.check_pack(pack)[0] == []
 
+    man = json.loads((pack / "manifest.json").read_text())
     man["evidence_roots"] = {"@runs/": {}}
     man["files"][0]["sha256"] = "0" * 64
     (pack / "manifest.json").write_text(json.dumps(man), encoding="utf-8")
@@ -583,6 +653,74 @@ def test_judge_science_and_pack(tmp_path, monkeypatch):
     problems, gaps = J.check_pack(pack)
     assert any("task8_drill" in p for p in problems)
     assert {g["what"] for g in gaps} == {"task7_stages", "task9_vla"}
+
+
+def test_judge_pack_signs_and_modes(tmp_path):
+    pack = _minimal_pack(tmp_path)
+    # 三签件缺一角色 → 问题
+    (pack / "task10_closeout/signs/verifier.json").unlink()
+    problems, _gaps = J.check_pack(pack)
+    assert any("三签件缺角色" in p for p in problems)
+
+    # 非法 verdict → 问题
+    (pack / "task10_closeout/signs/verifier.json").write_text(
+        json.dumps({"schema": "simpraxis.phase25.sign.v1",
+                    "role": "verifier", "verdict": "MAYBE"}), encoding="utf-8")
+    _write_manifest(pack)
+    _harden(pack)
+    problems, _gaps = J.check_pack(pack)
+    assert any("verdict 非法" in p for p in problems)
+
+    # 权限放水（0644 文件 / 0755 目录）→ 问题
+    (pack / "a.txt").chmod(0o644)
+    problems, _gaps = J.check_pack(pack)
+    assert any("权限不符 0700/0600" in p for p in problems)
+
+    # 包内未登记文件（manifest 未全覆盖）→ 问题
+    (pack / "a.txt").chmod(0o600)
+    (pack / "extra.txt").write_text("x\n", encoding="utf-8")
+    (pack / "extra.txt").chmod(0o600)
+    problems, _gaps = J.check_pack(pack)
+    assert any("未登记文件" in p for p in problems)
+
+
+def test_judge_tables_pin_rows_and_vector_identity(tmp_path):
+    rec = _synthetic_reconcile()
+    base = tmp_path / "pre_vector_identity.json"
+    base.write_text(json.dumps({"tables": {
+        k: {"vector_set_sha256": "b" * 64}
+        for k in ("kb_chunks", "solution_chunks",
+                  "phase1_learnings", "phase2_learnings")}}), encoding="utf-8")
+    assert J.check_tables(rec, base) == []
+
+    bad = _synthetic_reconcile()
+    bad["tables"]["solution_chunks"]["rows"] = 93
+    bad["tables"]["phase2_learnings"]["dim"] = 1024
+    bad["tables"]["phase1_learnings"]["vector_set_sha256"] = "c" * 64
+    bad["tables"].pop("kb_chunks")
+    problems = J.check_tables(bad, base)
+    assert any("缺表 kb_chunks" in p for p in problems)
+    assert any("solution_chunks 行数 93" in p for p in problems)
+    assert any("phase2_learnings 维度 1024" in p for p in problems)
+    assert any("phase1_learnings 向量集" in p for p in problems)
+    # 缺窗前基线本身就是问题（不许跳过向量身份比对）
+    assert J.check_tables(_synthetic_reconcile(), None)
+
+
+def test_judge_ledger_recomputes_file_sha(tmp_path):
+    led = _write_ledger(tmp_path / "l.jsonl", [_call(1), _call(2),
+                                               _call(3)])
+    rec = _synthetic_reconcile()
+    rec["ledger_path"] = str(led)
+    rec["ledger_sha256"] = J._sha256(led)
+    assert J.check_ledger(rec) == []
+
+    rec["ledger_sha256"] = "a" * 64          # 自报值与实件不符
+    problems = J.check_ledger(rec)
+    assert any("sha256 复算" in p for p in problems)
+
+    rec["ledger_path"] = str(tmp_path / "gone.jsonl")
+    assert any("账文件不存在" in p for p in J.check_ledger(rec))
 
 
 def test_judge_report_without_artifacts_is_not_green(tmp_path):

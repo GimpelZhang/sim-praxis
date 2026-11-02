@@ -29,6 +29,7 @@ import argparse
 import hashlib
 import json
 import re
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -90,6 +91,12 @@ def check_ledger(rec: dict) -> list[str]:
         problems.append("ok+fail ≠ n_calls")
     if len(led["fail_rows"]) != led["fail"]:
         problems.append("fail_rows 条数与 fail 计数不符")
+    # 账文件 sha256 复算（不信任对账件自报值）
+    lp = Path(rec.get("ledger_path") or "")
+    if not lp.is_file():
+        problems.append(f"账文件不存在：{lp}")
+    elif _sha256(lp) != rec.get("ledger_sha256"):
+        problems.append("账文件 sha256 复算与对账件不符")
     ap = rec["approvals"]
     if not ap["ok"] or ap["problems"]:
         problems.append(f"批准件不符：{ap['problems']}")
@@ -99,23 +106,39 @@ def check_ledger(rec: dict) -> list[str]:
     return problems
 
 
-def check_tables(rec: dict) -> list[str]:
+# AC-T10-3：四表收尾活值（Plan 引用时点值；只增不改的是 kb 表，其余随里程碑
+# 新增行——本里程碑 T9 未执行故 solution_chunks 停在 94、学习表停在 44/1）。
+EXPECTED_ROWS = {"kb_chunks": 1542, "solution_chunks": 94,
+                 "phase1_learnings": 44, "phase2_learnings": 1}
+_STAGE_B_CONDITIONS = {"1_thresholds", "2_h3_subset_h4", "3_residual_recovery",
+                       "4_data_identity", "5_engineering"}
+
+
+def check_tables(rec: dict, pre_vector_identity: "Path | None" = None) -> list[str]:
     tabs = rec["tables"]
     problems = []
-    for name in ("kb_chunks", "solution_chunks",
-                 "phase1_learnings", "phase2_learnings"):
+    for name, want in EXPECTED_ROWS.items():
         t = tabs.get(name)
         if not t:
             problems.append(f"缺表 {name}")
             continue
         if t.get("dim") != 768:
             problems.append(f"{name} 维度 {t.get('dim')} ≠ 768")
-        if not isinstance(t.get("rows"), int) or t["rows"] <= 0:
-            problems.append(f"{name} 行数非法 {t.get('rows')}")
-    if tabs.get("kb_chunks", {}).get("rows") != 1542:
-        problems.append(
-            f"kb_chunks 行数 {tabs.get('kb_chunks', {}).get('rows')} ≠ 1542"
-            "（只增不改基线）")
+        if t.get("rows") != want:
+            problems.append(f"{name} 行数 {t.get('rows')} ≠ 收尾活值 {want}")
+    # 向量身份与窗口前基线逐表比对（不只看行数）
+    if pre_vector_identity is None or not pre_vector_identity.is_file():
+        problems.append(f"缺窗前向量身份基线：{pre_vector_identity}")
+    else:
+        base = json.loads(pre_vector_identity.read_text(encoding="utf-8"))
+        for name in EXPECTED_ROWS:
+            want = (base.get("tables", {}).get(name) or {}).get(
+                "vector_set_sha256")
+            got = (tabs.get(name) or {}).get("vector_set_sha256")
+            if not want:
+                problems.append(f"基线缺 {name} 的 vector_set_sha256")
+            elif got != want:
+                problems.append(f"{name} 向量集 sha 与窗前基线不符")
     return problems
 
 
@@ -133,27 +156,49 @@ def check_env(rec: dict) -> list[str]:
     return problems
 
 
-def check_science(rec: dict) -> "tuple[list[str], list[dict]]":
+def check_science(rec: dict,
+                  pack_dir: "Path | None" = None) -> "tuple[list[str], list[dict]]":
     problems: list[str] = []
     gaps: list[dict] = []
     method = rec["methodology"]["per_task"]
     for task, v in method.items():
         if v.get("methodology_failure"):
             problems.append(f"{task} 实际超 P90（方法学失败结论须入 Complete）")
-    # T6 Stage B 判决件
-    if not _STAGE_B_VERDICT.is_file():
-        gaps.append({"what": "T6 Stage B 判决件", "path": str(_STAGE_B_VERDICT),
-                     "why": "窗口证据未随包提供"})
-    else:
-        v = json.loads(_STAGE_B_VERDICT.read_text(encoding="utf-8"))
+    # T6 Stage B 判决件：优先读包内已入 sha256 台账的副本（证据自足），
+    # 包外活件只作缺口兜底——不能只凭包外活件判绿。
+    verdict_path = None
+    if pack_dir is not None:
+        cand = (pack_dir / "task6_stage_b" / "window"
+                / _STAGE_B_VERDICT.parent.name / "task6_r4_verdict.json")
+        if cand.is_file():
+            verdict_path = cand
+    if verdict_path is None:
+        if not _STAGE_B_VERDICT.is_file():
+            # 科学结论无任何可读判决件 → 不得判绿（缺证 = 问题，不是缺口）
+            problems.append(f"T6 Stage B 判决件缺失：{_STAGE_B_VERDICT}")
+        else:
+            verdict_path = _STAGE_B_VERDICT
+            gaps.append({"what": "T6 Stage B 判决件（包外活件）",
+                         "path": str(_STAGE_B_VERDICT),
+                         "why": "包内未提供副本，按包外活件判定"})
+    if verdict_path is not None:
+        v = json.loads(verdict_path.read_text(encoding="utf-8"))
         if v.get("verdict") != "RETAIN_R4" or v.get("retain") is not True:
             problems.append(f"T6 Stage B 判决非 RETAIN_R4：{v.get('verdict')}")
         conds = v.get("conditions") or {}
-        bad = [k for k, c in conds.items() if not c.get("ok")]
+        if set(conds) != _STAGE_B_CONDITIONS:
+            problems.append(
+                f"T6 Stage B 条件键不符（应恰 5 条）：{sorted(conds)}")
+        bad = [k for k, c in conds.items() if c is not True]
         if bad:
             problems.append(f"T6 Stage B 条件未全过：{bad}")
-        if not (v.get("point_prediction_match") or {}).get("ok"):
+        ppm = v.get("point_prediction_match") or {}
+        if not ppm.get("ok"):
             problems.append("T6 Stage B 点预测闸未过")
+        if ppm.get("mismatches") or ppm.get("n_cases") != 47:
+            problems.append(
+                f"T6 Stage B 点预测逐案不符：n={ppm.get('n_cases')} "
+                f"mismatches={ppm.get('mismatches')}")
         want = "9a704e0081c62e1d938bd023bddc572eafac3768450f08327c7a8ad09fb59e16"
         if v.get("iter5_sha256") != want:
             problems.append("T6 Stage B iter5 报告 sha 与登记不符")
@@ -223,6 +268,26 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
     entries = man.get("files") or []
     if not entries:
         problems.append("manifest.files 为空")
+    listed = {r["path"] for r in entries}
+    # 全覆盖：包内实有文件集合 == manifest 登记集合 + manifest.json 自身
+    actual = {str(p.relative_to(pack_dir)) for p in pack_dir.rglob("*")
+              if p.is_file()}
+    unlisted = actual - listed - {"manifest.json"}
+    if unlisted:
+        problems.append(f"包内未登记文件 {len(unlisted)} 个：{sorted(unlisted)[:3]}")
+    ghost = listed - actual
+    if ghost:
+        problems.append(f"manifest 列件缺失 {len(ghost)} 个：{sorted(ghost)[:3]}")
+    bad_modes = []
+    for p in pack_dir.rglob("*"):
+        if p.name == "manifest.json":
+            continue
+        mode = stat.S_IMODE(p.stat().st_mode)
+        want = 0o700 if p.is_dir() else 0o600
+        if mode != want:
+            bad_modes.append(f"{p.relative_to(pack_dir)}={oct(mode)}")
+    if bad_modes:
+        problems.append(f"包内权限不符 0700/0600：{bad_modes[:3]}")
     for rec in entries:
         p = pack_dir / rec["path"]
         if not p.is_file():
@@ -242,13 +307,34 @@ def check_pack(pack_dir: Path) -> "tuple[list[str], list[dict]]":
             problems.append(f"缺 {slug}/NOT_EXECUTED.json 或该任务证据")
             continue
         rec = json.loads(marker.read_text(encoding="utf-8"))
+        if rec.get("status") != "stopped_by_user":
+            problems.append(f"{slug}/NOT_EXECUTED.json status 非 stopped_by_user")
         gaps.append({"what": rec.get("task") or slug,
                      "path": str(marker),
                      "why": f"{rec.get('status')}：{rec.get('adjudication')}"})
+    signs_dir = pack_dir / "task10_closeout" / "signs"
     if (pack_dir / "task10_closeout/signs_MISSING.json").is_file():
         gaps.append({"what": "Task 10 三签件",
-                     "path": str(pack_dir / "task10_closeout"),
+                     "path": str(signs_dir),
                      "why": "机判时点三签尚未落件（构建顺序：机判→三签→终建包）"})
+    else:
+        # 三签件齐备口径：executor/reviewer/verifier 三角色各一份且 verdict 可读
+        found = {}
+        for p in sorted(signs_dir.glob("*.json")) if signs_dir.is_dir() else []:
+            try:
+                s = json.loads(p.read_text(encoding="utf-8"))
+            except ValueError:
+                problems.append(f"三签件不可解析：{p.name}")
+                continue
+            found[s.get("role") or p.stem] = s
+        missing = {"executor", "reviewer", "verifier"} - set(found)
+        if missing:
+            problems.append(f"三签件缺角色：{sorted(missing)}")
+        for role, s in found.items():
+            if s.get("schema") != "simpraxis.phase25.sign.v1":
+                problems.append(f"三签件 {role} schema 不符")
+            if s.get("verdict") not in ("APPROVE", "REJECT"):
+                problems.append(f"三签件 {role} verdict 非法：{s.get('verdict')}")
     # 密钥双扫（包内文本）
     hits = []
     for p in pack_dir.rglob("*"):
@@ -296,9 +382,11 @@ def build_report(*, reconcile: Path, dashboard: Path, pack: Path,
     else:
         rec = json.loads(reconcile.read_text(encoding="utf-8"))
         problems += check_ledger(rec)
-        problems += check_tables(rec)
+        problems += check_tables(
+            rec, pack / "task6_stage_b" / "window"
+            / _STAGE_B_VERDICT.parent.name / "pre_vector_identity.json")
         problems += check_env(rec)
-        sp, sg = check_science(rec)
+        sp, sg = check_science(rec, pack)
         problems += sp
         gaps += sg
     dash = None

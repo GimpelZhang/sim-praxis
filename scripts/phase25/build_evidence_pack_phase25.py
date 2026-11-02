@@ -348,6 +348,14 @@ def build_pack(*, p25: Path, runs25: Path, repo: Path, p1: Path, pack: Path,
         src = roots[root_key] / src_rel
         if not src.is_file():
             raise PackError(f"必需证据缺失：{src}（逻辑编号 {logical}）")
+    # 必需目录同样在 --clean 删旧包之前预检（评审 LOW-1：不留「旧包已删、
+    # 新包未成」的空窗）；符号链接/密钥/超限只能在复制后判，属已知残余风险。
+    for (_pfx, root_key, src_dir, logical, required, _ex) in DIR_COPIES:
+        if not required:
+            continue
+        src_base = roots[root_key] / src_dir
+        if not src_base.exists():
+            raise PackError(f"必需证据目录缺失：{src_base}（逻辑编号 {logical}）")
 
     if clean:
         guarded = [Path(lance_uri), pack]
