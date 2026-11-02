@@ -394,11 +394,72 @@ def check_proc7(pack_dir: Path) -> list[str]:
         problems.append(f"PROC-7 差异件挂问题：{diff.get('problems')!r}")
     if diff.get("q1q2q3_recall_equal") is not True:
         problems.append("PROC-7 差异件未自证召回快照恒等")
-    tabs = diff.get("tables") or {}
+    # R4 MAJOR-1：不信 `ok` 自述，按明细字段重算——否则一份自称 ok、明细
+    # 却写着「文本变了 / id 集变了 / rows_before 崩塌」的差异件照样能绿。
+    tabs = diff.get("tables")
+    if not isinstance(tabs, dict):
+        return problems + ["PROC-7 差异件缺 tables 明细（不可判定）"]
     for name, want in EXPECTED_ROWS.items():
-        rows = (tabs.get(name) or {}).get("rows_after")
-        if rows != want:
-            problems.append(f"PROC-7 差异件 {name}.rows_after={rows!r} ≠ {want}")
+        t = tabs.get(name)
+        if not isinstance(t, dict):
+            problems.append(f"PROC-7 差异件缺 {name} 明细")
+            continue
+        for field in ("rows_before", "rows_after"):
+            if t.get(field) != want:
+                problems.append(
+                    f"PROC-7 差异件 {name}.{field}={t.get(field)!r} ≠ {want}")
+        for flag in ("id_set_equal", "id_set_sha256_equal",
+                     "content_hash_set_sha256_equal"):
+            if t.get(flag) is not True:
+                problems.append(f"PROC-7 差异件 {name}.{flag} 非 true")
+        for field in ("text_changed", "meta_noprov_changed"):
+            if t.get(field) != []:
+                problems.append(
+                    f"PROC-7 差异件 {name}.{field} 非空：{t.get(field)!r}")
+        if t.get("source_commit_changed_count") != 0:
+            problems.append(
+                f"PROC-7 差异件 {name}.source_commit_changed_count="
+                f"{t.get('source_commit_changed_count')!r} ≠ 0")
+        if name == "solution_chunks":
+            # 重盖章只允许 ingested_at 前进（0..rows），不许越界/非数值
+            n = t.get("ingested_at_changed_count")
+            if not _is_num(n) or not 0 <= n <= want:
+                problems.append(
+                    "PROC-7 差异件 solution_chunks.ingested_at_changed_count="
+                    f"{n!r} 越界（应在 0..{want}）")
+        else:
+            for field in ("meta_changed_count", "ingested_at_changed_count"):
+                if t.get(field) != 0:
+                    problems.append(
+                        f"PROC-7 差异件 {name}.{field}={t.get(field)!r} ≠ 0")
+    return problems
+
+
+# 包内收尾副本 ↔ 根目录活件（R4 MAJOR-2）：建包只是复制，过期件能被原样
+# 收录；不逐字节互证，包内外就能各说各话（红判躺进包里仍全绿）。
+_PACK_ROOT_PAIRS = (
+    ("closeout/closeout_reconcile.json", "closeout_reconcile.json"),
+    ("closeout/dashboard_phase25.json", "dashboard_phase25.json"),
+    ("closeout/closure_judge.json", "closure_judge.json"),
+    ("closeout/proc7_restamp_diff.json", "proc7_restamp_diff.json"),
+    ("task10_closeout/task10_fullsuite.log", "task10_fullsuite.log"),
+    ("task10_closeout/task10_kbint.log", "task10_kbint.log"),
+)
+
+
+def check_pack_vs_root(pack_dir: Path, root: Path) -> list[str]:
+    """包内收尾副本与根目录活件逐字节一致（否则视同未收录）。"""
+    problems: list[str] = []
+    for pack_rel, root_name in _PACK_ROOT_PAIRS:
+        p, r = pack_dir / pack_rel, root / root_name
+        if not p.is_file():
+            problems.append(f"包内缺 {pack_rel}（无从与根件互证）")
+        elif not r.is_file():
+            problems.append(f"根目录缺 {root_name}：包内副本无从互证")
+        elif _sha256(p) != _sha256(r):
+            problems.append(
+                f"包内 {pack_rel} 与根件 {root_name} 逐字节不一致"
+                "（建包收录了过期件）")
     return problems
 
 
@@ -782,6 +843,7 @@ def build_report(*, reconcile: Path, dashboard: Path, pack: Path,
     gaps += pg
     if rec is not None:
         problems += check_pack_vs_live(pack, rec)
+        problems += check_pack_vs_root(pack, reconcile.parent)
         problems += check_verifier_recomputed(pack, ac, rec)
     if dash is not None:
         problems += check_commit_binding(dash, pack)

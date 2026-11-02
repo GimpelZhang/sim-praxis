@@ -120,9 +120,14 @@ def _proc7_payload() -> dict:
     return {
         "schema": "simpraxis.phase25.proc7_restamp_diff.v1",
         "tables": {k: {"rows_before": v, "rows_after": v,
+                       "id_set_equal": True, "id_set_sha256_equal": True,
+                       "content_hash_set_sha256_equal": True,
                        "text_changed": [], "meta_noprov_changed": [],
+                       "meta_changed_count":
+                       (v if k == "solution_chunks" else 0),
                        "ingested_at_changed_count":
-                       (v if k == "solution_chunks" else 0)}
+                       (v if k == "solution_chunks" else 0),
+                       "source_commit_changed_count": 0}
                    for k, v in rows.items()},
         "q1q2q3_recall_equal": True,
         "problems": [],
@@ -964,6 +969,26 @@ def test_judge_proc7_diff(tmp_path):
         (lambda d: d.update({"q1q2q3_recall_equal": False}), "召回快照恒等"),
         (lambda d: d["tables"]["kb_chunks"].update({"rows_after": 1541}),
          "kb_chunks.rows_after"),
+        # R4 MAJOR-1：自称 ok 但明细自相矛盾，必须由明细判负
+        (lambda d: d["tables"]["solution_chunks"].update(
+            {"text_changed": ["sc_0001"]}), "text_changed 非空"),
+        (lambda d: d["tables"]["solution_chunks"].update(
+            {"meta_noprov_changed": ["sc_0002"]}), "meta_noprov_changed 非空"),
+        (lambda d: d["tables"]["kb_chunks"].update({"rows_before": 1541}),
+         "kb_chunks.rows_before"),
+        (lambda d: d["tables"]["kb_chunks"].pop("id_set_equal"),
+         "id_set_equal 非 true"),
+        (lambda d: d["tables"]["phase1_learnings"].update(
+            {"meta_changed_count": 3}), "phase1_learnings.meta_changed_count"),
+        (lambda d: d["tables"]["phase2_learnings"].update(
+            {"ingested_at_changed_count": 1}),
+         "phase2_learnings.ingested_at_changed_count"),
+        (lambda d: d["tables"]["solution_chunks"].update(
+            {"source_commit_changed_count": 2}),
+         "source_commit_changed_count"),
+        (lambda d: d["tables"]["solution_chunks"].update(
+            {"ingested_at_changed_count": 999}), "越界"),
+        (lambda d: d.update({"tables": None}), "缺 tables 明细"),
     ):
         d = _proc7_payload()
         mutate(d)
@@ -972,6 +997,35 @@ def test_judge_proc7_diff(tmp_path):
     path.unlink()
     _write_manifest(pack)
     assert any("缺 PROC-7 重盖章差异件" in p for p in J.check_pack(pack)[0])
+
+
+def test_judge_pack_vs_root(tmp_path):
+    """R4 MAJOR-2：包内收尾副本必须与根目录活件逐字节一致（过期件不算收录）。"""
+    pack = _minimal_pack(tmp_path)
+    root = tmp_path / "root"
+    root.mkdir()
+    for pack_rel, root_name in J._PACK_ROOT_PAIRS:
+        p = pack / pack_rel
+        if not p.is_file():                    # 最小包缺的三件补齐（两边同内容）
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text('{"fixture": true}', encoding="utf-8")
+        (root / root_name).write_bytes(p.read_bytes())
+    assert J.check_pack_vs_root(pack, root) == []
+    # 根件已更新、包内仍是旧件 → 判负（红判躺进包里那种情形）
+    (root / "closure_judge.json").write_text('{"ok": true}',
+                                             encoding="utf-8")
+    assert any("closure_judge.json 与根件" in p
+               for p in J.check_pack_vs_root(pack, root))
+    (root / "closure_judge.json").write_bytes(
+        (pack / "closeout/closure_judge.json").read_bytes())
+    # 根件缺失 → 无从互证
+    (root / "task10_kbint.log").unlink()
+    assert any("根目录缺 task10_kbint.log" in p
+               for p in J.check_pack_vs_root(pack, root))
+    # 包内缺件 → 判负
+    (pack / "closeout/dashboard_phase25.json").unlink()
+    assert any("包内缺 closeout/dashboard_phase25.json" in p
+               for p in J.check_pack_vs_root(pack, root))
 
 
 def test_judge_dashboard_asserts_suite_command(tmp_path):
