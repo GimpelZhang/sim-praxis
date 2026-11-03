@@ -425,6 +425,48 @@ def test_wall_a_pass_requires_all_five_conditions():
         assert R.wall_a_passed(**{**base, key: bad}) is False, (key, bad)
 
 
+def test_cgroup_read_point_aggregates_container_scopes(monkeypatch, tmp_path):
+    """评审 R7-CGROUP-PATH：读点必须是**包含容器 scope 的分层聚合器**。
+
+    本机 systemd 驱动下容器 scope 是 `system.slice` 的子级、`docker.service`
+    的兄弟；读 `docker.service/memory.events` 会漏掉真容器 OOM（reviewer 实测：
+    128m 容器炸弹 → 容器 scope 与 system.slice 的 oom_kill 0→1，docker.service
+    保持 0）。故断言读点含 `system.slice`、且**不再**同时含 `docker.service`
+    （后代，并读会重复计数）。
+    """
+    seen = []
+    real_exists = R.Path.exists
+
+    def fake_exists(self):
+        seen.append(str(self))
+        return True
+
+    real_read = R.Path.read_text
+
+    def fake_read(self, *a, **k):
+        if str(self) == "/proc/self/cgroup":
+            return "0::/user.slice/user-1000.slice/session-7.scope\n"
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(R.Path, "exists", fake_exists)
+    monkeypatch.setattr(R.Path, "read_text", fake_read)
+    paths = [str(p) for p in R._cgroup_event_paths()]
+    assert "/sys/fs/cgroup/system.slice/memory.events" in paths
+    assert not any("/docker.service/" in p for p in paths)
+    assert "/sys/fs/cgroup/user.slice/user-1000.slice/session-7.scope/memory.events" \
+        in paths
+
+
+def test_cgroup_read_point_falls_back_without_system_slice(monkeypatch):
+    """`system.slice` 不可读时回退 `docker.service`（cgroupfs 驱动的老路径）。"""
+    monkeypatch.setattr(R.Path, "exists", lambda self: False)
+    monkeypatch.setattr(R.Path, "read_text",
+                        lambda self, *a, **k: (_ for _ in ()).throw(OSError()))
+    paths = [str(p) for p in R._cgroup_event_paths()]
+    assert paths == [
+        "/sys/fs/cgroup/system.slice/docker.service/memory.events"]
+
+
 def test_oom_counter_parsing_and_delta(tmp_path, monkeypatch):
     """cgroup `memory.events` 解析：缺文件/坏行不猜 0；任一端缺席即 None。"""
     a = tmp_path / "docker.memory.events"

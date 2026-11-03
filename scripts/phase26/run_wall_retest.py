@@ -880,8 +880,11 @@ def _identity_rows(ledger: QuotaLedger, batch_id: str,
 #       **且**评分器退出码为 137。只认 137 不认计数器会被模型伪造——冻结评分器
 #       在容器/宿主内 `importlib.exec_module` 跑模型写的 `agent_solution.py`，
 #       模型一行 `os._exit(137)` 就能把评分器进程退出码设成 137（R7，
-#       2026-11-03 经 executor 独立复现：rc=137 但内核 oom_kill 增量为 0）；
-#   (c) /mnt 评分时点剩余空间（harness 观测）。
+#       2026-11-03 经 executor 独立复现：rc=137 但内核 oom_kill 增量为 0）。
+#       计数器的**读点**见 `_cgroup_event_paths()`：本机 systemd cgroup 驱动下
+#       容器 scope 是 `system.slice` 的子级、`docker.service` 的兄弟，读
+#       `docker.service` 会假阴性（评审 R7-CGROUP-PATH，reviewer 实证）；
+#   (c) /mnt 评分窗口内的最低剩余空间（harness 观测，评分前后各取一次）。
 # 模型 stdout/stderr 是**不可信信道**：模型 print 一行 MemoryError/ENOSPC
 # 不得把质量失败翻成基础设施故障，故本函数根本不接受这两个参数。
 INFRA_HTTP_PATTERNS = (
@@ -907,8 +910,30 @@ def _cgroup_event_paths() -> tuple[Path, ...]:
     容器评分（墙 A）的 OOM 击杀记在 `docker.service` 的 cgroup 上；宿主进程
     评分（墙 B）与本体进程被 OOM 击杀则记在本会话 scope 及其子树上。两处都
     读，任一在评分窗口内 `oom_kill` 增量 > 0 即算一次真实内核击杀。
+
+    评审 R7-CGROUP-PATH（第四轮，reviewer 实证）：本机 docker 用 **systemd
+    cgroup 驱动**（`docker info` → `CgroupDriver=systemd CgroupVersion=2`），
+    容器 scope 落在 `/sys/fs/cgroup/system.slice/docker-<id>.scope`，是
+    `system.slice` 的**直接子级**、`docker.service` 的**兄弟**——`docker.service`
+    的 `memory.events` 不聚合它们，读它恒得 0。实测：`--memory 128m` 容器内存
+    炸弹 → 容器 scope 与 `system.slice` 的 `oom_kill` 均 0→1，而
+    `docker.service` 保持 0。旧读点是 D4-6(b) 的**假阴性**（真 OOM 判成质量失败），
+    比误判更该修。
+
+    故读点改为**分层聚合器 `system.slice`**（cgroup v2 的 `memory.events` 是
+    层级累计，`system.slice` 覆盖 `docker.service` 与其全部 `docker-*.scope`），
+    不再同时读 `docker.service`（它是 `system.slice` 的后代，并读会重复计数；
+    `≥1` 阈值下重复无害，但少一路就少一处歧义）。`system.slice` 不可读时
+    回退 `docker.service`（cgroupfs 驱动老路径）。再加**本进程所在 scope**
+    覆盖墙 B 的宿主侧评分。
     """
-    paths = [Path("/sys/fs/cgroup/system.slice/docker.service/memory.events")]
+    paths: list[Path] = []
+    system_slice = Path("/sys/fs/cgroup/system.slice/memory.events")
+    if system_slice.exists():
+        paths.append(system_slice)
+    else:
+        paths.append(Path(
+            "/sys/fs/cgroup/system.slice/docker.service/memory.events"))
     try:
         rel = Path("/proc/self/cgroup").read_text(encoding="utf-8")
         for line in rel.splitlines():
@@ -1235,9 +1260,14 @@ def cmd_run(wall: str, batch_id: str) -> int:
 
     # R7：OOM 判据的前置快照必须在评分前后各取一次——模型代码能改自己的
     # 退出码，改不了内核 oom_kill 计数器。
+    # 磁盘同理（executor 第四轮 LOW）：评分**期间**写满才算基础设施故障，
+    # 故窗口两端各取一次并取更低值，而不是只在评分结束后看一眼。
     oom_before = _read_oom_kill_counts()
+    disk_free_before = shutil.disk_usage("/mnt").free
     scored = _score_once(wall, root, work)
     oom_kill_delta_at_score = _oom_kill_delta(oom_before, _read_oom_kill_counts())
+    disk_free_gib_at_score = round(
+        min(disk_free_before, shutil.disk_usage("/mnt").free) / (1 << 30), 2)
     score_dir = fc.ensure_dir(run_dir / "score")
     fc.atomic_write_bytes(score_dir / "stdout.log",
                           scored["stdout"].encode("utf-8"))
@@ -1263,8 +1293,7 @@ def cmd_run(wall: str, batch_id: str) -> int:
     metrics["ledger_seq"] = [r.get("seq") for r in seq_rows]
     score = scored.get("score") or {}
     # 磁盘写满只能由我方观测取证：模型 stdout/stderr 可自称 ENOSPC（评审 R2）。
-    disk_free_gib_at_score = round(
-        shutil.disk_usage("/mnt").free / (1 << 30), 2)
+    # 取值为评分窗口两端（`_score_once` 前后）的**更低值**，见上方快照注释。
     infra_failure, infra_class = classify_infra_failure(
         outcome.kind, str(outcome.reason or ""),
         scorer_rc=scored["rc"], oom_kill_delta=oom_kill_delta_at_score,
