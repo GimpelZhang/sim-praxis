@@ -671,21 +671,25 @@ def test_m5_cache_hit_between_real_rounds_tool_keeps_latest_real_seq(tmp_path):
     assert _answer_row(tr_b)["seq"] == 202
 
 
-def test_m5_build_seq_provider_reads_phase26_ledger_by_identity(
+def test_m5_build_seq_provider_reads_phase27_ledger_by_identity(
         tmp_path, monkeypatch):
-    # 真 phase26 账（临时根、0 触网）：billing 身份内读 max(seq)，
+    # 真活跃账（临时根、0 触网）：billing 身份内读 max(seq)，
     # 身份外/无上下文一律 None，不串 task/batch/thread。
     # Phase 2.6 T0.4-G：provider 缺省命名空间随新账换期（phase25 已封存）。
+    # 锁内适配 L-8（Phase 2.7 Task0）：phase26 已封存、写打开必拒，本用例的
+    # 写入与读取目标一并改指活跃账 phase27；不变量（身份隔离、max(seq) 语义、
+    # 退出上下文返 None）一字未松，且封存账零写入的断言由三本扩到四本。
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
     monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_PHASE25_ROOT", str(tmp_path / "phase25"))
     monkeypatch.setenv("SIMPRAXIS_PHASE26_ROOT", str(tmp_path / "phase26"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     (tmp_path / "gwstate").mkdir(exist_ok=True)
     from orchestrator.agentic.wiring import build_seq_provider
     from orchestrator.gateway import quota_ledger as ql
 
-    ledger = ql.QuotaLedger.phase26()
+    ledger = ql.QuotaLedger.phase27()
     provider = build_seq_provider()
     assert provider() is None        # 无 billing 上下文：零 IO 直接 None
     with ql.billing_context(task=4, batch_id="b-m5", thread_id="thr-A"):
@@ -706,8 +710,8 @@ def test_m5_build_seq_provider_reads_phase26_ledger_by_identity(
     with ql.billing_context(task=4, batch_id="b-m5", thread_id="thr-A"):
         assert provider() == 1       # 回原身份：不被后续行污染
     assert provider() is None        # 退出上下文：None
-    # 三份封存账零写入（命名空间隔离，AC-T0）。
-    for phase in ("phase1", "phase2", "phase25"):
+    # 四份封存账零写入（命名空间隔离，AC-T0）。
+    for phase in ("phase1", "phase2", "phase25", "phase26"):
         assert not (tmp_path / phase / "quota" / "ledger.jsonl").exists()
 
 

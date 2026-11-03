@@ -53,3 +53,19 @@ def pytest_configure(config):
     # kb_integration 同构——裸跑自行 skip，需显式 SIMPRAXIS_DOCKER_INTEGRATION=1
     # 且本机 docker daemon 在场才执行（非放水；Task 5 首次付费前必须真跑录证）。
     config.addinivalue_line("markers", "docker_integration: 真 docker 兄弟容器测试，需显式开关（SIMPRAXIS_DOCKER_INTEGRATION=1）")
+    # Phase 2.7 Task0（C-4）：真容器内测试打 container 标记，裸跑**收集期 deselect**
+    # （不是 skip——硬规则 7 禁止 skip；也不新增第三条 -m 排除，否则 CLAUDE.md 的
+    # 两排除收尾命令就不再逐字一致）。
+    config.addinivalue_line("markers", "container: 真容器内测试，需显式开关（SIMPRAXIS_CONTAINER=1）")
+
+
+def pytest_collection_modifyitems(config, items):
+    """container 裸跑 deselect（非 skip）：保持 CLAUDE.md 收尾命令仍只有两排除项。"""
+    if os.environ.get("SIMPRAXIS_CONTAINER") == "1":
+        return
+    keep, drop = [], []
+    for it in items:
+        (drop if it.get_closest_marker("container") else keep).append(it)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep

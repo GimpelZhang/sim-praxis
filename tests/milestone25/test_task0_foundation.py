@@ -2,13 +2,13 @@
 
 覆盖：
   1. scripts/00_env.sh 纯加法：与 T0 父本金（efc08a3，phase25 块入仓前）
-     逐字节对账（env 多 SIMPRAXIS_PHASE25_ROOT 与 Phase 2.6 的
-     SIMPRAXIS_PHASE26_ROOT、文件树多 phase25 + phase26 目录族）、0700/0600、
+     逐字节对账（env 多 SIMPRAXIS_PHASE25/26/27_ROOT、文件树多 phase25 +
+     phase26 + phase27 目录族）、0700/0600、
      幂等（已存在 ledger 不截断）、可写探针；
-  2. runtime_paths phase25 路径族 + Phase1/2/2.5 封存账写守卫（SealedLedgerError）；
+  2. runtime_paths phase25 路径族 + Phase1/2/2.5/2.6 封存账写守卫（SealedLedgerError）；
   3. PHASE25_TASK_CAPS={3:6,5:53,9:160,10:2} 常量/算术/命名空间永不并表
      （R1 2026-10-30 用户裁决 28→53，Task 5b 第二实验批次，见 task5b_spec.md §7）；
-  4. phase26 独立账（Phase 2.6 起；phase25 已随 2.5 结案封存）：空账首行 seq=1、
+  4. phase27 独立账（Phase 2.7 起；phase25/26 已随各自结案封存）：空账首行 seq=1、
      严格 UTC Z、任务帽/全局门/暂停态隔离、blocked（null seq）占批次不占实呼、
      CLI --ledger-phase；
   5. AC-T0-7 机判：合成正账 + 跳号/重号/混列/bool/非 Z 五负例必红 + 两栏汇总；
@@ -38,7 +38,7 @@ from orchestrator.gateway import quota_ledger as ql
 from orchestrator.gateway.quota_ledger import (
     LedgerSequenceError,
     PHASE25_NAMESPACE,
-    PHASE26_NAMESPACE,
+    PHASE27_NAMESPACE,
 )
 from orchestrator.gateway.router import GatewayPausedError
 
@@ -110,7 +110,8 @@ def _source_snapshot(script_text: str, shared_root: Path) -> dict:
     # 各期根一律不预置，强制走脚本默认值（data 根下 phase1/2/25/26），
     # 既测默认契约也杜绝测试串到外层 shell 的真实 /mnt 根。
     for k in ("SIMPRAXIS_PHASE1_ROOT", "SIMPRAXIS_PHASE2_ROOT",
-              "SIMPRAXIS_PHASE25_ROOT", "SIMPRAXIS_PHASE26_ROOT"):
+              "SIMPRAXIS_PHASE25_ROOT", "SIMPRAXIS_PHASE26_ROOT",
+              "SIMPRAXIS_PHASE27_ROOT"):
         env.pop(k, None)
 
     driver = (
@@ -180,6 +181,29 @@ _PHASE26_DATA_ADDITIONS = {
 }
 
 
+# Phase 2.7 Task0（L-3：设计决策 D0-4 的 zoo 目录在 T0.4-A 代码块里没有，
+# 取并集后 00_env.sh 同时建 zoo；本期望集随之逐项严格相等地扩第三份）。
+_PHASE27_DATA_ADDITIONS = {
+    "d 700 phase27",
+    "d 700 phase27/agentic_traces",
+    "d 700 phase27/estimates",
+    "d 700 phase27/quota",
+    "d 700 phase27/quota/approvals",
+    "d 700 phase27/quota/gateway_state",
+    "f 600 phase27/quota/ledger.jsonl",
+    "d 700 phase27/runs",
+    "d 700 phase27/skills_stage",
+    "d 700 phase27/task7_milestone",
+    "d 700 phase27/walls",
+    "d 700 phase27/watchdog",
+    "d 700 phase27/watchdog/incidents",
+    "d 700 phase27/watchdog/triage_bundles",
+    "d 700 phase27/zoo",
+    # SIMPRAXIS_RUN_DIR 默认就在 data 根下（data/runs/phase27）。
+    "d 700 runs/phase27",
+}
+
+
 def test_env_script_pure_additive_vs_pre_t0_parent(tmp_path):
     # 基线钉死 T0 父本金（不可变 commit），严禁改回活 HEAD——HEAD 在 T0
     # 提交后含 phase25 块，两边逐字节相同会令 added 断言自指必红。
@@ -192,30 +216,33 @@ def test_env_script_pure_additive_vs_pre_t0_parent(tmp_path):
     old = _source_snapshot(parent_text, shared)
     new = _source_snapshot(cur_text, shared)
 
-    # env：允许新增 SIMPRAXIS_PHASE25_ROOT 与 SIMPRAXIS_PHASE26_ROOT
-    # （各自默认落在 data 根下 phase25/、phase26/）。
+    # env：允许新增 SIMPRAXIS_PHASE25_ROOT / SIMPRAXIS_PHASE26_ROOT /
+    # SIMPRAXIS_PHASE27_ROOT（各自默认落在 data 根下 phase25/、phase26/、phase27/）。
     env_added = sorted(set(new["env"]) - set(old["env"]))
     assert sorted(set(old["env"]) - set(new["env"])) == []
     assert env_added == ["SIMPRAXIS_PHASE25_ROOT="
                          + str(shared / "data" / "phase25"),
                          "SIMPRAXIS_PHASE26_ROOT="
-                         + str(shared / "data" / "phase26")]
+                         + str(shared / "data" / "phase26"),
+                         "SIMPRAXIS_PHASE27_ROOT="
+                         + str(shared / "data" / "phase27")]
 
-    # 文件树：新增项必须恰好是 phase25 + phase26 目录族；旧项形态一个字节都不改。
-    # Phase 2.6 Task0 把 00_env.sh 的纯加法块加了第二份（phase26），本测随之
+    # 文件树：新增项必须恰好是 phase25 + phase26 + phase27 目录族；旧项形态一个
+    # 字节都不改。Phase 2.6 Task0 加第二份、Phase 2.7 Task0 加第三份，本测随之
     # 扩期望集——**断言仍是逐项严格相等**，不是放水。
-    expected_additions = _PHASE25_DATA_ADDITIONS | _PHASE26_DATA_ADDITIONS
+    expected_additions = (_PHASE25_DATA_ADDITIONS | _PHASE26_DATA_ADDITIONS
+                          | _PHASE27_DATA_ADDITIONS)
     added_tree = set(new["tree-data"]) - set(old["tree-data"])
     assert set(old["tree-data"]) - set(new["tree-data"]) == set()
     assert added_tree == expected_additions
     assert set(new["tree-data"]) == (
         set(old["tree-data"]) | expected_additions)
     assert set(new["tree-runs"]) - set(old["tree-runs"]) == {
-        "d 700 phase25", "d 700 phase26"}
+        "d 700 phase25", "d 700 phase26", "d 700 phase27"}
     assert set(old["tree-runs"]) - set(new["tree-runs"]) == set()
 
     # 空账（父本金版不创建它们，当前版首次 source 只 touch 不写内容）。
-    for phase in ("phase25", "phase26"):
+    for phase in ("phase25", "phase26", "phase27"):
         ledger = shared / "data" / phase / "quota" / "ledger.jsonl"
         assert ledger.stat().st_size == 0
         assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
@@ -232,12 +259,18 @@ def test_env_script_idempotent_ledger_not_truncated(tmp_path):
     ledger26 = shared / "data" / "phase26" / "quota" / "ledger.jsonl"
     ledger26.write_text('{"sentinel": true}\n', encoding="utf-8")
     ledger26.chmod(0o644)
+    ledger27 = shared / "data" / "phase27" / "quota" / "ledger.jsonl"
+    ledger27.write_text('{"sentinel": true}\n', encoding="utf-8")
+    ledger27.chmod(0o644)
     second = _source_snapshot(cur_text, shared)
     assert ledger.read_text(encoding="utf-8") == '{"sentinel": true}\n'
     assert stat.S_IMODE(ledger.stat().st_mode) == 0o600
     # phase26 块用无条件 `touch`（只改 mtime 不改内容）：开账 selfcheck 行不能被清零。
     assert ledger26.read_text(encoding="utf-8") == '{"sentinel": true}\n'
     assert stat.S_IMODE(ledger26.stat().st_mode) == 0o600
+    # phase27 块用 `[ ! -e ]` 守卫创建：已存在则不重写，只把权限收敛回 600。
+    assert ledger27.read_text(encoding="utf-8") == '{"sentinel": true}\n'
+    assert stat.S_IMODE(ledger27.stat().st_mode) == 0o600
     # 两次快照 tree/env 完全一致（幂等；探针临时文件无残留）。
     assert first["tree-data"] == second["tree-data"]
     assert first["tree-runs"] == second["tree-runs"]
@@ -256,6 +289,13 @@ def test_env_script_idempotent_ledger_not_truncated(tmp_path):
                 "task9_milestone", "runs"):
         mode = stat.S_IMODE((root26 / rel).stat().st_mode)
         assert mode == 0o700, f"phase26 {rel} 必须 0700，实际 {mode:o}"
+    root27 = shared / "data" / "phase27"
+    for rel in ("", "quota", "quota/approvals", "quota/gateway_state",
+                "estimates", "watchdog", "watchdog/incidents",
+                "watchdog/triage_bundles", "agentic_traces", "walls",
+                "task7_milestone", "skills_stage", "zoo", "runs"):
+        mode = stat.S_IMODE((root27 / rel).stat().st_mode)
+        assert mode == 0o700, f"phase27 {rel} 必须 0700，实际 {mode:o}"
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +309,8 @@ def p25_env(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE25_ROOT", str(tmp_path / "phase25"))
     # Phase 2.6：新写账缺省目标 = phase26 根；不显式给会让断言落到隐式推导上。
     monkeypatch.setenv("SIMPRAXIS_PHASE26_ROOT", str(tmp_path / "phase26"))
+    # Phase 2.7：phase26 亦已封存，新写账一律显式传 phase27 路径（D0-3 不改缺省）。
+    monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     return tmp_path
 
@@ -294,24 +336,27 @@ def test_sealed_ledgers_reject_write_open(p25_env):
     assert rp.phase2_ledger_path().resolve(strict=False) in sealed
     # Phase 2.6（D0-2）：phase25 已随 2.5 结案封存，反向断言翻正。
     assert rp.phase25_ledger_path().resolve(strict=False) in sealed
-    # phase26 新账不在封存集。
-    assert rp.phase26_ledger_path().resolve(strict=False) not in sealed
+    # Phase 2.7（D0-2）：phase26 已随 2.6 收束封存，反向断言翻正（C-3）。
+    assert rp.phase26_ledger_path().resolve(strict=False) in sealed
+    # 唯一可写账 = phase27（封存集不扩到当前写入者自身）。
+    assert rp.phase27_ledger_path().resolve(strict=False) not in sealed
+    for p in (rp.phase2_ledger_path(), rp.phase1_ledger_path(),
+              rp.phase25_ledger_path(), rp.phase26_ledger_path()):
+        with pytest.raises(rp.SealedLedgerError):
+            rp.open_ledger_append(p)
+    # 缺省追加目标仍是 phase26（D0-3 不改缺省）——因 phase26 已封存，缺省调用
+    # 现在必抛；Phase 2.7 的写一律显式传 phase27 路径。
     with pytest.raises(rp.SealedLedgerError):
-        rp.open_ledger_append(rp.phase2_ledger_path())
-    with pytest.raises(rp.SealedLedgerError):
-        rp.open_ledger_append(rp.phase1_ledger_path())
-    # 显式指向 phase25 封存账同样必拒。
-    with pytest.raises(rp.SealedLedgerError):
-        rp.open_ledger_append(rp.phase25_ledger_path())
-    # 缺省追加目标 = phase26 新账；写后权限 0600。
-    with rp.open_ledger_append() as fh:
+        rp.open_ledger_append()
+    with rp.open_ledger_append(rp.phase27_ledger_path()) as fh:
         fh.write('{"ok": true}\n')
-    p = rp.phase26_ledger_path()
+    p = rp.phase27_ledger_path()
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
     assert p.read_text(encoding="utf-8") == '{"ok": true}\n'
-    # 封存的 phase25 账一个字节都没多。
-    assert not rp.phase25_ledger_path().exists() or \
-        rp.phase25_ledger_path().read_text(encoding="utf-8") == ""
+    # 封存的 phase25/26 账一个字节都没多。
+    for sealed_ledger in (rp.phase25_ledger_path(), rp.phase26_ledger_path()):
+        assert not sealed_ledger.exists() or \
+            sealed_ledger.read_text(encoding="utf-8") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -358,17 +403,24 @@ def p25_ledger(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def p26_ledger(tmp_path, monkeypatch):
-    """Phase 2.6 新账夹具（phase25 已封存；写路径一律 phase26）。"""
+def p27_ledger(tmp_path, monkeypatch):
+    """Phase 2.7 活跃新账夹具（phase25/26 均已封存；写路径一律 phase27）。
+
+    锁内适配（Phase 2.7 Task0，D0-2）：本文件原以 phase26 为「当前新账」做
+    行为验证；Phase 2.7 起 phase26 进封存集，`_append` 走带守卫入口即抛
+    SealedLedgerError。因此同一组不变量（空账首行 seq=1 / blocked 占批次 /
+    任务硬帽）改指当前活跃账 phase27，逐值与相位帽对齐——断言强度不变。
+    """
     monkeypatch.setenv("SIMPRAXIS_PHASE1_ROOT", str(tmp_path / "phase1"))
     monkeypatch.setenv("SIMPRAXIS_PHASE2_ROOT", str(tmp_path / "phase2"))
     monkeypatch.setenv("SIMPRAXIS_PHASE25_ROOT", str(tmp_path / "phase25"))
     monkeypatch.setenv("SIMPRAXIS_PHASE26_ROOT", str(tmp_path / "phase26"))
+    monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     (tmp_path / "gwstate").mkdir(exist_ok=True)
     return {"tmp": tmp_path,
-            "ledger": tmp_path / "phase26" / "quota" / "ledger.jsonl",
-            "pause26": (tmp_path / "phase26" / "quota" / "gateway_state"
+            "ledger": tmp_path / "phase27" / "quota" / "ledger.jsonl",
+            "pause27": (tmp_path / "phase27" / "quota" / "gateway_state"
                         / "quota_pause.json"),
             "global_pause": tmp_path / "gwstate" / "quota_pause.json"}
 
@@ -379,30 +431,33 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
 
 
-def test_phase26_empty_ledger_first_seq_one_strict_z(p26_ledger):
-    led = ql.QuotaLedger.phase26()
+def test_phase27_empty_ledger_first_seq_one_strict_z(p27_ledger):
+    # 锁内适配（Phase 2.7 Task0，D0-2）：本用例原指 phase26（彼时的活跃新账），
+    # 2.6 收束后 phase26 封存、写打开必拒，故改指当前活跃账 phase27；
+    # 被验证的不变量（空账首行 seq=1 / 严格 Z / 批准件落本账）一字未松。
+    led = ql.QuotaLedger.phase27()
     ql.write_approval(batch_id=BATCH, task=4, stage=STAGE, approved=4,
                       beyond_normal=False, note="fixture（零付费）",
-                      namespace=PHASE26_NAMESPACE)
+                      namespace=PHASE27_NAMESPACE)
     pre = led.preflight(STAGE, task=4, batch_id=BATCH)
     assert pre == {"global_used": 0, "batch_used": 0, "task_used": 0,
                    "batch_approved": 4}
     row = led.record(STAGE, task=4, batch_id=BATCH, ok=True,
-                     model="fixture-model", thread_id="t-p26-1")
+                     model="fixture-model", thread_id="t-p27-1")
     assert row["seq"] == 1 and row["event"] == "call"
     parse_ts_iso_strict(row["ts_iso"])  # 严格 Z
     row2 = led.record(STAGE, task=4, batch_id=BATCH, ok=False,
-                      model="fixture-model", thread_id="t-p26-1")
+                      model="fixture-model", thread_id="t-p27-1")
     assert row2["seq"] == 2 and row2["global_used_after"] == 2
-    # 批准件落 phase26 目录且带 ledger_phase=26。
-    approval = json.loads((p26_ledger["tmp"] / "phase26" / "quota"
+    # 批准件落 phase27 目录且带 ledger_phase=27。
+    approval = json.loads((p27_ledger["tmp"] / "phase27" / "quota"
                            / "approvals" / f"{BATCH}.json").read_text())
-    assert approval["ledger_phase"] == 26
+    assert approval["ledger_phase"] == 27
     # 机判正账通过。
-    ql.validate_ledger_rows(_rows(p26_ledger["ledger"]))
-    # 三份封存账一个字节都没被写（目录可能由路径解析预建，只认账文件）。
-    for phase in ("phase1", "phase2", "phase25"):
-        assert not (p26_ledger["tmp"] / phase / "quota" / "ledger.jsonl").exists()
+    ql.validate_ledger_rows(_rows(p27_ledger["ledger"]))
+    # 四份封存账一个字节都没被写（目录可能由路径解析预建，只认账文件）。
+    for phase in ("phase1", "phase2", "phase25", "phase26"):
+        assert not (p27_ledger["tmp"] / phase / "quota" / "ledger.jsonl").exists()
 
 
 def test_phase25_approval_namespace_membership(p25_ledger):
@@ -421,15 +476,15 @@ def test_phase25_approval_namespace_membership(p25_ledger):
                           namespace=PHASE25_NAMESPACE)
 
 
-def test_phase26_blocked_occupies_batch_not_calls(p26_ledger):
+def test_phase27_blocked_occupies_batch_not_calls(p27_ledger):
+    # 锁内适配（Phase 2.7 Task0，D0-2）：同 test_phase27_empty_ledger…，改指活跃账。
     # 无批准件 → 不发网拦截 + null-seq blocked 行（批次计 1，实呼计 0）。
-    led = ql.QuotaLedger.phase26()
+    led = ql.QuotaLedger.phase27()
     with pytest.raises(GatewayPausedError):
         led.preflight(STAGE, task=4, batch_id=BATCH)
     ql.write_approval(batch_id=BATCH, task=4, stage=STAGE, approved=2,
                       beyond_normal=False, note="fixture",
-                      namespace=PHASE26_NAMESPACE)
-    # task4 帽 28 不参与本断言；blocked 占批次：此刻批次已用 1。
+                      namespace=PHASE27_NAMESPACE)
     assert led.preflight(STAGE, task=4, batch_id=BATCH) == {
         "global_used": 0, "batch_used": 1, "task_used": 0,
         "batch_approved": 2}
@@ -438,43 +493,45 @@ def test_phase26_blocked_occupies_batch_not_calls(p26_ledger):
     led.record(STAGE, task=4, batch_id=BATCH, ok=True, model="m",
                thread_id="t")
     # 第 3 次：2 blocked + 2 calls 将占满批次 2（blocked 占批次的核心断言；
-    # 本批先撞批次门，task4=28 任务门不参与）。
+    # 本批先撞批次门，task4=63 任务门不参与）。
     with pytest.raises(GatewayPausedError):
         led.preflight(STAGE, task=4, batch_id=BATCH)
-    rows = _rows(p26_ledger["ledger"])
+    rows = _rows(p27_ledger["ledger"])
     ql.validate_ledger_rows(rows)
     summary = ql.ledger_summary(rows)
     assert summary["call_rows"] == 2
     assert summary["blocked_rows"] == 2
     assert summary["total_rows"] == 4
     assert summary["batches"][BATCH] == {"calls": 2, "blocked": 2, "rows": 4}
-    # 暂停态写在 phase26 私有目录，全局 gateway_state 零写入。
-    assert p26_ledger["pause26"].exists()
-    assert not p26_ledger["global_pause"].exists()
-    state = json.loads(p26_ledger["pause26"].read_text())
+    # 暂停态写在 phase27 私有目录，全局 gateway_state 零写入。
+    assert p27_ledger["pause27"].exists()
+    assert not p27_ledger["global_pause"].exists()
+    state = json.loads(p27_ledger["pause27"].read_text())
     assert state["reason"] == "batch_budget_reached"
 
 
-def test_phase26_task_cap_enforced(p26_ledger):
-    # phase26 的密集帽任务：task9 cap=2（§6.1）。task3 不在 phase26 caps 内。
-    ql.write_approval(batch_id=BATCH, task=9, stage="macro_ideation",
-                      approved=10, beyond_normal=False, note="fixture",
-                      namespace=PHASE26_NAMESPACE)
-    led = ql.QuotaLedger.phase26()
-    for _ in range(2):
-        led.preflight("macro_ideation", task=9, batch_id=BATCH)
-        led.record("macro_ideation", task=9, batch_id=BATCH, ok=True,
-                   model="m", thread_id="t9")
+def test_phase27_task_cap_enforced(p27_ledger):
+    # 锁内适配（Phase 2.7 Task0，D0-2）：同前一例改指活跃账；相位帽换成本期
+    # 最密的 task4=63（Phase 2.6 时是 task9=2，该 task 不在 phase27 帽集内）。
+    assert ql.PHASE27_TASK_CAPS[4] == 63
+    ql.write_approval(batch_id=BATCH, task=4, stage=STAGE,
+                      approved=100, beyond_normal=False, note="fixture",
+                      namespace=PHASE27_NAMESPACE)
+    led = ql.QuotaLedger.phase27()
+    for _ in range(63):
+        led.preflight(STAGE, task=4, batch_id=BATCH)
+        led.record(STAGE, task=4, batch_id=BATCH, ok=True,
+                   model="m", thread_id="t4")
     with pytest.raises(GatewayPausedError):
-        led.preflight("macro_ideation", task=9, batch_id=BATCH)
-    state = json.loads(p26_ledger["pause26"].read_text())
+        led.preflight(STAGE, task=4, batch_id=BATCH)
+    state = json.loads(p27_ledger["pause27"].read_text())
     assert state["reason"] == "task_hard_cap"
     assert state["scope"] == "task"
-    assert state["trigger"]["task_hard_cap"] == 2
+    assert state["trigger"]["task_hard_cap"] == 63
     # task_hard_cap 不可用 resume+批次扩展恢复（科学硬帽绝对上限）。
     with pytest.raises(ql.QuotaError, match="任务硬顶不可恢复"):
         ql.resume(ticket="golden-resume-1234", batch_id=BATCH,
-                  namespace=PHASE26_NAMESPACE)
+                  namespace=PHASE27_NAMESPACE)
 
 
 def test_phase25_resume_writes_audit_in_namespace(p25_ledger):

@@ -15,6 +15,8 @@ Phase 2 起台账类路径（ledger/counters/approvals）统一由本模块解�
   $SIMPRAXIS_GATEWAY_STATE/quota_pause.json      # Phase1/2 熔断态（沿用，不随账分根）
   $SIMPRAXIS_PHASE25_ROOT/quota/gateway_state/   # Phase 2.5 独立熔断态目录
   $SIMPRAXIS_PHASE26_ROOT/quota/gateway_state/   # Phase 2.6 独立熔断态目录
+  $SIMPRAXIS_PHASE27_ROOT/quota/ledger.jsonl     # Phase 2.7 独立新账（空账，seq 从 0）
+  $SIMPRAXIS_PHASE27_ROOT/runs/                  # Phase 2.7 实跑产物根
 
 未导出 SIMPRAXIS_PHASE2_ROOT/SIMPRAXIS_PHASE25_ROOT 时回退到 phase1 根的同级
 ``phase2/``、``phase25/``：生产默认布局即
@@ -30,6 +32,11 @@ Phase 2.6（Task0，D0-2）：封存集扩为 {phase1, phase2, phase25}，三账
 新代码写账一律走 phase26_ledger_path()（open_ledger_append 的缺省目标亦已换期）。
 四根隔离算法只保有一份（_assert_roots_isolated，D0-3），phase25/phase26 两侧都是
 薄包装。
+
+Phase 2.7（Task0，D0-2/D0-3）：封存集再扩为 {phase1, phase2, phase25, phase26}，四账
+【永不再写】；新代码写账一律走 phase27_ledger_path()。``open_ledger_append()`` 的缺省
+目标**仍**留在 phase26（改它会让 Phase 2.6 既有断言红），因此它在 2.7 起**必然抛
+SealedLedgerError**——写入方必须显式传 phase27 路径（见 D0-3）。
 """
 from __future__ import annotations
 
@@ -44,6 +51,7 @@ _PHASE1_ENV = "SIMPRAXIS_PHASE1_ROOT"
 _PHASE2_ENV = "SIMPRAXIS_PHASE2_ROOT"
 _PHASE25_ENV = "SIMPRAXIS_PHASE25_ROOT"
 _PHASE26_ENV = "SIMPRAXIS_PHASE26_ROOT"
+_PHASE27_ENV = "SIMPRAXIS_PHASE27_ROOT"
 
 
 class SealedLedgerError(PermissionError):
@@ -122,6 +130,28 @@ def assert_phase26_roots_isolated() -> None:
         message=("必须与 Phase 1/2/2.5 封存根互异且互不嵌套"
                  f"（解析后）：phase1={p1} phase2={p2} phase25={p25} "
                  f"phase26={p26}"))
+
+
+def assert_phase27_roots_isolated() -> None:
+    """phase27 与四份封存根（phase1/phase2/phase25/phase26）两两互异且互不嵌套。
+
+    Phase 2.7 起启用（D0-2）：phase26 已封存，phase27 是当前唯一写入者；
+    别名/嵌套时 approvals/*.json、ledger.degraded.*、gateway_state/、
+    .ledger.lock、resume_audit.jsonl、runs/ 都会落进封存树，故须在任何
+    mkdir/写系统调用之前 fail-fast（同 phase25/26 的 _assert_roots_isolated）。
+    """
+    p1 = phase1_root().resolve(strict=False)
+    p2 = phase2_root().resolve(strict=False)
+    p25 = phase25_root().resolve(strict=False)
+    p26 = phase26_root().resolve(strict=False)
+    p27 = phase27_root().resolve(strict=False)
+    _assert_roots_isolated(
+        phase27_root(), (phase1_root(), phase2_root(), phase25_root(),
+                         phase26_root()),
+        label="SIMPRAXIS_PHASE27_ROOT",
+        message=("必须与 Phase 1/2/2.5/2.6 封存根互异且互不嵌套"
+                 f"（解析后）：phase1={p1} phase2={p2} phase25={p25} "
+                 f"phase26={p26} phase27={p27}"))
 
 
 def phase1_root() -> Path:
@@ -236,6 +266,50 @@ def phase26_gateway_state_path() -> Path:
     return phase26_gateway_state_dir() / "quota_pause.json"
 
 
+# ---- Phase 2.7 路径族（D0-1 复制而非泛化；env 缺省回退兄弟 phase27/） ----
+
+def phase27_root() -> Path:
+    """Phase 2.7 根：显式 env 优先；否则取 phase1 根同级 ``phase27/``（不建目录）。"""
+    root = os.environ.get(_PHASE27_ENV)
+    if root:
+        return Path(root)
+    return phase1_root().parent / "phase27"
+
+
+def phase27_runs_root() -> Path:
+    return phase27_root() / "runs"
+
+
+def phase27_quota_dir() -> Path:
+    return ensure_private_dir(phase27_root() / "quota")
+
+
+def phase27_ledger_path() -> Path:
+    return phase27_quota_dir() / "ledger.jsonl"
+
+
+def phase27_counters_path() -> Path:
+    return phase27_quota_dir() / "counters.json"
+
+
+def phase27_approvals_dir() -> Path:
+    return ensure_private_dir(phase27_quota_dir() / "approvals")
+
+
+def phase27_gateway_state_dir() -> Path:
+    # Phase 2.7 熔断态随本账命名空间隔离（不读不写全局 SIMPRAXIS_GATEWAY_STATE）。
+    return ensure_private_dir(phase27_root() / "quota" / "gateway_state")
+
+
+def phase27_gateway_state_path() -> Path:
+    return phase27_gateway_state_dir() / "quota_pause.json"
+
+
+def phase27_estimates_dir() -> Path:
+    """Phase 2.7 估计/基线件目录（phase26 无此函数；D0-5 把 T0 基线落于此）。"""
+    return ensure_private_dir(phase27_root() / "estimates")
+
+
 # ---- 熔断态（沿用独立 env/默认根，Task0 只统一入口、不改 env 契约） ----
 
 def gateway_state_dir() -> Path:
@@ -254,36 +328,42 @@ def phase1_ledger_path() -> Path:
 
 
 def sealed_ledger_paths() -> frozenset[Path]:
-    """Phase 1/2/2.5 封存账的绝对路径集（resolve 归一；strict=False 允许账体不在场）。
+    """Phase 1/2/2.5/2.6 封存账的绝对路径集（resolve 归一；strict=False 允许账体不在场）。
 
-    路径以【调用时点】env 解析为准：测试把 SIMPRAXIS_PHASE{1,2,25}_ROOT 指向
+    路径以【调用时点】env 解析为准：测试把 SIMPRAXIS_PHASE{1,2,25,26}_ROOT 指向
     临时根时，守卫随之指向临时根里的账，绝不误判真实 /mnt 账。
 
     Phase 2.6（D0-2）：phase25 已结案封存，本集扩为三份；任何写入一律走
     phase26_ledger_path()。
+    Phase 2.7（D0-2）：phase26 随 2.6 收束一并封存，本集扩为四份；任何写入一律走
+    phase27_ledger_path()（``open_ledger_append()`` 的缺省目标**仍**是 phase26，
+    D0-3：改缺省会让 Phase 2.6 既有断言红，故调用方显式传参）。
     """
     return frozenset({
         phase1_ledger_path().resolve(strict=False),
         phase2_ledger_path().resolve(strict=False),
         phase25_ledger_path().resolve(strict=False),
+        phase26_ledger_path().resolve(strict=False),
     })
 
 
 def assert_not_sealed_ledger(path: "str | Path") -> Path:
-    """写打开前置守卫：目标解析到 Phase 1/2/2.5 封存账即抛 SealedLedgerError。"""
+    """写打开前置守卫：目标解析到 Phase 1/2/2.5/2.6 封存账即抛 SealedLedgerError。"""
     p = Path(path)
     if p.resolve(strict=False) in sealed_ledger_paths():
         raise SealedLedgerError(
-            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5 封存账只读；"
-            "Phase 2.6 新写账必须走 phase26_ledger_path()）")
+            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5/2.6 封存账只读；"
+            "Phase 2.7 新写账必须走 phase27_ledger_path()）")
     return p
 
 
 def open_ledger_append(path: "str | Path | None" = None):
     """台账追加写唯一入口：先过封存守卫，再以 "a" 打开，文件权限收敛 0600。
 
-    缺省目标是 phase26 新账；调用方显式传 path 时同样先过封存守卫，
-    因此任何经本入口的写都不可能落到 Phase 1/2/2.5 封存账。
+    缺省目标是 phase26 新账（Phase 2.7 D0-3：缺省值不动，故 2.7 起缺省调用
+    必然抛 SealedLedgerError，写入方须显式传 phase27 路径）；调用方显式传 path
+    时同样先过封存守卫，因此任何经本入口的写都不可能落到 Phase 1/2/2.5/2.6
+    封存账。
     """
     target = path if path is not None else phase26_ledger_path()
     p = assert_not_sealed_ledger(target)

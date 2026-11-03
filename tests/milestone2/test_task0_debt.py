@@ -820,7 +820,10 @@ CALL_CACHE_ALLOWLIST = {
     # Phase 2.6 Task3（F1–F4）：TOOL_NAMES 10→12、expr 授予解析与
     # agentic_config 类型校验全部插在构造点之前（+32 行），纯位移
     # 197→229；构造表达式逐字未改，0 新增落点。
-    ("orchestrator/agentic/wiring.py", 229),
+    # Phase 2.7 Task0（锁内适配 L-8）：build_seq_provider 缺省命名空间随活跃账
+    # 换期（phase26→phase27，phase26 已封存）+ docstring 多 1 行，全部在构造点
+    # 之前，纯位移（229→230）；构造表达式逐字未改，0 新增落点、0 新增网关调用。
+    ("orchestrator/agentic/wiring.py", 230),
 }
 
 

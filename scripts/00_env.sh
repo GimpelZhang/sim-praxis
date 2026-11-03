@@ -329,3 +329,53 @@ touch "$SIMPRAXIS_PHASE26_ROOT/quota/ledger.jsonl"
 chmod 600 "$SIMPRAXIS_PHASE26_ROOT/quota/ledger.jsonl" 2>/dev/null || true
 _sp_writable_probe "$SIMPRAXIS_PHASE26_ROOT/quota" || return 1
 echo "[00_env] Phase2.6：新账根=$SIMPRAXIS_PHASE26_ROOT（全族 700）；四根互异互斥检查通过"
+
+# ── Phase 2.7：独立新账与私目录族（纯加法；缺省落 $SIMPRAXIS_DATA_ROOT/phase27）──
+export SIMPRAXIS_PHASE27_ROOT="${SIMPRAXIS_PHASE27_ROOT:-$SIMPRAXIS_DATA_ROOT/phase27}"
+_sp27_root="$(readlink -f "$SIMPRAXIS_PHASE27_ROOT")"
+for _sp_sealed in "$(readlink -f "$SIMPRAXIS_PHASE1_ROOT")" \
+                  "$(readlink -f "$SIMPRAXIS_PHASE2_ROOT")" \
+                  "$(readlink -f "$SIMPRAXIS_PHASE25_ROOT")" \
+                  "$(readlink -f "$SIMPRAXIS_PHASE26_ROOT")"; do
+  [ "$_sp27_root" = "$_sp_sealed" ] && {
+    echo "[00_env STOP] SIMPRAXIS_PHASE27_ROOT 与封存根同体：$_sp27_root" >&2; return 1; }
+  case "$_sp27_root" in
+    "$_sp_sealed"/*) echo "[00_env STOP] PHASE27 嵌套在封存根内：$_sp27_root" >&2; return 1 ;;
+  esac
+  case "$_sp_sealed" in
+    "$_sp27_root"/*) echo "[00_env STOP] 封存根嵌套在 PHASE27 内：$_sp_sealed" >&2; return 1 ;;
+  esac
+done
+mkdir -p "$SIMPRAXIS_PHASE27_ROOT"/quota/approvals \
+         "$SIMPRAXIS_PHASE27_ROOT"/quota/gateway_state \
+         "$SIMPRAXIS_PHASE27_ROOT"/estimates \
+         "$SIMPRAXIS_PHASE27_ROOT"/watchdog/incidents \
+         "$SIMPRAXIS_PHASE27_ROOT"/watchdog/triage_bundles \
+         "$SIMPRAXIS_PHASE27_ROOT"/agentic_traces \
+         "$SIMPRAXIS_PHASE27_ROOT"/walls \
+         "$SIMPRAXIS_PHASE27_ROOT"/runs \
+         "$SIMPRAXIS_PHASE27_ROOT"/task7_milestone \
+         "$SIMPRAXIS_PHASE27_ROOT"/skills_stage \
+         "$SIMPRAXIS_PHASE27_ROOT"/zoo \
+         "$SIMPRAXIS_RUN_DIR"/phase27
+chmod 700 "$SIMPRAXIS_PHASE27_ROOT" \
+          "$SIMPRAXIS_PHASE27_ROOT"/quota \
+          "$SIMPRAXIS_PHASE27_ROOT"/quota/approvals \
+          "$SIMPRAXIS_PHASE27_ROOT"/quota/gateway_state \
+          "$SIMPRAXIS_PHASE27_ROOT"/estimates \
+          "$SIMPRAXIS_PHASE27_ROOT"/watchdog \
+          "$SIMPRAXIS_PHASE27_ROOT"/watchdog/incidents \
+          "$SIMPRAXIS_PHASE27_ROOT"/watchdog/triage_bundles \
+          "$SIMPRAXIS_PHASE27_ROOT"/agentic_traces \
+          "$SIMPRAXIS_PHASE27_ROOT"/walls \
+          "$SIMPRAXIS_PHASE27_ROOT"/runs \
+          "$SIMPRAXIS_PHASE27_ROOT"/task7_milestone \
+          "$SIMPRAXIS_PHASE27_ROOT"/skills_stage \
+          "$SIMPRAXIS_PHASE27_ROOT"/zoo \
+          "$SIMPRAXIS_RUN_DIR"/phase27 2>/dev/null || true
+if [ ! -e "$SIMPRAXIS_PHASE27_ROOT/quota/ledger.jsonl" ]; then
+  ( umask 077 && : > "$SIMPRAXIS_PHASE27_ROOT/quota/ledger.jsonl" )
+fi
+chmod 600 "$SIMPRAXIS_PHASE27_ROOT/quota/ledger.jsonl" 2>/dev/null || true
+_sp_writable_probe "$SIMPRAXIS_PHASE27_ROOT/quota" || return 1
+echo "[00_env] Phase2.7：新账根=$SIMPRAXIS_PHASE27_ROOT（私目录族 700；空账 600；Phase1/2/2.5/2.6 四账封存只读）"
