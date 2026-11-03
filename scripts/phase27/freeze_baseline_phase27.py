@@ -160,10 +160,12 @@ def build(*, python: str, raw_path: Path, bootstrap: bool = False) -> dict:
     if bootstrap_note:
         doc["bootstrap_note"] = bootstrap_note
     if triple != PREV_PHASE26_BASELINE:
+        # 只陈述可核事实，不做无据归因（禁止把差异猜成某个具体原因）。
         doc["note"] = (
-            f"与 Phase 2.6 收官基线 {PREV_PHASE26_BASELINE} 不同：本件是 Phase 2.7 "
-            f"Task0 改动【前】的实跑（raw log 为准），差异来源见 "
-            f"{doc['raw_log_relpath']} 与 M2 之后的提交累积。")
+            f"与 Phase 2.6 收官基线 {PREV_PHASE26_BASELINE} 不同：本件是"
+            f"git_head={head} 时点的实跑（Phase 2.7 Task0 提交之后），"
+            f"计数含本 Task 新增的 tests/milestone27（T0 共 9 条）；"
+            f"数字一律以 {doc['raw_log_relpath']} 的汇总行为准。")
     return doc
 
 
@@ -177,7 +179,10 @@ def main(argv: "list[str] | None" = None) -> int:
     args = ap.parse_args(argv)
 
     est = rp.phase27_estimates_dir()
-    raw_path = Path(args.raw) if args.raw else est / "t0_baseline_pytest.raw.log"
+    # L-7：bootstrap 轮与全绿轮各留一份 raw，文件名不得互相覆盖。
+    default_name = ("t0_baseline_bootstrap.raw.log" if args.bootstrap
+                    else "t0_baseline_pytest.raw.log")
+    raw_path = Path(args.raw) if args.raw else est / default_name
     out = Path(args.out) if args.out else est / "t0_baseline_phase27.json"
     doc = build(python=args.python, raw_path=raw_path,
                 bootstrap=args.bootstrap)
