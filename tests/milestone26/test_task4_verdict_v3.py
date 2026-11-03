@@ -325,23 +325,93 @@ def test_infra_disk_uses_harness_signal_only():
 
 
 def test_wall_a_score_gate_requires_verdict_and_all_twelve_checks():
-    """评审 R9：墙 A 评分侧过闸 = rc 0 ∧ verdict=pass ∧ checks ≥ 12。
+    """评审 R9：墙 A 评分侧过闸 = 件源可信 ∧ rc 0 ∧ schema/verdict ∧ 12 项逐项 PASS。
 
     冻结评分器在自身进程内 `exec_module` 跑模型自著的 `agent_solution.py`，
     模型一行 `os._exit(0)` 就能让 rc 变 0 却一项检查都没跑；只看 final_rc
     等于把「全 12 项 PASS」交给模型控制（与 R7 同源）。
     """
-    good = {"verdict": "pass", "checks": [{"name": f"c{i}"} for i in range(12)]}
-    assert R.wall_a_score_ok(0, good) is True
-    assert R.wall_a_score_ok(0, None) is False                 # 评分件缺席
-    assert R.wall_a_score_ok(0, {}) is False                   # 空件（伪造 rc0）
-    assert R.wall_a_score_ok(0, {"verdict": "fail",
-                                 "checks": good["checks"]}) is False
-    assert R.wall_a_score_ok(0, {"verdict": "pass",
-                                 "checks": good["checks"][:11]}) is False
-    assert R.wall_a_score_ok(0, {"verdict": "pass"}) is False  # 无 checks 键
-    assert R.wall_a_score_ok(137, good) is False
-    assert R.wall_a_score_ok(None, good) is False              # 无退出码即 False
+    good = {"schema": R.WALL_A_SCORE_SCHEMA, "verdict": "pass",
+            "checks": [{"check": f"c{i}", "ok": True} for i in range(12)]}
+    ok = lambda rc, sc, prov=True: R.wall_a_score_ok(  # noqa: E731
+        rc, sc, provenance_ok=prov)
+    assert ok(0, good) is True
+    assert ok(0, None) is False                 # 评分件缺席
+    assert ok(0, {}) is False                   # 空件（伪造 rc0）
+    assert ok(0, {"verdict": "fail", "checks": good["checks"]}) is False
+    assert ok(0, {"verdict": "pass", "checks": good["checks"][:11]}) is False
+    assert ok(0, {"verdict": "pass"}) is False  # 无 checks 键
+    assert ok(137, good) is False
+    assert ok(None, good) is False              # 无退出码即 False
+    # 评审 R9 残留 2（MINOR）：12 条但逐项 ok=False 必须判否（判据 §1「全 PASS」）。
+    all_bad = {"schema": R.WALL_A_SCORE_SCHEMA, "verdict": "pass",
+               "checks": [{"check": f"c{i}", "ok": False} for i in range(12)]}
+    assert ok(0, all_bad) is False
+    # 12 条全 True 但名字重复 → 不足 12 项独立检查。
+    dup = {"schema": R.WALL_A_SCORE_SCHEMA, "verdict": "pass",
+           "checks": [{"check": "c0", "ok": True} for _ in range(12)]}
+    assert ok(0, dup) is False
+    # schema 不符（伪造件最容易漏的一格）。
+    assert ok(0, {**good, "schema": "x"}) is False
+    # 评审 R9 残留 1（MAJOR）：件源不可信时，内容再好也判否——无缺省值可绕过。
+    assert ok(0, good, prov=False) is False
+
+
+def test_select_score_file_rejects_forged_and_ambiguous_artifacts(tmp_path):
+    """R9 残留 1：`.score` 是模型可写目录，件源三条必要条件必须 fail-closed。
+
+    复现 executor 第四轮：真件 `wall_a-20261103T021400Z.json` 旁再放一件
+    future-dated 的 `wall_a-99999999T999999Z.json`，旧 `sorted()[-1]` 必选后者。
+    """
+    start, end = 1_793_672_000.0, 1_793_672_120.0   # 2026-11-03T02:13:20Z 窗口
+    sc = tmp_path / ".score"
+    sc.mkdir()
+    assert R.select_score_file(R.WALL_A, sc, window_start=start,
+                               window_end=end) == (None, "score_artifact_absent")
+
+    forged = sc / "wall_a-99999999T999999Z.json"     # executor 复现用的名字
+    forged.write_text("{}")
+    assert R.select_score_file(R.WALL_A, sc, window_start=start,
+                               window_end=end) == (
+        None, "score_artifact_name_unparsable")
+    forged.unlink()
+
+    future = sc / "wall_a-20991231T235959Z.json"     # 可解析但远在窗口外
+    future.write_text("{}")
+    assert R.select_score_file(R.WALL_A, sc, window_start=start,
+                               window_end=end) == (
+        None, "score_artifact_outside_window")
+    future.unlink()
+
+    legit = sc / "wall_a-20261103T021400Z.json"     # 窗口内（start+60s）
+    legit.write_text("{}")
+    also = sc / "wall_a-20261103T021401Z.json"      # 同在窗口内的第二件
+    also.write_text("{}")
+    p, why = R.select_score_file(R.WALL_A, sc, window_start=start,
+                                 window_end=end)
+    assert p is None and why.startswith("score_artifact_not_unique")  # 两件并存
+
+    also.unlink()                                    # 只留一件 → 选中
+    assert R.select_score_file(R.WALL_A, sc, window_start=start,
+                               window_end=end) == (legit, "")
+
+    legit.unlink()
+    (sc / "wall_a-notatimestamp.json").write_text("{}")
+    assert R.select_score_file(R.WALL_A, sc, window_start=start,
+                               window_end=end) == (
+        None, "score_artifact_name_unparsable")
+
+
+def test_select_score_file_is_wall_scoped(tmp_path):
+    """按墙别精确 glob：wall_b 件不得被墙 A 选中（反之亦然）。"""
+    start, end = 1_793_672_000.0, 1_793_672_120.0
+    sc = tmp_path / ".score"
+    sc.mkdir()
+    (sc / "wall_b-20261103T021400Z.json").write_text("{}")
+    assert R.select_score_file(R.WALL_A, sc, window_start=start,
+                               window_end=end)[1] == "score_artifact_absent"
+    assert R.select_score_file(R.WALL_B, sc, window_start=start,
+                               window_end=end)[0] is not None
 
 
 def test_wall_a_pass_requires_all_five_conditions():

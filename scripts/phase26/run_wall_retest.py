@@ -769,10 +769,76 @@ def _write_probe(rec: dict) -> Path:
 
 # --------------------------------------------------------------- 真跑
 
+# 评审 R9 残留（executor 第四轮复现）：冻结评分器在**自身进程内**
+# ``importlib.exec_module`` 跑模型自著的 ``agent_solution.py``
+# （wall_a_runner.py:93、wall_b_checker.py:56），``finish()`` 要到收尾才写
+# ``wall_a-<ts>.json``。模型可抢先往同一个 rw 挂载的 ``/work/.score`` 写一份
+# 伪造件再 ``os._exit(0)``；旧实现 ``sorted(glob("wall_*-*.json"))[-1]`` 按
+# 字典序取最后一件，伪造名 ``wall_a-99999999T999999Z.json`` 必然当选。
+#
+# 这里用三条**廉价、可机判、fail-closed** 的必要条件收窄该信道：
+#   ① 按墙别精确 glob（``wall_a-``/``wall_b-``），杂件一律不认；
+#   ② **恰 1 件**——多件即「伪造件与真件并存」，说明评分目录被写脏，
+#      一律判无效（不猜哪份是真的）；
+#   ③ 件名内嵌时间戳必须落在 ``[评分开始-偏差, 评分结束+偏差]``——
+#      直接杀掉 future-dated 的伪造名，也顺带挡住跨轮次的陈旧件。
+#
+# **残余（必须如实登记，不得假装闭合）**：模型若在同一窗口内写一个合法名
+# 并 ``os._exit(0)``，三条仍会放行。该通道与 R9 之前**只看 ``final_rc==0``**
+# 的通道同源同强度（``os._exit(0)`` 同样把退出码置 0），并非本修复引入；
+# 真正的关闭点在「评分器进程外执行模型代码」，属冻结墙的重设计，须 Phase 3
+# 新预注册（I4-1 禁止在 Task 4 内改墙）。
+SCORE_ARTIFACT_PREFIX = {WALL_A: "wall_a", WALL_B: "wall_b"}
+SCORE_TS_SKEW_S = 120.0
+SCORE_TS_FMT = "%Y%m%dT%H%M%S"
+
+
+def _score_ts_from_name(path: Path, wall: str) -> float | None:
+    """从 ``wall_a-<YYYYmmddTHHMMSS>.json`` 解析 UTC 时间戳；不可解析即 None。"""
+    prefix = SCORE_ARTIFACT_PREFIX[wall]
+    name = path.name
+    head, tail = f"{prefix}-", ".json"
+    if not (name.startswith(head) and name.endswith(tail)):
+        return None
+    try:
+        stem = name[len(head):-len(tail)]
+        if stem.endswith("Z"):        # 冻结 runner 无 Z；容错接受显式 UTC 后缀
+            stem = stem[:-1]
+        dt = datetime.strptime(stem, SCORE_TS_FMT)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc).timestamp()
+
+
+def select_score_file(wall: str, score_dir: Path, *,
+                      window_start: float,
+                      window_end: float) -> tuple[Path | None, str]:
+    """在模型可写的 ``.score`` 目录里选出**唯一且有窗口证据**的评分件。
+
+    返回 ``(path, "")`` 表示唯一候选且时间戳在窗口内；否则 ``(None, reason)``
+    且 reason 非空——调用方必须把 None 当作「无评分件」，不许回退旧逻辑。
+    """
+    try:
+        cands = sorted(score_dir.glob(f"{SCORE_ARTIFACT_PREFIX[wall]}-*.json"))
+    except OSError:
+        return None, "score_dir_unreadable"
+    if not cands:
+        return None, "score_artifact_absent"
+    if len(cands) > 1:
+        return None, f"score_artifact_not_unique({len(cands)})"
+    ts = _score_ts_from_name(cands[0], wall)
+    if ts is None:
+        return None, "score_artifact_name_unparsable"
+    if ts < window_start - SCORE_TS_SKEW_S or ts > window_end + SCORE_TS_SKEW_S:
+        return None, "score_artifact_outside_window"
+    return cands[0], ""
+
+
 def _score_once(wall: str, root: Path, work: Path) -> dict:
     score_dir = work / ".score"
     if score_dir.exists():
         shutil.rmtree(score_dir)
+    window_start = time.time()
     if wall == WALL_A:
         res = score_wall_a(work, fc.GATES_DIR / "wall_a", root,
                            timeout_s=240)
@@ -781,12 +847,18 @@ def _score_once(wall: str, root: Path, work: Path) -> dict:
             work, fc.GATES_DIR / "wall_b" / "wall_b_checker.py",
             root / "evidence_wall_b" / "pitcher_open_watertight.obj",
             timeout_s=180)
-    files = sorted(score_dir.glob("wall_*-*.json"))
-    score = json.loads(files[-1].read_text(encoding="utf-8")) if files else None
+    window_end = time.time()
+    picked, why = select_score_file(wall, score_dir,
+                                    window_start=window_start,
+                                    window_end=window_end)
+    score = json.loads(picked.read_text(encoding="utf-8")) if picked else None
     return {"rc": res.rc, "timed_out": res.timed_out,
             "stdout": res.stdout.decode("utf-8", "replace"),
             "stderr": res.stderr.decode("utf-8", "replace"),
-            "score": score, "score_file": files[-1].name if files else None}
+            "score": score,
+            "score_file": picked.name if picked else None,
+            "score_file_unique": picked is not None,
+            "score_file_reason": why}
 
 
 def _identity_rows(ledger: QuotaLedger, batch_id: str,
@@ -901,18 +973,51 @@ def classify_infra_failure(kind: str, reason: str, *,
     return False, ""
 
 
-def wall_a_score_ok(scorer_rc: int | None, score: dict | None) -> bool:
-    """墙 A 的评分侧必要条件：rc=0 ∧ verdict=pass ∧ 冻结 12 项全在。
+WALL_A_SCORE_SCHEMA = "simpraxis.phase25.wall_a_score.v1"
+
+
+def wall_a_checks_all_ok(checks: Any) -> bool:
+    """冻结 wall_a_runner.py 的 12 项检查必须**逐项** ``ok is True``。
+
+    评审 R9 残留 2（MINOR）：只数条数会放过「12 条但全 False」的畸形件；
+    判据 §1 写的是「全 12 项检查 PASS」，故逐项判定，且 12 个名字互不相同。
+    """
+    if not isinstance(checks, list) or len(checks) != WALL_A_CHECKS_N:
+        return False
+    names = []
+    for item in checks:
+        if not isinstance(item, dict) or item.get("ok") is not True:
+            return False
+        names.append(item.get("check"))
+    if not all(isinstance(n, str) and n for n in names):
+        return False
+    return len(set(names)) == WALL_A_CHECKS_N
+
+
+def wall_a_score_ok(scorer_rc: int | None, score: dict | None, *,
+                    provenance_ok: bool) -> bool:
+    """墙 A 的评分侧必要条件：件源可信 ∧ rc=0 ∧ schema/verdict ∧ 12 项全 PASS。
 
     评审 R9：判据 §1 括注「冻结 wall_a_runner.py 全 12 项检查 PASS」原先没落到
     机判，只看 ``final_rc==0``——而冻结评分器在进程内 ``importlib.exec_module``
     跑模型写的 ``agent_solution.py``，模型一行 ``os._exit(0)`` 就能让 rc 变 0 却
-    一项检查都没跑。三项全满足才算评分侧过闸（fail-closed：score 缺席即 False）。
+    一项检查都没跑。
+
+    评审 R9 残留（executor 第四轮）：光看评分件的**内容**不够——件本身落在模型
+    可写的 ``/work/.score``。故 ``provenance_ok`` 是**必填关键字参数**，由
+    ``select_score_file()`` 给出（唯一候选 + 件名时间戳在评分窗口内）；不给默认
+    值是为了让每个调用点都必须显式承担件源判断，杜绝「忘了传就放行」。
+
+    残余通道（同窗口内写合法名 + ``os._exit(0)``）与 R9 之前的退出码通道同源，
+    见 ``select_score_file`` 上方登记，须 Phase 3 墙重设计关闭。
     """
+    if not provenance_ok:
+        return False
     if scorer_rc is None or int(scorer_rc) != 0 or not isinstance(score, dict):
         return False
-    return (score.get("verdict") == "pass"
-            and len(score.get("checks") or []) >= WALL_A_CHECKS_N)
+    return (score.get("schema") == WALL_A_SCORE_SCHEMA
+            and score.get("verdict") == "pass"
+            and wall_a_checks_all_ok(score.get("checks")))
 
 
 def wall_a_passed(*, born_at_round: int | None, final_rc: int | None,
@@ -1180,6 +1285,8 @@ def cmd_run(wall: str, batch_id: str) -> int:
         "disk_free_gib_at_score": disk_free_gib_at_score,
         "score_verdict": score.get("verdict"),
         "checks_n": len(score.get("checks") or []),
+        "score_file": scored["score_file"],
+        "score_file_reason": scored["score_file_reason"],
         "b_cap": score.get("b_cap"),
         "infra_failure": infra_failure,
         "infra_class": infra_class,
@@ -1199,7 +1306,8 @@ def cmd_run(wall: str, batch_id: str) -> int:
         # 未跑（同源 R2/R7 的「退出码可信」假设）。故把评分件的 verdict 与
         # checks 条数一并作为**必要条件**；T4 两墙冻结件均满足（wallA
         # score_verdict=pass / checks_n=12），判决不变。
-        score_ok = wall_a_score_ok(scored["rc"], score)
+        score_ok = wall_a_score_ok(scored["rc"], score,
+                                   provenance_ok=bool(scored["score_file_unique"]))
         wall_result["score_checks_ok"] = score_ok
         wall_result["passed"] = wall_a_passed(
             born_at_round=born, final_rc=wall_result["final_rc"],
