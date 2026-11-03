@@ -174,7 +174,8 @@ class PreToolUsePolicy:
                 f"工具 {tool} 不在 Gate1 授予表内（授予："
                 f"{sorted(self.grants.tools) or '空'}）")
         if tool in ("write_file", "apply_patch", "update_scratchpad"):
-            decision = self._check_write(tool, resolved_path)
+            decision = self._check_write(
+                tool, resolved_path, content=validated_args.get("content"))
             if decision.decision == "deny":
                 return decision
         if tool == "run_cmd":
@@ -187,7 +188,8 @@ class PreToolUsePolicy:
                 return decision
         return PolicyDecision.allow()
 
-    def _check_write(self, tool: str, resolved_path: Path | None) -> PolicyDecision:
+    def _check_write(self, tool: str, resolved_path: Path | None,
+                     *, content: str | None = None) -> PolicyDecision:
         if self.nonprod:
             return PolicyDecision.deny(
                 "本地 NONPROD 形态 policy 拒绝一切写类工具"
@@ -195,6 +197,9 @@ class PreToolUsePolicy:
         if tool == "apply_patch":
             # 补丁内多文件的路径 jail/AST 闸在 tools.write 内逐件过；
             # write_roots 允许面同样适用（逐件 resolve 后复检）。
+            # cad_guard（D1-5）由 tools.write._guard_staged 在 _commit_staged
+            # 之前逐件过投影后的全文（本钩子只拿到 write_file 的 content，
+            # 补丁文本是 diff 不是 Python，此处不扫，避免把被删行算成命中）。
             return PolicyDecision.allow()
         roots = self.grants.write_roots_resolved(self.workdir)
         if not roots:
@@ -202,12 +207,24 @@ class PreToolUsePolicy:
         if resolved_path is None:
             return PolicyDecision.deny("写目标未解析")
         target = Path(resolved_path).resolve(strict=False)
+        within = False
         for root in roots:
             if target == root or root in target.parents:
-                return PolicyDecision.allow()
-        return PolicyDecision.deny(
-            f"写目标 {target} 不在 Gate1 可写前缀 "
-            f"{[str(r) for r in roots]} 之内")
+                within = True
+                break
+        if not within:
+            return PolicyDecision.deny(
+                f"写目标 {target} 不在 Gate1 可写前缀 "
+                f"{[str(r) for r in roots]} 之内")
+        # cad_guard（D1-5 / AC-T1-3）：写入**前**扫描内容，命中即 deny 观察，
+        # 零副作用。只扫 .py（非 Python 文件不存在「从零建网格」的写法）。
+        # 延迟导入：tools 包的 __init__ 反向依赖本模块（policy），顶层导入成环。
+        if content and target.suffix == ".py":
+            from .tools import cad_guard  # noqa: PLC0415
+            reason = cad_guard.deny_reason(content, tier=cad_guard.TIER_MODEL)
+            if reason is not None:
+                return PolicyDecision.deny(reason)
+        return PolicyDecision.allow()
 
     def _check_run_cmd(self, args: dict[str, Any]) -> PolicyDecision:
         argv = args.get("argv")

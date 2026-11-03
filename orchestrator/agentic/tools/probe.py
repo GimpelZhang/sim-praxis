@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ..policy import PolicyDecision, PreToolUsePolicy, ToolContext
 from ..schema import SchemaError, int_field, str_field, validate
+from ..image_pin import SCENE_BUILD_PYTHON
 from . import ToolResult
 from .run import check_backend, execute_render
 
@@ -89,6 +90,12 @@ def default_registry() -> ProbeRegistry:
         ProbeSpec("libero_compat_probe",
                   ("python", "/probes/probe_libero_compat.py",
                    "--out", "/tmp/simpraxis_probe_libero_compat.json")),
+        # Phase 2.7 Task 1（D1-4 / AC-T1-2）：场景装配探针。镜像内 Genesis 装在
+        # **系统解释器**（L-13：AGENTIC_IMAGE 是零 wheel 形态、没有 genesis），
+        # 故 argv 恒用 /usr/bin/python；资产经 run.py 的 extra_ro_mounts
+        # 以 `/assets:ro` 挂入，spec 在 workdir（容器 /work/scene_spec.json）。
+        ProbeSpec("scene_build",
+                  (SCENE_BUILD_PYTHON, "/probes/probe_scene_build.py")),
     ))
 
 

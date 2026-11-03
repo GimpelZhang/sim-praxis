@@ -315,9 +315,11 @@ def test_local_nonprod_backend_carries_banner_and_scrubs_env(workdir, tracer):
 
 def test_default_registry_contents():
     reg = default_registry()
+    # Phase 2.7 Task 1（AC-T1-2）新增 scene_build：仍是离线探针，argv 由注册表
+    # 固定（容器内 /usr/bin/python + /probes/probe_scene_build.py）。
     assert reg.names() == (
         "genesis_fluid_probe", "genesis_probe", "libero_compat_probe",
-        "maniskill_probe", "mujoco_probe")
+        "maniskill_probe", "mujoco_probe", "scene_build")
     assert not any(reg.is_network(n) for n in reg.names())
 
 

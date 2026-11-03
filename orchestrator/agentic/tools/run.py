@@ -60,6 +60,71 @@ _CONTAINER_ENV = {
 
 _DOCKER_SOCKET_PARTS = ("docker.sock",)
 
+# Phase 2.7 Task 1（T1.4-G，BR-11 落地物）：额外的只读挂载点白名单。
+# dst 只有两个字面量；src 必须落在 simpraxis 自有路径内且真实存在——
+# 否则 docker 会对不存在路径静默创建 root 属主目录（M3 的同一教训）。
+# `/assets` 的源用 assets.manifest.zoo_root()（单一源，env 可重定向到 tmp，
+# 默认即 /mnt/assets/simpraxis/zoo）；`/skills` 只认
+# `$SIMPRAXIS_PHASE27_ROOT/skills_stage/<sha12>`（Task 2 的 staged 副本）。
+_ALLOWED_RO_DST = ("/assets", "/skills")
+_SKILLS_STAGE_DIRNAME = "skills_stage"
+_SKILLS_STAGE_RE = re.compile(r"^[0-9a-f]{12}$")
+_GPUS_RE = re.compile(r"^(?:all|device=\d+)$")
+
+
+def _allowed_ro_sources() -> "tuple[Path, ...]":
+    """`/assets` 与 `/skills` 各自允许的源根（供 build 与单测共用）。"""
+    from ...assets.manifest import zoo_root      # 延迟导入：run.py 不拉重依赖
+    from ...common.runtime_paths import phase27_root
+
+    return (zoo_root().resolve(), (phase27_root() / _SKILLS_STAGE_DIRNAME).resolve())
+
+
+def _validate_extra_ro_mounts(extra: "tuple[tuple[str, str], ...]") -> "list[tuple[str, str, str]]":
+    """逐项校验 `(src, dst)`；任何不合即 ValueError（fail-closed，M3 先例）。"""
+    if not isinstance(extra, (tuple, list)):
+        raise ValueError(f"extra_ro_mounts 必须是 (src, dst) 元组序列：{extra!r}")
+    if not extra:
+        return []          # 默认路径不解析任何根（默认 argv 逐字节不变）
+    zoo_src, skills_src = _allowed_ro_sources()
+    out: "list[tuple[str, str, str]]" = []
+    seen: set[str] = set()
+    for item in extra:
+        if (not isinstance(item, (tuple, list)) or len(item) != 2
+                or not all(isinstance(x, str) and x for x in item)):
+            raise ValueError(f"extra_ro_mounts 每项必须是 (src, dst) 两个非空字符串：{item!r}")
+        src_raw, dst = item
+        if dst not in _ALLOWED_RO_DST:
+            raise ValueError(
+                f"挂载点只允许 {_ALLOWED_RO_DST}：{dst!r}（其余路径一律拒绝）")
+        if dst in seen:
+            raise ValueError(f"挂载点重复：{dst}")
+        src = Path(src_raw).resolve()
+        if not src.is_dir():
+            raise ValueError(
+                f"挂载源不存在或不是目录：{src_raw}（fail-closed：docker 会为"
+                "不存在的源静默建 root 属主目录）")
+        if dst == "/assets":
+            if src != zoo_src and zoo_src not in src.parents:
+                raise ValueError(
+                    f"/assets 挂载源必须落在资产库根内 {zoo_src}：{src}")
+        else:  # /skills
+            if src.parent != skills_src or not _SKILLS_STAGE_RE.match(src.name):
+                raise ValueError(
+                    f"/skills 挂载源必须形如 {skills_src}/<12 位 sha 前缀>：{src}")
+        seen.add(dst)
+        out.append((str(src), dst, "ro"))
+    return out
+
+
+def _validate_gpus(gpus: "str | None") -> "str | None":
+    """`--gpus` 值校验：只认 "all" 或 "device=N"（BR-11：本期未授权，恒为 None）。"""
+    if gpus is None:
+        return None
+    if not isinstance(gpus, str) or not _GPUS_RE.match(gpus):
+        raise ValueError(f'gpus 只接受 "all" 或 "device=N"：{gpus!r}')
+    return gpus
+
 
 @dataclass
 class CommandResult:
@@ -94,7 +159,9 @@ def build_docker_create_argv(*, image: str, argv: list[str], workdir: Path,
                              probes_path: "str | None" = None,
                              env: "dict[str,str] | None" = None,
                              network: str = "none",
-                             label: "str | None" = None
+                             label: "str | None" = None,
+                             extra_ro_mounts: "tuple[tuple[str, str], ...]" = (),
+                             gpus: "str | None" = None
                              ) -> list[str]:
     """兄弟容器 ``docker create`` argv 构造（唯一构造点；测试逐段断言）。
 
@@ -120,7 +187,10 @@ def build_docker_create_argv(*, image: str, argv: list[str], workdir: Path,
                 f"探针挂载源目录不存在或不是目录：{probes_path}（/probes "
                 "挂载 fail-closed，M3）")
         mounts.append((probes_path, "/probes", "ro"))
+    # Phase 2.7 T1.4-G：额外只读挂载（默认空 ⇒ 默认 argv 逐字节不变，AC-T1-8）。
+    mounts.extend(_validate_extra_ro_mounts(extra_ro_mounts))
     _check_no_docker_sock(mounts)
+    gpus_value = _validate_gpus(gpus)
 
     cmd = [
         "docker", "create", "--rm", "-i",
@@ -137,6 +207,9 @@ def build_docker_create_argv(*, image: str, argv: list[str], workdir: Path,
     ]
     for src, dst, mode in mounts:
         cmd.extend(["-v", f"{src}:{dst}:{mode}"])
+    if gpus_value is not None:
+        # BR-11：本期无生产调用点传值；单测覆盖 `--gpus device=0` 的落位。
+        cmd.extend(["--gpus", gpus_value])
     for key, value in _CONTAINER_ENV.items():
         cmd.extend(["-e", f"{key}={value}"])
     for key, value in sorted((env or {}).items()):
@@ -155,13 +228,20 @@ class DockerSiblingBackend(RunBackend):
     def __init__(self, image: str, *, venv_path: str = "/mnt/venvs/simpraxis",
                  kb_path: "str | None" = None,
                  probes_path: "str | None" = None,
-                 network: str = "none", runner: Any = subprocess.run):
+                 network: str = "none", runner: Any = subprocess.run,
+                 extra_ro_mounts: "tuple[tuple[str, str], ...]" = (),
+                 gpus: "str | None" = None):
         self.image = image
         self.venv_path = venv_path
         self.kb_path = kb_path
         self.probes_path = probes_path
         self.network = network
         self._runner = runner
+        # Phase 2.7 T1.4-G：挂载与 --gpus 由构造期定档（模型不可控）。
+        # 构造期就校验，避免「跑到一半才发现挂载非法」。默认关。
+        self.extra_ro_mounts = tuple(extra_ro_mounts)
+        self.gpus = _validate_gpus(gpus)
+        _validate_extra_ro_mounts(self.extra_ro_mounts)
         # M3：构造期校验 /probes 挂载源（给了就必须是真实目录；不给则
         # run_probe 调用侧 fail-closed 拒绝，见 tools/probe.py）。
         if probes_path is not None and not Path(probes_path).is_dir():
@@ -175,7 +255,8 @@ class DockerSiblingBackend(RunBackend):
             image=self.image, argv=list(argv), workdir=cwd,
             venv_path=self.venv_path, kb_path=self.kb_path,
             probes_path=self.probes_path, env=env, network=self.network,
-            label=label_uuid)
+            label=label_uuid, extra_ro_mounts=self.extra_ro_mounts,
+            gpus=self.gpus)
 
         def _run(cmd: list[str], timeout: int, *, stdin=subprocess.DEVNULL):
             return self._runner(

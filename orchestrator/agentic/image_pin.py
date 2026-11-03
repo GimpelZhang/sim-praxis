@@ -27,4 +27,22 @@ BASE_IMAGE = (
     "sim-praxis/sandbox@sha256:"
     "50b6e10df854db40ea41e33f3ed9731a9d5d35b2d9d2ccf9b9f178d8565e4bfe")
 
+# Genesis 载体（Phase 2.7 Task 1 Step 0 / scene_build 探针；L-13 单一源）。
+#
+# 为什么不是 AGENTIC_IMAGE：它是 D-3「零 wheel」形态（依赖全来自只读挂载的
+# /opt/venv），系统解释器与它同源的 BASE_IMAGE 都没有 genesis——2026-11-03
+# 实测 `ModuleNotFoundError: No module named 'genesis'`
+# （$SIMPRAXIS_PHASE27_ROOT/task1_asset_zoo/probe_interpreter_check.log）。
+# 宿主 import genesis 会段错误（A-06），所以既不能改宿主 venv，也不能靠挂载解决。
+# 本机已存在、依赖逐项满足（genesis-world 1.3.3 / trimesh 5.1.1 / coacd 1.0.14 /
+# numpy 1.26.4 / torch 2.4.1+cu124，装在镜像内 /usr/bin/python）的载体是
+# Phase 1 Task 8 的流体沙盒镜像；计划 T1.4-E 的处置正是「不一致就改这条 argv，
+# 不得改镜像」——故只换 argv 指向的镜像，不重建任何镜像、不动 AGENTIC_IMAGE。
+SCENE_BUILD_IMAGE = (
+    "sim-praxis/sandbox:phase1-task8@sha256:"
+    "78be93b970e47d18283a275e1eef15856fcd1ebf607c315bfca45299f3a0d3d7")
+
+# 该镜像里 Genesis 装在系统解释器上（不是 /opt/venv）。
+SCENE_BUILD_PYTHON = "/usr/bin/python"
+
 SMOLAGENTS_PIN = "1.26.0"

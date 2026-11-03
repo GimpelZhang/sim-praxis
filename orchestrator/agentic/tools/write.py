@@ -67,7 +67,8 @@ def _policy(ctx: ToolContext) -> PreToolUsePolicy:
                             probe_registry=ctx.probe_registry)
 
 
-def _gate_target(ctx: ToolContext, rel: str) -> "Path | ToolResult":
+def _gate_target(ctx: ToolContext, rel: str,
+                 content: "str | None" = None) -> "Path | ToolResult":
     """jail（含软链逃逸）+ runner 禁改件 + Gate1 可写前缀，三连过。"""
     target, reason = resolve_or_deny(ctx.jail, rel)
     if target is None:
@@ -77,10 +78,32 @@ def _gate_target(ctx: ToolContext, rel: str) -> "Path | ToolResult":
         _validate_target(Path(rel), ctx.workdir)
     except PatchSafetyError as exc:
         return _deny(str(exc))
-    decision = _policy(ctx).check("write_file", {}, resolved_path=target)
+    decision = _policy(ctx).check("write_file", {"content": content},
+                                  resolved_path=target)
     if decision.decision == "deny":
         return ToolResult.denied_result(decision)
     return target
+
+
+def _guard_staged(staged: dict[str, str]) -> None:
+    """D1-5：落盘**前**对整个投影集合过 cad_guard（同一规则、同一份文案）。
+
+    apply_patch 的全通道（unified / tolerant / replace.v1 / JSON）都汇到
+    ``_apply`` 的这一个提交点，投影后的全文才是模型真正要写下去的内容，
+    故在此扫最准；任一命中即整体拒写（零落盘，不是写了再删）。
+
+    **不放进** ``agent_runner.runner._commit_staged``：那条路是旧引擎
+    （Phase 1）的提交点，而 Phase 2.5 T4 的分层红线禁止旧引擎面引用
+    ``orchestrator.agentic``（机判 ``test_old_engine_surface_never_touches_agentic``）。
+    """
+    from . import cad_guard  # 延迟导入：tools/__init__ 反向依赖 policy
+    for key, text in staged.items():
+        if not key.endswith(".py"):
+            continue
+        reason = cad_guard.deny_reason(text, tier=cad_guard.TIER_MODEL)
+        if reason is not None:
+            raise PatchSafetyError(
+                f"补丁被拒（文件 {Path(key).name}，本轮零落盘）：{reason}")
 
 
 def _ast_gate(staged: dict[str, str]) -> "str | None":
@@ -122,7 +145,7 @@ def write_file(ctx: ToolContext, **kwargs) -> ToolResult:
         args = validate(_WRITE_FIELDS, kwargs)
     except SchemaError as exc:
         return _deny(f"schema 拒绝：{exc}")
-    gated = _gate_target(ctx, args["path"])
+    gated = _gate_target(ctx, args["path"], args["content"])
     if isinstance(gated, ToolResult):
         return gated
     target: Path = gated
@@ -341,6 +364,7 @@ def _apply(ctx: ToolContext, raw: str, workdir: Path) -> ToolResult:
     reason = _ast_gate(staged)
     if reason:
         raise PatchTransportError(reason)
+    _guard_staged(staged)
     _commit_staged(staged, workdir)
     msg = f"[apply_patch] 已应用：{sorted(set(applied))}"
     if tolerant_stats:
