@@ -320,9 +320,11 @@ t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest
 执行台账：`~/文档/Phase_2.6_Plan_Complete.md`（进行中；与 Plan 冲突以 Complete 为准）。
 独立账套命名空间 `QuotaLedger.phase26()`；**Phase 1/2/2.5 三本账自 Phase 2.6 起一律
 封存只读**（`runtime_paths.sealed_ledger_paths()`，写打开即 `SealedLedgerError`）。
-预算：受账实呼 Cap T4=28 / T7=16 / T8=70 / T9=2 = 116，`PHASE26_HARD_CAP=120`
-（独立字面量，不取 sum(caps)）、`PHASE26_NORMAL_BUDGET=120`；账外 `P26-B0`
-（`--validate-models`，恰 4 次付费 POST）⇒ 真实总量 116+4=120。
+预算：受账实呼 Cap T4=56 / T7=16 / T8=70 / T9=2 = 144，`PHASE26_HARD_CAP=148`
+（独立字面量，不取 sum(caps)）、`PHASE26_NORMAL_BUDGET=148`；账外 `P26-B0`
+（`--validate-models`，恰 4 次付费 POST）⇒ 真实总量 144+4=148。T4 的 56 是
+两个 28 呼信封的授权上限之和（V3 `P26-B1` + 2026-11-03 用户 STOP-4a 裁决 (b)
+授权的 V4 `P26-B1b`），**按信封授权相加、不按实花相加**（实花 20+28=48）。
 开账行：生产账首行 `event="selfcheck"`、`seq=1`、`model=null`、`ok=true`，
 **占 seq 不计实呼**（机判用 `ledger_summary(..., allow_events=("selfcheck",))`，
 Task 9 对账按 `event != "call"` 排除），永不删除以保 seq 连续。

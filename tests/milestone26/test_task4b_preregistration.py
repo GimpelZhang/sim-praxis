@@ -295,3 +295,32 @@ def test_cmd_run_rejects_the_other_campaign_batch(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         R.cmd_run("wallA", "P26-B1")
     assert "P26-B1b" in str(exc.value)
+
+
+# --------------------------------------------- 7. 基线薄壳的 campaign 钉死
+
+def test_baseline_wrapper_pins_v3_campaign(monkeypatch):
+    """评审 REV-T4b-3：薄壳必须**显式**传 `--campaign v3`。
+
+    依赖 argparse 缺省会让「将来缺省漂移」直接覆写已冻结的 V3 基线件；
+    用户显式指定 campaign 时，前置的 v3 必须被后者覆盖（argparse 取最后一次）。
+    """
+    from scripts.phase26 import recompute_baseline_ratio as RB
+
+    seen: dict[str, list[str]] = {}
+
+    def fake_main(argv):
+        seen["argv"] = list(argv)
+        return 0
+
+    monkeypatch.setattr(RB, "_retest_main", fake_main)
+    assert RB.main([]) == 0
+    assert seen["argv"] == ["--recompute-baseline", "--campaign", "v3"]
+    # 用户显式指定（空格式与等号式）都不得被前置值遮蔽
+    assert RB.main(["--campaign", "v4"]) == 0
+    assert seen["argv"][-2:] == ["--campaign", "v4"]
+    assert RB.main(["--campaign=v4"]) == 0
+    # 等号式不命中 `"--campaign" in args` 的守卫 ⇒ 仍会前置 v3，但用户的
+    # 等号式在**其后**，argparse 取最后一次 ⇒ 实际生效的仍是 v4。
+    assert seen["argv"][-1] == "--campaign=v4"
+

@@ -24,7 +24,17 @@ from scripts.phase26.run_wall_retest import main as _retest_main
 
 
 def main(argv: list[str] | None = None) -> int:
-    return _retest_main(["--recompute-baseline", *(argv or [])])
+    # 防线（2026-11-03 评审 REV-T4b-3）：本薄壳是 **V3 冻结基线的专用入口**。
+    # 它原先依赖 argparse 的缺省 campaign=v3；一旦缺省漂移（或将来有人改
+    # CAMPAIGNS 的顺序/默认），裸跑就会把**已冻结**的 V3
+    # `baseline_effective_ratio.json` 覆写掉。故此处显式钉死 `--campaign v3`；
+    # V4 基线另有 `--campaign v4` 的显式调用（Complete §T4.10b）。
+    # 用户显式传入（`--campaign v4` 或 `--campaign=v4`）时**以用户为准**：
+    # argparse 对重复的 store 取最后一次，这里前置的 v3 会被后者覆盖。
+    args = list(argv or [])
+    if "--campaign" not in args:
+        args = ["--campaign", "v3", *args]
+    return _retest_main(["--recompute-baseline", *args])
 
 
 if __name__ == "__main__":
