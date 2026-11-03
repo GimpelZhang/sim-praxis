@@ -1030,13 +1030,19 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
                     "grant_source": GRANT_SOURCE_CONTROL},
             latency_ms=0, raw_response_ref=round_state.current_raw_ref)
 
+    # Phase 2.6 Task4：把 F1 出生/追授事实随结局带出（判据 AC-T4-1 需要出生
+    # 轮号）。全关路径仍给空 dict，与 Phase 2.5 逐字节等价（AC-T3-5）。
+    extra = ({"born_at_round": budget.born_at_round,
+              "tail_granted": budget.tail_granted,
+              "effective_round_cap": budget.effective_round_cap}
+             if cfg.any_enabled else {})
     return AgenticOutcome(
         kind=kind, value=value, reason=reason, smolagents_state=state,
         rounds_used=budget.rounds_used, steps_used=step_counter[0],
         tokens_used=budget.tokens_used, cache_hits=model.cache_hits,
         empty_responses=model.empty_responses,
         supplier_errors=model.supplier_errors,
-        trace_path=tracer.trace_path)
+        trace_path=tracer.trace_path, extra=extra)
 
 
 # ---------------------------------------------------------------------------
