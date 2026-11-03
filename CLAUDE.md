@@ -330,3 +330,13 @@ t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest
 Task 9 对账按 `event != "call"` 排除），永不删除以保 seq 连续。
 看门狗缺省监护对象已换期到 phase26（`watched._default_ledger_path()` /
 `_default_pause_path()`），且长跑仍须显式传 `--ledger` / `--pause-state` 双保险。
+
+**2026-11-03 收束（STOP-4b 用户裁决）**：Task 0–4b 已闭——Task 4 与 Task 4b 两次预注册
+均判 `NOT_ESTABLISHED`（三签 APPROVE 绑 `d880065`，修复批 `950ed67`，冷跑
+2198 passed/7 skipped/51 deselected/rc=0）。用户当日逐字指示「就到这里停止 Phase 2.6
+的运行：不再进行 Task5 及以后的 Task」⇒ **Task 5–9 一律不执行**（不是延期、不是待裁决）。
+`RunSpec.agentic` 维持 **opt-in / 冻结**。账：116 受账实呼 + selfcheck 开账行 1（占 seq 不计
+实呼）+ 账外 validate 4 = 真实 120；T4 实花 48（V3 20 + V4 28），帽 56 余 8 不再使用；
+三本旧账仍封存只读。T4b 尾债 10 条留档，重启任一 Task 须新票据 + 用户裁决。
+本地领先 origin/main 12 提交（攒批纪律；推送是人工 STOP 门，本批尚未过门）。
+Phase 2.6 的产物口径：Task 0–3 全闭 + Task 4 两次预注册负结论，**不得表述为「全部完成」**。
