@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -209,6 +210,282 @@ def test_effective_ratio_denominator_counts_cache_hit_rounds():
     assert rounds[1]["cache_hit"] is True
 
 
+def test_birth_round_is_productive_without_any_tool_call():
+    """判据 §3 条款 (b)：出生轮本身计产出（该轮可以只有一次落盘之外的行为）。"""
+    events = [_round(1), _tool(1, "write_file", decision="deny", obs="拒绝"),
+              _round(2)]
+    rounds, productive = R._productive_rounds(events, born_at_round=2)
+    assert productive == 1
+    assert rounds[1]["productive_reason"] == "birth_round"
+    # 未给出出生轮（None）时条款 (b) 不触发：本批两墙 born 全 null 的实测口径
+    rounds2, productive2 = R._productive_rounds(events)
+    assert productive2 == 0 and rounds2[1]["productive"] is False
+
+
+def test_birth_round_keeps_tool_reason_when_already_productive():
+    """出生轮已因工具产出时不覆盖原因（只增不减，口径不放大）。"""
+    events = [_round(2), _tool(2, "write_file", obs="[write_file] ok")]
+    rounds, productive = R._productive_rounds(events, born_at_round=2)
+    assert productive == 1
+    assert rounds[0]["productive_reason"] == "tool:write_file"
+
+
+# ------------------------- D4-6：基础设施故障唯一机判（INCONCLUSIVE 的闸）
+
+def test_infra_5xx_retry_exhausted_is_infra():
+    """生产形态：reason 恒被 model.py 包成「供应侧错误（…）：HTTP …」（评审 R1）。"""
+    ok, cls = R.classify_infra_failure(
+        "supplier_error",
+        "供应侧错误（GatewayError）：HTTP 503 重试 5 次仍失败：upstream unavailable")
+    assert ok is True and cls == "gateway_5xx_429_exhausted"
+    # 未包装形态仍命中（回归：不得因适配包装而收紧成只认包装）
+    ok2, cls2 = R.classify_infra_failure(
+        "supplier_error", "HTTP 503 重试 5 次仍失败：upstream unavailable")
+    assert ok2 is True and cls2 == "gateway_5xx_429_exhausted"
+
+
+def test_infra_429_backoff_exhausted_is_infra():
+    ok, cls = R.classify_infra_failure(
+        "supplier_error",
+        "GATEWAY PAUSED stage=coding_debug until 2026-11-03T03:00:00Z "
+        "reason=429 退避预算耗尽，转长熔断")
+    assert ok is True and cls == "gateway_5xx_429_exhausted"
+    # 5xx/429 的「重试 N 次仍失败」在包装后同样命中
+    ok2, cls2 = R.classify_infra_failure(
+        "supplier_error",
+        "供应侧错误（GatewayError）：HTTP 429 重试 5 次仍失败：rate limited")
+    assert ok2 is True and cls2 == "gateway_5xx_429_exhausted"
+
+
+def test_infra_ignores_model_controlled_stdout_stderr():
+    """评审 R2：模型 print 一行 MemoryError/ENOSPC 不得打开基础设施窄口。
+
+    分类器**不接受** stdout/stderr —— 契约层面就关掉这条不可信信道。
+    """
+    import inspect
+    params = inspect.signature(R.classify_infra_failure).parameters
+    assert "stdout" not in params and "stderr" not in params
+    # 模型可控文本即便进了 reason，只要 kind 不是 supplier_error 也不算 (a)
+    ok, cls = R.classify_infra_failure(
+        "engine_error", "Traceback (most recent call last): MemoryError")
+    assert ok is False and cls == ""
+    ok, cls = R.classify_infra_failure(
+        "birth_absent", "model printed: out of memory / ENOSPC / OOMKilled")
+    assert ok is False and cls == ""
+
+
+def test_infra_excludes_quality_and_config_failures():
+    """4xx / 配额长熔断 / 未出生 / 引擎错：全部**不是**基础设施故障。"""
+    for kind, reason in (
+        ("supplier_error", "HTTP 400 stage=coding_debug：invalid request"),
+        ("supplier_error", "404/model-not-found stage=coding_debug：nope"),
+        ("supplier_error",
+         "GATEWAY PAUSED stage=coding_debug until X reason=quota exceeded"),
+        ("supplier_error", "凭据缺失：ANTHROPIC_AUTH_TOKEN"),
+        ("birth_absent", "8 轮未见入口脚本"),
+        ("engine_error", "ValueError: bad patch"),
+        ("round_cap", "轮帽 16 用尽"),
+        ("finish", "implicit_final_answer（未经 finish 原语）"),
+    ):
+        ok, cls = R.classify_infra_failure(kind, reason)
+        assert ok is False and cls == "", (kind, reason)
+
+
+def test_infra_oom_requires_kernel_counter_in_addition_to_exit_code():
+    """(b) 双证据：退出码 137 **且** 内核 oom_kill 增量 ≥1（评审 R7）。
+
+    冻结评分器在容器/宿主内 `exec_module` 跑模型写的 `agent_solution.py`，
+    模型一行 `os._exit(137)` 即可把评分器退出码设成 137；只看退出码等于
+    把 D4-6(b) 窄口交给模型控制。
+    """
+    ok, cls = R.classify_infra_failure("engine_error", "容器被杀")
+    assert ok is False                        # 无正面证据即 False
+    ok, cls = R.classify_infra_failure("engine_error", "", scorer_rc=137)
+    assert ok is False                        # R7：退出码可伪造，单证不足
+    ok, cls = R.classify_infra_failure("engine_error", "", scorer_rc=137,
+                                       oom_kill_delta=0)
+    assert ok is False                        # 有计数但窗口内零增量 ⇒ 伪造
+    ok, cls = R.classify_infra_failure("engine_error", "", scorer_rc=137,
+                                       oom_kill_delta=None)
+    assert ok is False                        # 计数不可读 ⇒ fail-closed
+    ok, cls = R.classify_infra_failure("engine_error", "", scorer_rc=137,
+                                       oom_kill_delta=1)
+    assert ok is True and cls == "container_oom_or_killed"
+    ok, cls = R.classify_infra_failure("engine_error", "", scorer_rc=139,
+                                       oom_kill_delta=3)
+    assert ok is False                        # 非 SIGKILL 退出码不归因到 OOM
+
+
+def test_infra_disk_uses_harness_signal_only():
+    """(c) 只认我方观测的 /mnt 评分时点剩余空间。"""
+    ok, cls = R.classify_infra_failure("finish", "", disk_free_gib=0.4)
+    assert ok is True and cls == "disk_full"
+    ok, cls = R.classify_infra_failure("finish", "", disk_free_gib=42.0)
+    assert ok is False
+
+
+def test_wall_a_score_gate_requires_verdict_and_all_twelve_checks():
+    """评审 R9：墙 A 评分侧过闸 = rc 0 ∧ verdict=pass ∧ checks ≥ 12。
+
+    冻结评分器在自身进程内 `exec_module` 跑模型自著的 `agent_solution.py`，
+    模型一行 `os._exit(0)` 就能让 rc 变 0 却一项检查都没跑；只看 final_rc
+    等于把「全 12 项 PASS」交给模型控制（与 R7 同源）。
+    """
+    good = {"verdict": "pass", "checks": [{"name": f"c{i}"} for i in range(12)]}
+    assert R.wall_a_score_ok(0, good) is True
+    assert R.wall_a_score_ok(0, None) is False                 # 评分件缺席
+    assert R.wall_a_score_ok(0, {}) is False                   # 空件（伪造 rc0）
+    assert R.wall_a_score_ok(0, {"verdict": "fail",
+                                 "checks": good["checks"]}) is False
+    assert R.wall_a_score_ok(0, {"verdict": "pass",
+                                 "checks": good["checks"][:11]}) is False
+    assert R.wall_a_score_ok(0, {"verdict": "pass"}) is False  # 无 checks 键
+    assert R.wall_a_score_ok(137, good) is False
+    assert R.wall_a_score_ok(None, good) is False              # 无退出码即 False
+
+
+def test_wall_a_pass_requires_all_five_conditions():
+    """五项合取：出生轮 ≤8、final_rc=0、评分件全过、run_expr 成功≥1、追授轮≥1。"""
+    base = dict(born_at_round=3, final_rc=0, score_ok=True,
+                run_expr_ok_calls=2, tail_rounds=4)
+    assert R.wall_a_passed(**base) is True
+    for key, bad in (("born_at_round", None), ("born_at_round", 9),
+                     ("final_rc", 1), ("score_ok", False),
+                     ("run_expr_ok_calls", 0), ("tail_rounds", 0)):
+        assert R.wall_a_passed(**{**base, key: bad}) is False, (key, bad)
+
+
+def test_oom_counter_parsing_and_delta(tmp_path, monkeypatch):
+    """cgroup `memory.events` 解析：缺文件/坏行不猜 0；任一端缺席即 None。"""
+    a = tmp_path / "docker.memory.events"
+    b = tmp_path / "self.memory.events"
+    a.write_text("low 0\nhigh 0\nmax 0\noom 1\noom_kill 7\n", encoding="utf-8")
+    b.write_text("max 0\noom_kill 2\n", encoding="utf-8")
+    monkeypatch.setattr(R, "_cgroup_event_paths", lambda: (a, b))
+    counts = R._read_oom_kill_counts()
+    assert counts == {str(a): 7, str(b): 2}
+    after = {str(a): 8, str(b): 2}
+    assert R._oom_kill_delta(counts, after) == 1
+    assert R._oom_kill_delta(counts, dict(counts)) == 0
+    # 计数回退（cgroup 重建）不计负增量
+    assert R._oom_kill_delta(counts, {str(a): 3, str(b): 2}) == 0
+    # 一端缺席 ⇒ 不可归因
+    assert R._oom_kill_delta(counts, {str(a): 9}) is None
+    assert R._oom_kill_delta(None, after) is None
+    # 坏行/缺键不算，也不抛
+    c = tmp_path / "broken.memory.events"
+    c.write_text("oom_kill not-an-int\n", encoding="utf-8")
+    d = tmp_path / "no-counter.memory.events"
+    d.write_text("oom 0\n", encoding="utf-8")
+    monkeypatch.setattr(R, "_cgroup_event_paths", lambda: (c, d))
+    assert R._read_oom_kill_counts() == {}
+
+
+def test_infra_failure_does_not_open_inconclusive_on_quality_failure():
+    """回归闸：模型质量类失败即使池用满也不得进 INCONCLUSIVE。"""
+    rec = {"passed": False, "rounds": 9, "productive_rounds": 3,
+           "infra_failure": R.classify_infra_failure(
+               "birth_absent", "9 轮未见 agent_solution.py")[0],
+           "fail_reasons": ["witness_not_12"]}
+    v, _r, _ratio = R.compute_verdict(rec, rec, pool_used=R.HARD_ENVELOPE)
+    assert rec["infra_failure"] is False
+    assert v == "NOT_ESTABLISHED"
+
+
+# ------------------------- I4-5：同一墙只许一轮非基础设施故障结果
+
+def _write_wall_result(root: Path, wall: str, stamp: str, *,
+                       infra: bool, passed: bool = False) -> Path:
+    d = root / "runs" / wall / stamp
+    d.mkdir(parents=True, exist_ok=True)
+    rec = {"wall": wall, "run_dir": str(d), "passed": passed,
+           "infra_failure": infra,
+           "infra_class": "gateway_5xx_429_exhausted" if infra else "",
+           "attempt_index": 0, "ts_iso": stamp,
+           "rounds": 9, "productive_rounds": 3, "fail_reasons": ["x"],
+           "paid_calls": 9, "cap_exhausted": True}
+    p = d / "wall_result_v3.json"
+    p.write_text(json.dumps(rec), encoding="utf-8")
+    return p
+
+
+def test_single_run_guard_allows_first_attempt(retest_env):
+    assert R._guard_single_run("wallA") == 0
+
+
+def test_single_run_guard_refuses_rerun_after_quality_failure(retest_env):
+    """判负不重跑：已有非基础设施故障结果时，第二次开跑必须炸。"""
+    _write_wall_result(retest_env, "wallA", "20261103T020317Z", infra=False)
+    with pytest.raises(SystemExit) as exc:
+        R._guard_single_run("wallA")
+    assert "I4-5" in str(exc.value)
+
+
+def test_single_run_guard_allows_one_d4_6_reserve_retry(retest_env):
+    _write_wall_result(retest_env, "wallA", "20261103T020317Z", infra=True)
+    assert R._guard_single_run("wallA") == 1
+    _write_wall_result(retest_env, "wallA", "20261103T030000Z", infra=True)
+    with pytest.raises(SystemExit) as exc:
+        R._guard_single_run("wallA")
+    assert "额度已用尽" in str(exc.value)
+
+
+def test_wall_result_selection_refuses_two_non_infra_attempts(retest_env):
+    """聚合不得静默取最后一次：两份非基础设施故障结果 = 人工裁决。"""
+    _write_wall_result(retest_env, "wallA", "20261103T020317Z", infra=False)
+    _write_wall_result(retest_env, "wallB", "20261103T020954Z", infra=False)
+    assert R._latest_wall_result("wallB")["wall"] == "wallB"
+    _write_wall_result(retest_env, "wallB", "20261103T040000Z", infra=False)
+    with pytest.raises(SystemExit) as exc:
+        R._latest_wall_result("wallB")
+    assert "I4-5" in str(exc.value)
+
+
+def test_wall_result_selection_prefers_non_infra_over_infra(retest_env):
+    _write_wall_result(retest_env, "wallA", "20261103T020000Z", infra=True)
+    _write_wall_result(retest_env, "wallA", "20261103T020317Z", infra=False,
+                       passed=True)
+    rec = R._latest_wall_result("wallA")
+    assert rec["infra_failure"] is False and rec["passed"] is True
+
+
+def test_single_run_guard_refuses_crashed_attempt_without_result(retest_env):
+    """评审 R5：已开跑（有 run_meta.json）但崩溃未落判决件 = 不可静默重跑。"""
+    d = retest_env / "runs" / "wallA" / "20261103T050000Z"
+    d.mkdir(parents=True)
+    (d / "run_meta.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        R._guard_single_run("wallA")
+    assert "人工分诊" in str(exc.value)
+    assert R._unrecorded_attempts("wallA") == [str(d)]
+    # 补记判决件后恢复正常口径（该件 infra=True ⇒ 仍可走 1 次储备重跑）
+    _write_wall_result(retest_env, "wallA", "20261103T050000Z", infra=True)
+    assert R._unrecorded_attempts("wallA") == []
+    assert R._guard_single_run("wallA") == 1
+
+
+def test_cmd_run_requires_matching_preflight(retest_env, monkeypatch):
+    """评审 R6：同批 --preflight 由机判强制，不是操作员纪律。"""
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    with pytest.raises(SystemExit) as exc:
+        R.cmd_run("wallA", R.BATCH_ID)
+    assert "预检件" in str(exc.value) or "缺少本批预检件" in str(exc.value)
+    # 批次不符同样拒
+    (retest_env / "preflight.json").write_text(
+        json.dumps({"schema": "x", "paid_calls": 0,
+                    "ticket": {"batch_id": "P26-OTHER"}}), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc2:
+        R.cmd_run("wallA", R.BATCH_ID)
+    assert "批次不符" in str(exc2.value)
+    # 预检自证花过钱同样拒
+    (retest_env / "preflight.json").write_text(
+        json.dumps({"schema": "x", "paid_calls": 2,
+                    "ticket": {"batch_id": R.BATCH_ID}}), encoding="utf-8")
+    with pytest.raises(SystemExit) as exc3:
+        R.cmd_run("wallA", R.BATCH_ID)
+    assert "paid_calls" in str(exc3.value)
+
+
 # --------------------------------------------- AC-T4-4：判据 LOCK 三重取证
 
 @pytest.fixture()
@@ -262,6 +539,18 @@ def test_verify_criteria_lock_rejects_content_tamper(retest_env):
     assert "sha256 不符" in str(exc.value)
 
 
+def test_verify_criteria_lock_rejects_mtime_tamper(retest_env):
+    """三重取证缺一不可：内容与 mode 不变，只动 mtime 也算篡改。"""
+    R.cmd_write_criteria()
+    R.cmd_seal_criteria()
+    p = R.criteria_path()
+    st = p.stat()
+    os.utime(p, (st.st_atime, st.st_mtime + 1))
+    with pytest.raises(SystemExit) as exc:
+        R.verify_criteria_lock()
+    assert "mtime 不符" in str(exc.value)
+
+
 def test_verify_criteria_lock_missing_lock_fails_closed(retest_env):
     R.cmd_write_criteria()
     with pytest.raises(SystemExit) as exc:
@@ -313,6 +602,95 @@ def test_probe_refuses_ticket_over_one(retest_env, monkeypatch):
 def test_probe_refuses_bad_max_tokens(retest_env, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
     assert R.cmd_probe_coding(R.PROBE_BATCH, 0) == 2
+
+
+def test_probe_refuses_replay_after_ticket_consumed(retest_env, monkeypatch):
+    """防重放：票已用尽（标记在发网前落盘）即拒，绝不第二次 POST。"""
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    p = retest_env / "quota" / "approvals" / f"{R.PROBE_BATCH}.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({
+        "batch_id": R.PROBE_BATCH, "task": R.TASK_ID, "stage": "coding_debug",
+        "approved": 1, "ledger_phase": 26}), encoding="utf-8")
+    (retest_env / f"probe_consumed_{R.PROBE_BATCH}.json").write_text(
+        json.dumps({"batch_id": R.PROBE_BATCH,
+                    "consumed_at_iso": "2026-11-03T01:59:37Z"}),
+        encoding="utf-8")
+    assert R.cmd_probe_coding() == 2       # 票据合法但额度已用尽 → 不发网
+
+
+def test_offledger_actuals_checks_evidence_presence_hermetically(
+        retest_env, monkeypatch, tmp_path):
+    """账外审计件不得只写「像路径的字符串」：证据在场与否必须机判。
+
+    合成条目（不读活盘、不依赖本机 P26-B0 件），验证绝对路径与相对
+    ``phase26_root()`` 两种写法都被解析成绝对路径并给出存在性。
+    """
+    abs_ev = tmp_path / "abs_evidence.json"
+    abs_ev.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(R, "OFF_LEDGER_ACTUALS", {
+        "P26-X1": {"approved": 1, "posts_used": 1, "kind": "probe",
+                   "outcome": "OK", "evidence": str(abs_ev)},
+        "P26-X2": {"approved": 1, "posts_used": 1, "kind": "probe",
+                   "outcome": "OK", "evidence_rel": "walls/retest/missing.json"},
+    })
+    got = R.offledger_actuals()
+    assert got["P26-X1"]["evidence_present"] is True
+    assert got["P26-X1"]["evidence"] == str(abs_ev)
+    assert got["P26-X2"]["evidence_present"] is False
+    assert got["P26-X2"]["evidence"].startswith(str(retest_env))
+    assert "evidence_rel" not in got["P26-X2"]
+
+
+def test_offledger_actuals_real_entries_point_at_existing_files():
+    """真实三条账外记录的 ``evidence`` 必须是绝对路径（不再有歧义相对根）。"""
+    for bid, rec in R.OFF_LEDGER_ACTUALS.items():
+        assert "evidence_rel" in rec or rec["evidence"].startswith("/"), bid
+
+
+# --------------------------------------------- 审计件封存账对账（fail-closed）
+
+def test_sealed_ledger_status_fails_closed_without_snapshot(tmp_path):
+    """快照缺席不得被读成「未改」：--audit-ledger 的 ok 判据曾用
+    ``sealed_untouched is not False``，None 也放行，等于自述算数。"""
+    ok, detail = R._sealed_ledger_status(tmp_path / "nope.json")
+    assert ok is False
+    assert detail["__error__"]["error"] == "快照缺席"
+
+
+def test_sealed_ledger_status_fails_closed_on_empty_snapshot(tmp_path):
+    p = tmp_path / "snap.json"
+    p.write_text(json.dumps({"paths": {}}), encoding="utf-8")
+    ok, detail = R._sealed_ledger_status(p)
+    assert ok is False and "空表" in detail["__error__"]["error"]
+
+
+def test_sealed_ledger_status_true_only_when_all_unchanged(tmp_path):
+    f = tmp_path / "sealed.ledger"
+    f.write_text("{}\n", encoding="utf-8")
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"paths": {
+        str(f): {"exists": True, "mtime": int(f.stat().st_mtime)}}}),
+        encoding="utf-8")
+    ok, detail = R._sealed_ledger_status(snap)
+    assert ok is True and detail[str(f)]["changed"] is False
+    # 追加一行 ⇒ mtime 变 ⇒ 判负
+    f.write_text("{}\n{}\n", encoding="utf-8")
+    os.utime(f, (1, 1))
+    ok2, detail2 = R._sealed_ledger_status(snap)
+    assert ok2 is False and detail2[str(f)]["changed"] is True
+
+
+def test_sealed_ledger_status_detects_deleted_file(tmp_path):
+    f = tmp_path / "sealed.ledger"
+    f.write_text("{}\n", encoding="utf-8")
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"paths": {
+        str(f): {"exists": True, "mtime": int(f.stat().st_mtime)}}}),
+        encoding="utf-8")
+    f.unlink()
+    ok, detail = R._sealed_ledger_status(snap)
+    assert ok is False and detail[str(f)]["after"]["exists"] is False
 
 
 # --------------------------------------------- 预算常量（帽不许抬）

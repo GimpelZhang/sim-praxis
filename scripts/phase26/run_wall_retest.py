@@ -341,13 +341,19 @@ def _obs_nonempty(row: dict) -> bool:
                 or (row.get("obs_tail") or "").strip())
 
 
-def _productive_rounds(events: list[dict]) -> tuple[list[dict], int]:
+def _productive_rounds(events: list[dict],
+                       born_at_round: int | None = None
+                       ) -> tuple[list[dict], int]:
     """按 §3 预注册定义从 trace 行复算每轮 productive 标记。
 
     返回 (rounds, productive_count)。模型轮行取 ``__model_round__``（轮号
     字段 ``round``，1 起）；其余 ``__`` 前缀内部控制行（``__answer__`` /
     ``__condense__``）不参与判定（既有 trace 语义：控制行不是工具调用）。
     工具行字段：``policy_decision`` / ``obs_head`` / ``obs_tail``。
+
+    判据 §3 是 **两择一**：(a) 该轮有 allow 且观察非空的工具调用；(b) 该轮
+    首次使入口脚本落盘（``born_at_round``）。两条都必须在代码里成立，否则
+    实现就窄于预注册文本。``born_at_round=None``（未出生）时 (b) 不触发。
     """
     rounds: list[dict] = []
     by_round: dict[Any, list[dict]] = {}
@@ -375,6 +381,12 @@ def _productive_rounds(events: list[dict]) -> tuple[list[dict], int]:
                 rec["productive"] = True
                 rec["productive_reason"] = f"tool:{row.get('tool')}"
                 break
+    # 判据 §3 条款 (b)：出生轮本身计产出（即便该轮没有成功工具调用）。
+    if born_at_round is not None:
+        rec = index.get(born_at_round)
+        if rec is not None and not rec["productive"]:
+            rec["productive"] = True
+            rec["productive_reason"] = "birth_round"
     for rec in rounds:
         if rec["productive"]:
             productive += 1
@@ -683,6 +695,20 @@ def cmd_probe_coding(batch: str = PROBE_BATCH,
     rows_before = len(call_lines(read_lines(ledger_p)))
     model_id = coding_debug_model_id()
 
+    # 防重放：本票只值 1 个 POST。标记在**发网前**落盘——即使进程在请求
+    # 途中崩溃，票也已记为用尽，不允许第二次 --probe-coding 再烧一次。
+    marker = retest_root() / f"probe_consumed_{batch}.json"
+    if marker.is_file():
+        print(f"[probe] 拒绝：{batch} 的 1 次额度已于 "
+              f"{_read_json(marker).get('consumed_at_iso')} 用尽（防重放）",
+              file=sys.stderr)
+        return 2
+    fc.write_json(marker, {
+        "schema": PROBE_SCHEMA, "batch_id": batch,
+        "consumed_at_iso": utc_iso(), "max_tokens": max_tokens,
+        "note": "发网前落盘：崩溃也不得重放本票（approved=1）",
+    })
+
     gw = ModelGateway(ledger=None, unguarded=True)  # 账外：与 validate 同路径
     prompt = "ping，只回复 pong"
     rec: dict[str, Any] = {
@@ -771,9 +797,136 @@ def _identity_rows(ledger: QuotaLedger, batch_id: str,
             and (r.get("thread_id") or "") == thread_id]
 
 
+# D4-6「基础设施故障」的唯一机判：三类，各自要求**正面证据**，无证据即
+# False（fail-closed）。这一格决定 INCONCLUSIVE 窄口是否打开，宁可漏判也
+# 不可误判——把模型质量类失败（未出生/补丁失败/rc≠0）判成基础设施故障，
+# 等于给「失败即不确定」开后门。
+#
+# 证据信道只有**我方产生**、且模型代码**不能伪造**的三路（评审 R2 + R7）：
+#   (a) 网关/内环自写的 outcome.kind + reason（router.py 与 loop.py 构造）；
+#   (b) 内核 OOM 击杀计数（cgroup v2 `memory.events::oom_kill`）的评分前后增量，
+#       **且**评分器退出码为 137。只认 137 不认计数器会被模型伪造——冻结评分器
+#       在容器/宿主内 `importlib.exec_module` 跑模型写的 `agent_solution.py`，
+#       模型一行 `os._exit(137)` 就能把评分器进程退出码设成 137（R7，
+#       2026-11-03 经 executor 独立复现：rc=137 但内核 oom_kill 增量为 0）；
+#   (c) /mnt 评分时点剩余空间（harness 观测）。
+# 模型 stdout/stderr 是**不可信信道**：模型 print 一行 MemoryError/ENOSPC
+# 不得把质量失败翻成基础设施故障，故本函数根本不接受这两个参数。
+INFRA_HTTP_PATTERNS = (
+    # router.py:1178 5xx 重试耗尽 → GatewayError("HTTP 5xx 重试 N 次仍失败：…")
+    # 生产 reason 恒被 model.py:340 包成「供应侧错误（GatewayError）：HTTP …」，
+    # 故**不得行首锚定**（评审 R1：^ 锚定使真实 5xx/429 永不命中，比修复前更差）。
+    # 这两条短语只由我方 router 产出，子串匹配仍然很窄。
+    re.compile(r"HTTP 5\d\d 重试 \d+ 次仍失败"),
+    re.compile(r"HTTP 429 .*重试 \d+ 次仍失败"),
+    # router.py:1155-1171 429 退避/等待预算耗尽 → GatewayPausedError(state)，
+    # str() 形如 "GATEWAY PAUSED stage=… until … reason=429 退避预算耗尽，转长熔断"。
+    # 配额长熔断（_is_quota_http）reason 是上游正文，不匹配这两串 → 不算 (a)。
+    re.compile(r"GATEWAY PAUSED .*reason=.*429.*(退避预算耗尽|等待预算超限)"),
+)
+CONTAINER_OOM_EXIT_CODES = (137,)      # SIGKILL —— **必要不充分**信号（R7）
+DISK_FLOOR_GIB = 1.0                   # 评分时点 /mnt 剩余低于此即视为磁盘写满
+WALL_A_CHECKS_N = 12                   # 冻结 wall_a_runner.py 的检查项数（R9）
+
+
+def _cgroup_event_paths() -> tuple[Path, ...]:
+    """OOM 计数的读取点：docker 容器树 + 本进程所在会话 scope。
+
+    容器评分（墙 A）的 OOM 击杀记在 `docker.service` 的 cgroup 上；宿主进程
+    评分（墙 B）与本体进程被 OOM 击杀则记在本会话 scope 及其子树上。两处都
+    读，任一在评分窗口内 `oom_kill` 增量 > 0 即算一次真实内核击杀。
+    """
+    paths = [Path("/sys/fs/cgroup/system.slice/docker.service/memory.events")]
+    try:
+        rel = Path("/proc/self/cgroup").read_text(encoding="utf-8")
+        for line in rel.splitlines():
+            if line.startswith("0::"):
+                sub = line[3:].strip()
+                if sub and sub != "/":
+                    paths.append(Path("/sys/fs/cgroup") / sub.lstrip("/")
+                                 / "memory.events")
+                break
+    except OSError:
+        pass
+    return tuple(paths)
+
+
+def _read_oom_kill_counts() -> dict[str, int]:
+    """读各 cgroup 的 `oom_kill` 累计值；读不到的路径直接缺席（不猜 0）。"""
+    out: dict[str, int] = {}
+    for p in _cgroup_event_paths():
+        try:
+            for line in Path(p).read_text(encoding="utf-8").splitlines():
+                key, _, val = line.partition(" ")
+                if key == "oom_kill":
+                    out[str(p)] = int(val.strip())
+                    break
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def _oom_kill_delta(before: dict[str, int] | None,
+                    after: dict[str, int] | None) -> int | None:
+    """评分窗口内的内核 OOM 击杀增量；任一端不可读即 None（fail-closed）。"""
+    if not before or not after or set(before) != set(after):
+        return None
+    return sum(max(0, after[k] - before[k]) for k in before)
+
+
+def classify_infra_failure(kind: str, reason: str, *,
+                           scorer_rc: int | None = None,
+                           oom_kill_delta: int | None = None,
+                           disk_free_gib: float | None = None
+                           ) -> tuple[bool, str]:
+    """D4-6 (a) 网关 5xx/429 退避耗尽 / (b) 容器 OOM 被杀 / (c) 磁盘写满。
+
+    返回 ``(是否基础设施故障, 命中类别或空串)``。判据只看**我方机器证据**，
+    不看「分数低」之类的质量信号，也不看模型可控的 stdout/stderr。
+
+    (b) 需要**双证据**：评分器退出码 137 **且**内核 `oom_kill` 计数在评分窗口
+    内确有增量。单看退出码可被模型伪造（`os._exit(137)`，见 R7），单看计数
+    无法归因到本次评分，二者缺一即 False（fail-closed）。
+    """
+    reason = reason or ""
+    if kind == "supplier_error":
+        for pat in INFRA_HTTP_PATTERNS:
+            if pat.search(reason):
+                return True, "gateway_5xx_429_exhausted"
+    if (scorer_rc is not None and int(scorer_rc) in CONTAINER_OOM_EXIT_CODES
+            and oom_kill_delta is not None and int(oom_kill_delta) >= 1):
+        return True, "container_oom_or_killed"
+    if disk_free_gib is not None and float(disk_free_gib) < DISK_FLOOR_GIB:
+        return True, "disk_full"
+    return False, ""
+
+
+def wall_a_score_ok(scorer_rc: int | None, score: dict | None) -> bool:
+    """墙 A 的评分侧必要条件：rc=0 ∧ verdict=pass ∧ 冻结 12 项全在。
+
+    评审 R9：判据 §1 括注「冻结 wall_a_runner.py 全 12 项检查 PASS」原先没落到
+    机判，只看 ``final_rc==0``——而冻结评分器在进程内 ``importlib.exec_module``
+    跑模型写的 ``agent_solution.py``，模型一行 ``os._exit(0)`` 就能让 rc 变 0 却
+    一项检查都没跑。三项全满足才算评分侧过闸（fail-closed：score 缺席即 False）。
+    """
+    if scorer_rc is None or int(scorer_rc) != 0 or not isinstance(score, dict):
+        return False
+    return (score.get("verdict") == "pass"
+            and len(score.get("checks") or []) >= WALL_A_CHECKS_N)
+
+
+def wall_a_passed(*, born_at_round: int | None, final_rc: int | None,
+                  score_ok: bool, run_expr_ok_calls: int,
+                  tail_rounds: int) -> bool:
+    """墙 A 过闸的完整合取（判据 §1，五项缺一不可）。"""
+    return bool(
+        born_at_round is not None and int(born_at_round) <= BIRTH_ROUND_LIMIT
+        and final_rc == 0 and bool(score_ok)
+        and int(run_expr_ok_calls) >= 1 and int(tail_rounds) >= 1)
+
+
 def _derive_metrics(outcome: Any, events: list[dict],
                     scored: dict) -> dict:
-    rounds, productive = _productive_rounds(events)
     # birth 轮：内环直接给出（AgenticOutcome.extra 自带 born_at_round）。
     # 兜底：从 trace 的追授轮反推——tail 只在出生校验通过后才追授，故
     # 首个 phase="verify_repair" 的模型轮恰是出生轮 + 1。
@@ -785,6 +938,8 @@ def _derive_metrics(outcome: Any, events: list[dict],
         first_tail = tail_rows[0].get("round")
         if isinstance(first_tail, int):
             born = first_tail - 1
+    # born 必须先算：判据 §3 条款 (b) 把它作为 productive 的第二判据。
+    rounds, productive = _productive_rounds(events, born_at_round=born)
     run_expr_ok = sum(
         1 for e in events
         if e.get("tool") == "run_expr"
@@ -816,6 +971,61 @@ def _derive_metrics(outcome: Any, events: list[dict],
     }
 
 
+def _wall_attempt_records(wall: str) -> list[dict]:
+    base = retest_root() / "runs" / wall
+    if not base.is_dir():
+        return []
+    return [_read_json(p) for p in sorted(base.glob("*/wall_result_v3.json"))]
+
+
+def _unrecorded_attempts(wall: str) -> list[str]:
+    """跑了但没落判决件的尝试（进程崩溃/被杀）。
+
+    评审 R5：``wall_result_v3.json`` 是唯一事实源时，一次已烧实呼却在写件前
+    崩溃的运行不会计入重试额度。run 目录由 ``cmd_run`` 在守卫**之后**创建，
+    故「有 run_meta.json 而无 wall_result_v3.json」必然是已开跑未收口。
+    """
+    base = retest_root() / "runs" / wall
+    if not base.is_dir():
+        return []
+    out = []
+    for d in sorted(p for p in base.iterdir() if p.is_dir()):
+        if (d / "run_meta.json").is_file() and not (
+                d / "wall_result_v3.json").is_file():
+            out.append(str(d))
+    return out
+
+
+def _guard_single_run(wall: str) -> int:
+    """I4-5 机判：同一墙只许一轮**非基础设施故障**的正式结果。
+
+    D4-6 是唯一重跑口子：上一轮必须命中三类基础设施故障之一，且本墙与
+    全批储备都未用尽（每墙至多 1 次重跑，全批重跑合计 ≤ RESERVE）。返回
+    本次尝试序号（0 起），落进 ``wall_result_v3.json.attempt_index``。
+    """
+    recs = _wall_attempt_records(wall)
+    unrecorded = _unrecorded_attempts(wall)
+    if unrecorded:
+        raise SystemExit(
+            f"{wall} 存在已开跑但未落判决件的尝试：{unrecorded}。I4-5 要求先"
+            "人工分诊（查该 run 的 rounds.jsonl / outcome.json 与账行 seq 区间，"
+            "确认是否已消耗实呼），补记 wall_result_v3.json 或挂牌失败后再重跑。")
+    if not recs:
+        return 0
+    non_infra = [r for r in recs if not r.get("infra_failure")]
+    if non_infra:
+        raise SystemExit(
+            f"{wall} 已有非基础设施故障的正式结果：{non_infra[0].get('run_dir')}"
+            f"（passed={non_infra[0].get('passed')}）。I4-5：判负不重跑同一墙；"
+            "重测须新票据 + 新判据 sha + 新批次号，不得复用本批。")
+    if len(recs) >= 2:
+        raise SystemExit(f"{wall} 储备重跑额度已用尽（已有 {len(recs)} 次尝试）")
+    retries = sum(max(0, len(_wall_attempt_records(w)) - 1) for w in WALLS)
+    if retries + 1 > RESERVE:
+        raise SystemExit(f"储备池 {RESERVE} 已耗尽（已重跑 {retries} 次）")
+    return len(recs)
+
+
 def cmd_run(wall: str, batch_id: str) -> int:
     if os.environ.get("SIMPRAXIS_ALLOW_PAID") != "1":
         print("拒绝裸跑付费墙：需要 SIMPRAXIS_ALLOW_PAID=1（硬规则 2 双守卫）",
@@ -824,14 +1034,31 @@ def cmd_run(wall: str, batch_id: str) -> int:
     if batch_id != BATCH_ID:
         raise SystemExit(f"批次号必须是单票 {BATCH_ID}（拆票即 "
                          "BLOCKED_BATCH_APPROVAL_MISSING）：{batch_id}")
+    # 评审 R6：同批 --preflight 必须是机判前置，而不是操作员纪律。要求预检件
+    # 在场、同批、且自证 0 付费（预检本身不得花过钱）。
+    pf_p = retest_root() / "preflight.json"
+    if not pf_p.is_file():
+        raise SystemExit(
+            f"缺少本批预检件 {pf_p}：先跑 --preflight（九件闸哈希 / 镜像 digest / "
+            "票据 / 0 触网）再开跑（§T4.2 入口准则）。")
+    pf = _read_json(pf_p)
+    if str((pf.get("ticket") or {}).get("batch_id")) != batch_id:
+        raise SystemExit(
+            f"预检件批次不符：preflight={pf.get('ticket', {}).get('batch_id')!r} "
+            f"vs 本次 {batch_id!r}")
+    if pf.get("paid_calls") != 0:
+        raise SystemExit(f"预检件自证 paid_calls={pf.get('paid_calls')!r} ≠ 0")
     root = fc.freeze_root()
     verify_freeze(root)
     lock = verify_criteria_lock()
+    attempt_index = _guard_single_run(wall)
     grant_strings = retest_grants(wall)
     grants = parse_grant_strings(grant_strings)
 
     stamp = utc_stamp()
     thread_id = f"p26-{wall.lower()}-{stamp}"
+    if (retest_root() / "runs" / wall / stamp).exists():
+        raise SystemExit(f"运行目录已存在（时间戳碰撞）：{stamp}")
     run_dir = fc.ensure_dir(retest_root() / "runs" / wall / stamp)
     work = fc.ensure_dir(run_dir / "work")
     text = task_text(wall)
@@ -901,7 +1128,11 @@ def cmd_run(wall: str, batch_id: str) -> int:
     print(f"[retest] loop 终局 kind={outcome.kind} "
           f"rounds={outcome.rounds_used} steps={outcome.steps_used}", flush=True)
 
+    # R7：OOM 判据的前置快照必须在评分前后各取一次——模型代码能改自己的
+    # 退出码，改不了内核 oom_kill 计数器。
+    oom_before = _read_oom_kill_counts()
     scored = _score_once(wall, root, work)
+    oom_kill_delta_at_score = _oom_kill_delta(oom_before, _read_oom_kill_counts())
     score_dir = fc.ensure_dir(run_dir / "score")
     fc.atomic_write_bytes(score_dir / "stdout.log",
                           scored["stdout"].encode("utf-8"))
@@ -926,20 +1157,33 @@ def cmd_run(wall: str, batch_id: str) -> int:
     metrics["paid_calls"] = n_calls
     metrics["ledger_seq"] = [r.get("seq") for r in seq_rows]
     score = scored.get("score") or {}
+    # 磁盘写满只能由我方观测取证：模型 stdout/stderr 可自称 ENOSPC（评审 R2）。
+    disk_free_gib_at_score = round(
+        shutil.disk_usage("/mnt").free / (1 << 30), 2)
+    infra_failure, infra_class = classify_infra_failure(
+        outcome.kind, str(outcome.reason or ""),
+        scorer_rc=scored["rc"], oom_kill_delta=oom_kill_delta_at_score,
+        disk_free_gib=disk_free_gib_at_score)
     wall_result = {
         "schema": WALL_RESULT_SCHEMA,
         "wall": wall, "batch_id": batch_id, "thread_id": thread_id,
         "ts_iso": utc_iso(), "run_dir": str(run_dir),
+        "attempt_index": attempt_index,
         "subcap": SUBCAPS[wall], "envelope": HARD_ENVELOPE,
         "loop_kind": outcome.kind,
         "supplier_errors": outcome.supplier_errors,
         "empty_responses": outcome.empty_responses,
         "cache_hits": outcome.cache_hits,
         "scorer_timed_out": scored["timed_out"],
+        "scorer_rc": scored["rc"],
+        "oom_kill_delta_at_score": oom_kill_delta_at_score,
+        "disk_free_gib_at_score": disk_free_gib_at_score,
         "score_verdict": score.get("verdict"),
         "checks_n": len(score.get("checks") or []),
         "b_cap": score.get("b_cap"),
-        "infra_failure": outcome.kind == "supplier_error",
+        "infra_failure": infra_failure,
+        "infra_class": infra_class,
+        "effective_round_cap": (outcome.extra or {}).get("effective_round_cap"),
         "cap_exhausted": n_calls >= SUBCAPS[wall],
         "gpu_max_mib_while_running": gpu_sampler.max_mib,
         "gpu_final_mib": gpu_final,
@@ -949,16 +1193,25 @@ def cmd_run(wall: str, batch_id: str) -> int:
     # 判定（本墙）：判据见 VERDICT_CRITERIA_V3.md §1/§2。
     if wall == WALL_A:
         born = wall_result["rounds_to_first_birth"]
-        wall_result["passed"] = bool(
-            born is not None and born <= BIRTH_ROUND_LIMIT
-            and wall_result["final_rc"] == 0
-            and wall_result["run_expr_ok_calls"] >= 1
-            and wall_result["tail_rounds"] >= 1)
+        # 评审 R9：判据 §1 括注「冻结 wall_a_runner.py 全 12 项检查 PASS」必须
+        # 落到机判——只看 final_rc==0 不够：评分器在自身进程内 exec_module 模型
+        # 自著的 agent_solution.py，模型 `os._exit(0)` 即可让 rc=0 而 12 项一项
+        # 未跑（同源 R2/R7 的「退出码可信」假设）。故把评分件的 verdict 与
+        # checks 条数一并作为**必要条件**；T4 两墙冻结件均满足（wallA
+        # score_verdict=pass / checks_n=12），判决不变。
+        score_ok = wall_a_score_ok(scored["rc"], score)
+        wall_result["score_checks_ok"] = score_ok
+        wall_result["passed"] = wall_a_passed(
+            born_at_round=born, final_rc=wall_result["final_rc"],
+            score_ok=score_ok,
+            run_expr_ok_calls=wall_result["run_expr_ok_calls"],
+            tail_rounds=wall_result["tail_rounds"])
         wall_result["fail_reasons"] = [
             name for name, cond in (
                 ("birth_round_absent_or_gt_limit",
                  born is None or born > BIRTH_ROUND_LIMIT),
                 ("final_rc_not_zero", wall_result["final_rc"] != 0),
+                ("score_verdict_not_pass_or_checks_lt_12", not score_ok),
                 ("no_successful_run_expr", wall_result["run_expr_ok_calls"] < 1),
                 ("no_verify_repair_round", wall_result["tail_rounds"] < 1),
             ) if cond]
@@ -994,11 +1247,23 @@ def cmd_run(wall: str, batch_id: str) -> int:
 # --------------------------------------------------------------- 判定/聚合
 
 def _latest_wall_result(wall: str) -> dict | None:
-    base = retest_root() / "runs" / wall
-    if not base.is_dir():
+    """聚合口径：取该墙**唯一**的非基础设施故障结果。
+
+    两次以上非基础设施故障结果意味着同一墙被重跑过（I4-5 违规），此时
+    必须炸而不是"取最后一次"——静默覆盖会让新结果顶替旧判决而判据 LOCK
+    依旧验绿。只有整墙全是基础设施故障（D4-6 重跑也已用尽）时，才取最后
+    一次尝试，让 ``infra_failure=True`` 如实流入 INCONCLUSIVE 窄口。
+    """
+    recs = _wall_attempt_records(wall)
+    if not recs:
         return None
-    cands = sorted(base.glob("*/wall_result_v3.json"))
-    return _read_json(cands[-1]) if cands else None
+    non_infra = [r for r in recs if not r.get("infra_failure")]
+    if len(non_infra) > 1:
+        raise SystemExit(
+            f"{wall} 存在 {len(non_infra)} 份非基础设施故障结果："
+            f"{[r.get('run_dir') for r in non_infra]}。I4-5 禁止重跑同一墙，"
+            "无法机判选哪一份——人工裁决。")
+    return non_infra[0] if non_infra else recs[-1]
 
 
 def judge_wall(wall: str) -> tuple[bool, str]:
@@ -1014,6 +1279,17 @@ def cmd_judge(wall: str) -> int:
     ok, msg = judge_wall(wall)
     print(msg)
     return 0 if ok else 1
+
+
+def _wall_attempts_brief(wall: str) -> list[dict]:
+    """判决件里的尝试台账（D4-6 重跑留痕：几次、每次是否基础设施故障）。"""
+    return [{"attempt_index": r.get("attempt_index"),
+             "ts_iso": r.get("ts_iso"), "run_dir": r.get("run_dir"),
+             "infra_failure": r.get("infra_failure"),
+             "infra_class": r.get("infra_class"),
+             "paid_calls": r.get("paid_calls"),
+             "passed": r.get("passed")}
+            for r in _wall_attempt_records(wall)]
 
 
 def _pooled_ratio(a: dict | None, b: dict | None) -> float | None:
@@ -1072,6 +1348,7 @@ def cmd_combine() -> int:
         },
         "wallA": {
             "subcap": SUBCAPS[WALL_A], "paid_calls": rec_a["paid_calls"],
+            "attempts": _wall_attempts_brief(WALL_A),
             "rounds_to_first_birth": rec_a["rounds_to_first_birth"],
             "rounds_birth_to_rc0": rec_a["rounds_birth_to_rc0"],
             "final_rc": rec_a["final_rc"],
@@ -1080,10 +1357,13 @@ def cmd_combine() -> int:
             "effective_step_ratio": rec_a["effective_step_ratio"],
             "passed": rec_a["passed"], "fail_reasons": rec_a["fail_reasons"],
             "cap_exhausted": rec_a["cap_exhausted"],
+            "infra_failure": rec_a.get("infra_failure"),
+            "infra_class": rec_a.get("infra_class"),
             "run_dir": rec_a["run_dir"],
         },
         "wallB": {
             "subcap": SUBCAPS[WALL_B], "paid_calls": rec_b["paid_calls"],
+            "attempts": _wall_attempts_brief(WALL_B),
             "witness_12": rec_b["witness_12"],
             "sentinel_count": rec_b["sentinel_count"],
             "negative_physical": rec_b["negative_physical"],
@@ -1092,6 +1372,8 @@ def cmd_combine() -> int:
             "passed": rec_b["passed"], "fail_reasons": rec_b["fail_reasons"],
             "cap_exhausted": rec_b["cap_exhausted"],
             "b_cap": rec_b.get("b_cap"),
+            "infra_failure": rec_b.get("infra_failure"),
+            "infra_class": rec_b.get("infra_class"),
             "run_dir": rec_b["run_dir"],
         },
         "pool": {"base": sum(SUBCAPS.values()), "reserve": RESERVE,
@@ -1139,32 +1421,76 @@ def cmd_judge_all() -> int:
 # 账外批次实耗（账行看不见的部分，人工对账的唯一真值）。
 # P26-B0 批准 4 次但实发 5 次：``--validate-models`` 走 ``_post_messages``，
 # 对 HTTP 200 空内容最多重试 5 次，每次重试都是真付费 POST（D26-8b 登记项）。
+# ``evidence`` 一律写**绝对路径**：P26-B0 的件落网关默认根
+# ``/mnt/artifacts/simpraxis/runs/model_validate``，**不在** ``phase26_root()``
+# 下——写成相对路径会让读者以为在 ``$ROOT/runs/``（评审 MINOR 指出）。
 OFF_LEDGER_ACTUALS = {
     "P26-B0": {"approved": 4, "posts_used": 5, "kind": "validate-models",
                "outcome": "FAIL:EmptyResponseError（macro_ideation 连续 5 次 "
                           "HTTP200 空回答；max_tokens=8 被思维链吃光）",
-               "evidence": "runs/model_validate/20261103-094723/FAILURE.json"},
+               "evidence": "/mnt/artifacts/simpraxis/runs/model_validate/"
+                           "20261103-094723/FAILURE.json"},
     "P26-B0b": {"approved": 1, "posts_used": 1, "kind": "coding_probe",
                 "outcome": "FAIL:empty_text（200/type=message/回显一致，"
                            "output_tokens=8 恰等于上限）",
-                "evidence": "walls/retest/probe_coding_debug_"
-                            "20261103T015937Z.json"},
+                "evidence_rel": "walls/retest/probe_coding_debug_"
+                                "20261103T015937Z.json"},
     "P26-B0c": {"approved": 1, "posts_used": 1, "kind": "coding_probe",
                 "outcome": "OK:pong（content_types=[thinking,text]，"
                            "output_tokens=32）",
-                "evidence": "walls/retest/probe_coding_debug_"
-                            "20261103T020156Z.json"},
+                "evidence_rel": "walls/retest/probe_coding_debug_"
+                                "20261103T020156Z.json"},
 }
 
 
 def offledger_actuals() -> dict:
-    """逐批回填「批准件是否在场」并原样带出实耗。"""
+    """逐批回填「批准件/证据件是否在场」并原样带出实耗。
+
+    ``evidence_present`` 是**机判**而非自述：审计件不得只写一个看起来像
+    路径的字符串（P17 教训）。
+    """
     aprovals = phase26_root() / "quota" / "approvals"
     out = {}
     for bid, rec in OFF_LEDGER_ACTUALS.items():
+        rec = dict(rec)
+        rel = rec.pop("evidence_rel", None)
+        ev = Path(rec["evidence"]) if rec.get("evidence") else (
+            phase26_root() / rel if rel else None)
+        if ev is not None:
+            rec["evidence"] = str(ev)
         out[bid] = {**rec,
+                    "evidence_present": bool(ev is not None and ev.is_file()),
                     "approval_present": (aprovals / f"{bid}.json").is_file()}
     return out
+
+
+def _sealed_ledger_status(snap_p: Path) -> tuple[bool | None, dict]:
+    """封存账快照对账（fail-closed）。
+
+    快照由 ``--preflight`` 落盘；缺席或空表 ⇒ 封存账「不可证明未改」，
+    返回 ``False`` 让 ``--audit-ledger`` 判负。原实现的 ok 判据是
+    ``sealed_untouched is not False``，快照缺席时恒为 True 而放行——等于
+    「审计件自述未改」就算数（P17 教训）。
+    """
+    if not snap_p.is_file():
+        return False, {"__error__": {"error": "快照缺席", "path": str(snap_p)}}
+    snap = _read_json(snap_p).get("paths") or {}
+    if not snap:
+        return False, {"__error__": {"error": "快照为空表，无对账对象",
+                                     "path": str(snap_p)}}
+    untouched = True
+    detail: dict[str, dict] = {}
+    for path, rec in snap.items():
+        p = Path(path)
+        now_exists = p.is_file()
+        now_mtime = int(p.stat().st_mtime) if now_exists else None
+        changed = (now_exists != rec["exists"] or now_mtime != rec["mtime"])
+        detail[path] = {"before": rec,
+                        "after": {"exists": now_exists, "mtime": now_mtime},
+                        "changed": changed}
+        if changed:
+            untouched = False
+    return untouched, detail
 
 
 def cmd_audit_ledger() -> int:
@@ -1182,23 +1508,7 @@ def cmd_audit_ledger() -> int:
         by_batch[str(r.get("batch_id"))] = by_batch.get(
             str(r.get("batch_id")), 0) + 1
     snap_p = retest_root() / "manifests" / "sealed_ledger_snapshot.json"
-    sealed_untouched = None
-    sealed_detail = {}
-    if snap_p.is_file():
-        snap = _read_json(snap_p)["paths"]
-        sealed_untouched = True
-        for path, rec in snap.items():
-            p = Path(path)
-            now_exists = p.is_file()
-            now_mtime = int(p.stat().st_mtime) if now_exists else None
-            changed = (now_exists != rec["exists"]
-                       or now_mtime != rec["mtime"])
-            sealed_detail[path] = {"before": rec,
-                                   "after": {"exists": now_exists,
-                                             "mtime": now_mtime},
-                                   "changed": changed}
-            if changed:
-                sealed_untouched = False
+    sealed_untouched, sealed_detail = _sealed_ledger_status(snap_p)
     ticket = phase26_root() / "quota" / "approvals" / f"{OFFLEDGER_BATCH}.json"
     payload = {
         "schema": AUDIT_SCHEMA,
@@ -1225,7 +1535,7 @@ def cmd_audit_ledger() -> int:
     fc.write_json(out, payload)
     print(json.dumps(payload, indent=1, ensure_ascii=False))
     ok = (payload["within_envelope"] and contiguous
-          and sealed_untouched is not False)
+          and sealed_untouched is True)
     return 0 if ok else 1
 
 

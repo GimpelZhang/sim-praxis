@@ -191,36 +191,70 @@ def test_g11_task_hard_cap_pause_shape_then_resume_refused(isolated):
 
 # ---------- G-13：生产源码红线——每个 ModelGateway(...) 必须显式挂 ledger/unguarded ----------
 
-def test_g13_model_gateway_construction_requires_ledger_or_unguarded():
-    """AST 扫描 orchestrator/**/*.py：无 ledger= 又无 unguarded= 的构造即违规。
+# G-13 白名单（Task 4 评审 MINOR 修复）：unguarded=True 只准出现在下列两处。
+# 新增任何 unguarded 构造点即红——「白名单语义被本测试锁定」现在是真的锁定。
+UNGUARDED_ALLOWLIST = {
+    # --validate-models 账外 ping（脚本入口自身，票外批次 P26-B0 走 miss4 记账）
+    "orchestrator/gateway/router.py",
+    # 付费票据外探针：approved==1 + probe_consumed_<batch>.json 消费标记双守卫
+    "scripts/phase26/run_wall_retest.py",
+}
 
-    白名单语义被本测试锁定：当前仅 router.main 的 --validate-models 账外 ping
-    允许 unguarded=True，其余生产入口必须挂 QuotaLedger。新增入口忘记挂账时
-    本测试先红，杜绝账外烧预算。
+
+def _unguarded_enabled(value: ast.expr) -> bool:
+    """``unguarded`` 的真值判定不看字面量写法（评审 R4）。
+
+    ``unguarded=1`` / ``= 'yes'`` 同样会让 ``ModelGateway`` 跳过账本，故只认
+    ``is True`` 会被绕过；非字面量表达式无法静态判定，按「开启」fail-closed。
+    """
+    if isinstance(value, ast.Constant):
+        return bool(value.value)
+    return True
+
+
+def test_g13_model_gateway_construction_requires_ledger_or_unguarded():
+    """AST 扫描 orchestrator/** 与 scripts/**：无 ledger= 又无 unguarded= 即违规。
+
+    扫描半径原只含 orchestrator/**，而真正逐次烧钱的付费入口大多在 scripts/
+    （phase25 探针与墙、phase26 run_wall_retest），故一并纳入同等要求。
+    unguarded=True 不是自由通行证：只允许 UNGUARDED_ALLOWLIST 两处，其余即红。
+    （tests/ 不在半径内：单测一律 monkeypatch transport，0 触网 0 记账。）
     """
     offenders = []
-    scanned = 0
-    for py in (REPO_ROOT / "orchestrator").rglob("*.py"):
-        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            if isinstance(func, ast.Name):
-                fname = func.id
-            elif isinstance(func, ast.Attribute):
-                fname = func.attr
-            else:
-                continue
-            if fname != "ModelGateway":
-                continue
-            scanned += 1
-            kwargs = {k.arg for k in node.keywords if k.arg}
-            # ledger 是第 10 个位置参数；位置传入同样算合规（实际无此风格）
-            if "ledger" in kwargs or "unguarded" in kwargs or len(node.args) >= 10:
-                continue
-            offenders.append(f"{py.relative_to(REPO_ROOT)}:{node.lineno}")
-    assert scanned >= 5, f"红线扫描应覆盖全部生产构造点（实际 {scanned}）"
+    unguarded_sites = []
+    scanned = {"orchestrator": 0, "scripts": 0}
+    for root in ("orchestrator", "scripts"):
+        for py in (REPO_ROOT / root).rglob("*.py"):
+            rel = str(py.relative_to(REPO_ROOT))
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if isinstance(func, ast.Name):
+                    fname = func.id
+                elif isinstance(func, ast.Attribute):
+                    fname = func.attr
+                else:
+                    continue
+                if fname != "ModelGateway":
+                    continue
+                scanned[root] += 1
+                kwargs = {k.arg for k in node.keywords if k.arg}
+                unguarded_true = any(
+                    k.arg == "unguarded" and _unguarded_enabled(k.value)
+                    for k in node.keywords)
+                if unguarded_true and rel not in UNGUARDED_ALLOWLIST:
+                    unguarded_sites.append(f"{rel}:{node.lineno}")
+                # ledger 是第 10 个位置参数；位置传入同样算合规（实际无此风格）
+                if "ledger" in kwargs or "unguarded" in kwargs or len(node.args) >= 10:
+                    continue
+                offenders.append(f"{rel}:{node.lineno}")
+    assert scanned["orchestrator"] >= 5 and scanned["scripts"] >= 5, (
+        f"红线扫描应覆盖 orchestrator/ 与 scripts/ 两处生产构造点（实际 {scanned}）")
     assert not offenders, (
         "ModelGateway 构造必须显式 ledger=QuotaLedger() 或 unguarded=True："
         + ", ".join(offenders))
+    assert not unguarded_sites, (
+        "unguarded=True 仅限 UNGUARDED_ALLOWLIST（router --validate-models / "
+        "run_wall_retest 账外探针）：" + ", ".join(unguarded_sites))
