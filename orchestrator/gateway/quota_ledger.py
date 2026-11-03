@@ -517,14 +517,21 @@ LEDGER_PHASE26 = 26       # phase26 批准件/恢复流水的 phase 断言标记
 # 把 0 写进映射会让该任务第一条预检行就撞帽（含 AC-T0-2 的开账行）。0 付费
 # 任务由第 2 道闸（批次批准件必须存在）真正兜住。注意 PHASE25_TASK_CAPS 的
 # {10: 2} 是先例——0 付费任务也可以有帽；真实规则是「Cap=0 ⇒ 不设帽」。
-PHASE26_TASK_CAPS = types.MappingProxyType({4: 28, 7: 16, 8: 70, 9: 2})
-# 全案硬熔断（A-14）。**不写成 sum(PHASE26_TASK_CAPS.values())**（那是 116）：
-# 本 Phase 的 120 是独立常量，与计划 §6.1 表末行一致（账行 116 + 账外
-# --validate-models 4 = 真实付费 120）。
-PHASE26_HARD_CAP = 120
-# 与 PHASE25_NORMAL_BUDGET 同语义，**取与硬帽同值 120**（不复用四个 Cap 的合计
-# 116：取 116 会让第 117 呼命中休眠中的第 5 道闸 `global_used >= normal_budget
-# and not beyond_normal`，凭空多造一道门；取 120 时第 5 道闸永不先于第 3 道。
+PHASE26_TASK_CAPS = types.MappingProxyType({4: 56, 7: 16, 8: 70, 9: 2})
+# 全案硬熔断（A-14）。**不写成 sum(PHASE26_TASK_CAPS.values())**：本 Phase 的
+# 120 原为独立常量，与计划 §6.1 表末行一致（账行 116 + 账外 --validate-models
+# 4 = 真实付费 120）。
+#
+# 锁内适配（2026-11-03，Complete §T4.10）：STOP-4a 用户裁决 **(b) 同墙同帽换
+# 预注册再战一次** 授权在**同一批冻结墙、同一组帽、同一模型**上花第二个 28 呼
+# 信封（票据 `P26-B1b`，新判据 sha、新目录 `walls/retest_v4/`，明令不得称为
+# V3 的「重跑」）。故 task4 帽 28→56（=27 已花 + 28 新信封 −储备口径，按计划
+# 表末行同法取 28+28），硬帽与正常预算同步 +28：120→148（账行不再有三个 Task
+# 未启动的旧合计约束）。**只有 Task 4 的帽变了**，7/8/9 三项一字未改；模型与
+# 阈值不变（硬规则 1/7 不受影响）。历史 120 的账审口径见 T4 台账。
+PHASE26_HARD_CAP = 148
+# 与 PHASE25_NORMAL_BUDGET 同语义，**取与硬帽同值**（不复用四个 Cap 的合计，
+# 取合计会让第 5 道闸先于第 3 道凭空多造一道门）。
 PHASE26_NORMAL_BUDGET = PHASE26_HARD_CAP
 
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名

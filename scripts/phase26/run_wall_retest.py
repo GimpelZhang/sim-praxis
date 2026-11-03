@@ -92,6 +92,72 @@ OFFLEDGER_BATCH = "P26-B0"             # 账外 --validate-models，恒 4 次 PO
 PROBE_BATCH = "P26-B0b"               # 账外 coding_debug 单发探针，恰 1 次 POST
 PROBE_SCHEMA = "simpraxis.phase26.t4_coding_probe.v1"
 
+
+# --- Task 4b：第二次预注册（STOP-4a 用户裁决 (b)）=========================
+#
+# 用户 2026-11-03 裁决「同墙同帽换预注册再战一次」：新票据 + 新判据 sha +
+# 新批次号，且**不得**称为本批 V3 的「重跑」。三条必须同时满足，缺一即拒：
+#   1) 新目录（`walls/retest_v4/`）——V3 的 runs/verdict/LOCK 一字节不动；
+#   2) 新批次号（`P26-B1b`）——账行按批隔离，V3 的 20 行不计入新信封；
+#   3) 新判据文件与 LOCK——首呼前封存，sha 与 V3 不同。
+#
+# 唯一被允许改变的**仪器**项：出生闸的入口脚本候选名。冻结墙 A 任务书要求
+# 交付 `agent_solution.py`，而 V3 的出生闸只看 `.entrypoint.py`（全墙任务书
+# 无此词），故出生标记与追授尾结构上永不触发（D26-8d）。V4 把候选名作为
+# campaign 参数注入，`loop.py` 的缺省仍是 `(".entrypoint.py",)`，V3 行为逐字不变。
+#
+# 明确**不**改变的项（预注册声明，防仪器修复滑成能力放水）：F1–F4 四开关、
+# 授予串、子帽 16/9/3、信封 28、模型 ID、判据全部阈值（8 轮 / 12 项 /
+# calls_to_rc0<=15 / 合并占比 0.80）。`run_expr` 的 AST 面**不放宽**：判据只要
+# ≥1 次成功调用，`print(1+1)` 即可满足。
+class Campaign:
+    """一次预注册的命名空间（目录 / 票据 / 判据 / 入口候选名）。"""
+
+    __slots__ = ("key", "batch_id", "subdir", "criteria_name",
+                 "verdict_name", "wall_result_name", "entrypoint_names")
+
+    def __init__(self, key: str, batch_id: str, subdir: str,
+                 criteria_name: str, verdict_name: str,
+                 wall_result_name: str, entrypoint_names: "tuple[str, ...]"):
+        self.key = key
+        self.batch_id = batch_id
+        self.subdir = subdir
+        self.criteria_name = criteria_name
+        self.verdict_name = verdict_name
+        self.wall_result_name = wall_result_name
+        self.entrypoint_names = entrypoint_names
+
+    def __repr__(self) -> str:  # pragma: no cover - 诊断用
+        return (f"Campaign({self.key!r}, batch={self.batch_id!r}, "
+                f"subdir={self.subdir!r}, entry={self.entrypoint_names!r})")
+
+
+CAMPAIGNS = {
+    "v3": Campaign("v3", "P26-B1", "retest", "VERDICT_CRITERIA_V3.md",
+                   "verdict_v3.json", "wall_result_v3.json",
+                   (".entrypoint.py",)),
+    "v4": Campaign("v4", "P26-B1b", "retest_v4", "VERDICT_CRITERIA_V4.md",
+                   "verdict_v4.json", "wall_result_v4.json",
+                   ("agent_solution.py",)),
+}
+
+# 进程级当前 campaign。只在 CLI 解析后由 :func:`set_campaign` 改一次；库内
+# 直接调用（含既有单测）恒为 V3 ⇒ 全部路径与 V3 逐字节相同。
+_CAMPAIGN = CAMPAIGNS["v3"]
+
+
+def campaign() -> Campaign:
+    return _CAMPAIGN
+
+
+def set_campaign(key: str) -> Campaign:
+    global _CAMPAIGN
+    if key not in CAMPAIGNS:
+        raise SystemExit(f"未知 campaign {key!r}（可选：{sorted(CAMPAIGNS)}）")
+    _CAMPAIGN = CAMPAIGNS[key]
+    return _CAMPAIGN
+
+
 # --- §T4.4 判据常量（与 VERDICT_CRITERIA_V3.md 逐条同义） -------------------
 BIRTH_ROUND_LIMIT = 8                  # AC-T4-1
 CALLS_TO_RC0_LIMIT_B = 15              # AC-T4-2 回归闸
@@ -145,11 +211,12 @@ def phase26_root() -> Path:
 
 
 def retest_root() -> Path:
-    return phase26_root() / "walls" / "retest"
+    """当前 campaign 的根目录。V3 恒 ``walls/retest``（与既有行为逐字节相同）。"""
+    return phase26_root() / "walls" / campaign().subdir
 
 
 def criteria_path() -> Path:
-    return retest_root() / "VERDICT_CRITERIA_V3.md"
+    return retest_root() / campaign().criteria_name
 
 
 def lock_path() -> Path:
@@ -329,6 +396,48 @@ effective_step_ratio := count(productive_round) / count(all rounds)
 """
 
 
+# --- V4 判据补丁（Task 4b；STOP-4a 裁决 (b) 授权的**唯一**增量）------------
+#
+# 每条 (old, new, 期望命中次数)：命中次数不符即 `--write-criteria` 熔断，
+# 防止 V3 正文后续漂移使 V4 的「只差出生件名」声明失真。
+# `{entry}` 由 `campaign().entrypoint_names[0]` 代入（单真值，不在此抄字面量）。
+V4_CRITERIA_PATCHES = (
+    ("# Phase 2.6 Task 4 三态判据 v3（首呼前冻结；与此后脚本机判逐条同义）",
+     "# Phase 2.6 Task 4 三态判据 v4（首呼前冻结；与此后脚本机判逐条同义）\n\n"
+     "> **v4 由来**：2026-11-03 用户经 STOP-4a 裁决「同墙同帽换预注册再战一次」。\n"
+     "> 本文件是**第二次预注册**（票据 `P26-B1b`，目录 `walls/retest_v4/`），\n"
+     "> **不是** v3（`P26-B1` / `walls/retest/`）的「重跑」——v3 的判据、判决件、\n"
+     "> 两墙 run 目录与三签件全部原样冻结只读，一字未改。\n"
+     "> 相对 v3 的**唯一**判据增量是 §1 出生件的文件名（`.entrypoint.py` →\n"
+     "> `{entry}`）：冻结墙任务书要求交付 `agent_solution.py`，全墙任务书\n"
+     "> 无 `.entrypoint.py` 一词，故 v3 的出生闸与追授尾**结构上永不触发**\n"
+     "> （D26-8d）。其余判据（墙 A 四项 / 墙 B 12 项 / 哨兵与运动学两轴 /\n"
+     "> 占比 0.80 / 三态映射 / 预算形状）与 v3 逐字相同；**未**放宽 `run_expr`\n"
+     "> 的 AST 面（判据只要 >=1 次成功调用），**未**改任何阈值。", 1),
+    ("- `rounds_to_first_birth <= 8`（入口脚本 `.entrypoint.py` 首次同时满足",
+     "- `rounds_to_first_birth <= 8`（入口脚本 `{entry}` 首次同时满足", 1),
+    ("- 票据 `P26-B1`：单票覆盖两墙，`approved=28`，票内子额度 16/9/3",
+     "- 票据 `P26-B1b`：单票覆盖两墙，`approved=28`，票内子额度 16/9/3", 1),
+)
+
+
+def criteria_body() -> str:
+    """当前 campaign 的判据正文。V3 恒为 :data:`CRITERIA_BODY` 原文。"""
+    text = CRITERIA_BODY
+    if campaign().key == "v3":
+        return text
+    entry = campaign().entrypoint_names[0]
+    for old, new, want in V4_CRITERIA_PATCHES:
+        got = text.count(old)
+        if got != want:
+            raise SystemExit(
+                f"V4 判据补丁锚点漂移（命中 {got} 次，期望 {want}）：{old!r}")
+        text = text.replace(old, new.replace("{entry}", entry))
+    if text == CRITERIA_BODY:  # pragma: no cover - 防御：补丁不得空转
+        raise SystemExit("V4 判据补丁未生效")
+    return text
+
+
 def _read_json(p: Path) -> dict:
     return json.loads(p.read_text(encoding="utf-8"))
 
@@ -441,7 +550,9 @@ def cmd_recompute_baseline() -> int:
     payload = {
         "schema": BASELINE_SCHEMA,
         "ts_iso": utc_iso(),
-        "definition": "§T4.3 预注册定义（VERDICT_CRITERIA_V3.md §3 逐字）",
+        "definition": (f"§T4.3 预注册定义（{campaign().criteria_name} §3 逐字"
+                       + ("）" if campaign().key == "v3"
+                          else "；与 V3 同名条款逐字相同）")),
         "phase25_recorded": 0.36,
         "recomputed": pooled,
         "by_wall": by_wall,
@@ -465,7 +576,7 @@ def cmd_write_criteria() -> int:
     if lock_path().is_file():
         raise SystemExit("LOCK 已存在：判据已封，禁止重写")
     rbase = _read_json(base_p)["recomputed"]
-    text = CRITERIA_BODY.replace("__RBASE__", f"{rbase}")
+    text = criteria_body().replace("__RBASE__", f"{rbase}")
     p = criteria_path()
     fc.atomic_write_bytes(p, text.encode("utf-8"))
     print(f"[retest] 判据已落盘：{p}")
@@ -478,17 +589,38 @@ def _ledger_task_rows() -> list[dict]:
     return [r for r in rows if r.get("task") == TASK_ID]
 
 
+def _ledger_campaign_rows() -> list[dict]:
+    """当前 campaign 批次号下的实呼行（Task4b 批间隔离的唯一口径）。
+
+    V3（``P26-B1``）与 V4（``P26-B1b``）同属 task=4，账行靠 ``batch`` 字段区分。
+    历史行的 ``batch`` 命名不统一（``P26-B1`` / ``p26-b1`` 皆有），故按大小写
+    不敏感等值匹配。用途三处：``--seal-criteria`` 的「首呼已发生」闸、
+    ``--combine``/``--judge-all`` 的共享池用量（§T4.10：V4 自带 28 信封，
+    V3 的 20 行不并入；对 V3 而言本批即唯一 task=4 批次，取值与
+    :func:`_ledger_task_rows` 相同）。
+    """
+    want = campaign().batch_id.lower()
+    out = []
+    for r in _ledger_task_rows():
+        got = r.get("batch") or r.get("batch_id") or ""
+        if isinstance(got, str) and got.lower() == want:
+            out.append(r)
+    return out
+
+
 def _criteria_lock_record() -> dict:
     p = criteria_path()
     st = p.stat()
     return {
         "schema": CRITERIA_LOCK_SCHEMA,
+        "campaign": campaign().key,
         "criteria_path": str(p),
         "criteria_sha256": fc.sha256_file(p),
         "criteria_mtime": int(st.st_mtime),
         "criteria_mode": oct(st.st_mode & 0o777),
         "locked_iso": utc_iso(),
-        "batch_id": BATCH_ID,
+        "batch_id": campaign().batch_id,
+        "entrypoint_names": list(campaign().entrypoint_names),
         "note": ("首呼锁：判据文本在首呼之前封存；跑后任何改动都使本批次作废"
                  "（sha + mtime + mode 三重取证）。"),
     }
@@ -520,8 +652,9 @@ def verify_criteria_lock() -> dict:
 def cmd_seal_criteria() -> int:
     if lock_path().is_file():
         raise SystemExit("LOCK 已存在：判据已封，拒绝重封")
-    if _ledger_task_rows():
-        raise SystemExit("账上已有 task=4 实呼行：首呼已发生，禁止再封判据")
+    if _ledger_campaign_rows():
+        raise SystemExit(f"账上已有 {campaign().batch_id} 的 task=4 实呼行："
+                         "首呼已发生，禁止再封判据")
     p = criteria_path()
     if not p.is_file():
         raise SystemExit(f"判据文件缺失：{p}（先 --write-criteria）")
@@ -577,11 +710,13 @@ def cmd_preflight(wall: str | None = None) -> int:
     ledger = phase26_ledger()
     ledger_p = ledger.ns.ledger_path_fn()
     before = len(call_lines(read_lines(ledger_p)))
-    ticket_p = phase26_root() / "quota" / "approvals" / f"{BATCH_ID}.json"
+    ticket_p = (phase26_root() / "quota" / "approvals"
+                / f"{campaign().batch_id}.json")
     if not ticket_p.is_file():
-        raise SystemExit(f"票据不存在：{ticket_p}（先落 P26-B1.json）")
+        raise SystemExit(f"票据不存在：{ticket_p}")
     ticket = _read_json(ticket_p)
-    expect = {"batch_id": BATCH_ID, "task": TASK_ID, "stage": "coding_debug",
+    expect = {"batch_id": campaign().batch_id, "task": TASK_ID,
+              "stage": "coding_debug",
               "approved": HARD_ENVELOPE, "beyond_normal": False,
               "ledger_phase": 26}
     for key, want in expect.items():
@@ -590,7 +725,8 @@ def cmd_preflight(wall: str | None = None) -> int:
                 f"票据字段 {key} 不符：{ticket.get(key)!r} != {want!r}"
                 "（第 2/4/6 道闸按此拒）")
     try:
-        pf = ledger.preflight("coding_debug", task=TASK_ID, batch_id=BATCH_ID)
+        pf = ledger.preflight("coding_debug", task=TASK_ID,
+                              batch_id=campaign().batch_id)
     except Exception as exc:  # noqa: BLE001 - 任何拦截都是预检失败
         raise SystemExit(f"票据 preflight 被拦：{type(exc).__name__}: {exc}")
     after = len(call_lines(read_lines(ledger_p)))
@@ -1105,15 +1241,15 @@ def _wall_attempt_records(wall: str) -> list[dict]:
     base = retest_root() / "runs" / wall
     if not base.is_dir():
         return []
-    return [_read_json(p) for p in sorted(base.glob("*/wall_result_v3.json"))]
+    return [_read_json(p) for p in sorted(base.glob(f"*/{campaign().wall_result_name}"))]
 
 
 def _unrecorded_attempts(wall: str) -> list[str]:
     """跑了但没落判决件的尝试（进程崩溃/被杀）。
 
-    评审 R5：``wall_result_v3.json`` 是唯一事实源时，一次已烧实呼却在写件前
+    评审 R5：``{campaign().wall_result_name}`` 是唯一事实源时，一次已烧实呼却在写件前
     崩溃的运行不会计入重试额度。run 目录由 ``cmd_run`` 在守卫**之后**创建，
-    故「有 run_meta.json 而无 wall_result_v3.json」必然是已开跑未收口。
+    故「有 run_meta.json 而无墙结果件」必然是已开跑未收口。
     """
     base = retest_root() / "runs" / wall
     if not base.is_dir():
@@ -1121,7 +1257,7 @@ def _unrecorded_attempts(wall: str) -> list[str]:
     out = []
     for d in sorted(p for p in base.iterdir() if p.is_dir()):
         if (d / "run_meta.json").is_file() and not (
-                d / "wall_result_v3.json").is_file():
+                d / campaign().wall_result_name).is_file():
             out.append(str(d))
     return out
 
@@ -1131,7 +1267,7 @@ def _guard_single_run(wall: str) -> int:
 
     D4-6 是唯一重跑口子：上一轮必须命中三类基础设施故障之一，且本墙与
     全批储备都未用尽（每墙至多 1 次重跑，全批重跑合计 ≤ RESERVE）。返回
-    本次尝试序号（0 起），落进 ``wall_result_v3.json.attempt_index``。
+    本次尝试序号（0 起），落进墙结果件的 ``attempt_index``。
     """
     recs = _wall_attempt_records(wall)
     unrecorded = _unrecorded_attempts(wall)
@@ -1139,7 +1275,7 @@ def _guard_single_run(wall: str) -> int:
         raise SystemExit(
             f"{wall} 存在已开跑但未落判决件的尝试：{unrecorded}。I4-5 要求先"
             "人工分诊（查该 run 的 rounds.jsonl / outcome.json 与账行 seq 区间，"
-            "确认是否已消耗实呼），补记 wall_result_v3.json 或挂牌失败后再重跑。")
+            "确认是否已消耗实呼），补记墙结果件或挂牌失败后再重跑。")
     if not recs:
         return 0
     non_infra = [r for r in recs if not r.get("infra_failure")]
@@ -1161,8 +1297,8 @@ def cmd_run(wall: str, batch_id: str) -> int:
         print("拒绝裸跑付费墙：需要 SIMPRAXIS_ALLOW_PAID=1（硬规则 2 双守卫）",
               file=sys.stderr)
         return 2
-    if batch_id != BATCH_ID:
-        raise SystemExit(f"批次号必须是单票 {BATCH_ID}（拆票即 "
+    if batch_id != campaign().batch_id:
+        raise SystemExit(f"批次号必须是单票 {campaign().batch_id}（拆票即 "
                          "BLOCKED_BATCH_APPROVAL_MISSING）：{batch_id}")
     # 评审 R6：同批 --preflight 必须是机判前置，而不是操作员纪律。要求预检件
     # 在场、同批、且自证 0 付费（预检本身不得花过钱）。
@@ -1195,9 +1331,17 @@ def cmd_run(wall: str, batch_id: str) -> int:
     fc.atomic_write_bytes(run_dir / "task_prompt.txt", text.encode("utf-8"))
     meta = {
         "schema": "simpraxis.phase26.t4_run_meta.v1",
+        "campaign": campaign().key,
         "wall": wall, "batch_id": batch_id, "thread_id": thread_id,
         "started_iso": utc_iso(), "subcap": SUBCAPS[wall],
         "envelope": HARD_ENVELOPE, "reserve": RESERVE,
+        "entrypoint_names": list(campaign().entrypoint_names),
+        # F1 追授口径（§T4.10 预注册）：`round_cap` 与 V3 逐字相同（16/9），
+        # 追授 ≤3 轮**会计入本墙 paid_calls 与全批 28 包络**；子帽不含追授，
+        # 故两墙同时用满追授的理论上限为 31 > 28，实际由账本第 6 道闸在 28
+        # 处截断（该情形的机判口径见判据 §4/§5，属预算结果非基础设施故障）。
+        "tail_rounds": (TAIL_ROUNDS if CFG.verify_repair_tail else 0),
+        "subcap_excludes_tail": True,
         "model": {"coding_debug": coding_debug_model_id()},
         "agentic_config": {
             "verify_repair_tail": CFG.verify_repair_tail,
@@ -1237,7 +1381,8 @@ def cmd_run(wall: str, batch_id: str) -> int:
             probe_registry=None, recall_port=None,
             call_cache=None, nonprod=False,
             seq_provider=build_seq_provider(),
-            agentic_config=CFG)
+            agentic_config=CFG,
+            entrypoint_names=campaign().entrypoint_names)
 
     residue = docker_label_residue()
     if residue:
@@ -1370,7 +1515,7 @@ def cmd_run(wall: str, batch_id: str) -> int:
                 ("negative_physical", wall_result["negative_physical"] != 0),
                 ("calls_to_rc0_gt_15", n_calls > CALLS_TO_RC0_LIMIT_B),
             ) if cond]
-    fc.write_json(run_dir / "wall_result_v3.json", wall_result)
+    fc.write_json(run_dir / campaign().wall_result_name, wall_result)
     print(json.dumps(wall_result, indent=1, ensure_ascii=False))
     print(f"[retest] {wall} 完成：passed={wall_result['passed']} "
           f"calls={n_calls}/{SUBCAPS[wall]} gpu_final={gpu_final}MiB",
@@ -1406,7 +1551,7 @@ def _latest_wall_result(wall: str) -> dict | None:
 def judge_wall(wall: str) -> tuple[bool, str]:
     rec = _latest_wall_result(wall)
     if rec is None:
-        return False, f"{wall}: 无 wall_result_v3.json"
+        return False, f"{wall}: 无 {campaign().wall_result_name}"
     ok = bool(rec.get("passed"))
     reasons = rec.get("fail_reasons") or []
     return ok, f"{wall}: passed={ok}" + (f" reasons={reasons}" if reasons else "")
@@ -1463,7 +1608,9 @@ def cmd_combine() -> int:
     if missing:
         raise SystemExit(f"缺墙结果，无法聚合：{missing}")
     ledger = phase26_ledger()
-    rows = _ledger_task_rows()
+    # 共享池按 campaign 批次计（§T4.10：V4 自带 28 信封，V3 的 20 行不并入；
+    # 对 V3 而言本批即唯一 task=4 批次，取值与 ``_ledger_task_rows()`` 相同）。
+    rows = _ledger_campaign_rows()
     pool_used = len(rows)
     verdict, reason, ratio = compute_verdict(rec_a, rec_b, pool_used=pool_used)
     lock = verify_criteria_lock()
@@ -1473,7 +1620,9 @@ def cmd_combine() -> int:
     payload = {
         "schema": VERDICT_SCHEMA,
         "ts_iso": utc_iso(),
-        "batch": BATCH_ID,
+        "campaign": campaign().key,
+        "batch": campaign().batch_id,
+        "entrypoint_names": list(campaign().entrypoint_names),
         "criteria_sha256": lock["criteria_sha256"],
         "model": {"coding_debug": coding_debug_model_id()},
         "agentic_config": {
@@ -1524,7 +1673,7 @@ def cmd_combine() -> int:
         },
         "hard_rule_7_attestation": "未翻案：判据预注册于首呼前，跑后未改。",
     }
-    out = retest_root() / "verdict_v3.json"
+    out = retest_root() / campaign().verdict_name
     fc.write_json(out, payload)
     print(json.dumps(payload, indent=1, ensure_ascii=False))
     print(f"[retest] 判决：{out}")
@@ -1534,7 +1683,7 @@ def cmd_combine() -> int:
 def cmd_judge_all() -> int:
     rec_a = _latest_wall_result(WALL_A)
     rec_b = _latest_wall_result(WALL_B)
-    pool_used = len(_ledger_task_rows())
+    pool_used = len(_ledger_campaign_rows())
     verdict, reason, ratio = compute_verdict(rec_a, rec_b,
                                              pool_used=pool_used)
     lock_state = "OK"
@@ -1542,11 +1691,11 @@ def cmd_judge_all() -> int:
         lock = verify_criteria_lock()
         # AC-T4-3 后半：判决件里的 criteria_sha256 必须与 LOCK 内值相等
         # （判决件与判据绑定，换判据即换判决）。
-        vp = retest_root() / "verdict_v3.json"
+        vp = retest_root() / campaign().verdict_name
         if vp.is_file():
             got = _read_json(vp).get("criteria_sha256")
             if got != lock["criteria_sha256"]:
-                lock_state = (f"FAIL(verdict_v3.criteria_sha256={got} != "
+                lock_state = (f"FAIL({campaign().verdict_name}.criteria_sha256={got} != "
                               f"LOCK {lock['criteria_sha256']})")
     except SystemExit as exc:
         lock_state = f"FAIL({exc})"
@@ -1633,7 +1782,9 @@ def _sealed_ledger_status(snap_p: Path) -> tuple[bool | None, dict]:
 def cmd_audit_ledger() -> int:
     ledger = phase26_ledger()
     rows = call_lines(read_lines(ledger.ns.ledger_path_fn()))
-    task_rows = [r for r in rows if r.get("task") == TASK_ID]
+    # 信封按 campaign 批次计（§T4.10）：V3 的 20 行不得把 V4 的 28 呼信封挤爆。
+    task_rows = _ledger_campaign_rows()
+    all_task4_rows = [r for r in rows if r.get("task") == TASK_ID]
     seqs = [int(r["seq"]) for r in rows if isinstance(r.get("seq"), int)]
     contiguous = seqs == list(range(1, len(seqs) + 1))
     by_task: dict[str, int] = {}
@@ -1650,8 +1801,11 @@ def cmd_audit_ledger() -> int:
     payload = {
         "schema": AUDIT_SCHEMA,
         "ts_iso": utc_iso(),
+        "campaign": campaign().key,
+        "batch_id": campaign().batch_id,
         "rows_total": len(rows),
         "rows_task4": len(task_rows),
+        "rows_task4_all_batches": len(all_task4_rows),
         "envelope": HARD_ENVELOPE,
         "within_envelope": len(task_rows) <= HARD_ENVELOPE,
         "seq_contiguous": contiguous,
@@ -1680,8 +1834,12 @@ def cmd_audit_ledger() -> int:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--campaign", choices=sorted(CAMPAIGNS), default="v3",
+                    help="预注册命名空间：v3=首轮（缺省，逐字节同既有行为），"
+                         "v4=STOP-4a 裁决 (b) 的第二次预注册")
     ap.add_argument("--wall", choices=list(WALLS))
-    ap.add_argument("--batch", default=BATCH_ID)
+    ap.add_argument("--batch", default=None,
+                    help="缺省取当前 campaign 的批次号")
     ap.add_argument("--preflight", action="store_true")
     ap.add_argument("--probe-coding", action="store_true")
     ap.add_argument("--probe-batch", default=PROBE_BATCH)
@@ -1691,9 +1849,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seal-criteria", action="store_true")
     ap.add_argument("--judge", action="store_true")
     ap.add_argument("--judge-all", action="store_true")
-    ap.add_argument("--combine-v3", action="store_true")
+    ap.add_argument("--combine", action="store_true",
+                    help="聚合两墙成当前 campaign 的判决件")
+    ap.add_argument("--combine-v3", action="store_true",
+                    help="兼容别名：等价于 --combine（V3 缺省即 V3 判决件）")
     ap.add_argument("--audit-ledger", action="store_true")
     args = ap.parse_args(argv)
+
+    # 任何命令都在**路径解析之前**切 campaign：retest_root()/criteria_path()/
+    # lock_path()/票据/判决件名全部随之改变（V3 缺省 ⇒ 与既有行为逐字节相同）。
+    set_campaign(args.campaign)
+    if args.batch is None:
+        args.batch = campaign().batch_id
 
     if args.preflight:
         return cmd_preflight(args.wall)
@@ -1705,7 +1872,7 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_write_criteria()
     if args.seal_criteria:
         return cmd_seal_criteria()
-    if args.combine_v3:
+    if args.combine or args.combine_v3:
         return cmd_combine()
     if args.judge_all:
         return cmd_judge_all()

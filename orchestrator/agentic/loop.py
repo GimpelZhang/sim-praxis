@@ -103,6 +103,30 @@ TAIL_DIRECTIVE = ("【验证-修复尾】入口脚本已出生，剩余轮次只
                   "每轮必须以一次验证命令开头。")
 
 
+def normalize_entrypoint_names(names: Any) -> tuple[str, ...]:
+    """校验并规范化「入口脚本候选名」序列（Phase 2.6 Task 4b 预注册参数）。
+
+    缺省（``None``）恒为 ``(ENTRYPOINT,)``，与 Phase 2.5/2.6 Task3 逐字节同义。
+    候选名必须是 workdir 内的**单段相对文件名**：带路径分隔符、绝对路径、
+    ``.``/``..`` 一律 ValueError——出生闸是仪器，不允许被参数化成任意读点。
+    """
+    if names is None:
+        return (ENTRYPOINT,)
+    if isinstance(names, str) or not isinstance(names, (tuple, list)):
+        raise ValueError("entrypoint_names 必须是字符串元组/列表")
+    out: list[str] = []
+    for name in names:
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"entrypoint_names 项必须是非空字符串：{name!r}")
+        if "/" in name or "\\" in name or name in (".", ".."):
+            raise ValueError(f"entrypoint_names 项必须是单段文件名：{name!r}")
+        if name not in out:
+            out.append(name)
+    if not out:
+        raise ValueError("entrypoint_names 不能为空")
+    return tuple(out)
+
+
 def _entrypoint_ready(workdir: Path, name: str = ENTRYPOINT) -> bool:
     """三条件全真才算「出生」：存在 + 体积达标 + 编译通过。
 
@@ -132,6 +156,14 @@ def _entrypoint_ready(workdir: Path, name: str = ENTRYPOINT) -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return r.returncode == 0
+
+
+def _born_entrypoint(workdir: Path, names: tuple[str, ...]) -> str | None:
+    """首个三条件全真的候选入口名；全不满足返回 None（顺序即优先级）。"""
+    for name in names:
+        if _entrypoint_ready(workdir, name):
+            return name
+    return None
 
 
 def _read_scratchpad(workdir: Path, *, enabled: bool
@@ -874,7 +906,8 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
                            system_extra: str = "",
                            max_steps: "int | None" = None,
                            seq_provider: "Callable[[], int | None] | None" = None,
-                           agentic_config: "AgenticConfig | None" = None
+                           agentic_config: "AgenticConfig | None" = None,
+                           entrypoint_names: "tuple[str, ...] | None" = None
                            ) -> AgenticOutcome:
     """跑一次 agentic 内环（本 Task 全部测试用 fake gateway/backend，0 付费）。
 
@@ -882,6 +915,7 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
     （工具面、prompt、缓存纪元 v2、trace args 逐字节；AC-T3-5）。
     """
     workdir = Path(workdir)
+    entry_names = normalize_entrypoint_names(entrypoint_names)
     cfg = agentic_config if agentic_config is not None else ALL_OFF
     cache_version, cache_prefix, _disk_prefix = cache_epoch(cfg.any_enabled)
     meta = RoundMeta(cfg, cache_version=cache_version,
@@ -899,7 +933,7 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
         meta.effective_round_cap = budget.effective_round_cap
         if not cfg.verify_repair_tail or budget.tail_granted:
             return
-        if _entrypoint_ready(workdir, ENTRYPOINT):
+        if _born_entrypoint(workdir, entry_names) is not None:
             budget.mark_born(budget.rounds_used)
             budget.grant_verify_tail()
             meta.tail_granted = True
