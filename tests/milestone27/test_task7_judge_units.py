@@ -32,6 +32,7 @@ _SCRIPTS = _REPO / "scripts" / "phase27"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+import build_cold_run_json as cold_mod           # noqa: E402
 import build_dashboard_phase27 as dash_mod       # noqa: E402
 import build_evidence_pack_phase27 as pack_mod   # noqa: E402
 import check_phase27_closure as judge            # noqa: E402
@@ -230,3 +231,35 @@ def test_dashboard_tests_state_rejects_missing_cmd(tmp_path):
     p = _log(tmp_path, "2198 passed in 1.0s\nrc=0\n")
     with pytest.raises(dash_mod.DashboardError):
         dash_mod.tests_state(p)
+
+
+# ------------------------------------------------------------------ 7. cold_run.json 生成器
+def test_cold_run_json_binds_log_sha_and_counts(tmp_path):
+    p = _log(tmp_path, "# cmd: /x/python -m pytest tests -q\n"
+                       "2267 passed, 7 skipped, 66 deselected in 500s\nrc=0\n",
+              "cold_run.raw.log")
+    doc = cold_mod.build(log=p)
+    assert doc["schema"] == cold_mod.SCHEMA
+    assert doc["log_sha256"] == _sha256(p)
+    assert doc["passed"] == 2267
+    assert doc["failed"] == 0
+    assert doc["rc"] == 0
+    assert doc["red"] is False
+    assert "日志即最终版" in doc["note"]
+    assert len(doc["commit"]) == 40
+
+
+def test_cold_run_json_refuses_red_log(tmp_path):
+    """红日志不得充当证据——默认拒绝落盘，须显式 --allow-red。"""
+    p = _log(tmp_path, "# cmd: pytest\n3 failed, 100 passed\nrc=1\n")
+    with pytest.raises(cold_mod.ColdRunError):
+        cold_mod.build(log=p)
+    doc = cold_mod.build(log=p, allow_red=True)
+    assert doc["red"] is True and doc["failed"] == 3
+
+
+def test_cold_run_json_rejects_two_summary_lines(tmp_path):
+    """两段拼接（如尾部又贴了子进程输出）→ 拒绝，不猜哪条是真的。"""
+    p = _log(tmp_path, "# cmd: pytest\n2198 passed\n2267 passed\nrc=0\n")
+    with pytest.raises(cold_mod.ColdRunError):
+        cold_mod.build(log=p)
