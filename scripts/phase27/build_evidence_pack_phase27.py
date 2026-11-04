@@ -9,7 +9,8 @@ Phase 2.5 Task 10（D7-2：**从零重建**，不增量打补丁——增量会�
 - 符号链接一律 FATAL（``is_file()`` 会跟随链接把 ``~/access`` 打进包）；
 - 目录 0700 / 文件 0600；
 - 不入包：``cache/``（19M 引擎缓存）、``*.mp4``（D6-6 视频超大且非判据）、
-  旧 ``evidence_pack/`` 自身、空的运行时目录；
+  旧 ``evidence_pack/`` 自身、空的运行时目录、**判决件族**
+  （``closure_judge*.json``：判据产出不得成为被判证据，否则重建时自指）；
 - ``manifest.git_commit`` 是 AC-T7-6 三签的绑定锚。
 
 用法：
@@ -48,7 +49,21 @@ SKIP_SUFFIXES = (".mp4", ".avi", ".mov", ".mkv")
 SKIP_NAMES = {"__pycache__", ".pytest_cache", ".DS_Store", "node_modules"}
 # 判决件在包外（避免自指 sha 悖论）：包内副本无法自证，且会让 manifest
 # 依赖自身内容。Phase 2.7 口径：closure_judge.json 与 evidence_pack/ 同级。
+#
+# **按族排除**（r5 修复）：两段式机判把终段判决件落成 ``closure_judge.final.json``
+# 后，旧写法只排除 ``closure_judge.json`` 一个名字，重建时会把**终段判决件本身**
+# 打进包里——而它自述的 ``checks.pack.n_files/total_bytes`` 恰好是**不含自己**时
+# 的数，于是「重建后数字不再变化」的不动点被自己打破（实测 948 → 949 件）。
+# 判决件是判据的产出，任何段位都不该成为被判的证据；按前缀+后缀整族排除，
+# 后续再加段位（如 ``closure_judge.r5.json``）无需改这里。
 SKIP_FILENAMES = {"closure_judge.json"}
+
+
+def _is_judge_report(name: str) -> bool:
+    """判决件族：``closure_judge.json`` / ``closure_judge.<stage>.json``。"""
+    if name in SKIP_FILENAMES:
+        return True
+    return name.startswith("closure_judge.") and name.endswith(".json")
 
 # 证据根登记区（AC-T7 口径）：逻辑根 → 解析锚
 EVIDENCE_ROOTS = {
@@ -112,7 +127,7 @@ def _walk(src_base: Path) -> "list[Path]":
         dirnames[:] = kept
         for name in sorted(filenames):
             p = dpath / name
-            if name in SKIP_NAMES or name in SKIP_FILENAMES \
+            if name in SKIP_NAMES or _is_judge_report(name) \
                     or name.endswith(SKIP_SUFFIXES):
                 continue
             if p.is_symlink():
@@ -224,7 +239,7 @@ def build(*, root: Path, pack: Path, clean: bool,
         if child.is_symlink():
             raise PackError(f"Phase 2.7 根下有符号链接顶层项：{child}")
         if child.is_file():
-            if child.name.endswith(SKIP_SUFFIXES):
+            if child.name.endswith(SKIP_SUFFIXES) or _is_judge_report(child.name):
                 continue
             if child.stat().st_size > MAX_FILE_BYTES:
                 raise PackError(f"根文件超限：{child}")

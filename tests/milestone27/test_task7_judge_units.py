@@ -15,6 +15,8 @@ Task 7 评审的 MEDIUM 尾债：四个交付件（机判 / 证据包 / 看板 /
    兄弟任务的证据包一律拒删；
 6. ``tests_state``（看板）：摘要行**按名提取**、必须恰一条，``failed`` 不得
    恒为 0 的死判据。
+7. 证据包重建不得收录**判决件族**（``closure_judge*.json``）：终段判决件自述
+   包内件数字节，一进包即自指，不动点被自己打破（948 → 949）。
 """
 from __future__ import annotations
 
@@ -444,3 +446,26 @@ def test_acceptance_green_terminal_stage_passes(tmp_path):
     assert problems == [], problems
     assert summary["passed"] == 7 and summary["in_pack"] is True
     assert len(summary["log_sha256"]) == 64
+
+
+# ------------------------------------------------------------------ 11. 判决件不入包
+def test_judge_report_family_is_skipped():
+    """两段式：核心段与终段判决件都必须在包外（判据产出不得成为被判证据）。"""
+    for name in ("closure_judge.json", "closure_judge.final.json",
+                 "closure_judge.r5.json"):
+        assert pack_mod._is_judge_report(name), name
+    # 不得误伤名字里只是含这些词的正常证据件
+    for name in ("closure_judge_notes.json", "my_closure_judge.json",
+                 "closure_judge.txt", "closure_judge"):
+        assert not pack_mod._is_judge_report(name), name
+
+
+def test_walk_excludes_terminal_judge_report(tmp_path):
+    """回归：重建证据包时终段判决件不得被拷进包（948 → 949 的不动点破缺）。"""
+    src = tmp_path / "task7_milestone"
+    src.mkdir(parents=True)
+    for name in ("cold_run.raw.log", "closure_judge.json",
+                 "closure_judge.final.json"):
+        (src / name).write_text("x", encoding="utf-8")
+    kept = sorted(p.name for p in pack_mod._walk(src))
+    assert kept == ["cold_run.raw.log"], kept
