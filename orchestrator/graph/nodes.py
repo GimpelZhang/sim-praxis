@@ -39,6 +39,14 @@ from .ascent import (
     classify_run,
     load_v1_index,
 )
+from .roadmap import (
+    advance,
+    coerce_stages,
+    current_stage,
+    grants_for_stage,
+    stage_statuses,
+    stage_view,
+)
 from .state import SimPraxisState, run_dir_for
 
 FAILURE_JSON = "FAILURE.json"
@@ -49,6 +57,15 @@ TO_DIRECTION = "direction"
 TO_AGENT_RUN = "agent_run"
 TO_HUMAN_FAILURE = "human_failure"
 TO_PERSIST = "persist_learning"
+# Phase 2.7 Task 5（计划 §T5.3 D5-1）：单一图内新增的 Stage 框节点。
+# gate1 批准与 gate2 打回两条边都先经它，再进 agent_run；无路线图时它返回
+# 空更新（零事件），旧路径逐字节不变。
+# 锁内适配（计划 §T5.4C 称其为 ``stage_frame`` 节点）：langgraph 0.2.28 的
+# ``add_node`` 拒绝与状态键同名的节点（"'stage_frame' is already being used
+# as a state key"），而计划同时要求状态键名叫 ``stage_frame``。故节点名取
+# ``stage_advance``，状态键与事件类型仍逐字叫 ``stage_frame``——两者是不同
+# 命名空间，改名不影响 AC（AC-T5-4 只数节点数与条件边目标集合）。
+TO_STAGE_FRAME = "stage_advance"
 
 GATE_APPROVE = "approve"
 GATE_REJECT = "reject_with_comments"
@@ -216,10 +233,103 @@ def node_gate1(state: SimPraxisState, deps: GraphDeps) -> dict:
                            human_notes=notes)]}
 
 
+def _stage_id_of(state: dict) -> "str | None":
+    """当前 Stage 框的 stage_id（无路线图运行时为 None，事件形状不变）。"""
+    frame = state.get("stage_frame") or {}
+    sid = frame.get("stage_id") if isinstance(frame, dict) else None
+    return sid if isinstance(sid, str) and sid else None
+
+
+def _last_gate2_event(state: dict) -> "dict | None":
+    """按事件顺序取**最近一条** gate2 家族事件（accepted/rejected/hard_failure）。
+
+    为何不能只 ``_last_event(state, "gate2_accepted")``：多 Stage 下 Stage 1 的
+    accept 会一直留在 events 里，Stage 2 的 reject 之后如果仍按「找最后一条
+    accepted」判定，就会把 Stage 1 的旧批准误当成当前 Stage 的通过。按序取
+    最近一条 gate2 事件是唯一无歧义的判据（旧路径单 Stage 语义逐位等价：
+    accept 之后不会再有 gate2 事件）。
+    """
+    for ev in reversed(state.get("events", [])):
+        if isinstance(ev, dict) and str(ev.get("type", "")).startswith("gate2"):
+            return ev
+    return None
+
+
+def _stage_ceiling(state: dict) -> tuple[str, ...]:
+    """全局授予上限 = Gate 1 选中的提案所带的 tool_grants（计划 §T5.3 D5-4）。
+
+    路线图运行时 Gate 1 一次性审的是**整条路线图的授权矩阵**，其上限落在
+    被选提案的 ``tool_grants`` 上（与单 Stage 运行的 RunSpec 授予同源）。
+    提案未带该键 ⇒ 上限空 ⇒ 任何 Stage 都拿不到工具（fail-closed，不猜）。
+    """
+    chosen = state.get("chosen") or {}
+    grants = chosen.get("tool_grants") if isinstance(chosen, dict) else None
+    return tuple(str(g) for g in (grants or ()))
+
+
+def node_stage_frame(state: SimPraxisState, deps: "GraphDeps | None" = None) -> dict:
+    """Stage 框节点（Phase 2.7 Task 5，AC-T5-1/AC-T5-2）。
+
+    语义：
+    - 无 ``stages`` ⇒ 返回 ``{}``（旧路径零事件、零键，Phase 1 七事件序列不变）；
+    - 最近一条 gate2 事件是**当前 Stage** 的 accept ⇒ 前进一格（拒绝重复前进：
+      状态已 approved 时说明同一 accept 已被消费，fail-closed 报错而不是静默跳过）；
+    - 最近一条 gate2 事件是 reject/hard_failure ⇒ 当前 Stage 记 rejected，随后
+      重试（状态回到 running）；
+    - 产出 ``stage_index`` / ``stage_status`` / ``stage_frame``（含收窄后的授予）。
+    """
+    stages = coerce_stages(state.get("stages"))
+    if not stages:
+        return {}
+    status = dict(state.get("stage_status") or stage_statuses(stages))
+    index = int(state.get("stage_index", 0) or 0)
+    stage = current_stage(stages, index)
+    ev = _last_gate2_event(state)
+    if ev is not None:
+        sid = ev.get("stage_id")
+        if ev.get("type") == "gate2_accepted":
+            if sid != stage.stage_id:
+                raise GraphStateError(
+                    f"gate2_accepted 的 stage_id={sid!r} 与当前 Stage "
+                    f"{stage.stage_id!r} 不符（事件顺序或 stage 键损坏）")
+            status[stage.stage_id] = "approved"
+            try:
+                index = advance(stages, index)
+            except StopIteration as exc:
+                raise GraphStateError(
+                    "最后一个 Stage 已 approved 却被路由回 stage_frame"
+                    "（route_after_gate2 应直接进 persist_learning）") from exc
+            stage = stages[index]
+            # 重复消费守卫：前进后落到的 Stage 若已 approved，说明同一 accept 被
+            # 消费了两次（正常流里前进只会落到未完成的 Stage）。看事件计数
+            # （frames > accepts+1）不行——打回重试本来就会多出一次 frame。
+            if status.get(stage.stage_id) == "approved":
+                raise GraphStateError(
+                    f"前进落到了已 approved 的 Stage {stage.stage_id!r}"
+                    "（accept 被重复消费或路由回环）")
+        elif ev.get("type") in ("gate2_rejected", "gate2_hard_failure"):
+            if sid != stage.stage_id:
+                raise GraphStateError(
+                    f"gate2 打回事件的 stage_id={sid!r} 与当前 Stage "
+                    f"{stage.stage_id!r} 不符（事件顺序或 stage 键损坏）")
+            status[stage.stage_id] = "rejected"
+    status[stage.stage_id] = "running"
+    grants = grants_for_stage(stages, index, _stage_ceiling(state))
+    return {
+        "stage_index": index,
+        "stage_status": status,
+        "stage_frame": stage_view(stage, grants),
+        "events": [_ev("stage_frame", stage_id=stage.stage_id,
+                       stage_index=index, tool_grants=list(grants))],
+    }
+
+
 def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
     record = deps.require("agent_run", state)
     runs = list(state.get("agent_runs", []))
     runs.append(record)
+    stage_id = _stage_id_of(state)
+    stage_extra = {"stage_id": stage_id} if stage_id else {}
     # Task4：runner 5 轮用尽/补丁越界 → 失败态带轨迹进 human_failure，
     # 绝不进入 evaluate 伪造成功（计划 L502；§6.3 显式 FAILURE 原则）。
     if record.get("status") == "failed":
@@ -230,7 +340,8 @@ def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
             "events": [_ev("agent_run_failed", run_index=len(runs),
                            coding_round=record.get("coding_round", 0),
                            reason=record.get("reason", "agent_run 失败"),
-                           failure_json=record.get("failure_json"))],
+                           failure_json=record.get("failure_json"),
+                           **stage_extra)],
         }
     uri = record.get("telemetry_uri")
     if not uri:
@@ -240,7 +351,8 @@ def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
         "telemetry_uri": uri,
         "events": [_ev("agent_run", run_index=len(runs),
                        coding_round=record.get("coding_round",
-                                               state.get("coding_round", 0)))],
+                                               state.get("coding_round", 0)),
+                       **stage_extra)],
     }
     if "coding_round" in record:
         update["coding_round"] = record["coding_round"]
@@ -281,23 +393,40 @@ def node_gate2(state: SimPraxisState, deps: GraphDeps) -> dict:
     verdict = decision.get("decision")
     if verdict not in _VALID_VERDICTS:
         raise GraphStateError(f"Gate2 决策值非法：{verdict!r}（决策字典：{decision}）")
+    # Phase 2.7 Task 5：路线图运行时给 gate2 事件打上 stage_id（旧路径为空，
+    # 事件形状逐字节不变），供 route_after_gate2 / node_stage_frame 按序判定。
+    stage_id = _stage_id_of(state)
+    stage_extra = {"stage_id": stage_id} if stage_id else {}
+
+    def _stamped(update: dict, verdict_word: str) -> dict:
+        """把当前 Stage 的终态写进 stage_status（最后一个 Stage 之后不再回
+        stage_frame，故 accepted 必须在 gate2 当步就落 status，否则终态会停在
+        running）。无路线图运行时零影响。"""
+        if stage_id:
+            status = dict(state.get("stage_status") or {})
+            status[stage_id] = verdict_word
+            update["stage_status"] = status
+        return update
+
     if verdict == GATE_APPROVE:
-        update = {"events": [_ev("gate2_accepted")]}
+        update = {"events": [_ev("gate2_accepted", **stage_extra)]}
         # Task6 ascent：Gate2 接缝批准时把五键全块写回 state（learning
         # 演化志消费）；其余任务/非 dict 载荷不透传，行为逐字节不变。
         sources = decision.get("evolution_sources")
         if isinstance(sources, dict):
             update["evolution_sources"] = sources
-        return update
+        return _stamped(update, "approved")
     rejects = int(state.get("gate2_rejects", 0)) + 1
     notes = (decision.get("human_notes") or "").strip()
     if not notes:
-        return {"gate2_rejects": rejects,
-                "events": [_ev("gate2_hard_failure", rejects=rejects,
-                               reason="Gate2 打回但 human_notes 为空")]}
-    return {"gate2_rejects": rejects,
-            "events": [_ev("gate2_rejected", rejects=rejects,
-                           human_notes=notes)]}
+        return _stamped({"gate2_rejects": rejects,
+                         "events": [_ev("gate2_hard_failure", rejects=rejects,
+                                        reason="Gate2 打回但 human_notes 为空",
+                                        **stage_extra)]}, "rejected")
+    return _stamped({"gate2_rejects": rejects,
+                     "events": [_ev("gate2_rejected", rejects=rejects,
+                                    human_notes=notes, **stage_extra)]},
+                    "rejected")
 
 
 def node_persist_learning(state: SimPraxisState, deps: GraphDeps) -> dict:
@@ -459,9 +588,20 @@ def route_after_agent_run(state: dict) -> str:
     return "evaluate"
 
 
+def _has_stages(state: dict) -> bool:
+    """该 thread 是否是路线图运行（有 ``stages`` 才进 Stage 框）。
+
+    非法 stages 由 ``coerce_stages`` 直接抛 RoadmapError（fail-closed）；此处
+    不吞异常——半坏的路线图必须显式失败，不能静默退回单 Stage 语义。
+    """
+    return bool(coerce_stages(state.get("stages")))
+
+
 def route_after_gate1(state: dict) -> str:
     if _last_event(state, "gate1_approved"):
-        return TO_AGENT_RUN
+        # Phase 2.7 Task 5：路线图运行经 Stage 框进 agent_run；无路线图时**逐位
+        # 保持旧边**（gate1 → agent_run，拓扑与 Phase 1 完全一致）。
+        return TO_STAGE_FRAME if _has_stages(state) else TO_AGENT_RUN
     if _last_event(state, "gate1_hard_failure"):
         return TO_HUMAN_FAILURE
     if int(state.get("gate1_rejects", 0)) >= GATE_REJECT_LIMIT:
@@ -470,13 +610,33 @@ def route_after_gate1(state: dict) -> str:
 
 
 def route_after_gate2(state: dict) -> str:
-    if _last_event(state, "gate2_accepted"):
-        return TO_PERSIST
-    if _last_event(state, "gate2_hard_failure"):
+    """Gate2 之后去哪：按**最近一条** gate2 事件判定（多 Stage 见 _last_gate2_event）。
+
+    旧路径（无 stages）语义与 Phase 1 逐位一致：accept→persist、hard_failure→
+    human_failure、两次打回→human_failure、否则回 agent_run。
+    路线图运行时：当前 Stage accept 且还有下一 Stage ⇒ 先回 stage_frame 推进
+    （D5-1）；最后一个 Stage accept ⇒ persist。
+    """
+    ev = _last_gate2_event(state)
+    kind = (ev or {}).get("type")
+    if kind == "gate2_accepted":
+        stages = coerce_stages(state.get("stages"))
+        if not stages:
+            return TO_PERSIST
+        index = int(state.get("stage_index", 0) or 0)
+        stage = current_stage(stages, index)
+        if ev.get("stage_id") != stage.stage_id:
+            raise GraphStateError(
+                f"gate2_accepted 的 stage_id={ev.get('stage_id')!r} 与当前 "
+                f"Stage {stage.stage_id!r} 不符（事件顺序或 stage 键损坏）")
+        return TO_STAGE_FRAME if index + 1 < len(stages) else TO_PERSIST
+    if kind == "gate2_hard_failure":
         return TO_HUMAN_FAILURE
     if int(state.get("gate2_rejects", 0)) >= GATE_REJECT_LIMIT:
         return TO_HUMAN_FAILURE
-    return TO_AGENT_RUN
+    # 打回重试：路线图运行先回 Stage 框（重算当前 Stage 的收窄授予），
+    # 无路线图时**逐位保持旧边**（gate2 → agent_run）。
+    return TO_STAGE_FRAME if _has_stages(state) else TO_AGENT_RUN
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +652,10 @@ def build_graph(deps: "GraphDeps | None" = None):
     graph.add_node("classify", lambda s: node_classify(s, deps))
     graph.add_node("direction", lambda s: node_direction(s, deps))
     graph.add_node("gate1", lambda s: node_gate1(s, deps))
+    # Phase 2.7 Task 5（计划 §T5.3 D5-1）：gate1 批准与 gate2 打回都先进
+    # stage_frame，再无条件进 agent_run。无路线图时该节点返回空更新，
+    # 图多一个零事件节点，Phase 1 的七事件序列与拓扑语义均不变。
+    graph.add_node(TO_STAGE_FRAME, lambda s: node_stage_frame(s, deps))
     graph.add_node("agent_run", lambda s: node_agent_run(s, deps))
     graph.add_node("evaluate", lambda s: node_evaluate(s, deps))
     graph.add_node("gate2", lambda s: node_gate2(s, deps))
@@ -506,11 +670,15 @@ def build_graph(deps: "GraphDeps | None" = None):
     graph.add_edge("classify", "direction")
 
     graph.add_edge("direction", "gate1")
+    # 两条条件边各自带「有无路线图」两枝：无路线图逐位走旧边（gate1→agent_run、
+    # gate2→agent_run），路线图运行才经 Stage 框（D5-1）。
     graph.add_conditional_edges("gate1", route_after_gate1, {
         TO_AGENT_RUN: "agent_run",
+        TO_STAGE_FRAME: TO_STAGE_FRAME,
         TO_DIRECTION: "direction",
         TO_HUMAN_FAILURE: "human_failure",
     })
+    graph.add_edge(TO_STAGE_FRAME, "agent_run")
     # Task4：agent_run 失败（5 轮用尽/补丁越界）→ human_failure，否则进 evaluate
     graph.add_conditional_edges("agent_run", route_after_agent_run, {
         TO_HUMAN_FAILURE: "human_failure",
@@ -520,6 +688,7 @@ def build_graph(deps: "GraphDeps | None" = None):
     graph.add_conditional_edges("gate2", route_after_gate2, {
         TO_PERSIST: "persist_learning",
         TO_AGENT_RUN: "agent_run",
+        TO_STAGE_FRAME: TO_STAGE_FRAME,
         TO_HUMAN_FAILURE: "human_failure",
     })
     graph.add_edge("persist_learning", "done")

@@ -41,6 +41,13 @@ class SimPraxisState(TypedDict, total=False):
     # 节点 update 双侧都丢，故必须声明为通道）；Gate1 提案机判（task7_libero.
     # gate1_proposal）与 D-4 降级的唯一状态输入。standard 任务缺省不写。
     stage0_report_path: str
+    # Phase 2.7 Task 5（计划 §T5.4-B）：多 Stage 路线图四键。必须在此声明——
+    # langgraph 0.2.28 对 TypedDict 未声明键在 input 与节点 update 两侧都静默
+    # 丢弃（本文件抬头原话）。四键皆纯 JSON 数据（dataclass 不入检查点）。
+    stages: list                 # [{stage_id,title,objective,exit_ac,tool_grants,max_rounds}]
+    stage_index: int             # 当前 Stage 索引（0 起）
+    stage_frame: dict            # 当前 Stage 只读视图（stage_frame 节点写，agent_run 读）
+    stage_status: dict           # stage_id -> pending|running|approved|rejected
     events: Annotated[list, operator.add]
 
 

@@ -312,6 +312,11 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # Task0b optics_model 改经 resolver stage（stage_optics_model 插入），
     # 467 → 484（纯位移，无新增 claim/upsert；diff 已人工核对）
     "scripts/milestone1/q2_human_gate.py": {484},
+    # Phase 2.7 Task5 真人演练脚本（计划 §T5.4-F，AC-T5-3）：与
+    # q2_human_gate.py 同性质——人工取证工具，自建独立 pending 库
+    # （`<证据目录>/drill_pending.sqlite`），不触生产台账/生产 pending 库；
+    # 发送闸门只有一处（演练卡 upsert，170），无 claim/upsert 旁路。
+    "scripts/phase27/drill_roadmap_cards.py": {170},
 }
 
 
