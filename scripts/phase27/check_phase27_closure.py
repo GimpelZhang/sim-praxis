@@ -5,7 +5,7 @@
 重读账、重读表、重算证据包，再把三处独立产出互相对撞。任一断言不成立即
 ``problems`` 非空（rc=1）；未达成项**如实挂牌 gaps，不计入通过**（硬规则 7）。
 
-六类检查：
+七类检查（第 7 类只在 ``--require-acceptance`` 下生效，见下）：
 
 1. **AC 计数**：从 ``Phase_2.7_Plan_detailed.md`` 正文去重提取 ``AC-Tn-k``，
    与附录声明的 67 及逐 Task 计数（9/10/6/13/9/5/8/7）逐项相等，且与看板
@@ -23,11 +23,22 @@
    ``tests`` 三段与包内冻结日志逐字段相等（含 ``failed``），且 kbint/容器场
    必须 ``rc == 0``；看板的 ``ledger`` / ``lance_tables`` 段与机判独立重算的
    结果相等；包内 ``cold_run.json`` ↔ ``cold_run.raw.log`` ↔
-   ``manifest.git_commit`` 三件自洽。
+   ``manifest.git_commit`` 三件自洽；
+7. **验收车道**（``--require-acceptance``）：``milestone_closeout.raw.log``
+   存在、命令含 ``SIMPRAXIS_MILESTONE_CLOSEOUT=1``（未开闸则验的是空集）、
+   ``rc == 0``、``failed == 0``、``passed >= 7``，且证据包收录了同一份日志。
+
+**两段式（为什么第 7 类要旗标）**：验收套的 AC-T7-7 读的就是本判决件，而
+本判决件若反过来要求「验收套已绿」，就成死锁——「判决件要绿 → 要跑验收 →
+验收要读判决件」。所以判决件跑两遍：**核心段**（无旗标，三签后落盘，供
+AC-T7-7 读）与**终段**（``--require-acceptance``，验收车道绿后落盘，把验收
+日志也吞进判据）。两次都写同一路径，后写者即权威；``require_acceptance``
+字段自述是哪一段，避免「拿核心段冒充终段」。
 
 用法：
   python scripts/phase27/check_phase27_closure.py [--report OUT.json]
                                                  [--pack DIR] [--dashboard P]
+                                                 [--require-acceptance]
 """
 from __future__ import annotations
 
@@ -586,8 +597,75 @@ def check_cross(dashboard_path: Path, pack_dir: Path,
     return {"dashboard": str(dashboard_path), "git_commit": commit,
             "ac_total": ac["total"], "ac_ids_sha256": ac["ids_sha256"]}, problems
 
+
 # ---------------------------------------------------------------------------
-# 7. 未达成项挂牌（gap 必须出现，缺了是 problem）
+# 7. 验收车道（两段式的第二段）
+# ---------------------------------------------------------------------------
+ACCEPTANCE_LOG = "milestone_closeout.raw.log"
+ACCEPTANCE_CMD_TOKEN = "SIMPRAXIS_MILESTONE_CLOSEOUT=1"
+ACCEPTANCE_MIN_PASSED = 7          # AC-T7-1..7，缺一不可
+
+
+def check_acceptance(milestone_dir: Path, pack_dir: Path, *,
+                     required: bool) -> "tuple[dict, list[str]]":
+    """验收套车道自己也要被机判消费——否则它「有绿灯但无人读」。
+
+    判据只认**原始日志**（不认自述）：命令必须含显式开闸开关（否则 marker 在
+    收集期 deselect，一条也没跑也是 ``0 passed`` 的「绿」）、``rc == 0``、
+    ``failed == 0``、``passed >= 7``，且该日志必须已经进了证据包（同一 sha256）
+    ——日志只在护栏外躺着，就等于没被证据化。
+
+    ``required=False``（核心段）只查「若日志已存在则必须绿」：核心段跑在验收
+    车道**之前**，此刻日志本就不该存在；但一份**红的**验收日志不管哪一段都是
+    失败证据，不能因为旗标没开就视而不见。
+    """
+    p = milestone_dir / ACCEPTANCE_LOG
+    if not p.is_file():
+        if required:
+            return ({"present": False, "required": True},
+                    [f"缺验收车道日志：{p}（--require-acceptance 下必须存在）"])
+        return {"present": False, "required": False}, []
+
+    problems: "list[str]" = []
+    try:
+        blk = _tests_block(p.read_text(encoding="utf-8", errors="replace"))
+    except ValueError as exc:
+        return ({"present": True, "required": required},
+                [f"{ACCEPTANCE_LOG} {exc}"])
+
+    if ACCEPTANCE_CMD_TOKEN not in blk["command"]:
+        problems.append(
+            f"验收车道命令缺 {ACCEPTANCE_CMD_TOKEN}：marker 未开闸时整套在收集"
+            f"期 deselect，`0 passed` 会伪装成绿——{blk['command']!r}")
+    if blk["rc"] != 0:
+        problems.append(f"验收车道 rc={blk['rc']} ≠ 0")
+    if blk["failed"] != 0:
+        problems.append(f"验收车道 failed={blk['failed']} ≠ 0")
+    if blk["passed"] < ACCEPTANCE_MIN_PASSED:
+        problems.append(
+            f"验收车道 passed={blk['passed']} < {ACCEPTANCE_MIN_PASSED}"
+            "（7 条 AC 缺一不可）")
+
+    log_sha = _sha256(p)
+    packed = None
+    man_path = pack_dir / "manifest.json"
+    if man_path.is_file():
+        man = json.loads(man_path.read_text(encoding="utf-8"))
+        packed = next((e for e in (man.get("files") or [])
+                       if e.get("path") == ACCEPTANCE_LOG), None)
+    if required and packed is None:
+        problems.append(f"证据包未收录验收车道日志：{ACCEPTANCE_LOG}")
+    elif packed is not None and packed.get("sha256") != log_sha:
+        problems.append(
+            f"证据包内的 {ACCEPTANCE_LOG} 与盘上不是同一份"
+            f"（{packed.get('sha256')} ≠ {log_sha}，打包后又跑了一遍？）")
+
+    return ({"present": True, "required": required, "log_sha256": log_sha,
+             "in_pack": packed is not None, **blk}, problems)
+
+
+# ---------------------------------------------------------------------------
+# 8. 未达成项挂牌（gap 必须出现，缺了是 problem）
 # ---------------------------------------------------------------------------
 def registered_gaps() -> "list[dict]":
     return [
@@ -628,7 +706,7 @@ def check_gaps(report_gaps: "list[dict]", problems: "list[str]") -> None:
 # ---------------------------------------------------------------------------
 def build_report(*, root: Path, dashboard: Path, pack: Path,
                  signs: Path, ledger: Path, approvals: Path,
-                 recycle: Path) -> dict:
+                 recycle: Path, require_acceptance: bool = False) -> dict:
     problems: "list[str]" = []
     gaps = registered_gaps()
 
@@ -649,11 +727,16 @@ def build_report(*, root: Path, dashboard: Path, pack: Path,
     problems.extend(p)
     cross, p = check_cross(dashboard, pack, led, tables)
     problems.extend(p)
+    acc, p = check_acceptance(root / "task7_milestone", pack,
+                              required=require_acceptance)
+    problems.extend(p)
     check_gaps(gaps, problems)
 
     return {
         "schema": "simpraxis.phase27.closure_judge.v1",
         "root": str(root),
+        # 自述是哪一段：核心段（供 AC-T7-7 读）还是终段（含验收车道）
+        "require_acceptance": require_acceptance,
         "problems": problems,
         "gaps": gaps,
         "checks": {
@@ -663,6 +746,7 @@ def build_report(*, root: Path, dashboard: Path, pack: Path,
             "evidence_pack": pack_sum,
             "signs": sign_sum,
             "cross": cross,
+            "acceptance": acc,
         },
     }
 
@@ -680,6 +764,9 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--approvals", type=Path, default=None)
     ap.add_argument("--recycle", type=Path, default=None)
     ap.add_argument("--report", type=Path, default=None)
+    ap.add_argument("--require-acceptance", action="store_true",
+                    help="终段：要求验收车道日志存在且绿并入包"
+                         "（验收套绿后跑；缺省会与 AC-T7-7 死锁）")
     args = ap.parse_args(argv)
 
     root = args.root or phase27_root()
@@ -693,6 +780,7 @@ def main(argv: "list[str] | None" = None) -> int:
         approvals=args.approvals or phase27_approvals_dir(),
         recycle=args.recycle or (root / "task6_vla" / "manifests"
                                  / "RECYCLE.json"),
+        require_acceptance=args.require_acceptance,
     )
     text = json.dumps(rep, ensure_ascii=False, indent=1, sort_keys=True) + "\n"
     if args.report:

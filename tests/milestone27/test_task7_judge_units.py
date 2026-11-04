@@ -354,3 +354,93 @@ def test_cold_run_json_rejects_two_summary_lines(tmp_path):
     p = _log(tmp_path, "# cmd: pytest\n2198 passed\n2267 passed\nrc=0\n")
     with pytest.raises(cold_mod.ColdRunError):
         cold_mod.build(log=p)
+
+
+# ------------------------------------------------------------------ 10. 验收车道入机判
+_ACC_CMD = ("# cmd: SIMPRAXIS_MILESTONE_CLOSEOUT=1 SIMPRAXIS_KB_INTEGRATION=1 "
+            "/mnt/venvs/simpraxis/bin/python -m pytest "
+            "tests/milestone27/test_task7_closeout.py -q\n")
+_ACC_GREEN = _ACC_CMD + "7 passed, 2 warnings in 12.3s\nrc=0\n"
+_ACC_RED = _ACC_CMD + "1 failed, 6 passed in 12.3s\nrc=1\n"
+
+
+def _acc_state(tmp_path: Path, body: "str | None"):
+    """造一个含验收日志的 milestone 目录 + 收录同一份（或空包）的证据包。"""
+    ms = tmp_path / "task7_milestone"
+    ms.mkdir(parents=True, exist_ok=True)
+    log = ms / judge.ACCEPTANCE_LOG
+    if body is not None:
+        log.write_text(body, encoding="utf-8")
+    pack = _make_pack(
+        tmp_path,
+        [(judge.ACCEPTANCE_LOG, body.encode("utf-8"))] if body is not None
+        else [("other.txt", b"x")])
+    return ms, pack
+
+
+def test_acceptance_core_stage_tolerates_absent_log(tmp_path):
+    """核心段（无旗标）跑在验收车道之前：日志不存在不算 problem。"""
+    ms, pack = _acc_state(tmp_path, None)
+    summary, problems = judge.check_acceptance(ms, pack, required=False)
+    assert problems == [], problems
+    assert summary["present"] is False and summary["required"] is False
+
+
+def test_acceptance_terminal_stage_requires_log(tmp_path):
+    """终段（--require-acceptance）缺日志即 problem——否则「没跑」也算收尾。"""
+    ms, pack = _acc_state(tmp_path, None)
+    summary, problems = judge.check_acceptance(ms, pack, required=True)
+    assert summary["present"] is False
+    assert any("缺验收车道日志" in p for p in problems), problems
+
+
+def test_acceptance_red_log_is_red_at_both_stages(tmp_path):
+    """红的验收日志是失败证据，核心段也不许视而不见。"""
+    for required in (False, True):
+        ms, pack = _acc_state(tmp_path / f"r{required}", _ACC_RED)
+        _summary, problems = judge.check_acceptance(ms, pack, required=required)
+        assert any("rc=1" in p for p in problems), problems
+        assert any("failed=1" in p for p in problems), problems
+
+
+def test_acceptance_rejects_command_without_gate_switch(tmp_path):
+    """没有开闸开关：marker 在收集期 deselect，`0 passed` 会伪装成绿。"""
+    body = ("# cmd: /x/python -m pytest tests/milestone27/"
+            "test_task7_closeout.py -q\n7 passed in 1.0s\nrc=0\n")
+    ms, pack = _acc_state(tmp_path, body)
+    _summary, problems = judge.check_acceptance(ms, pack, required=True)
+    assert any("SIMPRAXIS_MILESTONE_CLOSEOUT=1" in p for p in problems), problems
+
+
+def test_acceptance_rejects_fewer_than_seven_passed(tmp_path):
+    """7 条 AC 缺一不可：`6 passed` 也是红的。"""
+    body = _ACC_CMD + "6 passed in 1.0s\nrc=0\n"
+    ms, pack = _acc_state(tmp_path, body)
+    _summary, problems = judge.check_acceptance(ms, pack, required=True)
+    assert any("passed=6" in p for p in problems), problems
+
+
+def test_acceptance_terminal_stage_requires_log_inside_pack(tmp_path):
+    """日志只在护栏外躺着等于没被证据化：终段要求它已进包。"""
+    ms, _pack_ignored = _acc_state(tmp_path, _ACC_GREEN)
+    empty_pack = _make_pack(tmp_path / "other", [("other.txt", b"x")])
+    _summary, problems = judge.check_acceptance(ms, empty_pack, required=True)
+    assert any("证据包未收录验收车道日志" in p for p in problems), problems
+
+
+def test_acceptance_detects_pack_copy_drift(tmp_path):
+    """打包后又跑了一遍验收（日志变了）：包内副本 sha 不符即 problem。"""
+    ms, pack = _acc_state(tmp_path, _ACC_GREEN)
+    (ms / judge.ACCEPTANCE_LOG).write_text(
+        _ACC_CMD + "7 passed in 99.9s\nrc=0\n", encoding="utf-8")
+    _summary, problems = judge.check_acceptance(ms, pack, required=True)
+    assert any("不是同一份" in p for p in problems), problems
+
+
+def test_acceptance_green_terminal_stage_passes(tmp_path):
+    """正样本：开闸 + 7 passed + rc=0 + 已入包 → 无 problem。"""
+    ms, pack = _acc_state(tmp_path, _ACC_GREEN)
+    summary, problems = judge.check_acceptance(ms, pack, required=True)
+    assert problems == [], problems
+    assert summary["passed"] == 7 and summary["in_pack"] is True
+    assert len(summary["log_sha256"]) == 64
