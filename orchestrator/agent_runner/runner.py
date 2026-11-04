@@ -2977,9 +2977,17 @@ def agent_run_seam(runner: AgentRunner, spec_factory: "Callable[[dict], RunSpec]
     """图接缝工厂：agent_run 节点每次按当前 state 构造 RunSpec 后执行。
 
     Gate2 打回意见由 spec_factory 从 state 的 gate2_rejected 事件提取。
+    Phase 2.7 Task 5（计划 §T5.4-C）：这是图侧唯一构造 RunSpec 的落点，故
+    多 Stage 的逐 Stage 授予收窄在此处按 ``state['stage_frame'].tool_grants``
+    覆盖 ``spec.tool_grants``（``roadmap.narrow_spec_grants``）；无 stage_frame
+    时该函数原样返回同一 spec 对象，旧路径逐字节不变。**不改**
+    ``RunSpec.agentic``（BR-2 冻结，本 Task 不碰）。
     """
     def seam(state: dict) -> dict:
         spec = spec_factory(state)
+        # 局部 import：避免 runner 模块级依赖 graph 包（其 __init__ 拉 langgraph）。
+        from orchestrator.graph.roadmap import narrow_spec_grants
+        spec = narrow_spec_grants(spec, state)
         record = runner.run(spec)
         if record["status"] == "ok":
             return {"telemetry_uri": record["telemetry_uri"],

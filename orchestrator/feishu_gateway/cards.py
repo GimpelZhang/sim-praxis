@@ -954,6 +954,94 @@ def build_gate2_card_v2(
     }
 
 
+# ---------------- Phase 2.7 Task5：路线图审阅卡 / Stage 终审卡 ----------------
+#
+# 计划 §T5.3 D5-5：两张新卡都沿用 schema 2.0，表单区复用 _gate1_form_2 /
+# _gate2_form_2 的构造方式（不新造卡片 DSL）。按钮 value 与既有卡逐字同形
+# （gate/decision/choice、gate/decision/video_fallback），故 parse_card_event /
+# PendingStore / _handle_card 的白名单与交叉校验全部原样生效——新卡不需要
+# 任何回调侧改动，也不会绕过 owner 白名单或空意见二次校验。
+
+def _roadmap_stage_md(idx: int, stage: dict[str, Any]) -> str:
+    exit_ac = stage.get("exit_ac") or []
+    grants = stage.get("tool_grants") or []
+    ac_md = "\n".join(f"  {i + 1}. {md_escape(str(a))}"
+                      for i, a in enumerate(exit_ac)) or "  -"
+    grant_md = "、".join(inline_code(str(g)) for g in grants) or "（无）"
+    return (
+        f"**Stage {idx + 1}：{md_escape(str(stage.get('stage_id', '-')))}"
+        f" · {md_escape(str(stage.get('title', '-')))}**\n"
+        f"- 目标：{md_escape(str(stage.get('objective', '-')))}"
+        f"（轮帽 {md_escape(str(stage.get('max_rounds', 8)))}）\n"
+        f"- 出口判据：\n{ac_md}\n"
+        f"- 本 Stage 申请工具：{grant_md}")
+
+
+def build_roadmap_card(roadmap: dict[str, Any]) -> dict:
+    """Gate1「整条路线图」审阅卡（schema 2.0，表单区复用 _gate1_form_2）。
+
+    Gate 1 一次审的是**整条路线图**：逐 Stage 的目标/出口判据/申请工具矩阵。
+    批准 = 批准这条路线图（choice 恒 0）；打回意见必填（服务端回调侧二次校验）。
+    """
+    stages = roadmap.get("stages") or []
+    if not isinstance(stages, list) or not stages:
+        raise ValueError("build_roadmap_card：roadmap.stages 必须是非空数组")
+    body: list[dict] = [
+        _div_lark_md(
+            f"**路线图审阅**（schema `{md_escape(str(roadmap.get('schema', '-')))}`，"
+            f"共 {len(stages)} 个 Stage）\n"
+            f"{md_escape(str(roadmap.get('title', '')))}"
+            "\n请批准整条路线图；每次 Stage 结束会单独发 Stage 终审卡。"
+            "打回请在意见框写明具体意见（必填，会原样带回）。"),
+    ]
+    for idx, stage in enumerate(stages):
+        body.append(_div_lark_md(_roadmap_stage_md(idx, stage)))
+    body.append(_gate1_form_2(0))
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "wide_screen_mode": True},
+        "header": _v2_header("blue", "【SimPraxis】Gate 1：多 Stage 路线图审批"),
+        "body": {"elements": body},
+    }
+
+
+def build_stage_gate_card(stage: dict[str, Any],
+                          artifacts: "list[dict[str, Any]] | None" = None,
+                          *, stage_index: int = 0,
+                          total_stages: int = 1) -> dict:
+    """Stage 终审卡（Gate2 语义，schema 2.0，表单区复用 _gate2_form_2）。
+
+    审的是**当前 Stage 的交付**：目标、出口判据、产物清单。approve ⇒ 推进到
+    下一 Stage（或末 Stage 收尾）；reject ⇒ 只重试当前 Stage（Stage 隔离）。
+    """
+    if not isinstance(stage, dict) or not stage.get("stage_id"):
+        raise ValueError("build_stage_gate_card：stage 必须带 stage_id")
+    body: list[dict] = [
+        _div_lark_md(
+            f"**Stage 终审（第 {stage_index + 1}/{total_stages} 个）**\n"
+            + _roadmap_stage_md(stage_index, stage)),
+    ]
+    rows = [a for a in (artifacts or []) if isinstance(a, dict)]
+    if rows:
+        lines = "\n".join(
+            f"- `{md_escape(str(a.get('name', '-')))}`："
+            f"{md_escape(str(a.get('detail', '-')))}"
+            for a in rows)
+        body.append(_div_lark_md(f"**本 Stage 产物**\n{lines}"))
+    else:
+        body.append(_div_lark_md("**本 Stage 产物**：（调用方未登记）"))
+    body.append(_div_lark_md(
+        "_放行 = 推进到下一 Stage；驳回 = 只重试本 Stage，已完成 Stage 的产物与"
+        "账行不会重跑。_"))
+    body.append(_gate2_form_2(False))
+    return {
+        "schema": "2.0",
+        "config": {"update_multi": True, "wide_screen_mode": True},
+        "header": _v2_header("green", "【SimPraxis】Stage 终审"),
+        "body": {"elements": body},
+    }
+
+
 # ---------------- Phase 2 Task3：ascent 升阶卡 / 双媒体 Diff 卡 ----------------
 
 # Pareto 六指标中文名（与 judge.pareto.METRIC_DIRECTIONS 同一指标集）。

@@ -275,7 +275,42 @@ def _initial_state(args: argparse.Namespace, payload: dict) -> dict:
     elif variant == TASK8_VARIANT_FLUID:
         from orchestrator.graph.task8_fluid import STAGE0_REPORT_STATE_KEY
         state[STAGE0_REPORT_STATE_KEY] = str(_fluid_stage0_path(args))
+    stages_file = getattr(args, "stages_file", None)
+    if stages_file:
+        state.update(_stages_state(args, stages_file))
     return state
+
+
+def _stages_state(args: argparse.Namespace, stages_file: str) -> dict:
+    """--stages-file → 四个路线图状态键（Phase 2.7 Task5，fail-closed）。
+
+    - 文件不存在 / JSON 非法 / schema 不符 / 空 stages / 重复 id / 空 grants
+      ⇒ RoadmapError 直接上抛（CLI 边界 exit≠0，不进图、不建账）；
+    - stage_index 越界同样抛（不静默夹到 0）；
+    - 落进 state 的是**纯 JSON 形态**（dataclass 不进检查点）。
+    """
+    import json as _json
+
+    from orchestrator.graph.roadmap import (
+        current_stage,
+        stage_statuses,
+        stage_to_mapping,
+        validate_roadmap,
+    )
+
+    path = Path(stages_file)
+    if not path.is_file():
+        raise FileNotFoundError(f"--stages-file 不存在：{path}")
+    doc = _json.loads(path.read_text(encoding="utf-8"))
+    stages = validate_roadmap(doc)
+    index = 0 if args.stage_index is None else int(args.stage_index)
+    current_stage(stages, index)          # 越界即 RoadmapError
+    return {
+        "stages": [stage_to_mapping(s) for s in stages],
+        "stage_index": index,
+        "stage_status": stage_statuses(stages),
+        "stage_frame": {},
+    }
 
 
 class _AgentEngineDispatcher:
@@ -655,6 +690,15 @@ def main(argv: "list[str] | None" = None) -> int:
                             "runs/phase2/task7/stage0/stage0_compat_report.json "
                             "或 runs/phase2/task8/stage0/stage0_fluid_report.json）")
         p.add_argument("--task-title", default=None)
+        # Phase 2.7 Task5（计划 §T5.3 锁内适配 2）：提纲的单个 --stage 字符串
+        # 无法表达 stages[]，落成 --stages-file（JSON 路线图，schema
+        # simpraxis.roadmap.v1）+ --stage-index（可选断点，0 起）。不给
+        # --stages-file 时整图行为与 Phase 2 逐字节一致（stage_frame 空转）。
+        p.add_argument("--stages-file", dest="stages_file", default=None,
+                       help="多 Stage 路线图 JSON（schema simpraxis.roadmap.v1）；"
+                            "缺省 = 单 Stage 直通（旧行为）")
+        p.add_argument("--stage-index", dest="stage_index", type=int, default=None,
+                       help="从第几个 Stage 起跑（0 起；仅 --stages-file 下有效）")
         # Phase 2.6 Task2：生产召回模式与规划档位（D2-2 / D2-4）。
         # choices 引用常量，不写字面量（TIERS 里没有 "policy" 这种值）。
         p.add_argument("--recall-mode", dest="recall_mode", default=RECALL_FOURWAY,
