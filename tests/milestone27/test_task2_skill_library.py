@@ -43,11 +43,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE = phase27_root() / "task2_skills"
 TWO_EXCLUSIONS = '-m "not paid and not kb_integration"'
 
+# Task 2 首灌四件 + Task 4 依 BR-4/D4-4 追加的 wall_b.instruments（KB cd5cdad）。
+# 断言形态不变：仍是「清单逐名与磁盘逐件 sha 双向相等」，追加只改基线不改口径
+# （Complete §5.0b #14：Task 4 登记第五件技能后，Task 2 的两条钉死基线随之刷新）。
 EXPECTED_SKILLS = (
     "common.math_3d",
     "libero.env_boot",
     "maniskill.pushcube",
     "mujoco.contact_push",
+    "wall_b.instruments",
 )
 
 
