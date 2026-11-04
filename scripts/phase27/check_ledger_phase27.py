@@ -69,7 +69,9 @@ def analyze(rows: "list[dict]") -> dict:
     if int_seqs != list(range(1, len(int_seqs) + 1)):
         problems.append(f"整数 seq 不连续：{int_seqs}")
 
-    if len(selfchecks) > 1:
+    # 恰 1 条：**0 条也红**——空账/自造账不得静默返回 problems=[]（本脚本
+    # 自称 AC-T0-3 机判入口，独立 rc 必须真能咬）。
+    if len(selfchecks) != 1:
         problems.append(f"selfcheck 行应恰有 1 条，实际 {len(selfchecks)}")
     if selfchecks and selfchecks[0].get("seq") != 1:
         problems.append(f"selfcheck 必须占 seq=1，实际 {selfchecks[0].get('seq')!r}")
@@ -129,6 +131,8 @@ def _selfcheck(ledger_arg: str | None) -> int:
         "global_used 断档": [ok_rows[0], ok_rows[1],
                              dict(ok_rows[2], global_used_after=7)],
         "未知 event": [dict(ok_rows[0], event="bogus")],
+        "缺 selfcheck": [dict(ok_rows[1], seq=1, global_used_after=1)],
+        "空账": [],
     }
     for name, rows in negatives.items():
         if not analyze(rows)["problems"]:
@@ -146,6 +150,16 @@ def _selfcheck(ledger_arg: str | None) -> int:
         old = {k: os.environ.get(k) for k in roots}
         os.environ.update(roots)
         try:
+            # 开账 selfcheck 行由 Task 0 一次性写入（QuotaLedger 无公开 API），
+            # 端到端样本按同一形状自行种入，再接 QuotaLedger.record——
+            # 「缺 selfcheck 即红」的判据要能在真账形态上验到。
+            led_path = rp.phase27_ledger_path()
+            led_path.parent.mkdir(parents=True, exist_ok=True)
+            led_path.write_text(json.dumps({
+                "ts_iso": ql._now_iso(), "event": "selfcheck", "seq": 1,
+                "model": None, "ok": True, "global_used_after": 0,
+            }, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.chmod(led_path, 0o600)
             led = ql.QuotaLedger.phase27()
             for i in (1, 2, 3):
                 led.record("coding_debug", task=4, batch_id="P27-SELFTEST",
@@ -183,6 +197,11 @@ def main(argv: "list[str] | None" = None) -> int:
     path = Path(args.ledger) if args.ledger else rp.phase27_ledger_path()
     rows = _rows_from(path)
     res = analyze(rows)
+    if not path.is_file():
+        # 缺账本 ≠ 空账合格：独立机判入口必须自证「账在」，否则 `--ledger
+        # 不存在的路径` 会 rc=0 骗过调用方（AC-T7-2 自身另有 is_file 兜底，
+        # 但本脚本的 rc 也可能被别处单独消费）。
+        res["problems"].insert(0, f"账本不存在：{path}")
     payload = {"schema": "simpraxis.phase27.ledger_check.v1",
                "ledger": str(path), "row_count": len(rows), **res}
     text = json.dumps(payload, ensure_ascii=False, indent=1) + "\n"

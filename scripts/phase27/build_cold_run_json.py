@@ -10,7 +10,9 @@
   拒绝，避免把子进程摘要读进来）；
 - ``rc != 0`` 或 ``failed != 0`` 默认拒绝落盘（红日志不是证据）；确需留证时
   显式 ``--allow-red``，并把 ``red: true`` 写进 json；
-- ``note`` 逐字声明「日志即最终版」，与机判/AC 的读法一致（verifier 缺口 2）。
+- ``note`` 逐字声明「日志即最终版」，与机判/AC 的读法一致（verifier 缺口 2）；
+  note **不引用尚未产出的文件**（验收套独立车道日志在本件生成时可能还不存在，
+  悬空引用会被 verifier 判成「假声明」）。
 
 用法：
   python scripts/phase27/build_cold_run_json.py                     # 默认路径
@@ -102,8 +104,8 @@ def build(*, log: Path, repo: Path = _REPO, allow_red: bool = False,
         .strftime("%Y-%m-%dT%H:%M:%SZ"),
         "note": note or (
             "日志即最终版（权威轮，逐字 CLAUDE.md 两排除命令、无 --ignore）；"
-            "验收套按 milestone_closeout marker 在收集期 deselect，"
-            "其独立车道日志见 milestone_closeout.raw.log"),
+            "验收套按 milestone_closeout marker 在收集期 deselect（需 "
+            "SIMPRAXIS_MILESTONE_CLOSEOUT=1 显式开启），其计数不计入本日志"),
     }
 
 

@@ -39,6 +39,11 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
+_SCRIPTS = _REPO / "scripts" / "phase27"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+from check_phase27_closure import canonical_command_problem  # noqa: E402
 
 pytestmark = pytest.mark.milestone_closeout
 
@@ -97,13 +102,15 @@ def _parse_log(text: str) -> dict:
              if re.search(r"\b\d+ passed\b", ln)]
     assert len(cmds) == 1, f"`# cmd:` 行应恰 1 条，实得 {len(cmds)}"
     assert len(rcs) == 1, f"`rc=` 行应恰 1 条，实得 {len(rcs)}"
-    assert lines, "日志里没有 pytest 摘要行"
+    # 摘要行恰一条：取末行会把「9 failed, 2262 passed」后面拼进来的
+    # 「2262 passed」当成唯一摘要，红摘要被吞（与看板/生成器同规则）。
+    assert len(lines) == 1, f"pytest 摘要行应恰 1 条，实得 {len(lines)} 条"
 
     def _n(field: str) -> int:
-        m = re.search(rf"\b(\d+) {field}\b", lines[-1])
+        m = re.search(rf"\b(\d+) {field}\b", lines[0])
         return int(m.group(1)) if m else 0
 
-    return {"command": cmds[0].strip(), "summary": lines[-1],
+    return {"command": cmds[0].strip(), "summary": lines[0],
             "passed": _n("passed"), "failed": _n("failed"),
             "skipped": _n("skipped"), "deselected": _n("deselected"),
             "rc": int(rcs[0])}
@@ -123,16 +130,12 @@ def test_ac_t7_1_cold_run():
 
     # 命令口径：必须是 CLAUDE.md 收尾命令的**逐字形态**——解释器 + 固定参数
     # 尾部，尾部之前不得再夹任何旗标（否则 `--ignore=…` 这类「少收几条测试」
-    # 也能骗过子串检查）。
-    _CANON = ('-m pytest tests -q -k "not test_04" '
-              '-m "not paid and not kb_integration"')
+    # 也能骗过子串检查）。判据与本机判共用单一真值
+    # `check_phase27_closure.canonical_command_problem`（只管「怎么说」，
+    # 判定口径不外溢到别处；单测见 test_task7_judge_units.py）。
     cmd = parsed["command"]
-    assert cmd.endswith(_CANON), (
-        f"冷跑命令不是 CLAUDE.md 的逐字形态（尾部应为 {_CANON!r}）：{cmd}")
-    prefix = cmd[:-len(_CANON)]
-    assert prefix and " " not in prefix and "--" not in prefix, (
-        f"冷跑命令在解释器与固定尾部之间夹了额外参数：{prefix!r}")
-    assert "--ignore" not in cmd, "冷跑命令不得 --ignore 任何测试文件"
+    problem = canonical_command_problem(cmd)
+    assert problem is None, problem
 
     doc = _read_json(milestone() / "cold_run.json")
     assert doc.get("schema") == COLD_JSON_SCHEMA, doc.get("schema")

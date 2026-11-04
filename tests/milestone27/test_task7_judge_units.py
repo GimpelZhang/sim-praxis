@@ -108,6 +108,26 @@ def test_tests_block_rejects_unreviewable_log():
         judge._tests_block("# cmd: pytest\nrc=0\n")
 
 
+def test_tests_block_rejects_two_summaries():
+    """两行摘要：取末行会把前面的红摘要吞掉（`failed` 静默读 0）。"""
+    text = ("# cmd: pytest\n9 failed, 2262 passed\n2262 passed\nrc=1\n")
+    with pytest.raises(ValueError):
+        judge._tests_block(text)
+
+
+def test_ac_parse_log_rejects_two_summaries():
+    """验收套自己的解析器与机判**同规则**：摘要行恰一条。"""
+    import importlib.util
+
+    path = _REPO / "tests" / "milestone27" / "test_task7_closeout.py"
+    spec = importlib.util.spec_from_file_location("t7_closeout_ac", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    text = ("# cmd: pytest\n9 failed, 2262 passed\n2262 passed\nrc=1\n")
+    with pytest.raises(AssertionError):
+        mod._parse_log(text)
+
+
 # ------------------------------------------------------------------ 2. size==0 回归
 def test_check_pack_accepts_empty_file_size_zero(tmp_path):
     """`4248808` 回归：空文件登记 size=0 是合法值，不是「登记不符」。"""
@@ -233,7 +253,78 @@ def test_dashboard_tests_state_rejects_missing_cmd(tmp_path):
         dash_mod.tests_state(p)
 
 
-# ------------------------------------------------------------------ 7. cold_run.json 生成器
+# ------------------------------------------------------------------ 7. 冷跑命令口径
+def test_canonical_command_accepts_interpreter_prefix():
+    """`6670c26` 回归：解释器前缀后自带一个空格，不得被当成「额外参数」。"""
+    cmd = ('/mnt/venvs/simpraxis/bin/python -m pytest tests -q '
+           '-k "not test_04" -m "not paid and not kb_integration"')
+    assert judge.canonical_command_problem(cmd) is None
+
+
+def test_canonical_command_rejects_extra_flag_between():
+    cmd = ('/usr/bin/python -p no:cacheprovider -m pytest tests -q '
+           '-k "not test_04" -m "not paid and not kb_integration"')
+    assert judge.canonical_command_problem(cmd) is not None
+
+
+def test_canonical_command_rejects_ignore_and_tail_drift():
+    bad_ignore = ('/usr/bin/python -m pytest tests -q -k "not test_04" '
+                  '-m "not paid and not kb_integration" '
+                  '--ignore=tests/milestone27/test_task7_closeout.py')
+    assert judge.canonical_command_problem(bad_ignore) is not None
+    bad_tail = ('/usr/bin/python -m pytest tests -q -k "not test_04" '
+                '-m "not paid"')
+    assert judge.canonical_command_problem(bad_tail) is not None
+    assert judge.canonical_command_problem("") is not None
+
+
+# ------------------------------------------------------------------ 8. 独立账对账器（AC-T0-3 入口）
+def _load_ledger_checker():
+    import importlib.util
+    path = _REPO / "scripts" / "phase27" / "check_ledger_phase27.py"
+    spec = importlib.util.spec_from_file_location("t7_ledger_check", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _row(**kw):
+    base = {"ts_iso": "2026-11-04T00:00:00Z", "event": "call", "seq": 2,
+            "model": "m", "global_used_after": 1, "ok": True,
+            "task": 4, "stage": "coding_debug", "batch_id": "P27-X"}
+    base.update(kw)
+    return base
+
+
+_SELF = {"ts_iso": "2026-11-04T00:00:00Z", "event": "selfcheck", "seq": 1,
+         "model": None, "global_used_after": 0, "ok": True}
+
+
+def test_ledger_checker_empty_and_no_selfcheck_are_red():
+    """空账 / 零 selfcheck 不得返回 problems=[]（reviewer 二轮 #8）。"""
+    mod = _load_ledger_checker()
+    assert mod.analyze([])["problems"]
+    assert mod.analyze([_row(seq=1)])["problems"]
+
+
+def test_ledger_checker_missing_file_rc_nonzero(tmp_path):
+    mod = _load_ledger_checker()
+    rc = mod.main(["--ledger", str(tmp_path / "absent.jsonl")])
+    assert rc == 1
+
+
+def test_judge_ledger_rejects_ticket_fidelity_mismatch(tmp_path):
+    """账实不符：行挂在 P27-X 下但 task 与票面声明不同 → problem。"""
+    appr = {"schema": "simpraxis.phase27.approval.v1", "batch_id": "P27-X",
+            "approved": 5, "task": 4, "stage": "coding_debug"}
+    (tmp_path / "P27-X.json").write_text(json.dumps(appr), encoding="utf-8")
+    summary, problems = judge.check_ledger([_SELF, _row(task=4)], tmp_path)
+    assert problems == [], problems
+    summary, problems = judge.check_ledger([_SELF, _row(task=6)], tmp_path)
+    assert any("不符" in p for p in problems), problems
+
+
+# ------------------------------------------------------------------ 9. cold_run.json 生成器
 def test_cold_run_json_binds_log_sha_and_counts(tmp_path):
     p = _log(tmp_path, "# cmd: /x/python -m pytest tests -q\n"
                        "2267 passed, 7 skipped, 66 deselected in 500s\nrc=0\n",

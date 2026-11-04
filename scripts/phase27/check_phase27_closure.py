@@ -402,17 +402,20 @@ def _tests_block(text: str) -> dict:
     rcs = re.findall(r"^rc=(\d+)$", text, re.M)
     lines = [ln.strip() for ln in text.splitlines()
              if re.search(r"\b\d+ passed\b", ln)]
-    if len(cmds) != 1 or len(rcs) != 1 or not lines:
+    # 摘要行必须**恰一条**：两行摘要（如尾部又贴了子进程输出）时取最后一条
+    # 会把红摘要吞掉（`9 failed, 2262 passed` + `2262 passed` → failed=0）。
+    if len(cmds) != 1 or len(rcs) != 1 or len(lines) != 1:
         raise ValueError(
-            f"日志不可审：cmd={len(cmds)} rc={len(rcs)} summary={len(lines)}")
+            f"日志不可审：cmd={len(cmds)} rc={len(rcs)} summary={len(lines)}"
+            "（各应恰 1 条）")
 
     def _n(field: str) -> int:
-        m = re.search(rf"\b(\d+) {field}\b", lines[-1])
+        m = re.search(rf"\b(\d+) {field}\b", lines[0])
         return int(m.group(1)) if m else 0
 
     return {
         "command": cmds[0].strip(),
-        "summary": lines[-1],
+        "summary": lines[0],
         "passed": _n("passed"),
         "failed": _n("failed"),
         "skipped": _n("skipped"),
@@ -422,6 +425,33 @@ def _tests_block(text: str) -> dict:
 
 
 COLD_PASSED_FLOOR = 2198
+CANON_TAIL = ('-m pytest tests -q -k "not test_04" '
+              '-m "not paid and not kb_integration"')
+
+
+def canonical_command_problem(cmd: str) -> "str | None":
+    """冷跑命令必须是 CLAUDE.md 收尾命令的**逐字**形态：``<解释器> <固定尾部>``。
+
+    只看「含两个 -k/-m 子串」会被 ``--ignore`` 或额外旗标骗过（少收几条测试
+    也算绿）。这里要求尾部**逐字相等**，且尾部之前**恰一个**解释器 token——
+    不得夹任何参数。合格返回 ``None``，否则返回问题描述。
+
+    （AC-T7-1 与本机判共用此单一真值；``6670c26`` 上一轮此处把尾随空格
+    当成了「额外参数」，属实现 bug，已由本函数取代。）
+    """
+    cmd = (cmd or "").strip()
+    if not cmd.endswith(CANON_TAIL):
+        return f"冷跑命令不是逐字形态（尾部应为 {CANON_TAIL!r}）：{cmd!r}"
+    prefix = cmd[: -len(CANON_TAIL)].strip()
+    if not prefix:
+        return f"冷跑命令缺解释器前缀：{cmd!r}"
+    if not re.fullmatch(r"\S+", prefix):
+        return f"解释器与固定尾部之间夹了额外参数：{prefix!r}"
+    if "--" in prefix:
+        return f"解释器位出现了旗标：{prefix!r}"
+    if "--ignore" in cmd:
+        return "冷跑命令不得 --ignore 任何测试文件"
+    return None
 
 
 def check_cross(dashboard_path: Path, pack_dir: Path,
@@ -494,6 +524,9 @@ def check_cross(dashboard_path: Path, pack_dir: Path,
         if int(cold.get("passed") or 0) < COLD_PASSED_FLOOR:
             problems.append(
                 f"冷跑 passed={cold.get('passed')!r} < 地板 {COLD_PASSED_FLOOR}")
+        cmd_problem = canonical_command_problem(cold.get("command") or "")
+        if cmd_problem:
+            problems.append(cmd_problem)
 
     # 锁内适配 2（kbint 增列）既然把活库套纳入收尾，就必须判它绿；
     # 容器场同理。只做「看板 vs 冻结日志」互撞是同源比较，无法发现红。
