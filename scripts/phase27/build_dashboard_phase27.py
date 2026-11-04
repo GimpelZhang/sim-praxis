@@ -86,20 +86,27 @@ def git_state() -> dict:
     }
 
 
-_SUMMARY_RE = re.compile(
-    r"^(?P<line>.*?(?P<passed>\d+) passed(?:, (?P<skipped>\d+) skipped)?"
-    r"(?:, (?P<deselected>\d+) deselected)?.+?)$", re.M)
+_SUMMARY_RE = re.compile(r"\b\d+ passed\b")
 
 
 def tests_state(result_path: "Path | None") -> dict:
-    """吃一套实跑日志：末条 pytest 摘要 + 唯一 rc 行 + `# cmd:` 头。"""
+    """吃一套实跑日志：唯一 pytest 摘要行 + 唯一 rc 行 + `# cmd:` 头。
+
+    各计数字段**按名提取**（pytest 的打印次序是 `failed, passed, skipped,
+    deselected`，不是固定次序），摘要行必须**恰一条**——多行摘要往往意味着
+    日志里混进了子进程的 pytest 输出，此时「取最后一条」很可能读错。
+    """
     if result_path is None or not Path(result_path).is_file():
         raise DashboardError(f"缺测试日志：{result_path}")
     text = Path(result_path).read_text(encoding="utf-8", errors="replace")
-    matches = list(_SUMMARY_RE.finditer(text))
-    if not matches:
+    lines = [ln.strip() for ln in text.splitlines() if _SUMMARY_RE.search(ln)]
+    if not lines:
         raise DashboardError(f"测试日志里找不到 pytest 摘要行：{result_path}")
-    m = matches[-1]
+    if len(lines) > 1:
+        raise DashboardError(
+            f"测试日志里 pytest 摘要行应恰 1 条，实得 {len(lines)} 条"
+            f"（疑似混入子进程输出）：{result_path}")
+    line = lines[0]
     rcs = re.findall(r"^rc=(\d+)$", text, re.M)
     if len(rcs) != 1:
         raise DashboardError(
@@ -109,12 +116,18 @@ def tests_state(result_path: "Path | None") -> dict:
         raise DashboardError(
             f"测试日志里 `# cmd:` 行应恰 1 条，实得 {len(cmds)} 条"
             f"（命令口径不可审）：{result_path}")
+
+    def _n(field: str) -> int:
+        m = re.search(rf"\b(\d+) {field}\b", line)
+        return int(m.group(1)) if m else 0
+
     return {
         "source": str(result_path),
-        "summary": m.group("line").strip(),
-        "passed": int(m.group("passed")),
-        "skipped": int(m.group("skipped") or 0),
-        "deselected": int(m.group("deselected") or 0),
+        "summary": line,
+        "passed": _n("passed"),
+        "failed": _n("failed"),
+        "skipped": _n("skipped"),
+        "deselected": _n("deselected"),
         "rc": int(rcs[0]),
         "command": cmds[0].strip(),
     }
@@ -220,9 +233,13 @@ def build(*, cold_run: Path, kbint: Path, container_run: Path,
         "kbint": tests_state(kbint),
         "container_run": tests_state(container_run),
     }
-    if tests["cold_run"]["rc"] != 0:
-        raise DashboardError(
-            f"冷跑 rc={tests['cold_run']['rc']} ≠ 0：看板不产")
+    # 「半张绿」守卫：任一段红即拒绝出板。冷跑是主判据，活库/容器套同样是
+    # 锁内适配 2 纳入收尾的判据——只守冷跑会让 kbint 红着也能出绿板。
+    for key in ("cold_run", "kbint", "container_run"):
+        blk = tests[key]
+        if blk["rc"] != 0 or blk["failed"] != 0:
+            raise DashboardError(
+                f"{key} rc={blk['rc']} failed={blk['failed']}：看板不产")
     return {
         "schema": SCHEMA,
         "version": "1.0",

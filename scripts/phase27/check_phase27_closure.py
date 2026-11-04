@@ -20,7 +20,10 @@
 5. **三签**：三份签署件存在、``verdict == "APPROVE"``、绑定 commit 与
    ``manifest.git_commit`` 相等；
 6. **交叉互证**：看板 ``git.commit`` == ``manifest.git_commit``；看板的
-   ``tests`` 三段与包内冻结日志逐字段相等；Complete 文档关键段存在。
+   ``tests`` 三段与包内冻结日志逐字段相等（含 ``failed``），且 kbint/容器场
+   必须 ``rc == 0``；看板的 ``ledger`` / ``lance_tables`` 段与机判独立重算的
+   结果相等；包内 ``cold_run.json`` ↔ ``cold_run.raw.log`` ↔
+   ``manifest.git_commit`` 三件自洽。
 
 用法：
   python scripts/phase27/check_phase27_closure.py [--report OUT.json]
@@ -165,7 +168,10 @@ def check_ledger(rows: "list[dict]", approvals_dir: Path) -> "tuple[dict, list[s
         by_batch[str(r.get("batch_id"))] = by_batch.get(
             str(r.get("batch_id")), 0) + 1
 
-    # 每张票必须有批准件，且用量不超票额（无票不许发网）
+    # 每张票必须有批准件，用量不超票额（无票不许发网），
+    # 且该批实呼的 (task, stage) 必须与票面声明**逐项一致**（AC-T7-2 的
+    # 「by_task/by_stage 与票一致」——只查票额会放过「改了 task 但仍挂在
+    # 原批次下」这种账实不符）。
     for batch_id, used in sorted(by_batch.items()):
         p = approvals_dir / f"{batch_id}.json"
         if not p.is_file():
@@ -177,6 +183,18 @@ def check_ledger(rows: "list[dict]", approvals_dir: Path) -> "tuple[dict, list[s
             problems.append(f"批准件 {batch_id} 的 approved 非 int：{cap!r}")
         elif used > cap:
             problems.append(f"批次 {batch_id} 用量 {used} 超票额 {cap}")
+
+        got = {(str(r.get("task")), str(r.get("stage")))
+               for r in calls if str(r.get("batch_id")) == batch_id}
+        want = {(str(appr.get("task")), str(appr.get("stage")))}
+        if got != want:
+            problems.append(
+                f"批次 {batch_id} 实呼的 (task, stage)={sorted(got)} 与票面"
+                f"声明 {sorted(want)} 不符")
+        if appr.get("batch_id") not in (None, batch_id):
+            problems.append(
+                f"批准件 {batch_id}.json 内的 batch_id={appr.get('batch_id')!r}"
+                f" 与文件名不符")
     known = {p.stem for p in approvals_dir.glob("*.json")}
     for batch_id in sorted(known - set(by_batch)):
         problems.append(f"批准件 {batch_id} 在账上没有任何实呼（空票）")
@@ -254,15 +272,28 @@ def check_pack(pack_dir: Path) -> "tuple[dict, list[str], list[str]]":
     commit = man.get("git_commit")
     if not commit:
         problems.append("manifest.git_commit 为空")
+    # 脏树上打的包不许绑定 HEAD 被三签认证（脏树 = 证据不对应任何提交）
+    if man.get("git_dirty") is not False:
+        problems.append(
+            f"证据包不是从干净树构建的（git_dirty={man.get('git_dirty')!r}）")
 
     files = man.get("files") or []
     if not files:
         problems.append("manifest.files 为空（空包不算通过）")
+    base = pack_dir.resolve()
     n_bad = 0
     for entry in files:
-        rel = entry.get("path")
+        rel = str(entry.get("path"))
         want = entry.get("sha256")
-        p = pack_dir / str(rel)
+        # 路径越界守卫：绝对路径 / `..` 会让 sha256 与 size 全部「对得上」，
+        # 却把判据指向包外的任意文件（空包 + 外部引用即可骗过纯哈希校验）
+        rp = (pack_dir / rel)
+        if (not rel or Path(rel).is_absolute() or ".." in Path(rel).parts
+                or base not in rp.resolve().parents):
+            problems.append(f"manifest 条目路径越界：{rel!r}")
+            n_bad += 1
+            continue
+        p = rp
         if not p.is_file():
             problems.append(f"包内缺件：{rel}")
             n_bad += 1
@@ -393,7 +424,9 @@ def _tests_block(text: str) -> dict:
 COLD_PASSED_FLOOR = 2198
 
 
-def check_cross(dashboard_path: Path, pack_dir: Path) -> "tuple[dict, list[str]]":
+def check_cross(dashboard_path: Path, pack_dir: Path,
+                ledger_summary: "dict | None" = None,
+                tables_summary: "dict | None" = None) -> "tuple[dict, list[str]]":
     problems: "list[str]" = []
     if not dashboard_path.is_file():
         return {}, [f"缺看板：{dashboard_path}"]
@@ -440,7 +473,7 @@ def check_cross(dashboard_path: Path, pack_dir: Path) -> "tuple[dict, list[str]]
         except ValueError as exc:
             problems.append(f"{fname} {exc}")
             continue
-        for field in ("command", "summary", "passed", "skipped",
+        for field in ("command", "summary", "passed", "failed", "skipped",
                       "deselected", "rc"):
             if blk.get(field) != want[field]:
                 problems.append(
@@ -448,16 +481,74 @@ def check_cross(dashboard_path: Path, pack_dir: Path) -> "tuple[dict, list[str]]
                     f"包内日志 {want[field]!r}")
 
     # AC-T7-1 口径：冷跑 rc=0、failed==0、passed ≥ 2198（锁内适配 1：
-    # 「新增测试数」单列，不与既有基线混算，故这里是地板不是等式）
+    # 「新增测试数」单列，不与既有基线混算，故这里是地板不是等式）。
+    # 注意：`failed` 必须**在场**才算数——缺键时 `.get()` 返回 None，
+    # 若写成 `if cold.get("failed"):` 则永久为假（死判据）。这里一律
+    # 与 0 做不等比较，缺键即 problem。
     cold = tests.get("cold_run") or {}
     if cold:
         if cold.get("rc") != 0:
             problems.append(f"冷跑 rc={cold.get('rc')!r} ≠ 0")
-        if cold.get("failed"):
+        if cold.get("failed") != 0:
             problems.append(f"冷跑 failed={cold.get('failed')!r} ≠ 0")
         if int(cold.get("passed") or 0) < COLD_PASSED_FLOOR:
             problems.append(
                 f"冷跑 passed={cold.get('passed')!r} < 地板 {COLD_PASSED_FLOOR}")
+
+    # 锁内适配 2（kbint 增列）既然把活库套纳入收尾，就必须判它绿；
+    # 容器场同理。只做「看板 vs 冻结日志」互撞是同源比较，无法发现红。
+    for key in ("kbint", "container_run"):
+        blk = tests.get(key) or {}
+        if blk.get("rc") != 0:
+            problems.append(
+                f"{key} rc={blk.get('rc')!r} ≠ 0（活库/容器套必须绿）")
+        if blk.get("failed") != 0:
+            problems.append(f"{key} failed={blk.get('failed')!r} ≠ 0")
+
+    # 看板自报的账与四表必须与机判**独立重算**的结果一致——否则看板整段
+    # 撒谎（例如把 67 写成 60）也能靠「看板 vs 冻结日志」同源自洽而过关。
+    if ledger_summary:
+        dled = dash.get("ledger") or {}
+        pairs = (("total_rows", "total_rows"), ("n_calls", "n_calls"),
+                 ("ok", "ok"), ("fail", "fail"), ("by_task", "by_task"),
+                 ("by_stage", "by_stage"), ("by_batch", "by_batch"),
+                 ("n_selfcheck", "selfcheck_rows"))
+        for dash_field, judge_field in pairs:
+            if dled.get(dash_field) != ledger_summary.get(judge_field):
+                problems.append(
+                    f"看板 ledger.{dash_field}={dled.get(dash_field)!r} ≠ "
+                    f"机判重算 {judge_field}={ledger_summary.get(judge_field)!r}")
+    if tables_summary:
+        dt = dash.get("lance_tables") or {}
+        for name, rows in (tables_summary.get("rows") or {}).items():
+            if dt.get(name) != rows:
+                problems.append(
+                    f"看板 lance_tables.{name}={dt.get(name)!r} ≠ 机判重算 {rows}")
+
+    # 包内冷跑三件套自洽：cold_run.json ↔ cold_run.raw.log ↔ manifest.git_commit
+    # （冷跑证据若来自别的提交，签了 HEAD 也等于没签）
+    cj, clog = pack_dir / "cold_run.json", pack_dir / "cold_run.raw.log"
+    if not cj.is_file() or not clog.is_file():
+        problems.append("包内缺 cold_run.json / cold_run.raw.log（冷跑证据不完整）")
+    else:
+        cdoc = json.loads(cj.read_text(encoding="utf-8"))
+        if cdoc.get("log_sha256") != _sha256(clog):
+            problems.append("包内 cold_run.json.log_sha256 ≠ 包内冷跑日志 sha256")
+        if commit and cdoc.get("commit") != commit:
+            problems.append(
+                f"包内 cold_run.json.commit={cdoc.get('commit')!r} ≠ "
+                f"manifest.git_commit={commit}（冷跑不在被签提交上）")
+        try:
+            parsed = _tests_block(clog.read_text(encoding="utf-8",
+                                                 errors="replace"))
+        except ValueError as exc:
+            problems.append(f"包内冷跑日志不可审：{exc}")
+        else:
+            for field in ("passed", "failed", "skipped", "deselected", "rc"):
+                if cdoc.get(field) != parsed[field]:
+                    problems.append(
+                        f"包内 cold_run.json.{field}={cdoc.get(field)!r} ≠ "
+                        f"日志 {parsed[field]!r}")
 
     return {"dashboard": str(dashboard_path), "git_commit": commit,
             "ac_total": ac["total"], "ac_ids_sha256": ac["ids_sha256"]}, problems
@@ -510,7 +601,11 @@ def build_report(*, root: Path, dashboard: Path, pack: Path,
 
     ac, p = count_acs()
     problems.extend(p)
-    rows = _rows_from(ledger)
+    if not ledger.is_file():
+        problems.append(f"账本不存在：{ledger}（账不可审即不可收尾）")
+        rows: "list[dict]" = []
+    else:
+        rows = _rows_from(ledger)
     led, p = check_ledger(rows, approvals)
     problems.extend(p)
     tables, p = check_tables(recycle)
@@ -519,7 +614,7 @@ def build_report(*, root: Path, dashboard: Path, pack: Path,
     problems.extend(p)
     sign_sum, p = check_signs(signs, pack_sum.get("git_commit"))
     problems.extend(p)
-    cross, p = check_cross(dashboard, pack)
+    cross, p = check_cross(dashboard, pack, led, tables)
     problems.extend(p)
     check_gaps(gaps, problems)
 

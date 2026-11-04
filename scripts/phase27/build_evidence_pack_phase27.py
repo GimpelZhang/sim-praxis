@@ -190,11 +190,18 @@ def _normalize_modes(pack: Path) -> dict:
 
 
 def _check_clean_target(pack: Path, root: Path) -> None:
-    """`--clean` 的删除守卫：目标必须是 Phase 2.7 根下的 evidence_pack 字面名。"""
+    """`--clean` 的删除守卫：目标必须是 Phase 2.7 根下**本 Task 的** evidence_pack。
+
+    只查「名为 evidence_pack 且在根下」是不够的——那会允许删掉
+    `$ROOT/task5_roadmap/evidence_pack` 这类**兄弟任务**的证据包。
+    """
     rp = pack.resolve()
     rr = root.resolve()
     if rp.name != "evidence_pack":
         raise PackError(f"--clean 只允许删名为 evidence_pack 的目录：{rp}")
+    if rp.parent.name != "task7_milestone":
+        raise PackError(
+            f"--clean 只允许删 task7_milestone/evidence_pack，目标为：{rp}")
     if rr not in rp.parents:
         raise PackError(f"--clean 目标越出 Phase 2.7 根：{rp} 不在 {rr} 之下")
 
@@ -265,6 +272,7 @@ def build(*, root: Path, pack: Path, clean: bool,
         "policy": {
             "max_file_bytes": MAX_FILE_BYTES,
             "no_symlinks": True,
+            "clean_rebuild": bool(clean),
             "excluded_top_dirs": sorted(SKIP_TOP_DIRS),
             "excluded_suffixes": list(SKIP_SUFFIXES),
             "modes": {"dirs": "0700", "files": "0600"},

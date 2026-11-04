@@ -115,11 +115,18 @@ def test_ac_t7_1_cold_run():
     assert parsed["passed"] >= COLD_PASSED_FLOOR, (
         f"冷跑 passed={parsed['passed']} < 地板 {COLD_PASSED_FLOOR}")
 
-    # 命令口径：逐字等于 CLAUDE.md 收尾命令（两排除项缺一即 FAIL）
+    # 命令口径：必须是 CLAUDE.md 收尾命令的**逐字形态**——解释器 + 固定参数
+    # 尾部，尾部之前不得再夹任何旗标（否则 `--ignore=…` 这类「少收几条测试」
+    # 也能骗过子串检查）。
+    _CANON = ('-m pytest tests -q -k "not test_04" '
+              '-m "not paid and not kb_integration"')
     cmd = parsed["command"]
-    assert "not test_04" in cmd, f"冷跑命令缺 `not test_04`：{cmd}"
-    assert 'not paid and not kb_integration' in cmd, (
-        f"冷跑命令缺两排除项：{cmd}")
+    assert cmd.endswith(_CANON), (
+        f"冷跑命令不是 CLAUDE.md 的逐字形态（尾部应为 {_CANON!r}）：{cmd}")
+    prefix = cmd[:-len(_CANON)]
+    assert prefix and " " not in prefix and "--" not in prefix, (
+        f"冷跑命令在解释器与固定尾部之间夹了额外参数：{prefix!r}")
+    assert "--ignore" not in cmd, "冷跑命令不得 --ignore 任何测试文件"
 
     doc = _read_json(milestone() / "cold_run.json")
     assert doc.get("schema") == COLD_JSON_SCHEMA, doc.get("schema")
@@ -158,7 +165,9 @@ def test_ac_t7_2_ledger_reconcile():
     n_calls = doc["summary"]["call_rows"]
     assert n_calls <= HARD_CAP, f"实呼 {n_calls} 超硬帽 {HARD_CAP}"
 
-    # 每张票都必须有批准件，且用量不超票额（无票不许发网）
+    # 每张票都必须有批准件，用量不超票额（无票不许发网），且该批实呼的
+    # (task, stage) 必须与票面声明逐项一致——只查票额会放过「把 task 从 4
+    # 改成 6 但仍挂在 P27-B1 下」这种账实不符（AC-T7-2 的 by_task/by_stage 口径）
     by_batch: "dict[str, int]" = {}
     for r in rows:
         if r.get("event") == "call":
@@ -169,9 +178,19 @@ def test_ac_t7_2_ledger_reconcile():
     for batch_id, used in by_batch.items():
         p = approvals / f"{batch_id}.json"
         assert p.is_file(), f"批次 {batch_id} 有 {used} 呼但没有批准件：{p}"
-        cap = _read_json(p).get("approved")
+        doc = _read_json(p)
+        cap = doc.get("approved")
         assert isinstance(cap, int), f"批准件 {batch_id} 的 approved 非 int"
         assert used <= cap, f"批次 {batch_id} 用量 {used} 超票额 {cap}"
+
+        want = {(str(doc.get("task")), str(doc.get("stage")))}
+        got = {(str(r.get("task")), str(r.get("stage")))
+               for r in rows
+               if r.get("event") == "call"
+               and str(r.get("batch_id")) == batch_id}
+        assert got == want, (
+            f"批次 {batch_id} 实呼 (task, stage)={sorted(got)} 与票面声明 "
+            f"{sorted(want)} 不符")
 
 
 # ------------------------------------------------------------------ AC-T7-3
@@ -314,5 +333,25 @@ def test_ac_t7_7_closure_judge():
     for g in gaps:
         for field in ("tag", "what", "why_not_pass", "owner"):
             assert g.get(field), f"gap {g.get('tag')} 缺字段 {field}"
-    assert rep["checks"]["evidence_pack"]["git_commit"] == _head(), (
+    pack_sum = rep["checks"]["evidence_pack"]
+    assert pack_sum["git_commit"] == _head(), (
         "机判里的证据包 commit 与 HEAD 不符（判决件过期）")
+
+    # 判决件必须与**当前盘上的**证据包/签署件逐字节对齐——只比 commit 会放过
+    # 「签完又改了证据包/换了签署件但没重跑机判」的陈旧判决件。
+    man = _read_json(milestone() / "evidence_pack" / "manifest.json")
+    assert pack_sum["n_files"] == man["n_files"], (
+        f"机判记的包件数 {pack_sum['n_files']} ≠ manifest {man['n_files']}")
+    assert pack_sum["bytes"] == man["total_bytes"], (
+        f"机判记的包字节 {pack_sum['bytes']} ≠ manifest {man['total_bytes']}")
+
+    signs = rep["checks"]["signs"]
+    assert set(signs) == {"executor", "reviewer", "verifier"}, (
+        f"机判签署件不齐：{sorted(signs)}")
+    for role, blk in signs.items():
+        p = milestone() / "signs" / f"{role}.json"
+        assert p.is_file(), f"缺签署件：{p}"
+        assert blk.get("sha256") == _sha256(p), (
+            f"机判记的 {role} 签署件 sha 与盘上不符（签后改动未重判）")
+        assert blk.get("commit") == _head(), (
+            f"机判记的 {role} 绑定 commit {blk.get('commit')} ≠ HEAD")
