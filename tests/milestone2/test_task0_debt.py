@@ -823,7 +823,11 @@ CALL_CACHE_ALLOWLIST = {
     # Phase 2.7 Task0（锁内适配 L-8）：build_seq_provider 缺省命名空间随活跃账
     # 换期（phase26→phase27，phase26 已封存）+ docstring 多 1 行，全部在构造点
     # 之前，纯位移（229→230）；构造表达式逐字未改，0 新增落点、0 新增网关调用。
-    ("orchestrator/agentic/wiring.py", 230),
+    # Phase 2.7 Task3（D3-7）：默认 CallReplay 处的键空间注释由 2 行扩为 4 行
+    # （agentic-v2-/v3-/v4- 三纪元前缀分隔，说明 v4 键空间天然为空），全在构造点
+    # 之前，纯位移（230→232）；构造表达式 `CallReplay(phase1_root() / ".call_cache")`
+    # 逐字未改，0 新增落点、0 新增网关调用。
+    ("orchestrator/agentic/wiring.py", 232),
 }
 
 
