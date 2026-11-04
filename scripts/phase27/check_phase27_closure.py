@@ -278,9 +278,12 @@ def check_pack(pack_dir: Path) -> "tuple[dict, list[str], list[str]]":
         if p.stat().st_size > MAX_FILE_BYTES:
             problems.append(f"包内 >10MB 文件：{rel}")
             n_bad += 1
-        if int(entry.get("size") or -1) != p.stat().st_size:
+        # 注意：空文件 size==0 是**合法值**，不能写成 `entry.get("size") or -1`
+        # （0 是 falsy，会把合法的空文件误判成登记不符）
+        declared_size = entry.get("size")
+        if declared_size is None or int(declared_size) != p.stat().st_size:
             problems.append(
-                f"包内登记大小不符：{rel} {entry.get('size')!r} ≠ "
+                f"包内登记大小不符：{rel} {declared_size!r} ≠ "
                 f"{p.stat().st_size}")
 
     on_disk = {p.relative_to(pack_dir).as_posix()
