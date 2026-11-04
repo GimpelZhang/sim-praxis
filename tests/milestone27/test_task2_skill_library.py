@@ -46,9 +46,12 @@ TWO_EXCLUSIONS = '-m "not paid and not kb_integration"'
 # Task 2 首灌四件 + Task 4 依 BR-4/D4-4 追加的 wall_b.instruments（KB cd5cdad）。
 # 断言形态不变：仍是「清单逐名与磁盘逐件 sha 双向相等」，追加只改基线不改口径
 # （Complete §5.0b #14：Task 4 登记第五件技能后，Task 2 的两条钉死基线随之刷新）。
+# Task 6（2026-11-04，KB b5de4bd 回收 04_libero_vla）再追加第六件
+# libero.vla_episodes——同样是「刷新基线、不放水」：全等断言形态不变。
 EXPECTED_SKILLS = (
     "common.math_3d",
     "libero.env_boot",
+    "libero.vla_episodes",
     "maniskill.pushcube",
     "mujoco.contact_push",
     "wall_b.instruments",
@@ -267,7 +270,7 @@ def test_ac_t2_4_engine_never_imports_skills():
 
 @pytest.mark.kb_integration
 def test_ac_t2_5_four_tables_unchanged(monkeypatch):
-    """本 Task 不写任何表：四表行数恒 1542 / 44 / 94 / 1。"""
+    """本 Task 不写任何表：四表行数恒 1542 / 44 / 106 / 1。"""
     require_kb_integration(data=True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
@@ -279,7 +282,10 @@ def test_ac_t2_5_four_tables_unchanged(monkeypatch):
 
     db = lancedb.connect(kb_pins.default_lancedb_uri())
     assert db.open_table("kb_chunks").count_rows() == 1542
-    assert db.open_table("solution_chunks").count_rows() == 94
+    # 锁内适配（Task 6 回收窗口 2026-11-04）：Task 2 自身的「不写表」语义不变
+    # ——本测仍只读；94→106 是 Task 6 回收 04_libero_vla（12 块）后的活表基线
+    # 纯事实前进。断言形态不变（仍是精确等值，不是 >=）。
+    assert db.open_table("solution_chunks").count_rows() == 106
     assert LearningStore().count() == 44
     assert EvolutionStore().count() == 1
 

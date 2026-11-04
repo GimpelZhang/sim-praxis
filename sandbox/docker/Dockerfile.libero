@@ -1,0 +1,137 @@
+# Phase 2.7 Task 6：LIBERO + VLA 专用镜像（物理隔离，BR-5 裁决）
+#
+# 隔离纪律（AC-T6-7）：
+# - 本镜像内的依赖**不进**主 venv `/mnt/venvs/simpraxis`（S0 before/after 逐字节相等）；
+# - LIBERO 生态要求 robosuite 1.4.0 + mujoco 2.3.7（与硬规则 8 的 mujoco 3.15.0
+#   不同版本），差异由 BR-5「物理隔离」裁定承载：只在本镜像内生效；
+# - OPENVLA/Octo 的 transformers/timm 版本也只在本镜像内，宿主主 venv 不动。
+#
+# 构建（BuildKit，additional context 指向 LIBERO tour，tour 本体只作依赖、不实跑）：
+#   docker build --network host \
+#     --build-context libero=/mnt/assets/simpraxis/tours/LIBERO_tour \
+#     -f sandbox/docker/Dockerfile.libero -t sim-praxis/libero:task6 sandbox/docker
+FROM nvidia/cuda:12.4.1-base-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 LANG=C.UTF-8 \
+    MUJOCO_GL=egl PYOPENGL_PLATFORM=egl \
+    HF_ENDPOINT=https://hf-mirror.com \
+    PYTHONPATH=/opt/libero-src
+
+# 1) apt 清华源 + 渲染/编解码依赖
+RUN set -eux; \
+    if [ -f /etc/apt/sources.list ]; then \
+      sed -i -E 's@https?://(archive|security|ports).ubuntu.com/ubuntu@https://mirrors.tuna.tsinghua.edu.cn/ubuntu@g' /etc/apt/sources.list; \
+    fi; \
+    if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+      sed -i -E 's@https?://(archive|security).ubuntu.com/ubuntu@https://mirrors.tuna.tsinghua.edu.cn/ubuntu@g' /etc/apt/sources.list.d/ubuntu.sources; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip python3-dev python3-venv \
+      build-essential cmake pkg-config git curl wget ca-certificates \
+      libegl1 libegl1-mesa-dev libgl1 libgl1-mesa-dev libgles2 libgles2-mesa-dev \
+      libglvnd-dev libglu1-mesa-dev libglx0 libosmesa6 libosmesa6-dev \
+      mesa-utils x11-utils xvfb ffmpeg \
+      libglew-dev libxrandr2 libxinerama1 libxcursor1 libxi6 libxext6 libx11-6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2) pip 清华源
+RUN python3 -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple \
+    && python3 -m pip config set global.trusted-host pypi.tuna.tsinghua.edu.cn \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# 3) torch 2.4.1：先官方 cu124 索引，失败回退清华默认 wheel（自带 CUDA 运行时）
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1 \
+      --index-url https://download.pytorch.org/whl/cu124 \
+    || python3 -m pip install --no-cache-dir torch==2.4.1 torchvision==0.19.1
+
+# 4) LIBERO 生态：robosuite 1.4.0 + mujoco 2.3.7（LIBERO 时代版本）+ bddl
+#    numpy 钉 1.26.4（主仓口径；bddl/robosuite 都兼容）
+RUN PIP_DEFAULT_TIMEOUT=180 PIP_RETRIES=10 python3 -m pip install --no-cache-dir \
+      numpy==1.26.4 scipy==1.13.1 numba==0.60.0 \
+      mujoco==2.3.7 robosuite==1.4.0 bddl==1.0.1 \
+      cloudpickle==2.1.0 easydict==1.9 future==0.18.2 \
+      gym==0.25.2 h5py==3.11.0 termcolor==2.4.0 hydra-core==1.2.0 \
+      opencv-python==4.10.0.84 "imageio[ffmpeg]==2.36.1"
+
+# 5) VLA 依赖（OpenVLA 最小集 + Octo 所需的 transformers 侧件）
+RUN PIP_DEFAULT_TIMEOUT=180 PIP_RETRIES=10 python3 -m pip install --no-cache-dir \
+      transformers==4.40.1 tokenizers==0.19.1 timm==0.9.10 \
+      accelerate==0.33.0 sentencepiece==0.2.0 einops==0.8.0 safetensors==0.4.5 \
+      pillow==10.4.0
+
+# 5b) LIBERO 运行期还需要的杂项（2026-11-04 第二次构建断言抓到：`env_wrapper.py`
+#     顶部 `import matplotlib.cm`，镜像里没有 ⇒ import 链断在 `envs` 上）。
+#     单独成层是为了不失效第 5 层的缓存（构建机带宽 ~260 KB/s，重跑一层≈十几分钟）。
+RUN PIP_DEFAULT_TIMEOUT=180 PIP_RETRIES=10 python3 -m pip install --no-cache-dir \
+      matplotlib==3.8.4 PyYAML==6.0.1 tqdm==4.66.4
+
+# 6) LIBERO 包（tour 副本，只装不改；tour 本体不在镜像内实跑）
+#
+# 适配（2026-11-04，首跑即撞：`ModuleNotFoundError: No module named 'libero'`）：
+#   LIBERO 仓根下的 `libero/` 是**命名空间目录**（`libero/__init__.py` 不存在，
+#   真正的包是同级的 `libero/libero/`）。`setup.py` 的 `find_packages()` 只会装
+#   `libero.libero` / `libero.lifelong`，editable finder 里没有顶层 `libero` 的映射，
+#   于是 `from libero.libero import benchmark` 在解析父包时就断了。
+#   修法：不靠 editable 映射，直接把**仓根**挂到 `PYTHONPATH`（见上方 ENV），
+#   顶层 `libero` 作为隐式命名空间包即可解析。editable 安装保留（entry_points 用）。
+COPY --from=libero /libero /opt/libero-src/libero
+COPY --from=libero /setup.py /opt/libero-src/setup.py
+COPY --from=libero /README.md /opt/libero-src/README.md
+COPY --from=libero /benchmark_scripts /opt/libero-src/benchmark_scripts
+RUN cd /opt/libero-src && python3 -m pip install --no-cache-dir -e . --no-deps
+
+# 7) LIBERO 配置文件的**预生成**：`libero/libero/__init__.py` 在 `~/.libero/config.yaml`
+#    缺失时会调 `input()` 询问路径——容器内无 TTY 会直接 EOFError。构建期写死，
+#    并把 benchmark_root 指到镜像内真实路径（bddl_files/init_files/assets 都在这棵树下）。
+RUN set -eux; \
+    for H in /root /home/agent; do \
+      mkdir -p "$H/.libero"; \
+      python3 -c "import yaml,os,sys; \
+root='/opt/libero-src/libero/libero'; \
+cfg={'benchmark_root': root, \
+     'bddl_files': os.path.join(root,'bddl_files'), \
+     'init_states': os.path.join(root,'init_files'), \
+     'datasets': os.path.join(root,'..','datasets'), \
+     'assets': os.path.join(root,'assets')}; \
+open(sys.argv[1],'w').write(yaml.dump(cfg))" "$H/.libero/config.yaml"; \
+    done
+
+# 8) 构建期断言：版本 + **真实 import 链**（上次是只验版本、没验 import，结果
+#    首跑才撞 `No module named 'libero'`——构建期就该红）。不进 GPU、不渲染。
+RUN python3 -c "import importlib.metadata as m, torch, numpy; \
+    assert torch.__version__.startswith('2.4.1'), torch.__version__; \
+    assert numpy.__version__ == '1.26.4', numpy.__version__; \
+    assert m.version('robosuite') == '1.4.0'; \
+    assert m.version('mujoco') == '2.3.7'; \
+    assert m.version('bddl') == '1.0.1'; \
+    assert m.version('transformers') == '4.40.1'; \
+    assert m.version('timm') == '0.9.10'; \
+    import libero, libero.libero; \
+    from libero.libero import benchmark, get_libero_path; \
+    _b = benchmark.get_benchmark_dict(); \
+    assert 'libero_object' in _b, sorted(_b)[:5]; \
+    _p = get_libero_path('bddl_files'); \
+    import os; assert os.path.isdir(_p), _p; \
+    from libero.libero.envs import OffScreenRenderEnv; \
+    print('libero image OK', libero.__path__, _p)"
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute,display
+
+# 8b) 构建期断言以 root 跑过 `import robosuite`，它在 `/tmp/robosuite.log` 落了
+#     一个 root:644 的日志文件；容器以 `--user 1000:1000` 运行时 robosuite 打开
+#     同一路径会 PermissionError（2026-11-04 实测）。清掉并让 /tmp 可写。
+RUN rm -f /tmp/robosuite.log && chmod 1777 /tmp
+
+ARG UID=1000
+ARG GID=1000
+RUN set -eux; \
+    if ! getent group "$GID" >/dev/null; then groupadd -g "$GID" agent; fi; \
+    if ! id agent >/dev/null 2>&1; then useradd -u "$UID" -g "$GID" -m -s /bin/bash agent; fi; \
+    mkdir -p /home/agent/.cache/huggingface /home/agent/weights /home/agent/runs \
+    && chown -R "$UID:$GID" /home/agent
+
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

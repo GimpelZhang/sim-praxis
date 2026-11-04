@@ -564,10 +564,15 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
 
     tbl = ing.table()
     df = tbl.to_pandas()
+    # 锁内适配（规格 §8 活表基线对账）：第五→第六方案。Phase 2.7 Task 6 的
+    # Gate2 三卡 approve（2026-11-04T12:00:13Z）之后按 AC-T6-5 回收
+    # track1_tools/04_libero_vla（KB b5de4bd），solution_chunks 94→106。
+    # 断言形态不变：仍是「活库 solution_id 集合与规范集全等」，只是基线前进。
     assert set(df["solution_id"].unique()) == {
         "track1_tools/01_maniskill_pushcube",
         "track1_tools/02_mujoco_contact_push",
         "track1_tools/03_libero",
+        "track1_tools/04_libero_vla",
         "track2_questions/01_ice_floor_humanoid_dr",
         "track2_questions/02_lidar_weather"}
     assert set(df["kind"].unique()) == {"readme", "manifest", "code"}
@@ -578,6 +583,7 @@ def test_solution_chunks_recall_old_tables_frozen(monkeypatch):
         "track1_tools/01_maniskill_pushcube": 15,
         "track1_tools/02_mujoco_contact_push": 10,
         "track1_tools/03_libero": 12,
+        "track1_tools/04_libero_vla": 12,
         "track2_questions/01_ice_floor_humanoid_dr": 22,
         "track2_questions/02_lidar_weather": 35}
 

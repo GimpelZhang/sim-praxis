@@ -84,6 +84,9 @@ EXPECTED_SOLUTION_IDS: tuple[str, ...] = (
     "track1_tools/01_maniskill_pushcube",
     "track1_tools/02_mujoco_contact_push",
     "track1_tools/03_libero",
+    # Phase 2.7 Task 6 回收（2026-11-04，Gate2 三卡 approve 后）：LIBERO +
+    # OpenVLA-7B 策略臂，诚实负结果（主策略 0/10、对照臂缺失，逐条降级披露）。
+    "track1_tools/04_libero_vla",
     "track2_questions/01_ice_floor_humanoid_dr",
     "track2_questions/02_lidar_weather",
 )

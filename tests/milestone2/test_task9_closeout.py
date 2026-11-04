@@ -914,7 +914,10 @@ def test_live_four_table_counts():
     # 十二行（2026-10-28：human_failure_gate2 3 ＋ human_failure_agent_run 9），
     # 几何无关；换嵌入前后 phase1 id 集逐字相等（后窗产物④ verdict=pass）。
     assert tmap["phase1_learnings"]["rows"] == 44
-    assert tmap["solution_chunks"]["rows"] == 94
+    # 锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：94→106 纯事实刷新——
+    # Gate2 三卡 approve 后回收 solutions/track1_tools/04_libero_vla（KB
+    # b5de4bd）12 块；老两表 kb_chunks/phase1_learnings 冻结不变。
+    assert tmap["solution_chunks"]["rows"] == 106
     # 锁内适配（2026-10-27 攒批86 活表对账）：phase2_learnings 表已建——Task6
     # Gate2 accept 后 persist 首行落库（66bafb1d，run27，rung=3），M2 时点
     # 「未建表」断言随活表现实更新为恰 1 行。

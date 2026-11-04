@@ -8,13 +8,13 @@
       "kb_chunks": "35d4bf61849c3108348a0aa61bea89a269a2bd748b115dc2105b83de88da1b72",
       "phase1_learnings": "022341f732776f33b33314db3e34ddfd915c9ed2ab88cfe6f8c0c9e87af43a9d",
       "phase2_learnings": "82058d2fa23796c4130749ef0a86dce1504aeff3648ddde0caa7f3fbb5731b4e",
-      "solution_chunks": "cdab79c7e1de3d6bd821d28e65c8ac60ac412ccac3ba4c94bf5be90a4fd68197"
+      "solution_chunks": "5081fab04bc8d629b83913633f6bbc5c66399feaae4e3598242d1b95975a8129"
     },
     "table_rows": {
       "kb_chunks": 1542,
       "phase1_learnings": 44,
       "phase2_learnings": 1,
-      "solution_chunks": 94
+      "solution_chunks": 106
     },
     "top_k": 8,
     "uri": "/home/vipuser/embodied-ai-sim-knowledge-base/data/lancedb"
@@ -38,10 +38,10 @@
           "2e7d3ac99db9cbb7e791f8355f13af51",
           "c685ddb05301e1dad8dbf713b3df64d2",
           "947d4633823cd48f901678879f59c41a",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "018286cd723b0a4e95bbb09d0b4b56b0",
-          "94ea9d7d55ea86ad807d6131f32f2116",
-          "85cecf4469e244080bd003f2e16b2453"
+          "94ea9d7d55ea86ad807d6131f32f2116"
         ]
       },
       {
@@ -51,10 +51,10 @@
           "ca8c9e45328b9d258ca59f89a4149b99",
           "2e7d3ac99db9cbb7e791f8355f13af51",
           "c685ddb05301e1dad8dbf713b3df64d2",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "018286cd723b0a4e95bbb09d0b4b56b0",
-          "94ea9d7d55ea86ad807d6131f32f2116",
-          "85cecf4469e244080bd003f2e16b2453"
+          "94ea9d7d55ea86ad807d6131f32f2116"
         ]
       },
       {
@@ -64,10 +64,10 @@
           "c685ddb05301e1dad8dbf713b3df64d2",
           "947d4633823cd48f901678879f59c41a",
           "9a15e94c83e73ca331cfdd5b4420feed",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "94ea9d7d55ea86ad807d6131f32f2116",
-          "018286cd723b0a4e95bbb09d0b4b56b0",
-          "cc5167b3ec658f8cbbd13ec7ace0303b"
+          "018286cd723b0a4e95bbb09d0b4b56b0"
         ]
       },
       {
@@ -77,10 +77,10 @@
           "ca8c9e45328b9d258ca59f89a4149b99",
           "2e7d3ac99db9cbb7e791f8355f13af51",
           "947d4633823cd48f901678879f59c41a",
+          "dffe749a07b7fd97953e048d418a54c6",
           "018286cd723b0a4e95bbb09d0b4b56b0",
           "8fc302da5604bd93df72c10d0c7cc740",
-          "94ea9d7d55ea86ad807d6131f32f2116",
-          "a13906551ee98fe4311469fc57d1c9f1"
+          "94ea9d7d55ea86ad807d6131f32f2116"
         ]
       },
       {
@@ -90,10 +90,10 @@
           "947d4633823cd48f901678879f59c41a",
           "c685ddb05301e1dad8dbf713b3df64d2",
           "ca8c9e45328b9d258ca59f89a4149b99",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "94ea9d7d55ea86ad807d6131f32f2116",
-          "018286cd723b0a4e95bbb09d0b4b56b0",
-          "2e7d3ac99db9cbb7e791f8355f13af51"
+          "018286cd723b0a4e95bbb09d0b4b56b0"
         ]
       },
       {
@@ -103,10 +103,10 @@
           "7f9bdabc4e7286f7c1d58ce8972fea64",
           "c685ddb05301e1dad8dbf713b3df64d2",
           "2e7d3ac99db9cbb7e791f8355f13af51",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "018286cd723b0a4e95bbb09d0b4b56b0",
-          "94ea9d7d55ea86ad807d6131f32f2116",
-          "85cecf4469e244080bd003f2e16b2453"
+          "94ea9d7d55ea86ad807d6131f32f2116"
         ]
       },
       {
@@ -116,10 +116,10 @@
           "2e7d3ac99db9cbb7e791f8355f13af51",
           "77444cbfec27c5e08dc037835e4768c7",
           "947d4633823cd48f901678879f59c41a",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "94ea9d7d55ea86ad807d6131f32f2116",
-          "018286cd723b0a4e95bbb09d0b4b56b0",
-          "568774a54aafefd210e280b632441d23"
+          "018286cd723b0a4e95bbb09d0b4b56b0"
         ]
       },
       {
@@ -129,10 +129,10 @@
           "7f9bdabc4e7286f7c1d58ce8972fea64",
           "c685ddb05301e1dad8dbf713b3df64d2",
           "2e7d3ac99db9cbb7e791f8355f13af51",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "94ea9d7d55ea86ad807d6131f32f2116",
-          "3527610366e86230cfe32c64d8ebb815",
-          "4a32f893011654600def9a93a3567b23"
+          "3527610366e86230cfe32c64d8ebb815"
         ]
       },
       {
@@ -142,23 +142,23 @@
           "947d4633823cd48f901678879f59c41a",
           "ca8c9e45328b9d258ca59f89a4149b99",
           "c685ddb05301e1dad8dbf713b3df64d2",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "018286cd723b0a4e95bbb09d0b4b56b0",
-          "4a32f893011654600def9a93a3567b23",
-          "94ea9d7d55ea86ad807d6131f32f2116"
+          "4a32f893011654600def9a93a3567b23"
         ]
       },
       {
         "query": "LIBERO stage1 setrlimit RLIMIT_NOFILE MUJOCO_GL egl OffScreenRenderEnv import",
         "solution_hit_ids": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
           "947d4633823cd48f901678879f59c41a",
           "2e7d3ac99db9cbb7e791f8355f13af51",
           "c685ddb05301e1dad8dbf713b3df64d2",
-          "ca8c9e45328b9d258ca59f89a4149b99",
           "8fc302da5604bd93df72c10d0c7cc740",
+          "dffe749a07b7fd97953e048d418a54c6",
           "94ea9d7d55ea86ad807d6131f32f2116",
-          "cc5167b3ec658f8cbbd13ec7ace0303b",
-          "018286cd723b0a4e95bbb09d0b4b56b0"
+          "cc5167b3ec658f8cbbd13ec7ace0303b"
         ]
       },
       {
@@ -168,10 +168,10 @@
           "c685ddb05301e1dad8dbf713b3df64d2",
           "947d4633823cd48f901678879f59c41a",
           "2e7d3ac99db9cbb7e791f8355f13af51",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "018286cd723b0a4e95bbb09d0b4b56b0",
-          "94ea9d7d55ea86ad807d6131f32f2116",
-          "4a32f893011654600def9a93a3567b23"
+          "94ea9d7d55ea86ad807d6131f32f2116"
         ]
       },
       {
@@ -181,10 +181,10 @@
           "c685ddb05301e1dad8dbf713b3df64d2",
           "947d4633823cd48f901678879f59c41a",
           "ca8c9e45328b9d258ca59f89a4149b99",
+          "dffe749a07b7fd97953e048d418a54c6",
           "8fc302da5604bd93df72c10d0c7cc740",
           "94ea9d7d55ea86ad807d6131f32f2116",
-          "4a32f893011654600def9a93a3567b23",
-          "018286cd723b0a4e95bbb09d0b4b56b0"
+          "4a32f893011654600def9a93a3567b23"
         ]
       }
     ],
@@ -193,18 +193,16 @@
       "2e7d3ac99db9",
       "3527610366e8",
       "4a32f8930116",
-      "568774a54aaf",
       "77444cbfec27",
       "7f9bdabc4e72",
-      "85cecf4469e2",
       "8fc302da5604",
       "947d4633823c",
       "94ea9d7d55ea",
       "9a15e94c83e7",
-      "a13906551ee9",
       "c685ddb05301",
       "ca8c9e45328b",
-      "cc5167b3ec65"
+      "cc5167b3ec65",
+      "dffe749a07b7"
     ]
   },
   "schema": "simpraxis.phase25.task6_r3_prod_union.v1",

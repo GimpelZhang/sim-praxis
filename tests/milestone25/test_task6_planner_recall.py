@@ -1118,7 +1118,14 @@ def _load_frozen_iter3_report() -> dict:
 
 
 @pytest.mark.kb_integration
-def test_live_four_table_invariants_1542_44_94_1(monkeypatch):
+def test_live_four_table_invariants_1542_44_106_1(monkeypatch):
+    """活四表基线：kb/learnings/phase2 三表冻结，solution_chunks 随回收前进。
+
+    锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：测试名与断言里的
+    solution_chunks 94→106 是同一件事的两处登记——Gate2 三卡 approve 后
+    回收 track1_tools/04_libero_vla（KB b5de4bd）12 块，老两表与 phase2
+    一行未动。断言仍是精确等值（不是 `>=`），主线不动。
+    """
     require_kb_integration(data=True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     monkeypatch.setenv("TRANSFORMERS_OFFLINE", "1")
@@ -1130,7 +1137,7 @@ def test_live_four_table_invariants_1542_44_94_1(monkeypatch):
 
     db = lancedb.connect(kb_pins.default_lancedb_uri())
     assert db.open_table("kb_chunks").count_rows() == 1542
-    assert db.open_table("solution_chunks").count_rows() == 94
+    assert db.open_table("solution_chunks").count_rows() == 106
     assert LearningStore().count() == 44
     assert EvolutionStore().count() == 1
     # 活库只读红线：四路召回全程不建表、不写块。
@@ -1187,8 +1194,13 @@ def test_live_task6_3_libero_scoped_seam_12_prod_union_3(monkeypatch):
         assert head["solution_id"] == LIBERO_SOLUTION_ID
         assert head["top_k"] == 8
         assert snap["source_queries"] == LIBERO_VLA_QUERIES
+        # 锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：快照按机产脚本
+        # scripts/phase25/gen_r3_prod_union_snapshot.py 在 106 行活库上重产
+        # （两次运行逐字节相同），故表行数、id 集 sha 与 per_query 全部随
+        # 机产件前进；手写字面量只登记「该快照产在哪一档活表上」，等式仍是
+        # 「快照 == 活库」的精确等值。scoped-12 交集 8 席逐位未变（见 §7）。
         assert head["table_rows"] == {
-            "kb_chunks": 1542, "solution_chunks": 94,
+            "kb_chunks": 1542, "solution_chunks": 106,
             "phase1_learnings": 44, "phase2_learnings": 1}
         assert head["table_id_set_sha256"] == _live_table_id_shas()
         assert set(snap["scoped_seam_prefixes"]) == LIBERO_12_PREFIXES

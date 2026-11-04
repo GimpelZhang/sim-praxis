@@ -52,6 +52,39 @@ TASK_ID = 4
 BATCHES = ("P27-B1", "P27-B1b")
 ENVELOPE = {"P27-B1": p27.MODE_R["total"], "P27-B1b": p27.MODE_N["total"]}
 
+
+def _batch_scope_violations() -> list[str]:
+    """D4-8b 的原义：Task 4 不得为「额度转移」另开第三张票。
+
+    锁内适配（Phase 2.7 Task 6，2026-11-04）：计划 §T6 明确给 Task 6 开了它
+    自己的批次 `P27-B2`（帽 85）。原写法把「phase27 批准件目录里只许出现
+    P27-B1/B1b」当作 D4-8b 的判据，这其实是**全局**判法——会把 Task 6 的
+    计划内批次误判成「第三张票」。改为按**归属**判，且多两条更硬的闸门：
+
+    ① Task 4 自己的实呼行只许落在 B1/B1b（转移票若开给 task4 必被抓住）；
+    ② 账上出现的每个 batch_id 都必须有批准件（无票不许发网）；
+    ③ 任何批准件不得是「task=4 但批次不在 B1/B1b」（转移专用票的真正形态）。
+
+    判据强度不降：原全局判法能抓的三类问题，新写法逐类都能抓，且①②是新增
+    的收紧方向。
+    """
+    paid = [r for r in ledger_rows() if r.get("event") == "call"]
+    approvals = QuotaLedger.phase27().ns.approvals_dir_fn()
+    problems: list[str] = []
+    stray_task4 = sorted({r.get("batch_id") or "" for r in paid
+                          if r.get("task") == TASK_ID} - set(BATCHES) - {""})
+    if stray_task4:
+        problems.append(f"task4 实呼落在计划外批次：{stray_task4}")
+    have = {p.stem for p in approvals.glob("*.json")}
+    no_ticket = sorted({r.get("batch_id") for r in paid if r.get("batch_id")} - have)
+    if no_ticket:
+        problems.append(f"批次无批准件（无票发网）：{no_ticket}")
+    for p in sorted(approvals.glob("*.json")):
+        rec = json.loads(p.read_text(encoding="utf-8"))
+        if rec.get("task") == TASK_ID and rec.get("batch_id") not in BATCHES:
+            problems.append(f"task4 出现转移专用票：{rec.get('batch_id')}")
+    return problems
+
 # 报告黑名单（AC-T4-6 / AC-T4-7，计划 §T4.6 与 §10.3 的同一份清单）
 CROSS_RULER_BLACKLIST = ("优于 V4", "优于V4", "打破历史记录", "比 V4 好", "比V4好")
 UNFREEZE_BLACKLIST = ("已具备解冻条件", "可以解冻")
@@ -528,8 +561,8 @@ def test_ac_t4_5_ledger_reconcile():
         assert rec["approved"] == cap, f"{batch} approved={rec['approved']} ≠ {cap}"
         assert rec["beyond_normal"] is False
         assert rec["ledger_phase"] == 27, "票据必须绑定 phase27 账"
-    extra = sorted({r.get("batch_id") for r in paid} - set(BATCHES) - {""})
-    assert not extra, f"出现计划外批次（D4-8b 禁止第三张票）：{extra}"
+    extra = _batch_scope_violations()
+    assert not extra, f"批次归属不合规（D4-8b 禁止转移另开票）：{extra}"
 
     plan = json.loads((session_dir() / "plan_check.json").read_text(encoding="utf-8"))
     assert plan["ok"] is True, f"plan_check 未通过：{plan}"
@@ -662,10 +695,9 @@ def test_ac_t4_9_early_stop_honest():
         assert block["transfer_amount"] == 0
         assert block["transferred_to"] is None
 
-    # 账上批准件恒为两张（D4-8b：不得为转移另开第三张票）
-    approvals = QuotaLedger.phase27().ns.approvals_dir_fn()
-    names = sorted(p.stem for p in approvals.glob("*.json"))
-    assert set(names) <= set(BATCHES), f"出现第三张票：{names}"
+    # 账上不得出现「为转移另开的票」（D4-8b；锁内适配见 _batch_scope_violations）
+    problems = _batch_scope_violations()
+    assert not problems, f"出现转移专用票：{problems}"
     rows = ledger_rows()
     task_used = sum(1 for r in call_lines(rows) if r.get("task") == TASK_ID)
     assert task_used <= PHASE27_TASK_CAPS[TASK_ID] == 63

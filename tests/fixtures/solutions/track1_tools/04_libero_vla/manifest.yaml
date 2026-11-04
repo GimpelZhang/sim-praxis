@@ -1,0 +1,27 @@
+schema: simpraxis.solution_manifest.v1
+solution_id: track1_tools/04_libero_vla
+title: Fixture：LIBERO VLA 多 Stage（合成，非真实脚本）
+entrypoint: vla_episode_runner.py
+args:
+- --out-dir <workdir>（必填，编排器注入）
+- --run-id <run_id>（必填，编排器注入）
+- --stage <s1_baseline|s2_main_policy|s3_control_policy>（可选，默认 s1_baseline）
+sim_engine:
+  slug: mujoco
+  min_version: 3.15.0
+dependencies:
+  python: '>=3.10'
+  pip: []
+  notes: 合成 fixture：无真实引擎/VLA 权重依赖，空 pip 列表语义同正式 manifest。
+rung_thresholds:
+  ref: orchestrator/judge/rungs.py
+  constants: []
+frozen_inputs:
+- track: track1
+  index: 4
+files:
+- relpath: vla_episode_runner.py
+  sha256: 5ee968d1e8b30b96abd02e75c21885566cfedd576d734d982b568f4a17e29165
+- relpath: README.md
+  sha256: 9cfe78ca9d060dfabcf69e4cc5b8d35fc8e8117a74eb3506fa71c8c49619b509
+v1_run_relpath: null

@@ -617,7 +617,11 @@ def test_live_phase1_table_not_written(tmp_path):
     # phase1 id 集逐字相等（后窗产物④ verdict=pass，0600 证据）。
     # 本测只读、before/after 恒等语义不动，不得写出第 45 行。
     assert before[TABLE_NAME] == 44
-    assert before["solution_chunks"] == 94
+    # 锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：94→106 纯事实刷新——
+    # Gate2 三卡 approve 后回收 solutions/track1_tools/04_libero_vla
+    # （KB b5de4bd，README 3 + manifest 1 + code 8 = 12 块）。本测只读，
+    # before/after 恒等语义不动。
+    assert before["solution_chunks"] == 106
 
     ret = recall.retrieve(
         "MuJoCo EGL 无头渲染 接触求解 仿真失败 修复", site="direction")

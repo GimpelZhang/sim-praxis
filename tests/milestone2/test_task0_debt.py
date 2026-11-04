@@ -319,6 +319,14 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 行号随 Task5 演练 fixture 补第三 Stage 纯位移（170 → 180）；写入点只有
     # 这一处，性质不变。
     "scripts/phase27/drill_roadmap_cards.py": {180},
+    # Phase 2.7 Task6 VLA 战役驱动（计划 §T6.4-B，AC-T6-2/5）：与
+    # q2_human_gate.py / drill_roadmap_cards.py 同性质——人工取证驱动，
+    # pending 库自建在战役证据目录（`runs/<thread>/pending.sqlite`），不触
+    # 生产台账/生产 pending 库。发送闸门只有一处（StageGate._reopen_round
+    # 的 upsert，570：Gate1 路线图 + 每 Stage 的 Gate2 卡都走这里，重挂不
+    # 重发/打回归档重开/No Fake Approval 全继承 gateway 的既有协议），
+    # 无 claim/upsert 旁路（AST 全仓扫描证）。
+    "scripts/phase27/run_libero_vla_stage.py": {570},
 }
 
 
