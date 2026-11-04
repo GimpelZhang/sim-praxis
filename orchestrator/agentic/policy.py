@@ -41,6 +41,9 @@ SIDE_EFFECT_TOOLS = frozenset({
     "write_file", "apply_patch",
     "run_cmd", "run_probe", "recall",
     "run_expr", "update_scratchpad",
+    # Phase 2.7 Task3（D3-5）：预览探针工具（Gate1 逐项授予；只读场景
+    # spec + 容器内/本地渲一帧，落在 workdir 的 .preview/ 下）。
+    "render_quick_preview",
 })
 CONTROL_TOOLS = frozenset({"finish", "fail"})
 
@@ -116,6 +119,35 @@ class GrantTable:
         return roots
 
 
+@dataclass(frozen=True)
+class PreviewPermit:
+    """预览工具的门控面（Phase 2.7 T3：D3-5/D3-10/AC-T3-9/10/11）。
+
+    **只由引擎装配**（``loop.run_agentic_inner_loop`` 读 ``AgenticConfig`` 后
+    构造），模型代码不可写：``ToolContext`` 是 frozen+slots，模型侧没有任何
+    改写入口。两个字段各自的语义边界：
+
+    - ``privileged_relation``：是否允许回执携带 ``spatial_relation``
+      （由 Task 1 manifest 关键点解析算出的真值几何）。**仅**当
+      ``cfg.privileged_state_inject`` 且 ``cfg.run_mode == "N"`` 时为真
+      （BR-3 第 5 项）；模式 R 一律为假，回执里连关键点数字都不出现
+      （AC-T3-11 ④）。
+    - ``visual_caller``：BR-1 视觉诊断的唯一通道适配器，签名为
+      ``(prompt: str, image_b64: str) -> str``；**仅** ``cfg.visual_critic``
+      时由引擎注入一个转调 ``ModelGateway.call_visual``（stage 硬绑
+      ``visual_rollout``）的闭包。默认 None ⇒ 零视觉调用（AC-T3-10）。
+    """
+
+    privileged_relation: bool = False
+    visual_caller: "Callable[[str, str], str] | None" = None
+
+    def __post_init__(self) -> None:
+        if type(self.privileged_relation) is not bool:
+            raise ValueError("PreviewPermit.privileged_relation 必须是 bool")
+        if self.visual_caller is not None and not callable(self.visual_caller):
+            raise ValueError("PreviewPermit.visual_caller 必须是可调用或 None")
+
+
 @dataclass(frozen=True, slots=True)
 class ToolContext:
     """一次 agentic run 的工具执行上下文（由 loop engine 装配，测试直接构造）。
@@ -141,6 +173,10 @@ class ToolContext:
     # Phase 2.6 Task3（F3）：仅在 AgenticConfig.tolerant_patch=True 时置真；
     # 不可变 bool，工具层据此决定 unified_diff 通道是否启用唯一命中回退。
     tolerant_patch: bool = False
+    # Phase 2.7 Task3（D3-5/D3-10）：预览探针的门控面（None = 工具未授予）。
+    # 引擎装配，模型不可写；真值几何与视觉诊断各自的开关都在本对象内，
+    # 不存在「模型自己传参数就能打开」的路径。
+    preview: "PreviewPermit | None" = None
     jail: PathJail = field(init=False)
 
     def __post_init__(self) -> None:
@@ -149,6 +185,9 @@ class ToolContext:
         workdir = Path(self.workdir).resolve(strict=False)
         object.__setattr__(self, "workdir", workdir)
         object.__setattr__(self, "jail", PathJail(workdir))
+        if self.preview is not None and not isinstance(self.preview,
+                                                       PreviewPermit):
+            raise ValueError("preview 必须是 PreviewPermit 或 None")
 
 
 class PreToolUsePolicy:

@@ -1,0 +1,57 @@
+{
+  "schema": "simpraxis.asset_zoo.v1",
+  "_note": "Phase 2.7 Task3 AC-T3-11⑤ 合成夹具：只有 manifest 关键点 + 位姿，不带任何网格文件（RV-09）。四件真实资产 spout_defined 全为 false（本 Phase 的确定事实），分支 (a)（有唯一出口的壶）只能由本夹具驱动；resolve_from_manifest() 刻意跳过磁盘 sha256 校验，因为它对的就是这份无网格夹具。",
+  "assets": [
+    {
+      "name": "vessel/pitcher_spout_true",
+      "kind": "vessel",
+      "keypoints": {
+        "schema": "vessel",
+        "bottom_center": [0.0, 0.0, 0.0],
+        "rim_center": [0.0, 0.0, 0.1],
+        "pour_edge": [0.05, 0.0, 0.1],
+        "handle_grip": [-0.05, 0.0, 0.05],
+        "spout_defined": true
+      }
+    },
+    {
+      "name": "vessel/cup_rim",
+      "kind": "vessel",
+      "keypoints": {
+        "schema": "vessel",
+        "bottom_center": [0.0, 0.0, 0.0],
+        "rim_center": [0.0, 0.0, 0.04],
+        "pour_edge": null,
+        "handle_grip": null,
+        "spout_defined": false
+      }
+    }
+  ],
+  "scenes": {
+    "spout_true": {
+      "schema": "simpraxis.scene_spec.v1",
+      "engine": "genesis",
+      "bodies": [
+        {
+          "asset": "vessel/pitcher_spout_true",
+          "pos": [0.2, 0.25, 1.0],
+          "quat": [1.0, 0.0, 0.0, 0.0],
+          "fixed": true
+        },
+        {
+          "asset": "vessel/cup_rim",
+          "pos": [0.32, 0.25, 1.0],
+          "quat": [1.0, 0.0, 0.0, 0.0],
+          "fixed": true
+        }
+      ],
+      "fluid": null
+    }
+  },
+  "expected_spatial_relation": {
+    "pitcher_spout_to_cup_rim_offset": [-0.07, 0.0, 0.06],
+    "pitcher_pitch_angle_deg": 0.0,
+    "is_spout_pointing_towards_cup": true,
+    "pitcher_to_cup_distance": 0.123693
+  }
+}

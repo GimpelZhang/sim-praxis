@@ -71,6 +71,19 @@ _SKILLS_STAGE_DIRNAME = "skills_stage"
 _SKILLS_STAGE_RE = re.compile(r"^[0-9a-f]{12}$")
 _GPUS_RE = re.compile(r"^(?:all|device=\d+)$")
 
+# Phase 2.7 Task 3（AC-T3-2 的 G0-12 裁决物，2026-11-04 用户授权）：
+# 预编译缓存挂载。**唯一**允许的可写挂载点，dst 字面量 `/cache`；
+# src 只认 `$SIMPRAXIS_PHASE27_ROOT/cache/genesis`（0700，
+# runtime_paths.phase27_preview_cache_dir()）。理由与实测：
+# Genesis 的 taichi 内核 + 着色器/numba 编译在冷缓存下占冷启 ~76 s
+# （总 96.6 s），而它们本就可缓存——同一镜像第二次 wall_s=15.1 s。
+_CACHE_DST = "/cache"
+_CACHE_ENV = {
+    "GS_CACHE_FILE_PATH": f"{_CACHE_DST}/gs",
+    "XDG_CACHE_HOME": f"{_CACHE_DST}/xdg",
+    "NUMBA_CACHE_DIR": f"{_CACHE_DST}/numba",
+}
+
 
 def _allowed_ro_sources() -> "tuple[Path, ...]":
     """`/assets` 与 `/skills` 各自允许的源根（供 build 与单测共用）。"""
@@ -117,6 +130,30 @@ def _validate_extra_ro_mounts(extra: "tuple[tuple[str, str], ...]") -> "list[tup
     return out
 
 
+def _validate_cache_mount(cache_path: "str | None") -> "tuple[str, str, str] | None":
+    """编译缓存挂载校验（AC-T3-2 的 G0-12 裁决物，2026-11-04 用户授权）。
+
+    - `None` ⇒ 不挂载（默认 argv 逐字节不变，AC-T1-8 的 golden 仍成立）；
+    - 给了就必须是 `$SIMPRAXIS_PHASE27_ROOT/cache/genesis` 本身（fail-closed：
+      docker 会为不存在的源静默建 root 属主目录，M3 同一教训）；
+    - dst 只有 `/cache` 一个字面量，mode 恒 `rw`（缓存必须可写）。
+    """
+    if cache_path is None:
+        return None
+    from ...common.runtime_paths import phase27_root
+
+    src = Path(cache_path).resolve()
+    expected = (phase27_root() / "cache" / "genesis").resolve()
+    if src != expected:
+        raise ValueError(
+            f"缓存挂载源只允许 {expected}：{cache_path!r}")
+    if not src.is_dir():
+        raise ValueError(
+            f"缓存挂载源不存在或不是目录：{cache_path!r}（fail-closed：docker "
+            "会为不存在的源静默建 root 属主目录）")
+    return (str(src), _CACHE_DST, "rw")
+
+
 def _validate_gpus(gpus: "str | None") -> "str | None":
     """`--gpus` 值校验：只认 "all" 或 "device=N"（BR-11：本期未授权，恒为 None）。"""
     if gpus is None:
@@ -161,7 +198,8 @@ def build_docker_create_argv(*, image: str, argv: list[str], workdir: Path,
                              network: str = "none",
                              label: "str | None" = None,
                              extra_ro_mounts: "tuple[tuple[str, str], ...]" = (),
-                             gpus: "str | None" = None
+                             gpus: "str | None" = None,
+                             cache_path: "str | None" = None,
                              ) -> list[str]:
     """兄弟容器 ``docker create`` argv 构造（唯一构造点；测试逐段断言）。
 
@@ -189,6 +227,10 @@ def build_docker_create_argv(*, image: str, argv: list[str], workdir: Path,
         mounts.append((probes_path, "/probes", "ro"))
     # Phase 2.7 T1.4-G：额外只读挂载（默认空 ⇒ 默认 argv 逐字节不变，AC-T1-8）。
     mounts.extend(_validate_extra_ro_mounts(extra_ro_mounts))
+    # Phase 2.7 Task 3：可写编译缓存（默认 None ⇒ 默认 argv 逐字节不变）。
+    cache_mount = _validate_cache_mount(cache_path)
+    if cache_mount is not None:
+        mounts.append(cache_mount)
     _check_no_docker_sock(mounts)
     gpus_value = _validate_gpus(gpus)
 
@@ -212,6 +254,10 @@ def build_docker_create_argv(*, image: str, argv: list[str], workdir: Path,
         cmd.extend(["--gpus", gpus_value])
     for key, value in _CONTAINER_ENV.items():
         cmd.extend(["-e", f"{key}={value}"])
+    if cache_mount is not None:
+        # 缓存位置是**容器固定环境**，模型不可覆盖（与 _CONTAINER_ENV 同级）。
+        for key, value in _CACHE_ENV.items():
+            cmd.extend(["-e", f"{key}={value}"])
     for key, value in sorted((env or {}).items()):
         cmd.extend(["-e", f"{key}={value}"])
     cmd.append(image)
@@ -230,18 +276,22 @@ class DockerSiblingBackend(RunBackend):
                  probes_path: "str | None" = None,
                  network: str = "none", runner: Any = subprocess.run,
                  extra_ro_mounts: "tuple[tuple[str, str], ...]" = (),
-                 gpus: "str | None" = None):
+                 gpus: "str | None" = None,
+                 cache_path: "str | None" = None):
         self.image = image
         self.venv_path = venv_path
         self.kb_path = kb_path
         self.probes_path = probes_path
         self.network = network
         self._runner = runner
+        self.cache_path = cache_path
         # Phase 2.7 T1.4-G：挂载与 --gpus 由构造期定档（模型不可控）。
         # 构造期就校验，避免「跑到一半才发现挂载非法」。默认关。
         self.extra_ro_mounts = tuple(extra_ro_mounts)
         self.gpus = _validate_gpus(gpus)
         _validate_extra_ro_mounts(self.extra_ro_mounts)
+        # Task 3：缓存挂载同样构造期校验（路径非法就别起容器）。
+        _validate_cache_mount(self.cache_path)
         # M3：构造期校验 /probes 挂载源（给了就必须是真实目录；不给则
         # run_probe 调用侧 fail-closed 拒绝，见 tools/probe.py）。
         if probes_path is not None and not Path(probes_path).is_dir():
@@ -256,7 +306,7 @@ class DockerSiblingBackend(RunBackend):
             venv_path=self.venv_path, kb_path=self.kb_path,
             probes_path=self.probes_path, env=env, network=self.network,
             label=label_uuid, extra_ro_mounts=self.extra_ro_mounts,
-            gpus=self.gpus)
+            gpus=self.gpus, cache_path=self.cache_path)
 
         def _run(cmd: list[str], timeout: int, *, stdin=subprocess.DEVNULL):
             return self._runner(

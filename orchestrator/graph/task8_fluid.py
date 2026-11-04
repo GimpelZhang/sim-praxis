@@ -56,6 +56,7 @@ from orchestrator.agent_runner.runner import (
 from orchestrator.common.fsutil import atomic_write_text
 from orchestrator.common.runtime_paths import phase2_runs_root
 from orchestrator.graph import task8_fluid_chunks as fchunks
+from orchestrator.graph import task8_fluid_contracts as contracts
 from orchestrator.graph import task8_fluid_prompts as prompts
 from orchestrator.graph.nodes import GraphStateError
 from orchestrator.graph.task8 import VENV_PY
@@ -864,6 +865,36 @@ def validate_wj_fluid_report(obj: Any) -> list[str]:
         if not any(isinstance(md, dict) and md.get("kind") == "video"
                    for md in media):
             errs.append("gate2_ready=true 时顶层 media 至少含一条 video")
+
+    # Phase 2.7 Task3 / BR-7：C1–C7 构造性合同的评测期判定块（可选键，
+    # 历史报表向后兼容）。给了就必须成套且注册表完整——缺一条即红。
+    if "contracts" in obj:
+        block = obj["contracts"]
+        if not isinstance(block, dict):
+            errs.append("contracts 必须是对象")
+        else:
+            _werr(block.get("schema") == contracts.CONTRACTS_SCHEMA,
+                  f"contracts.schema 必须是 {contracts.CONTRACTS_SCHEMA}", errs)
+            got = block.get("contracts")
+            _werr(isinstance(got, dict)
+                  and set(got) == set(contracts.EXPECTED_CONTRACTS),
+                  "contracts.contracts 必须逐条含 C1–C7（缺一条即红）", errs)
+            _werr(not block.get("registry_errors"),
+                  "contracts.registry_errors 必须为空（判据注册表不完整）",
+                  errs)
+            if isinstance(got, dict):
+                for cid, item in got.items():
+                    if not isinstance(item, dict):
+                        errs.append(f"contracts.contracts.{cid} 必须是对象")
+                        continue
+                    _werr(item.get("status") in (contracts.PASS,
+                                                 contracts.VIOLATION,
+                                                 contracts.UNDECIDABLE),
+                          f"contracts.contracts.{cid}.status 必须是 "
+                          "pass/violation/undecidable", errs)
+                    _werr(isinstance(item.get("findings"), list),
+                          f"contracts.contracts.{cid}.findings 必须是数组",
+                          errs)
     return errs
 
 
@@ -872,9 +903,16 @@ def build_wj_fluid_report(*, thread_id: str, solver_api: str, cup: dict,
                           metrics_ref: dict, trajectory_ref: dict,
                           media: list[dict], stage0_compat_ref: str,
                           gate2_ready: bool,
+                          contracts_report: "dict | None" = None,
                           ts_utc: "str | None" = None) -> dict:
     """由 Stage1 评估产物组装 wj_fluid_report v1，组装后立即自校验；
-    非法输入抛 WjFluidReportError——不让非法件出引擎。"""
+    非法输入抛 WjFluidReportError——不让非法件出引擎。
+
+    ``contracts_report``（Phase 2.7 Task3 / BR-7）：C1–C7 构造性合同的**评测期**
+    判定（``task8_fluid_contracts.evaluate_contracts``）。合同已从生成期 prompt
+    迁到本报告的校验侧，故它随 WJ 报表一起落盘；缺省 None 时不写该键
+    （历史报表格式向后兼容）。
+    """
     if ts_utc is None:
         ts_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     report = {
@@ -896,6 +934,8 @@ def build_wj_fluid_report(*, thread_id: str, solver_api: str, cup: dict,
         "media": media,
         "gate2_ready": bool(gate2_ready),
     }
+    if contracts_report is not None:
+        report["contracts"] = contracts_report
     errs = validate_wj_fluid_report(report)
     if errs:
         raise WjFluidReportError(
@@ -1107,6 +1147,11 @@ def _assemble_wj_from_results(results_path: Path, workdir: Path, *,
     }
     results_sha = hashlib.sha256(results_path.read_bytes()).hexdigest()
     traj_sha = hashlib.sha256(traj_path.read_bytes()).hexdigest()
+    # Phase 2.7 Task3 / BR-7：C1–C7 构造性合同在**评测期**判定（不是生成期
+    # 灌输）。证据面＝出生脚本 + 壶网格 +（若有）运行期见证；缺什么就记
+    # 「不可判」，绝不把无法判定写成通过（硬规则 7）。
+    contracts_report = contracts.evaluate_contracts(
+        contracts.collect_evidence(workdir, script_name=FLUID_ENTRYPOINT))
     return build_wj_fluid_report(
         thread_id=thread_id, solver_api=solver_api.strip(),
         cup={"inner_radius": float(cup.inner_radius),
@@ -1119,7 +1164,8 @@ def _assemble_wj_from_results(results_path: Path, workdir: Path, *,
                      "sha256": results_sha},
         trajectory_ref={"path": TRAJECTORY_NAME, "sha256": traj_sha},
         media=media, stage0_compat_ref=stage0_compat_ref,
-        gate2_ready=True)  # video 缺失已在上方 fail-closed
+        gate2_ready=True,  # video 缺失已在上方 fail-closed
+        contracts_report=contracts_report)
 
 
 def _derive_wj_path(state: dict, rec: dict) -> "Path | None":
@@ -1269,6 +1315,12 @@ def build_gate2_explanation(state: dict,
             f"守恒机判{cons_s}；飞溅中位 {m['splash_ratio_median']:.3f}、"
             f"越界中位 {m['out_of_bounds_ratio_median']:.3f}"
             f"（solver={report.get('solver_api')}）。")
+        # Phase 2.7 Task3 / BR-7：构造性合同 C1–C7 在**评测期**逐条判定，
+        # 结果随 WJ 报表落盘；卡上只给三态摘要，违例/不可判明细见报表。
+        block = report.get("contracts")
+        if isinstance(block, dict) and block.get("contracts"):
+            lines.append(contracts.summarize(block) + "（明细见 wj_report.json"
+                         " 的 contracts 段）。")
     problem = "\n".join(lines)
 
     parts: list[str] = []

@@ -57,10 +57,17 @@ CACHE_DISK_PREFIX = "agentic-v3-"
 CACHE_VERSION_LEGACY = "agentic-v2"
 CACHE_LOGICAL_PREFIX_LEGACY = "agentic-v2:"
 CACHE_DISK_PREFIX_LEGACY = "agentic-v2-"
+# Phase 2.7 Task 3（D3-7）：ENV_SPEC / 预览探针开启后，prompt 与工具面都变了。
+# 若仍落 v3 键空间，会命中「不含 ENV_SPEC 的旧响应」——看起来跑了新路径、
+# 实际是旧缓存（证据腐化）。故单开第三纪元；v4 键空间在 .call_cache 下
+# 天然为空（验收要求之一）。
+CACHE_VERSION_V4 = "agentic-v4"
+CACHE_LOGICAL_PREFIX_V4 = "agentic-v4:"
+CACHE_DISK_PREFIX_V4 = "agentic-v4-"
 
 
 def cache_epoch(any_enabled: bool) -> tuple[str, str, str]:
-    """按开关面选纪元：任一开启 → v3；全关 → v2（旧行为逐字节回滚面）。"""
+    """按开关面选纪元：任一旧开关开启 → v3；全关 → v2（旧行为逐字节回滚面）。"""
     if type(any_enabled) is not bool:
         raise ValueError("any_enabled 必须是 bool")
     if any_enabled:
@@ -69,17 +76,34 @@ def cache_epoch(any_enabled: bool) -> tuple[str, str, str]:
             CACHE_DISK_PREFIX_LEGACY)
 
 
+def cache_epoch_for(cfg: Any) -> tuple[str, str, str]:
+    """AgenticConfig → 纪元（Phase 2.7 D3-7 的唯一判定入口）。
+
+    新开关（``env_spec`` / ``render_preview``）任一开启即 v4；否则落回
+    :func:`cache_epoch` 的旧映射（旧四项任一开启 v3，全关 v2）。
+    ``cfg`` 用 ``getattr`` 读取，便于既有的「鸭子类型 cfg」测试桩继续可用。
+    """
+    if getattr(cfg, "env_spec", False) or getattr(cfg, "render_preview", False):
+        return CACHE_VERSION_V4, CACHE_LOGICAL_PREFIX_V4, CACHE_DISK_PREFIX_V4
+    return cache_epoch(bool(getattr(cfg, "any_enabled", False)))
+
+
 def cache_prefixes(version: str) -> tuple[str, str]:
     """纪元版本串 → (逻辑前缀, 磁盘前缀)；未知版本 fail-closed。"""
     if version == CACHE_VERSION:
         return CACHE_LOGICAL_PREFIX, CACHE_DISK_PREFIX
     if version == CACHE_VERSION_LEGACY:
         return CACHE_LOGICAL_PREFIX_LEGACY, CACHE_DISK_PREFIX_LEGACY
+    if version == CACHE_VERSION_V4:
+        return CACHE_LOGICAL_PREFIX_V4, CACHE_DISK_PREFIX_V4
     raise ValueError(f"未知缓存纪元：{version!r}")
 
 MODEL_ROUND_TOOL = "__model_round__"
 CONDENSE_TOOL = "__condense__"
 ANSWER_TOOL = "__answer__"
+# Phase 2.7 Task 3：ENV_SPEC 装载事件（缺件降级 env_spec_missing 也走这一行）。
+# 与其余 ``__`` 控制行同构：字段集不变、seq=null、step=0、不占工具步。
+ENV_SPEC_TOOL = "__env_spec__"
 
 # ---------------------------------------------------------------------------
 # 观察规范化（每条规则必须配测试；顺序敏感，先剥路径后剥时间/随机量）

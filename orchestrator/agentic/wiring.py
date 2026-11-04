@@ -225,8 +225,10 @@ def run_agentic_for_runspec(
     tracer = _open_trace(spec)
     if call_cache is None:
         # 与 AgentRunner 的默认 CallReplay 同一目录（runner.py 落点见
-        # test_task0_debt 白名单）：agentic-v2-/agentic-v3- 双纪元键空间
+        # test_task0_debt 白名单）：agentic-v2-/v3-/v4- 三纪元键空间
         # 与 coding_ 键空间零交集（前缀分隔），历史 coding_/macro_ 键不动。
+        # （Phase 2.7 Task3 D3-7 新增 v4：env_spec/render_preview 开启后的
+        # 键空间天然为空，不会命中不含 ENV_SPEC 的旧 v2/v3 响应。）
         call_cache = CallReplay(phase1_root() / ".call_cache")
     outcome = run_agentic_inner_loop(
         workdir=spec.workdir, task=_build_task_text(spec),

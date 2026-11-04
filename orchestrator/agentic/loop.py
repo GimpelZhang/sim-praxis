@@ -22,6 +22,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import time
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -48,6 +49,8 @@ from .caps import (
     CapExceeded,
 )
 from .config import ALL_OFF, AgenticConfig
+from .env_spec import (EnvSpec, EnvSpecError, env_spec_path, load_env_spec,
+                       static_env_spec)
 from .executor import HardenedLocalPythonExecutor, TerminateSignal
 from .forensics import (
     ANSWER_TOOL,
@@ -55,8 +58,9 @@ from .forensics import (
     CACHE_LOGICAL_PREFIX_LEGACY,
     CONDENSE_TOOL,
     MODEL_ROUND_TOOL,
+    ENV_SPEC_TOOL,
     TraceStore,
-    cache_epoch,
+    cache_epoch_for,
     canonical_json,
     iter_trajectory,
     normalize_observation,
@@ -64,10 +68,13 @@ from .forensics import (
     sha256_text,
 )
 from .model import SupplierModelError, build_gateway_model
+from .prompt import build_system_prompt
 from .policy import (
     GRANT_SOURCE_CONTROL,
+    POLICY_DENY_MARKER,
     GrantTable,
     PolicyDecision,
+    PreviewPermit,
     ToolContext,
 )
 from .tools import ToolResult
@@ -76,6 +83,7 @@ from .tools.read import list_dir as t_list_dir
 from .tools.read import read_file as t_read_file
 from .tools.probe import run_probe as t_run_probe
 from .tools.recall import recall as t_recall
+from .tools.render_preview import render_quick_preview as t_render_preview
 from .tools.run import run_cmd as t_run_cmd
 from .tools.run_expr import MAX_EXPR_CHARS, run_expr as t_run_expr
 from .tools.scratchpad import (
@@ -187,9 +195,122 @@ def _read_scratchpad(workdir: Path, *, enabled: bool
     return text, False
 
 
+def _trace_control(tracer: "TraceStore | None", tool: str, args: dict,
+                   observation: str) -> None:
+    """写一条 ``__`` 控制行（seq=null、step=0；不占工具步、不触网）。"""
+    if tracer is None:
+        return
+    tracer.record(
+        seq=None, round_idx=0, step=0, tool=tool, args=args,
+        observation=observation,
+        policy={"decision": "allow", "reason": "",
+                "grant_source": GRANT_SOURCE_CONTROL},
+        latency_ms=0)
+
+
+def _env_spec_blocks(cfg: "AgenticConfig",
+                     *, tracer: "TraceStore | None" = None,
+                     meta: "RoundMeta | None" = None
+                     ) -> "tuple[str, str]":
+    """按 cfg 渲染 ENV_SPEC 与技能卡（D3-2 / Task 2 D2-6）。
+
+    两段都是**轮次无关**的确定性文本（同一份 env_spec.json + manifest
+    必然逐字节相同），故 D3-9 的「prompt 不随历史增长」成立。
+
+    降级语义（Plan §T3.4-G）：``env_spec.json`` 缺件/坏件 → 用静态段兜底，
+    在 trace 记一行 ``env_spec_missing``，**不 fail 整个 run**；技能清单读不到
+    同样只记 ``skills_missing`` 并不注入技能卡（不伪造内容）。
+    """
+    if not cfg.env_spec:
+        return "", ""
+    from orchestrator.skills.registry import (SkillsError, env_spec_skills_block,
+                                              list_skills)
+
+    skill_names: tuple[str, ...] = ()
+    skills_block = ""
+    try:
+        skill_names = tuple(e.name for e in list_skills())
+        skills_block = env_spec_skills_block()
+    except (SkillsError, OSError) as exc:
+        _trace_control(tracer, ENV_SPEC_TOOL,
+                       {"status": "skills_missing",
+                        "detail": f"{type(exc).__name__}: {exc}"[:200]},
+                       "skills manifest unreadable; skills block omitted")
+    try:
+        spec = load_env_spec()
+        _trace_control(tracer, ENV_SPEC_TOOL,
+                       {"status": "env_spec_loaded",
+                        "path": str(env_spec_path())},
+                       "env_spec loaded")
+    except (EnvSpecError, OSError) as exc:
+        spec = static_env_spec(skills=skill_names)
+        _trace_control(tracer, ENV_SPEC_TOOL,
+                       {"status": "env_spec_missing",
+                        "detail": f"{type(exc).__name__}: {exc}"[:200]},
+                       "env_spec.json missing/invalid; degraded to static segment")
+    return spec.render_block(mode=cfg.run_mode), skills_block
+
+
+def _preview_permit(cfg: AgenticConfig, gateway: Any) -> "PreviewPermit | None":
+    """引擎侧装配 ``PreviewPermit``（Phase 2.7 T3 / D3-5 / D3-10 / BR-1）。
+
+    两件事**只能由引擎决定**，模型侧没有任何参数可达：
+
+    - ``privileged_relation``：真值几何（manifest 关键点算出的
+      ``spatial_relation``）只在 ``privileged_state_inject`` 且模式 N 时给；
+      模式 R 一律为假（BR-3 第 5 项 / AC-T3-11 ④）。
+    - ``visual_caller``：视觉诊断只在 ``visual_critic`` 时注入，且**只**转调
+      ``ModelGateway.call_visual``（硬规则 1 的唯一视觉入口，stage 硬绑
+      ``visual_rollout``）；返回文本、图不出工具层。
+    """
+    if not cfg.render_preview:
+        return None
+    caller = None
+    if cfg.visual_critic:
+        if gateway is None:
+            # 开关开了却没有网关 = 装配错误；静默跳过会让「已开启」说谎。
+            raise ValueError(
+                "AgenticConfig.visual_critic=True 但没有 gateway：视觉诊断"
+                "只能经 ModelGateway.call_visual")
+        caller = _visual_caller_from_gateway(gateway)
+    return PreviewPermit(
+        privileged_relation=bool(cfg.privileged_state_inject
+                                 and cfg.run_mode == "N"),
+        visual_caller=caller)
+
+
+def _visual_caller_from_gateway(gateway: Any) -> "Callable[[str, str], str]":
+    """``call_visual(prompt, image_b64)`` → 文本适配器（丢弃用量元组）。
+
+    用量由网关自己入 ledger（硬规则 2）；本适配器只把文本还给工具层。
+    异常照抛——由工具层转成一条**如实标注失败**的观察，不允许伪造诊断。
+
+    **必须跨线程带上调用上下文**（AC-T3-10 实测发现）：smolagents 的
+    硬化执行器把模型代码放进 ``ThreadPoolExecutor(max_workers=1)`` 里跑
+    （local_python_executor 的超时装饰器），而 ``billing_context`` 是
+    ``ContextVar``——**不随线程传播**。不在这里抓一份 ``copy_context()``
+    的话，工具线程里的 ``gateway.call_visual`` 会在 BillingGate 前置检查处
+    抛「缺少 billing_context」，视觉诊断永远走不到真网关（表面上是
+    「调用失败」的诚实观察，实际是接线缺口）。这里在**造 permit 的线程**
+    （= 拿到 billing_context 的那条）抓上下文副本，工具线程里在副本内调。
+    """
+    caller_ctx = copy_context()
+
+    def _call(prompt: str, image_b64: str) -> str:
+        text, _usage = caller_ctx.run(gateway.call_visual, prompt, image_b64)
+        return text
+    return _call
+
+
 def _tool_docs(cfg: "AgenticConfig | None") -> str:
-    """开关开启时才追加的工具说明（全关时 prompt 与旧版逐字节相同）。"""
-    if cfg is None or not cfg.any_enabled:
+    """开关开启时才追加的工具说明（全关时 prompt 与旧版逐字节相同）。
+
+    Phase 2.7 Task3（D3-5）：判定从 ``any_enabled``（旧四项）改为「本函数
+    实际拼出至少一行」——``render_preview`` 单独开启时旧四项可能全关，
+    若沿用旧判据这行说明会被静默吞掉（开关开了却不在 prompt 里，等于
+    让模型看不见被授予的工具）。全关时输出仍为空串，字节逐字不变。
+    """
+    if cfg is None:
         return ""
     docs = ""
     if cfg.run_expr:
@@ -200,6 +321,10 @@ def _tool_docs(cfg: "AgenticConfig | None") -> str:
         docs += (f"- update_scratchpad(content)：整体覆盖写跨轮记忆 "
                  f"{SCRATCHPAD_REL}（≤{SCRATCHPAD_MAX_CHARS} 字符）；下一轮"
                  "生效，压缩旧轮不会丢它。\n")
+    if cfg.render_preview:
+        docs += ("- render_quick_preview(scene_spec_path, camera=\"ortho_top\")："
+                 "渲一帧 256x256 预览，只回文本（png 相对路径 + 世界系 "
+                 "bbox_table + 几何 verdict）；图字节不进观察。\n")
     return ("\n本 run 追加工具：\n" + docs) if docs else ""
 
 # C3：loop 唯一信任的真终局信号 kind 白名单——来源只能是硬化执行器
@@ -285,6 +410,8 @@ _TOOL_FNS: dict[str, Callable[..., ToolResult]] = {
     # Phase 2.6 Task3：F2/F4（按 cfg 动态出现在授予面，见 granted_tool_names）。
     "run_expr": t_run_expr,
     "update_scratchpad": t_update_scratchpad,
+    # Phase 2.7 Task3（D3-5）：预览探针（仅 cfg.render_preview 时进授予面）。
+    "render_quick_preview": t_render_preview,
 }
 
 _TOOL_SPECS: dict[str, dict[str, Any]] = {
@@ -382,6 +509,16 @@ _TOOL_SPECS: dict[str, dict[str, Any]] = {
                         f"（≤{SCRATCHPAD_MAX_CHARS} 字符，下一轮生效）。"),
         "inputs": {
             "content": {"type": "string", "description": "完整 scratchpad 内容"},
+        },
+    },
+    "render_quick_preview": {
+        "description": ("渲一帧 256x256 场景预览，只回**文本**（png 相对路径、"
+                        "世界系 bbox_table、几何 verdict）。图字节不进观察。"),
+        "inputs": {
+            "scene_spec_path": {"type": "string",
+                                "description": "workdir 内 scene spec 相对路径"},
+            "camera": {"type": "string", "nullable": True,
+                       "description": "正交俯视 ortho_top（默认）/ iso / front"},
         },
     },
 }
@@ -529,6 +666,13 @@ class _UpdateScratchpadTool(BoundTool):
         return super().forward()
 
 
+class _RenderPreviewTool(BoundTool):
+    name = "render_quick_preview"
+
+    def forward(self, scene_spec_path: str, camera: str = "ortho_top") -> str:
+        return super().forward()
+
+
 class RoundMeta:
     """每-run 的轮面元数据（F1 追授 + F4 scratchpad + 缓存纪元）。
 
@@ -637,11 +781,16 @@ def granted_tool_names(ctx: ToolContext,
         enabled.add("run_expr")
     if cfg is not None and cfg.scratchpad:
         enabled.add("update_scratchpad")
+    # Phase 2.7 Task3（D3-5）：预览工具按开关面出现，且仍受 Gate1 授予表约束
+    # ——「开关开了但 Gate1 没授」⇒ 不出现（授予表恒为第一道闸）。
+    if cfg is not None and cfg.render_preview:
+        enabled.add("render_quick_preview")
     names = tuple(n for n in ("read_file", "list_dir", "grep", "write_file",
                               "apply_patch", "run_cmd", "run_probe", "recall")
                   if n in ctx.grants.tools)
-    extra = tuple(n for n in ("run_expr", "update_scratchpad")
-                  if n in enabled and n in ctx.grants.tools)
+    extra = tuple(
+        n for n in ("run_expr", "update_scratchpad", "render_quick_preview")
+        if n in enabled and n in ctx.grants.tools)
     return names + extra + ("finish", "fail")
 
 
@@ -676,6 +825,7 @@ _BOUND_CLASSES: dict[str, type[BoundTool]] = {
     "fail": _FailTool,
     "run_expr": _RunExprTool,
     "update_scratchpad": _UpdateScratchpadTool,
+    "render_quick_preview": _RenderPreviewTool,
 }
 
 
@@ -709,25 +859,95 @@ def build_bound_tools(ctx: ToolContext,
 # Condenser（旧轮只留哈希摘要；迷路计数入 trace）
 # ---------------------------------------------------------------------------
 
+# AC-T3-12②：被动 seed 的候选来源——**只读**工具（run_cmd/write_file 等能
+# 产生副作用或只是命令回显的观察不作为「记忆」）。
+SEED_TOOLS = frozenset({"read_file", "list_dir", "grep", "recall",
+                        "run_probe", "render_quick_preview"})
+# seed 截断长度：够记住一条路径/一段签名，又不至于把 prompt 顶到软上限。
+SEED_MAX_CHARS = 300
+
+
 class Condenser:
     """确定性上下文压缩：仅保留最近 ``keep_full`` 个动作轮全文。
 
     压缩动作本身由 step_callback 在每轮结束后驱动，被压缩的旧轮替换为
     「工具名 + args_hash + 观察 sha256」摘要；累计丢失字符数（lostness）
     以 __condense__ 控制行进 trace。同轨迹必同压缩（确定性），故指纹可重放。
+
+    Phase 2.7 Task3（F4 双保险 / AC-T3-12）：``scratchpad=True`` 时，**首次**
+    压缩会做一次被动 seed——若模型从未写过工作记忆文件，就把最近一次成功
+    只读回执的前 ``SEED_MAX_CHARS`` 字符写进它。这是安全网而不是新机制：
+    主动面仍是 prompt 里的「工作记忆铁律」行；模型照做了就不会触发本路径。
     """
 
     def __init__(self, tracer: "TraceStore | None", *,
-                 keep_full: int = KEEP_FULL_ROUNDS):
+                 keep_full: int = KEEP_FULL_ROUNDS,
+                 scratchpad: bool = False,
+                 workdir: "Path | None" = None):
         self.tracer = tracer
         self.keep_full = keep_full
         self.lost_chars = 0
         self.condensed_rounds = 0
+        self.scratchpad = bool(scratchpad)
+        self.workdir = Path(workdir) if workdir is not None else None
+        # seed 只做一次；记下来源轮次供 __condense__ 行与机判使用。
+        self.seed_source_round: "int | None" = None
+        self.seed_done = False
+
+    # ------------------------------------------------------------------ seed
+
+    def _seed_source(self) -> "tuple[int, str, str] | None":
+        """最近一次**成功只读**回执：(round, tool, 前 300 字符)。
+
+        「成功」= policy 放行且观察不是 deny 文本；「只读」= 工具名在白名单内。
+        全程只读 trace 文件，不重跑工具、不读时间戳 ⇒ 同轨迹逐字节同结果。
+        """
+        if self.tracer is None:
+            return None
+        for line in reversed(self.tracer.load_lines()):
+            tool = str(line.get("tool", ""))
+            if tool not in SEED_TOOLS:
+                continue
+            policy = line.get("policy_decision") or {}
+            if policy.get("decision") != "allow":
+                continue
+            head = line.get("obs_head") or ""
+            if not head or head.startswith(POLICY_DENY_MARKER):
+                continue
+            return (int(line.get("round", 0)), tool, head[:SEED_MAX_CHARS])
+        return None
+
+    def _maybe_seed(self) -> bool:
+        """首次压缩时被动 seed（无候选/已写过/未启用 ⇒ 什么都不做）。"""
+        if not self.scratchpad or self.seed_done or self.workdir is None:
+            return False
+        self.seed_done = True
+        target = self.workdir / SCRATCHPAD_REL
+        try:
+            if target.is_file() and target.read_bytes().strip():
+                return False          # 模型自己写过，尊重它，不覆盖
+        except OSError:
+            pass
+        source = self._seed_source()
+        if source is None:
+            return False
+        round_idx, tool, text = source
+        seed = (f"<!-- auto-seeded at condense: round={round_idx} tool={tool} -->\n"
+                f"{text}\n")
+        try:
+            from orchestrator.common.fsutil import atomic_write_text
+
+            atomic_write_text(target, seed, mode=0o600)
+        except OSError:
+            return False
+        self.seed_source_round = round_idx
+        return True
 
     def __call__(self, memory_step: Any, agent: CodeAgent) -> None:
         steps = [s for s in agent.memory.steps if type(s).__name__ == "ActionStep"]
         if len(steps) <= self.keep_full:
             return
+        seeded = self._maybe_seed()
         for s in steps[:-self.keep_full]:
             if getattr(s, "_agentic_condensed", False):
                 continue
@@ -759,13 +979,22 @@ class Condenser:
             self.condensed_rounds += 1
             self.lost_chars += lost
             if self.tracer is not None:
+                condense_args: dict[str, Any] = {
+                    "condensed_round": getattr(s, "step_number", 0),
+                    "lost_chars_this_round": lost,
+                    "lost_chars_cumulative": self.lost_chars,
+                }
+                if self.scratchpad:
+                    # 仅在开关开启时补字段：全关时本行 args 与旧版逐字节相同。
+                    condense_args.update({
+                        "scratchpad_seeded": seeded,
+                        "seed_source_round": self.seed_source_round,
+                    })
                 self.tracer.record(
                     # M5：condense 是引擎内部事件、无模型调用，seq=null。
                     seq=None, round_idx=int(getattr(s, "step_number", 0)),
                     step=0, tool=CONDENSE_TOOL,
-                    args={"condensed_round": getattr(s, "step_number", 0),
-                          "lost_chars_this_round": lost,
-                          "lost_chars_cumulative": self.lost_chars},
+                    args=condense_args,
                     observation=f"round {getattr(s, 'step_number', '?')} condensed",
                     policy={"decision": "allow", "reason": "",
                             "grant_source": GRANT_SOURCE_CONTROL},
@@ -917,7 +1146,7 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
     workdir = Path(workdir)
     entry_names = normalize_entrypoint_names(entrypoint_names)
     cfg = agentic_config if agentic_config is not None else ALL_OFF
-    cache_version, cache_prefix, _disk_prefix = cache_epoch(cfg.any_enabled)
+    cache_version, cache_prefix, _disk_prefix = cache_epoch_for(cfg)
     meta = RoundMeta(cfg, cache_version=cache_version,
                      cache_logical_prefix=cache_prefix)
     # C2：ctx frozen、不携预算/轮态；预算只在闭包细胞，轮态在私有 holder。
@@ -925,7 +1154,8 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
         workdir=workdir, grants=grants, thread_id=thread_id, tracer=tracer,
         run_backend=run_backend,
         probe_registry=probe_registry, recall_port=recall_port,
-        nonprod=nonprod, tolerant_patch=cfg.tolerant_patch)
+        nonprod=nonprod, tolerant_patch=cfg.tolerant_patch,
+        preview=_preview_permit(cfg, gateway))
     round_state = RoundState()
 
     def _on_step() -> None:
@@ -956,7 +1186,10 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
         recorder=_make_recorder(tracer, round_state, meta),
         seq_provider=seq_provider, cache_version=cache_version,
         round_context=_round_context)
-    instructions = system_contract(extra=system_extra) + _tool_docs(cfg)
+    env_spec_block, skills_block = _env_spec_blocks(cfg, tracer=tracer, meta=meta)
+    instructions = build_system_prompt(
+        cfg=cfg, env_spec_block=env_spec_block, skills_block=skills_block,
+        extra=system_extra)
     model.configure(system_prompt=instructions, task=task)
 
     if max_steps is not None:
@@ -978,7 +1211,8 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
     else:
         # 全关路径逐字节同 Phase 2.5。
         steps_max = max(budget.round_cap, 1)
-    condenser = Condenser(tracer)
+    # F4 双保险（AC-T3-12）：scratchpad 关闭时 seed 路径整体不存在。
+    condenser = Condenser(tracer, scratchpad=cfg.scratchpad, workdir=workdir)
     agent, _tools, step_counter = build_agent(
         ctx=ctx, model=model, tracer=tracer, budget=budget,
         round_state=round_state, instructions=instructions,

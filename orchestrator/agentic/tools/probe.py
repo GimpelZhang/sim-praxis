@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from ..policy import PolicyDecision, PreToolUsePolicy, ToolContext
 from ..schema import SchemaError, int_field, str_field, validate
@@ -106,6 +107,39 @@ _FIELDS = (
 )
 
 
+def resolve_probe_paths(backend: Any, argv: list[str]) -> "list[str] | ToolResult":
+    """M3：把 argv 里的容器路径 ``/probes/<f>`` 解析到当前后端可执行的位置。
+
+    兄弟容器形态：要求 ``backend.probes_path`` 是真实目录（宿主源的只读挂载
+    已注入），否则 fail-closed 返回 deny——**禁止**容器内 ENOENT 裸跑。
+    本地 NONPROD 形态：``/probes/<f>`` → 仓内 ``sandbox/probes/<f>`` 绝对路径，
+    缺件同样 deny。
+
+    Phase 2.7 Task3（D3-5）：``render_quick_preview`` 也要按同一口径解析探针
+    路径，故从 ``run_probe`` 里抽出（行为逐字不变，单一源）。
+    """
+    uses_probes = any(a.startswith(CONTAINER_PROBES_DIR + "/") for a in argv)
+    if not uses_probes:
+        return list(argv)
+    if getattr(backend, "nonprod", False):
+        resolved = []
+        for seg in argv:
+            if seg.startswith(CONTAINER_PROBES_DIR + "/"):
+                host_file = HOST_PROBES_DIR / seg[len(CONTAINER_PROBES_DIR) + 1:]
+                if not host_file.is_file():
+                    return ToolResult.denied_result(PolicyDecision.deny(
+                        f"NONPROD 探针脚本不存在：{host_file}（M3 fail-closed）"))
+                seg = str(host_file)
+            resolved.append(seg)
+        return resolved
+    probes_path = getattr(backend, "probes_path", None)
+    if not probes_path or not Path(probes_path).is_dir():
+        return ToolResult.denied_result(PolicyDecision.deny(
+            "/probes 未挂载或宿主源目录不存在：兄弟容器形态必须注入真实 "
+            "probes_path（M3 fail-closed，禁止容器内 ENOENT 裸跑）"))
+    return list(argv)
+
+
 def run_probe(ctx: ToolContext, **kwargs) -> ToolResult:
     try:
         args = validate(_FIELDS, kwargs)
@@ -126,27 +160,11 @@ def run_probe(ctx: ToolContext, **kwargs) -> ToolResult:
     spec = ctx.probe_registry.get(args["name"])
     argv = list(spec.argv)
 
-    # M3：/probes 挂载/存在性 fail-closed——脚本路径是容器绝对路径，挂载
-    # 缺失只会在容器内 ENOENT（rc!=0），这里在宿主侧先闸死并回 deny 观察。
-    uses_probes = any(a.startswith(CONTAINER_PROBES_DIR + "/") for a in argv)
-    if uses_probes and getattr(backend, "nonprod", False):
-        # 本地 NONPROD：/probes/<f> → 仓内 sandbox/probes/<f> 绝对路径。
-        resolved = []
-        for seg in argv:
-            if seg.startswith(CONTAINER_PROBES_DIR + "/"):
-                host_file = HOST_PROBES_DIR / seg[len(CONTAINER_PROBES_DIR) + 1:]
-                if not host_file.is_file():
-                    return ToolResult.denied_result(PolicyDecision.deny(
-                        f"NONPROD 探针脚本不存在：{host_file}（M3 fail-closed）"))
-                seg = str(host_file)
-            resolved.append(seg)
-        argv = resolved
-    elif uses_probes:
-        probes_path = getattr(backend, "probes_path", None)
-        if not probes_path or not Path(probes_path).is_dir():
-            return ToolResult.denied_result(PolicyDecision.deny(
-                "/probes 未挂载或宿主源目录不存在：兄弟容器形态必须注入真实 "
-                "probes_path（M3 fail-closed，禁止容器内 ENOENT 裸跑）"))
+    # M3：/probes 挂载/存在性 fail-closed（抽到 resolve_probe_paths，单一源）。
+    resolved = resolve_probe_paths(backend, argv)
+    if isinstance(resolved, ToolResult):
+        return resolved
+    argv = resolved
 
     return execute_render(ctx, argv, tag=f"run_probe:{spec.name}",
                           timeout_s=args["timeout_s"], env=None)

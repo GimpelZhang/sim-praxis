@@ -45,7 +45,13 @@ class CapExceeded(BaseException):
 
 @dataclass
 class BudgetTracker:
-    """单 run 预算计数；0 表示沿用 RunSpec/默认帽，负数非法。"""
+    """单 run 预算计数；0 表示沿用 RunSpec/默认帽，负数非法。
+
+    ⚠️ 术语（Phase 2.7 D3-3）：本类字段名里的 ``round`` 指**付费网关轮**
+    （一次模型调用 = 一次实呼/一次缓存命中），``step`` 指 smolagents 的
+    ActionStep（在 smolagents 里同为一次模型调用，由 loop 的 ``max_steps``
+    用法体现）。``tool_step_cap`` 是**工具执行次数**，不额外计价。
+    """
 
     step_cap: int = 0          # 每 run 工具步数（0 = 不显式限，由轮帽兜底）
     token_cap: int = 0         # 每 run 累计 token（in+out；0 = 不显式限）
@@ -53,6 +59,8 @@ class BudgetTracker:
     steps_used: int = 0
     tokens_used: int = 0
     rounds_used: int = 0
+    # Phase 2.7 Task3（D3-3）：工具执行次数帽（0 = 不限；不额外计价）。
+    tool_step_cap: int = 0
     # Phase 2.6 Task3（F1）：追授轮数（0 = 旧行为，不追授）；tail_granted
     # 只在出生校验通过后置真；born_at_round 为出生轮号（幂等标记用）。
     verify_repair_tail_rounds: int = 0
@@ -61,7 +69,7 @@ class BudgetTracker:
 
     def __post_init__(self) -> None:
         for name in ("step_cap", "token_cap", "round_cap",
-                     "verify_repair_tail_rounds"):
+                     "verify_repair_tail_rounds", "tool_step_cap"):
             value = getattr(self, name)
             if type(value) is not int or isinstance(value, bool) or value < 0:
                 raise ValueError(f"{name} 必须是非负整数")
@@ -82,6 +90,22 @@ class BudgetTracker:
         """当前生效轮帽（追授后 = round_cap + verify_repair_tail_rounds）。"""
         extra = self.verify_repair_tail_rounds if self.tail_granted else 0
         return self.round_cap + extra
+
+    def clamp_to_ticket(self, remaining: int) -> int:
+        """D3-4：把轮帽钳到**票额剩余**（弹性 ≠ 无限）。
+
+        返回 ``min(effective_round_cap, remaining)``；``remaining < 0`` 视为
+        0（票已用尽 ⇒ 一轮都不许跑）。**只回答**「本 run 最多几轮」，
+        不改 ``add_round`` 的终局逻辑——到帽仍由 ``add_round`` 抛
+        ``CapExceeded``，票额耗尽同样在那一处显形（kind=round_cap）。
+        钳制结果是**调用方装配期**的决定（写进 budget.round_cap），
+        本方法本身幂等、无副作用。
+        """
+        if type(remaining) is not int or isinstance(remaining, bool):
+            raise ValueError("remaining 必须是整数")
+        if remaining < 0:
+            return 0
+        return min(self.effective_round_cap, remaining)
 
     def mark_born(self, round_idx: int) -> bool:
         """记录出生轮号；幂等——首次返 True，已出生返 False。"""

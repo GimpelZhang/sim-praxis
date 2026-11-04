@@ -288,6 +288,18 @@ def phase27_ledger_path() -> Path:
     return phase27_quota_dir() / "ledger.jsonl"
 
 
+def phase27_preview_cache_dir() -> Path:
+    """预览探针的**编译缓存**宿主目录（0700；AC-T3-2 的 G0-12 裁决物）。
+
+    2026-11-04 用户裁决（AC-T3-2 冷启实测 96.6 s > 60 s）：taichi/numba/
+    着色器编译占了 ~76 s，而它们**本来就是可缓存的**——把缓存放到持久
+    目录后同镜像第二次实测 wall_s=15.1 s。故新增一条 rw 挂载
+    ``<本目录> → /cache``（`run.py::_validate_cache_mount` 是唯一校验点），
+    首次预热 99.3 s 由 AC-T3-2 单独取证，判据数值 60 s 不变。
+    """
+    return ensure_private_dir(phase27_root() / "cache" / "genesis")
+
+
 def phase27_counters_path() -> Path:
     return phase27_quota_dir() / "counters.json"
 

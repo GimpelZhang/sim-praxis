@@ -64,6 +64,7 @@ from .caps import CapExceeded, BudgetTracker
 from .forensics import (
     CACHE_VERSION,
     CACHE_VERSION_LEGACY,
+    CACHE_VERSION_V4,
     agentic_cache_fingerprint,
     cache_prefixes,
     canonical_json,
@@ -276,7 +277,8 @@ def build_gateway_model(gateway: Any, *, stage: str = STAGE,
     bool 不是 int）。
     """
     # --- 敏感配置：仅工厂局部细胞，方法闭包捕获，不落实例 ---
-    if cache_version not in (CACHE_VERSION, CACHE_VERSION_LEGACY):
+    if cache_version not in (CACHE_VERSION, CACHE_VERSION_LEGACY,
+                             CACHE_VERSION_V4):
         raise ValueError(f"未知缓存纪元：{cache_version!r}")
     system_prompt = ""
     task_text = ""
