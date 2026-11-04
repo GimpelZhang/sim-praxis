@@ -344,7 +344,7 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
 | 件 | sha256 |
 |---|---|
 | `scripts/phase25/task6_r4_verdict.py` | `ee9b2d01080fdc5ab1b7f8df939883e4406d727c380d2f309012dbc7c80571f8` |
-| `scripts/phase25/task6_r4_reference_sim.py` | `836cf8a4198c164e6989a9b65d329e27876f67b76fd5f247228faa1341b1143f` |
+| `scripts/phase25/task6_r4_reference_sim.py` | `9f998f7388f127527c04f5113091544aafd9fc5ce218fd951ec5c675f60c5eb9` |
 | `scripts/phase25/gen_task6_r4_window_evidence.py` | `6e89bf1574baa47adae0a030fa1010bfb798c50e49d4d65efef53de597f64f28` |
 | `scripts/phase25/gen_task6_r4_vector_identity.py` | `a58b3de4399f6eac0cd1fa1791380dd785fedef31d8122cbd04e4c1ce165c83a` |
 | `scripts/kb/gen_prewindow_snapshots.py` | `e1f21597a30c5f632dd8004cd9e7c9d15bea51ce4b8d895e7d9fbc4fe72be8cd` |
@@ -353,6 +353,18 @@ HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1 \
 比对**五件**实际字节（并断言同件不重复登记）；目录白名单含 `scripts/kb/`，
 窗口快照生成器不再是"承重但未登记"（修订 A10-L1）。prereg 表与落地件一旦
 漂移即红（防"登记的是上一版"，修订 A9-D7）。
+
+> **修订 A12（2026-11-04，Phase 2.7 Task 6 收口修复批）**：上表第二行
+> `task6_r4_reference_sim.py` 的 sha 由 `836cf8a4…` 改为 `9f998f73…`。
+> 改动内容是**纯加法**：`_load_iter3(path=None)` 增加可选 `path` 参数、
+> `simulate(iter3_path=…)` 与 CLI `--iter3` 同理，缺省分支一字未改；目的是让
+> 「Phase 2.5 活库锚点重冻 v2」（`scripts/phase27/refreeze_phase25_anchors.py`）
+> 能复用**同一个**第二实现，而不是另写一份。判据口径零变化：47 案点预测在 v1
+> 语料上仍逐字节复现（见 `snapshots/phase25_anchor_refreeze_v2.json` 的
+> v1/v2 双向 sha 与 `hit_drift` 两路 `[]`）。
+> **顺序缺陷如实留痕**：本表纪律是「先改表再改件」，本次实际是**先改件后补表**
+> （改动随 `16e0267` 落地，补表随其后的修复批）。按 §7.1 这属于黑名单行为，
+> 故在此显式登记而非静默补表——登记件的意义正在于让这类事情必须被看见。
 
 ### 7.3 PROC-7 溯源过程（预注册的例外程序）
 

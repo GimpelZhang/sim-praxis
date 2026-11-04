@@ -757,7 +757,12 @@ def test_v2_track_script_telemetry_contract(tmp_path, monkeypatch):
     mentioned = [p for p in grep.stdout.split("\0") if p]
     # 只允许引擎代码/测试按名引用（契约/缺件断言）；脚本本体已被上面的
     # ls-files 名字断言钉死（任何跟踪路径都不得叫这个文件名）。
-    assert all(p.startswith(("orchestrator/", "tests/"))
+    # 锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：机产语料快照
+    # scripts/phase25/snapshots/*.json 会把解法入口名**原文引用**在召回
+    # 文本里（planner_gold_iter3_corpus106.json）。它是排序产物、不是脚本，
+    # 故只放行这一个目录前缀；「跟踪面不得存在同名脚本」的上一条断言不变。
+    assert all(p.startswith(("orchestrator/", "tests/",
+                             "scripts/phase25/snapshots/"))
                for p in mentioned), mentioned
 
 
