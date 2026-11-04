@@ -57,15 +57,31 @@ def pytest_configure(config):
     # （不是 skip——硬规则 7 禁止 skip；也不新增第三条 -m 排除，否则 CLAUDE.md 的
     # 两排除收尾命令就不再逐字一致）。
     config.addinivalue_line("markers", "container: 真容器内测试，需显式开关（SIMPRAXIS_CONTAINER=1）")
+    # Phase 2.7 Task7（锁内适配 3）：里程碑验收套读的是**已落盘的收尾证据**
+    # （冷跑日志与 json、证据包、三签、机判件、活账/活库），在证据建成之前
+    # 必然红。它与 container 同构：裸跑收集期 deselect，需显式
+    # SIMPRAXIS_MILESTONE_CLOSEOUT=1 才执行——这样 CLAUDE.md 的两排除收尾
+    # 命令仍是**逐字**的（冷跑里不出现 --ignore 这类「少收一条」的口子），
+    # 而验收套在自己的车道里带日志留证。
+    config.addinivalue_line("markers", "milestone_closeout: 里程碑收尾验收套（读已落盘证据），需显式开关（SIMPRAXIS_MILESTONE_CLOSEOUT=1）")
 
 
 def pytest_collection_modifyitems(config, items):
-    """container 裸跑 deselect（非 skip）：保持 CLAUDE.md 收尾命令仍只有两排除项。"""
-    if os.environ.get("SIMPRAXIS_CONTAINER") == "1":
+    """container / milestone_closeout 裸跑 deselect（非 skip）：保持 CLAUDE.md 收尾命令仍只有两排除项。"""
+    gates = {
+        "container": os.environ.get("SIMPRAXIS_CONTAINER") == "1",
+        "milestone_closeout":
+            os.environ.get("SIMPRAXIS_MILESTONE_CLOSEOUT") == "1",
+    }
+    gated = {name for name, enabled in gates.items() if not enabled}
+    if not gated:
         return
     keep, drop = [], []
     for it in items:
-        (drop if it.get_closest_marker("container") else keep).append(it)
+        if any(it.get_closest_marker(name) for name in gated):
+            drop.append(it)
+        else:
+            keep.append(it)
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep

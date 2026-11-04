@@ -17,8 +17,12 @@
 - AC-T7-7 机判件：``closure_judge.json`` 的 ``problems == []``，
   ``gaps`` 逐条挂牌（未达成项不得计为 pass）。
 
-AC-T7-3 需要活库，打 ``kb_integration`` 标记（裸跑自动 deselect）；
-其余用例只读落盘产物与主机环境，两排除全套里照常跑。
+**车道纪律（锁内适配 3）**：本文件整组打 ``milestone_closeout`` 标记，裸跑
+收集期 deselect，需 ``SIMPRAXIS_MILESTONE_CLOSEOUT=1`` 才执行——它验的是
+**已落盘的收尾证据**（冷跑日志/证据包/三签/机判件），证据建成前必然红；
+若把它塞进冷跑，冷跑就会被自己正在写的日志拖红，只能靠 ``--ignore`` 绕，
+而 ``--ignore`` 正是 AC-T7-1 要禁的「少收一条」口子。验收套因此与 container
+同构：独立车道、独立日志留证。AC-T7-3 另需 ``SIMPRAXIS_KB_INTEGRATION=1``。
 """
 from __future__ import annotations
 
@@ -35,6 +39,8 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
+
+pytestmark = pytest.mark.milestone_closeout
 
 MILESTONE = "task7_milestone"
 SIGN_SCHEMA = "simpraxis.phase27.sign.v1"
