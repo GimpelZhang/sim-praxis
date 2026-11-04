@@ -316,7 +316,9 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # q2_human_gate.py 同性质——人工取证工具，自建独立 pending 库
     # （`<证据目录>/drill_pending.sqlite`），不触生产台账/生产 pending 库；
     # 发送闸门只有一处（演练卡 upsert，170），无 claim/upsert 旁路。
-    "scripts/phase27/drill_roadmap_cards.py": {170},
+    # 行号随 Task5 演练 fixture 补第三 Stage 纯位移（170 → 180）；写入点只有
+    # 这一处，性质不变。
+    "scripts/phase27/drill_roadmap_cards.py": {180},
 }
 
 
