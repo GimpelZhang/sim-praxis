@@ -11,7 +11,7 @@ pytest 的 `-k` 是子串匹配，所以每个 AC id 只能出现在唯一一个
      每行键序恰为 `LOG_FIELDS_V2`（七字段）。
   3. **AC-T2-2b**（kb_integration）：活库 `PlannerRecall.retrieve()` 在 LIBERO
      形状查询下返回行带三路 `source_route`，且 `03_libero` 方案块在 top-8 内；
-     同处取活库四表前后快照，断言 1542/44/94/1 全程不变（AC-T2-3 的活库半）。
+     同处取活库四表前后快照，断言 1542/106/44/1 全程不变（AC-T2-3 的活库半）。
   4. **AC-T2-3**：接线全过程只经只读 API（fake 引擎/学习库把写路径断言掉），
      前后行数快照相等。
   5. **AC-T2-4a**：`--recall-mode dual` 时 prompt 与旧 `build_first_messages`
@@ -365,7 +365,7 @@ def test_ac_t2_3_four_tables_unchanged_read_only_path(tmp_path):
         "engine_calls": sorted(set(ve.calls)),
         "store_calls": sorted(set(st.calls)),
         "note": ("本用例用只读 fake 引擎/学习库证明接线路径不触任何写 API；"
-                 "活库四表 1542/44/94/1 的前后快照见 AC-T2-2b 的 "
+                 "活库四表 1542/106/44/1 的前后快照见 AC-T2-2b 的 "
                  "ac_t2_3_live_table_snapshot.json（需 SIMPRAXIS_KB_INTEGRATION=1）"),
     }
     _write_evidence("ac_t2_3_fake_table_snapshot.json",
@@ -557,8 +557,11 @@ def test_ac_t2_2b_t2_reachable_live_three_routes(tmp_path):
                   f"{[r.get('solution_id') for r in sol_hits]}")
 
     # AC-T2-3 的活库半：四表全程不变（kb/phase1 由 Task0b 起的钉死基线）。
+    # 锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：solution_chunks
+    # 94→106（Gate2 三卡 approve 后回收 track1_tools/04_libero_vla 12 块）；
+    # 「全程不变」的语义不变，只是基线随经批准的语料扩容前进。
     assert before["kb_chunks"] == 1542
-    assert before["solution_chunks"] == 94
+    assert before["solution_chunks"] == 106
     assert before["phase1_learnings"] == 44
     assert before == after, f"检索触发了写：{before} → {after}"
 

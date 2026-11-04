@@ -177,7 +177,21 @@ def _load_fixture() -> dict:
     return data
 
 
-def _load_iter3() -> dict:
+def _load_iter3(path: "Path | None" = None) -> dict:
+    """稠密侧锚点。
+
+    缺省（``path=None``）走**冻结 v1** 语义：phase25 根下恰一份
+    ``planner_gold_iter3_*.json`` 且 sha 必须等于注册值。
+    ``path`` 非空时读该件（Phase 2.7 Task 6 收口的内容层扩容重冻 v2：
+    同一冻结规则规格、新的 106 行语料；v2 件的 sha 由调用方登记在
+    ``snapshots/phase25_anchor_refreeze_v2.json``，本函数只负责读）。
+    适配（2026-11-04 Phase 2.7 Task 6）：只为让 v2 重冻可复现，v1 语义一字未改。
+    """
+    if path is not None:
+        p = Path(path)
+        if not p.exists():
+            raise AnchorError(f"iter3 替代锚点不存在：{p}")
+        return json.loads(p.read_text(encoding="utf-8"))
     from orchestrator.common.runtime_paths import phase25_root
     hits = sorted((phase25_root() / "task6_recall").glob(
         "planner_gold_iter3_*.json"))
@@ -261,9 +275,9 @@ def _judge(case: dict, ids: list[str], by_id: dict[str, dict]) -> tuple:
     return None, None
 
 
-def simulate() -> dict:
+def simulate(iter3_path: "Path | None" = None) -> dict:
     fixture = _load_fixture()
-    iter3 = _load_iter3()
+    iter3 = _load_iter3(iter3_path)
     dense_by_id = {c["id"]: list(c["top8_ids"]) for c in iter3["cases"]}
     r3_hit = {c["id"]: bool(c["hit"]) for c in iter3["cases"]}
 
@@ -321,7 +335,8 @@ def simulate() -> dict:
         "note": ("设计期参考模拟（预注册 §3 规则规格的独立实现）；"
                  "稠密侧逐案强断言 == 冻结 iter3 报告 top8_ids。"),
         "fixture_sha256": FIXTURE_SHA256,
-        "iter3_report_sha256": ITER3_REPORT_SHA256,
+        "iter3_report_sha256": (
+            _sha256(Path(iter3_path)) if iter3_path else ITER3_REPORT_SHA256),
         "rules": {"ascii_token_regex": ASCII_RE.pattern,
                   "cjk_ngram": CJK_NGRAM, "bm25_k1": BM25_K1,
                   "bm25_b": BM25_B, "rrf_k": RRF_K, "top_k": TOP_K,
@@ -351,9 +366,11 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--check", default=None,
                     help="对注册件逐字节复核（不出分、不写文件）")
+    ap.add_argument("--iter3", default=None,
+                    help="稠密侧替代锚点（缺省=冻结 v1 iter3；v2 重冻用）")
     args = ap.parse_args(argv)
     try:
-        payload = simulate()
+        payload = simulate(iter3_path=(Path(args.iter3) if args.iter3 else None))
     except AnchorError as exc:
         print(f"[T6R4-REF][STOP] {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

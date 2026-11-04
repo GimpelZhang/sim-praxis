@@ -23,7 +23,7 @@ mpnet 历史值另在 iter1/iter2 报告文件证据链永久封存，见 fcb3fc
   G gold@8 机判脚本：fixture 冻结契约 + load_cases 校验 + rc 0/3/2。
 
 纪律：合成件 + 断网 env（mpnet 走 /mnt 本地缓存）；不写任何活库。
-活库不变量（1542/44/94/1）、AC-T6-3 12 块覆盖与 AC-T6-4 负结论重算均打
+活库不变量（1542/106/44/1）、AC-T6-3 12 块覆盖与 AC-T6-4 负结论重算均打
 kb_integration，裸跑自动 skip。
 """
 from __future__ import annotations
@@ -1078,10 +1078,28 @@ def _live_route_id_sets() -> dict:
 R3_PROD_UNION_SNAPSHOT = (REPO_ROOT / "scripts" / "phase25" / "snapshots"
                           / "task6_r3_mpnet_prod_union_snapshot.json")
 # verifier MINOR-1（攢批128）：注册件自身防篡改对位（两 lane 第五/六次重跑 cmp 同值）。
+# 锁内适配（2026-11-04 Phase 2.7 Task 6 回收窗口）：本件按机产脚本
+# scripts/phase25/gen_r3_prod_union_snapshot.py 在 106 行活库上重产（两次运行
+# 逐字节相同），注册 sha 随之从 53c043dc… 前进到 0aead650…；旧 sha 与重产取证
+# 登记在 scripts/phase25/snapshots/phase25_anchor_refreeze_v2.json 的
+# v1.prod_union_snapshot 段（sha256_pre_task6 / sha256_after_task6）。
 _R3_PROD_UNION_SNAPSHOT_SHA256 = (
-    "53c043dc202c7de8c611fb523ee842546b47f9d5cbbbaf72633064fcbf98cc7b")
+    "0aead65078e8a7088e1907693a724239ca530d451861466dabd9ee145fb0c96a")
 _ITER3_REPORT_SHA256 = (
     "f1c0e7f4caf32e066ef7ed4dbac9a75f02e32fc9e3876e42180e10ba267fa307")
+
+# ---- v2 重冻（Phase 2.7 Task 6 内容层扩容，2026-11-04）----
+# iter3 v1（上面 _ITER3_REPORT_SHA256）是 Phase 2.5 的历史证据，逐字节不动；
+# 活库等式改锚 v2 机产件（同一判分实现、新的 106 行语料），并加一道漂移围栏：
+# v1→v2 逐案变化必须恰好等于 manifest 登记值，多一处即 FAIL。
+REFREEZE_V2 = (REPO_ROOT / "scripts" / "phase25" / "snapshots"
+               / "phase25_anchor_refreeze_v2.json")
+V2_ITER3 = (REPO_ROOT / "scripts" / "phase25" / "snapshots"
+            / "planner_gold_iter3_corpus106.json")
+REFREEZE_V2_SHA256 = (
+    "a7a53e4f65ebfffad7cc58984b8edc65043a2674a80689d30b3984651b507449")
+V2_ITER3_SHA256 = (
+    "c9435b633e49b77418b4c357e0b61fdde31b7d79526b035b10b0e2fa32218d28")
 
 
 def _load_r3_prod_union_snapshot() -> dict:
@@ -1115,6 +1133,36 @@ def _load_frozen_iter3_report() -> dict:
     assert stat.S_IMODE(p.stat().st_mode) == 0o600
     assert hashlib.sha256(p.read_bytes()).hexdigest() == _ITER3_REPORT_SHA256
     return json.loads(p.read_text(encoding="utf-8"))
+
+
+def _load_refreeze_v2(path, want_sha: str) -> dict:
+    raw = path.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == want_sha, path.name
+    return json.loads(raw.decode("utf-8"))
+
+
+def _assert_r3_drift_fence(manifest: dict, v1_cases: list, v2_cases: list) -> None:
+    """v1→v2 的 iter3 top-8 变化必须逐案等于 manifest 登记值（多一处即 FAIL）。
+
+    重冻的**前置条件**是 hit 零漂移（生成器里就是硬闸）；这条围栏是它的
+    测试侧对位：聚合指标与 hit 判定逐位不变，只有 solutions 路 top-8 的
+    成员/次序随语料扩容移动，且每一处移动都必须先登记。
+    """
+    v1 = {c["id"]: c for c in v1_cases}
+    v2 = {c["id"]: c for c in v2_cases}
+    assert set(v1) == set(v2)
+    got: dict = {}
+    for cid in sorted(v1):
+        a = [str(x) for x in v1[cid]["top8_ids"]]
+        b = [str(x) for x in v2[cid]["top8_ids"]]
+        if a != b:
+            got[cid] = {"removed": sorted(set(a) - set(b)),
+                        "added": sorted(set(b) - set(a)),
+                        "order_changed": set(a) == set(b)}
+    assert got == manifest["top8_drift"]["r3"], "r3 漂移超出登记围栏"
+    assert manifest["hit_drift"]["r3"] == [], "r3 hit 漂移必须为零"
+    for cid in sorted(v1):
+        assert bool(v1[cid]["hit"]) is bool(v2[cid]["hit"]), cid
 
 
 @pytest.mark.kb_integration
@@ -1301,7 +1349,11 @@ def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
     results = mod.evaluate(planner, data["cases"])
     metrics = mod.summarize(data, results)
     if track == "mpnet768":
-        d3 = _load_frozen_iter3_report()
+        d3_v1 = _load_frozen_iter3_report()      # v1：sha 照旧钉死（历史证据）
+        man = _load_refreeze_v2(REFREEZE_V2, REFREEZE_V2_SHA256)
+        d3 = _load_refreeze_v2(V2_ITER3, V2_ITER3_SHA256)  # v2：活库锚点
+        assert man["v1"]["iter3_report"]["sha256"] == _ITER3_REPORT_SHA256
+        assert man["v2"]["iter3_report"]["sha256"] == V2_ITER3_SHA256
         assert d3["iteration"] == 3 and d3["rules_version"] == "r3"
         m3 = d3["metrics"]
         assert metrics["overall"] == m3["overall"]
@@ -1312,7 +1364,7 @@ def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
         assert {m["id"] for m in metrics["misses"]} == {
             m["id"] for m in m3["misses"]}
         # 47 案逐案活算重放：hit/rank/matched_by/top8_ids 有序全等——
-        # 回滚保真度的最强机判（非仅聚合数相等）。
+        # 回滚保真度的最强机判（非仅聚合数相等）。锚 v2 机产件（106 行语料）。
         frozen_cases = {c["id"]: c for c in d3["cases"]}
         assert set(frozen_cases) == {r["id"] for r in results}
         for r in results:
@@ -1321,6 +1373,10 @@ def test_live_gold_eval_frozen_negative_recompute(monkeypatch):
             assert r["rank"] == f["rank"]
             assert r["matched_by"] == f["matched_by"]
             assert r["top8_ids"] == f["top8_ids"]
+        # 漂移围栏（Phase 2.7 Task 6 语料扩容）：v1→v2 只许登记过的那些案
+        _assert_r3_drift_fence(man, d3_v1["cases"], d3["cases"])
+        # 聚合与 hit 判定逐位不变（重冻只重排 solutions 路 top-8 成员/次序）
+        assert man["metrics_v1_v2"]["r3"]["v1"] == man["metrics_v1_v2"]["r3"]["v2"]
     else:
         _assert_gold_eval_geometry_free(data, results, metrics)
 

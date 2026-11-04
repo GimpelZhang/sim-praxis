@@ -1,0 +1,1047 @@
+{
+  "cases": [
+    {
+      "hit": false,
+      "id": "kb_check_success",
+      "matched_by": null,
+      "provenance": "通用复现流程指南 5.2；Task7 LIBERO 战役 telemetry 判分争议（Rung1–3 结构不可判，只信 env.check_success()）",
+      "rank": null,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "71dff2b80e1d5db24b03ffbf30d7b90f",
+        "8462ce09fa042997f47cf9b22c897038",
+        "ddbcee40d7a95e1cfe44bd552aaddf52",
+        "c173a05a3eac953eb5ab7d499ce71c7b",
+        "c4b3570d42827113b5ffa04d0a2e9f0b",
+        "6183ed23f2b6ee6707aa290d7de1eb72",
+        "7f0902bae16e906afeb64a74b82bd6b1",
+        "04385e75a12d56a4797d8a97b4dfbb4e"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_272_families",
+      "matched_by": "gold_id",
+      "provenance": "LW-BenchHub background 4.3 任务库两种设计风格；选型先看规模校准的 Task 5 墙事实",
+      "rank": 6,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "00b6012cc5193fcb61dd9425622a6bfa",
+        "41d3a714186f3454798394100f89f706",
+        "71dff2b80e1d5db24b03ffbf30d7b90f",
+        "f769cd60efd3a32825943c881fd41c1f",
+        "8462ce09fa042997f47cf9b22c897038",
+        "66d8bc7e2f13555dbe7244102d7a7c4f",
+        "7f0902bae16e906afeb64a74b82bd6b1",
+        "55a38152621e72b4456f29618e99033b"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": false,
+      "id": "kb_execmode",
+      "matched_by": null,
+      "provenance": "LW-BenchHub background 2.4 ExecuteMode 9 种运行语义（lw_benchhub/utils/env.py:46）",
+      "rank": null,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "aa7fcbeac566089ac5bc6240ad946505",
+        "4aaedb3cc3447e9ed71299c8268e77ed",
+        "271fbfb32c85330fbdc08d4abcec921c",
+        "c4b3570d42827113b5ffa04d0a2e9f0b",
+        "d241f2bf674d2701ae98df312f78d9bc",
+        "825e203ac321024e05757fe75370eadc",
+        "55a38152621e72b4456f29618e99033b",
+        "73c661d4173f700d24c2b5fae1dbbfea"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "kb_libero_two_diff",
+      "matched_by": "gold_id",
+      "provenance": "LW-BenchHub background 3.5 LIBERO 系两点差异；Task7 BDDL/任务声明题面来源",
+      "rank": 1,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "41d3a714186f3454798394100f89f706",
+        "71dff2b80e1d5db24b03ffbf30d7b90f",
+        "6ed0acaafdd57b4a53b9af280d850e61",
+        "f769cd60efd3a32825943c881fd41c1f",
+        "71a7cce200d30014401af81b34b817a0",
+        "ccd06ecb59a7ede1ce4be50b887371ca",
+        "ee3f4c3a73e42511544bb77685b913de",
+        "f76e531ca0eaa2500646cc231029e8b0"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "kb_termcfg",
+      "matched_by": "gold_id",
+      "provenance": "LW-BenchHub background 4.3 成功判定通用管线（base.py:160/204-206/280-300）；解释遥操作半秒延迟",
+      "rank": 2,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "1a729852cc6b59839ded218377fbd1f5",
+        "4aaedb3cc3447e9ed71299c8268e77ed",
+        "dfd2c061e8d180debf63a50b336f42f0",
+        "3936c514758ed8d5d33f1235533c57a0",
+        "d241f2bf674d2701ae98df312f78d9bc",
+        "c4b3570d42827113b5ffa04d0a2e9f0b",
+        "88e24e6702e3b9cb8b0e1cbf5a9161a5",
+        "50f493163a2fbb7d8a34fa763c26406d"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_q28_contacts",
+      "matched_by": "gold_id",
+      "provenance": "Genesis World FAQ G 刚柔/刚流耦合 Q28；Task8 流体战役接触查询实坑",
+      "rank": 1,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "bcfc823cc8e7c1d2e6669c9ede892d8f",
+        "ab26f161975a0c46ffd8d931444370cd",
+        "cefadfaecf0e103893843d385add0f2e",
+        "a2638376f2c8f0f8c786a486f5db2786",
+        "01a3f715e41f4baa320e986e51773e5e",
+        "074538ca4285631ededa33d2192d4868",
+        "79e4718b14f11db4aa3a94f349fef71b",
+        "0800487e559c449ad7acf9d3cd969af3"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_q34_sph",
+      "matched_by": "gold_id",
+      "provenance": "Genesis World FAQ Q34 SPH 炸开；Task8 Stage0 sph_ok 探针对照",
+      "rank": 1,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "8e53e69bde857bb2046b1b0b01b991d0",
+        "d0fc7941037aa7f124eb3c52b7cb3b48",
+        "cefadfaecf0e103893843d385add0f2e",
+        "75f2e474b54f1a113d46e2ca1b9f2f59",
+        "f7c4c5831c618d59894cb331a48be611",
+        "e87ef422f5abdd3483a3e4e4d021a352",
+        "fd519213f5877c8e7a111546fa531828",
+        "ddbd6b4fdb88a737aa81a6be88295357"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_q10_vla",
+      "matched_by": "gold_id",
+      "provenance": "genesis_world Q10 VLA 末端收敛同点/夹爪恒 0.0；Task 5 墙与 J.4 D18 止损机制证据；policy_closed_loop 动作接口典型题面",
+      "rank": 5,
+      "route": "kb",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "33b9cd6b58aa0b00c06bb433b61e2c9a",
+        "fc75eff5c99e64a8efab1540e1e57274",
+        "f13d9d02a5d5d1334d91620b410f7c85",
+        "c17716ed4886735f15356eb461480748",
+        "a68795f01fcf2a6b06b33dd968d986a0",
+        "c4b3570d42827113b5ffa04d0a2e9f0b",
+        "d5149956b0ed2e07f0363323ca932d52",
+        "22726cd9c7f76a07556340d117374e3e"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": false,
+      "id": "kb_16d_layout",
+      "matched_by": null,
+      "provenance": "GE-Sim 2.0 background 8.5 工程注意事项 #1 + 7.2 S3（_wm_to_model_layout/wm_to_grip_last 重排两遍）；Task 5 合同/测量墙事实",
+      "rank": null,
+      "route": "kb",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "8d5bc04cb03378f5c5e66dd483908d15",
+        "7336425369db5461c431b4d056ec4d2f",
+        "1a03b6c8566c8382de77b2b7252491e9",
+        "1200e308c48ef8f7b543810b5b754959",
+        "378ae03de360229cc39cf6456f207498",
+        "966db65a9cb3d44aa893d884f320e837",
+        "7da876ce27513e4ad1fe807b977e84be",
+        "915b259a1e55b9bbda358a9264303156"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": false,
+      "id": "kb_pipolicy",
+      "matched_by": null,
+      "provenance": "genie_sim_v3 tour 代码知识 3.3 PiPolicy；动作从哪来/action chunk 节奏的 policy_closed_loop 核心题面",
+      "rank": null,
+      "route": "kb",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "ab4729c34d7eb56d8e290df71b63f426",
+        "7f0902bae16e906afeb64a74b82bd6b1",
+        "62eeb0391e42a4b022dac83d61e141e2",
+        "ff965cdf699e3a6bdd7a600f038cdf8b",
+        "27a3f52c7e269491c27899c4b46cd4cf",
+        "c8fe70ddd727296a11a80cfb59e90c50",
+        "db0aad46499513cde0c9894748a566c4",
+        "6a12f10a100ce8e8a2916ed30cad3309"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_openpi_dephell",
+      "matched_by": "gold_id",
+      "provenance": "GE-Sim 2.0 troubleshooting Q11（三症状，regex→lerobot commit→回锁 numpy 1.26.4）；硬规则 8 钉版教训同源",
+      "rank": 5,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "bcb701577505e6353129cd6804a118f3",
+        "d05d7be2bad954be887ac3d93ec050c6",
+        "634c70768c7901d4870e3b8ef0cb97f6",
+        "ace938e3d8d3dfc564efcfd65673f8f4",
+        "551821da8bd7df04d64f3a043b079c1f",
+        "0faea55f2eeb101b4971ac983c22059c",
+        "80798cec212124fdf1011965c724c818",
+        "86a8c614a602cc68c33bdf8fdd596e7e"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_lora_dead",
+      "matched_by": "gold_id",
+      "provenance": "GE-Sim 2.0 troubleshooting Q24（JAX-only/无 action_head 四原因，替代：冻结主干解 4 Linear）",
+      "rank": 7,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "789323a343654720a7781abf30e8855f",
+        "ab4729c34d7eb56d8e290df71b63f426",
+        "c8fe70ddd727296a11a80cfb59e90c50",
+        "634c70768c7901d4870e3b8ef0cb97f6",
+        "22726cd9c7f76a07556340d117374e3e",
+        "d779cb7fcfc2a719d3ea5a3fbd6433dd",
+        "9e702e67e68d9f01acabe42e4c32cf55",
+        "b0de696518c4739965f4b28ca5078068"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_vla_local",
+      "matched_by": "gold_id",
+      "provenance": "genesis_world quickstart 1.4 VLA 模型；离线/沙盒部署实需（本机 hf-mirror + 0 触网纪律）",
+      "rank": 4,
+      "route": "kb",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "bdda89bc880bdf5fd5327fde8ed1c786",
+        "6a12f10a100ce8e8a2916ed30cad3309",
+        "9b645d6e3a33ffea36d0d78e5f89b0d5",
+        "3e4e679b4fc7cc6a7e9f46091d7e2a70",
+        "bc16214df560840e8b72448576b83d09",
+        "c91ff4f427c52da732cd49016ad188ca",
+        "c173a05a3eac953eb5ab7d499ce71c7b",
+        "cc4799f43e6fd13149eff94ad8088a42"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_pi0_chunking",
+      "matched_by": "gold_id",
+      "provenance": "genesis_world AI Knowledge D10 Patch01（⚠️ 推理完整但从未执行——诚实标注）；Task8 战役同文档决策表",
+      "rank": 5,
+      "route": "kb",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "ec5adb31dfdf0f0bfc2bf325f51746a5",
+        "22726cd9c7f76a07556340d117374e3e",
+        "c8fe70ddd727296a11a80cfb59e90c50",
+        "d779cb7fcfc2a719d3ea5a3fbd6433dd",
+        "f13d9d02a5d5d1334d91620b410f7c85",
+        "789323a343654720a7781abf30e8855f",
+        "62eeb0391e42a4b022dac83d61e141e2",
+        "fbacb83cd075dc0b6d803c16209dcc39"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_judge_discipline",
+      "matched_by": "gold_text",
+      "provenance": "跨项目库 J.4 过不去时的口径纪律（D08 假阳性/L8 降目标/D18 机制层止损）；硬规则 7 的知识库对应件",
+      "rank": 6,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "ae91837f41a596cb57b4c82517b49510",
+        "07d0913158522c25d614dd42268965c0",
+        "a005c0a5ca6625be059bb81d86f235d0",
+        "550d3cb54a939e70063935c09dcf482a",
+        "124718d4065cd73cbd18cd4341aaeba6",
+        "57d85b2d56267f2d247f6b7209bbb3a3",
+        "4770c05967a7b7b6b005889288acb27f",
+        "8cec452ca76e0127a5dcf34cba9e4e38"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_quantify_first",
+      "matched_by": "gold_id",
+      "provenance": "具身智能仿真复现最佳实践 3.1 先量化再修复；Task6 升阶战役与 555 行采纳遥测反复引用",
+      "rank": 1,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "c4b3570d42827113b5ffa04d0a2e9f0b",
+        "c17716ed4886735f15356eb461480748",
+        "ae91837f41a596cb57b4c82517b49510",
+        "07d0913158522c25d614dd42268965c0",
+        "f4d4e86379b364b0a74f1ac421244194",
+        "1076078e120bd881b33e2d348230d956",
+        "7a4eae9b8049c76d8754f2e678d42f69",
+        "dedb19f5a8f77a63b99990373328108b"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "kb_judge_zero_json",
+      "matched_by": "gold_text",
+      "provenance": "GE-Sim-V2-tour 代码知识 7.2 S1（vlm_reward_client.py:209-214）；Task 5 测量墙与机判哨兵 -1 同族静默失效",
+      "rank": 1,
+      "route": "kb",
+      "tier": "probe",
+      "top8_ids": [
+        "c7bc146390e006864ad92814be9a88a3",
+        "3760710036a08404c9f94df16123fbac",
+        "920fa33c189755133a1f31ac0a5c629c",
+        "c91135c22ec804291aea7018d6c1a1dd",
+        "01413112dcf6a7a824bc6cdc05715783",
+        "9abf1a6a12b678f974aca863d656db53",
+        "7cc3c112c87b7ba46f00bb4a13b71431",
+        "7431ad0f1d73002533e2676f3e70606e"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "sol_bddl_readme",
+      "matched_by": "gold_id",
+      "provenance": "solutions/track1_tools/03_libero/README.md（GOAL_RE/OBJINT_RE 与大写谓词回退）；Task7 Gate2 回收件",
+      "rank": 6,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "947d4633823cd48f901678879f59c41a",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "a13906551ee98fe4311469fc57d1c9f1"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_pincompat",
+      "matched_by": "gold_id",
+      "provenance": "03_libero/README 版本钉死说明（用户裁决降级，硬规则 8 锁版）",
+      "rank": 6,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7b6f0c3021098736ab55e7656946444c",
+        "fe4581298d09edfb6c6ad64ea50a4eef",
+        "947d4633823cd48f901678879f59c41a",
+        "da29c534890a62be11ff326ca75103a6",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "018286cd723b0a4e95bbb09d0b4b56b0",
+        "cc5167b3ec658f8cbbd13ec7ace0303b"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_manifest",
+      "matched_by": "gold_id",
+      "provenance": "solutions/track1_tools/03_libero/manifest.yaml（simpraxis.solution_manifest.v1 逐件 sha256）",
+      "rank": 1,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "947d4633823cd48f901678879f59c41a",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "cc5167b3ec658f8cbbd13ec7ace0303b"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_win1_env",
+      "matched_by": "gold_id",
+      "provenance": "03_libero/stage1_minimal.py 代码窗1；Task7 战役 EMFILE/EGL 真实排障",
+      "rank": 4,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "947d4633823cd48f901678879f59c41a",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "018286cd723b0a4e95bbb09d0b4b56b0"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": false,
+      "id": "sol_win2_servo",
+      "matched_by": null,
+      "provenance": "stage1_minimal.py 代码窗2 servo()；policy_source=scripted_servo 的 7-DOF delta EEF+夹爪接口实证",
+      "rank": null,
+      "route": "solutions",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "ae0146acc531960293839d85b5f429fe",
+        "947d4633823cd48f901678879f59c41a",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "018286cd723b0a4e95bbb09d0b4b56b0",
+        "4a32f893011654600def9a93a3567b23"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": false,
+      "id": "sol_win3_clearance",
+      "matched_by": null,
+      "provenance": "stage1_minimal.py 代码窗3（24 角度扫描+run_episode 单控制环纪律）",
+      "rank": null,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "947d4633823cd48f901678879f59c41a",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "018286cd723b0a4e95bbb09d0b4b56b0"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": false,
+      "id": "sol_win4_region",
+      "matched_by": null,
+      "provenance": "stage1_minimal.py 代码窗4 parse_goal_names/resolve_names/resolve_target",
+      "rank": null,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "947d4633823cd48f901678879f59c41a",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "018286cd723b0a4e95bbb09d0b4b56b0"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_win5_finger",
+      "matched_by": "gold_id",
+      "provenance": "stage1_minimal.py 代码窗5（指轴 z 对齐：finger spread ±y, rotate about z）",
+      "rank": 3,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "ca8c9e45328b9d258ca59f89a4149b99",
+        "cb1f008d670f1ff7d53eac4d7a15f96d",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "018286cd723b0a4e95bbb09d0b4b56b0",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "94ea9d7d55ea86ad807d6131f32f2116"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": false,
+      "id": "sol_win6_align",
+      "matched_by": null,
+      "provenance": "stage1_minimal.py 代码窗6（符号反转重试+restore+下探 0.027/闭爪 16 步/抬升 50 步）",
+      "rank": null,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "ca8c9e45328b9d258ca59f89a4149b99",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "018286cd723b0a4e95bbb09d0b4b56b0",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "4a32f893011654600def9a93a3567b23"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_win7_held",
+      "matched_by": "gold_id",
+      "provenance": "stage1_minimal.py 代码窗7（碗拖尾 ~0.047m/分轴运输/反应式 0.014,0.035/return bool(env.check_success())）；真人 Gate2 空爪负反馈的对策件",
+      "rank": 1,
+      "route": "solutions",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "ca8c9e45328b9d258ca59f89a4149b99",
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "018286cd723b0a4e95bbb09d0b4b56b0",
+        "4a32f893011654600def9a93a3567b23",
+        "a13906551ee98fe4311469fc57d1c9f1"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_win8_benchmark",
+      "matched_by": "gold_text",
+      "provenance": "stage1_minimal.py 代码窗8 main（10 任务 benchmark、init states≥2、2 episodes）",
+      "rank": 2,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "947d4633823cd48f901678879f59c41a",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "77444cbfec27c5e08dc037835e4768c7",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "81c8000f7a6a3969836581eb11fa7ad9"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_win9_results",
+      "matched_by": "gold_id",
+      "provenance": "stage1_minimal.py 代码窗9（results_obj/telemetry FPS dt=0.002/manifest，env.close finally）",
+      "rank": 3,
+      "route": "solutions",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "ca8c9e45328b9d258ca59f89a4149b99",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "9a15e94c83e73ca331cfdd5b4420feed",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "4a32f893011654600def9a93a3567b23"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_win10_exit",
+      "matched_by": "gold_id",
+      "provenance": "stage1_minimal.py 代码窗10（不完整套件 exit1，错误路径 sys.exit(1)）",
+      "rank": 3,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7f9bdabc4e7286f7c1d58ce8972fea64",
+        "c685ddb05301e1dad8dbf713b3df64d2",
+        "77444cbfec27c5e08dc037835e4768c7",
+        "2e7d3ac99db9cbb7e791f8355f13af51",
+        "8fc302da5604bd93df72c10d0c7cc740",
+        "dffe749a07b7fd97953e048d418a54c6",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "81c8000f7a6a3969836581eb11fa7ad9"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_ice_code",
+      "matched_by": "gold_id",
+      "provenance": "solutions/track2_questions/01_ice_floor_humanoid_dr/genesis_humanoid_dr.py；Task8 Q1 0.824<界2.0 矛盾结论的执行脚本（v1 实际执行副本）",
+      "rank": 5,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "17557a2226c90bfaa34ea7bdb413c046",
+        "467276ad24fdee3f274120de4951c603",
+        "fdcbd903eaec528da31ed2e35ac819c8",
+        "b457be162ece8d3b9a356884f59ff2c4",
+        "a13906551ee98fe4311469fc57d1c9f1",
+        "0efb2069305352ac46bc95bc3c9d7894",
+        "4a32f893011654600def9a93a3567b23",
+        "3527610366e86230cfe32c64d8ebb815"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "sol_lidar_optics",
+      "matched_by": "gold_id",
+      "provenance": "solutions/track2_questions/02_lidar_weather/optics_model.py；Task8-Q2 天气因果证伪/几何射线 bit 相等补点验 rung=1",
+      "rank": 2,
+      "route": "solutions",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "b5c290301535407bac660359e1d03608",
+        "0efb2069305352ac46bc95bc3c9d7894",
+        "c5da4e7bda898519e7155df10eeb8e3f",
+        "3527610366e86230cfe32c64d8ebb815",
+        "00bb1910a9ffbcb96c2567cec0e27f64",
+        "877a42d0eb6ac73d16c9266c744272c4",
+        "a13906551ee98fe4311469fc57d1c9f1",
+        "8186e57f2c478fb9c31774c9baf9e279"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "sol_maniskill",
+      "matched_by": "gold_id",
+      "provenance": "solutions/track1_tools/01_maniskill_pushcube/maniskill_pushcube.py；Phase 1 Task7 ManiSkill track",
+      "rank": 5,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7508c5c06e7e03a7c903322cfcde0913",
+        "dfc4434614c39edfbc022588259a88d7",
+        "568774a54aafefd210e280b632441d23",
+        "fc7dbd24b92f4f5e240860d10cb0bf9d",
+        "0f2a32dad39fb0f4474fa7790db5fd53",
+        "9d4f12c428bb6bb5f23bb515387b83aa",
+        "85cecf4469e244080bd003f2e16b2453",
+        "94ea9d7d55ea86ad807d6131f32f2116"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_mujoco",
+      "matched_by": "gold_id",
+      "provenance": "solutions/track1_tools/02_mujoco_contact_push/mujoco_contact_push.py；Phase 1 Task7 MuJoCo track",
+      "rank": 5,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "7b6f0c3021098736ab55e7656946444c",
+        "fe4581298d09edfb6c6ad64ea50a4eef",
+        "bfbc315608f1d2f9c80c85a7c9595ba9",
+        "46e21eb895ef3c4550d166e9b9e36201",
+        "018286cd723b0a4e95bbb09d0b4b56b0",
+        "94ea9d7d55ea86ad807d6131f32f2116",
+        "a13906551ee98fe4311469fc57d1c9f1",
+        "cc5167b3ec658f8cbbd13ec7ace0303b"
+      ],
+      "track": "track1"
+    },
+    {
+      "hit": true,
+      "id": "sol_ice_readme",
+      "matched_by": "gold_text",
+      "provenance": "solutions/track2_questions/01_ice_floor_humanoid_dr/README.md（正本溯源 v1 执行副本/运行面 batch 与 CSV 合同）",
+      "rank": 3,
+      "route": "solutions",
+      "tier": "probe",
+      "top8_ids": [
+        "a5daf81e266f9ee2b61b332b47209f3a",
+        "17557a2226c90bfaa34ea7bdb413c046",
+        "fdcbd903eaec528da31ed2e35ac819c8",
+        "179b3dde66d76cc90dc2e25be02941fb",
+        "a13906551ee98fe4311469fc57d1c9f1",
+        "0efb2069305352ac46bc95bc3c9d7894",
+        "4a32f893011654600def9a93a3567b23",
+        "c5da4e7bda898519e7155df10eeb8e3f"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_rungs",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings run_id=t7-libero-stage1 侧车 persist 首崩（2026-10-27，攒批85 rungs 契约修复）",
+      "rank": 1,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "86d4198cb307c994431dde21039e8e98",
+        "020327ed97ad817254eefffe729a8974",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "0023944cbf8d46ac9939cacac5d2a014",
+        "62102153d30170907c4fb6badb191f45",
+        "52d9f2c1a09c1af091324e1aed1e6818",
+        "34bd4d33d900d6107ec6460873aa349f"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_evroot",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings t6-genesis-ascent persist 证据根拒绝（@phase2/ 第三根修复 f5d269b）",
+      "rank": 2,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "c3155d9ce7d91b24bcf58404ad0e99a6",
+        "020327ed97ad817254eefffe729a8974",
+        "05c0dedb670c65fbcb5c3d9ba0d4f121",
+        "9dce693df4f747a0210cef0448ddf853",
+        "c5bec0b98152dc52b6c5d81eee7c9ffb",
+        "70647bf0f8ac3e6274854a64662ade87",
+        "d357a40dccae41121753dfd5b92ccac1",
+        "2db16c8babac17f9418c39c14760d069"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_usercustomize",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings Task6 升阶战役 usercustomize.py hygiene 教训",
+      "rank": 2,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "5f5a383247ec9f99d55fd7ecac804b2a",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "86d4198cb307c994431dde21039e8e98",
+        "de8910c9ece9ca0e82435ed5bb6bc870",
+        "4a5e3c0234fe6e48b011539ed1d68ae0",
+        "edf8b68bb23bcd09ed965a35e5528fd8",
+        "0023944cbf8d46ac9939cacac5d2a014"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_v2_accept",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings gate2_accepted run t6-genesis-ascent V2（2026-10-26“V2通过”，与 pareto=dominated_by_v1 两轴正交）",
+      "rank": 2,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "fa7e87824e176a1e4913c6037242fc5d",
+        "66bafb1d8f3a88da7075bbab274205b6",
+        "0ef64b94244b437f4c00a605b15ad50f",
+        "0023944cbf8d46ac9939cacac5d2a014",
+        "5f5a383247ec9f99d55fd7ecac804b2a",
+        "62102153d30170907c4fb6badb191f45",
+        "f188a845609b3c4c8231deddc1a53dec",
+        "1f1713ca9c9d9222839fc91151b81887"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_patch_safety",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings run7a patch safety（genesis_humanoid_dr_v2.py old-block 2 hits）",
+      "rank": 4,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "86d4198cb307c994431dde21039e8e98",
+        "0ef64b94244b437f4c00a605b15ad50f",
+        "dc0d01e7e53c64c6c2f4784718e4e51d",
+        "5f5a383247ec9f99d55fd7ecac804b2a",
+        "1bf02ea873f5fb91555a3d310490f63c",
+        "0023944cbf8d46ac9939cacac5d2a014"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_mujoco_reject",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings t7-mujoco human_failure_gate2 rung=0（Task9 HITL 抽验同源）",
+      "rank": 1,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "dc0d01e7e53c64c6c2f4784718e4e51d",
+        "48ec4eb4503c49b14b4c078bd16f95dd",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "1bf02ea873f5fb91555a3d310490f63c",
+        "86d4198cb307c994431dde21039e8e98",
+        "5f5a383247ec9f99d55fd7ecac804b2a",
+        "1f1713ca9c9d9222839fc91151b81887"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_fluid_reject",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings t8q5-fluid-stage1 D10 第三熔 human_failure_gate2（2026-10-28 负结果结案五战役之一）",
+      "rank": 1,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "de8910c9ece9ca0e82435ed5bb6bc870",
+        "fa7e87824e176a1e4913c6037242fc5d",
+        "86d4198cb307c994431dde21039e8e98",
+        "66bafb1d8f3a88da7075bbab274205b6",
+        "4a5e3c0234fe6e48b011539ed1d68ae0",
+        "a89d254d5db96d318de9aafdb5ca8d1b",
+        "0ef64b94244b437f4c00a605b15ad50f",
+        "0023944cbf8d46ac9939cacac5d2a014"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_empty_gripper",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings 唯一 task7 gate2_accepted rung=1（2026-10-27 14:47:24 卡#3，r27 官方判分抓取成功）",
+      "rank": 3,
+      "route": "learnings",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "1bf02ea873f5fb91555a3d310490f63c",
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "fd59d8dfddb60ed87a711264915893ee",
+        "42b7de2bebf307e7f10988c544790cfc",
+        "344428787e7cbcb8b0dc50eb5c63c12e",
+        "dc0d01e7e53c64c6c2f4784718e4e51d",
+        "0023944cbf8d46ac9939cacac5d2a014"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_jitter",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings t7-libero run_e human_failure_agent_run（夹爪无序抖动没伸向物体）",
+      "rank": 1,
+      "route": "learnings",
+      "tier": "policy_closed_loop",
+      "top8_ids": [
+        "1bf02ea873f5fb91555a3d310490f63c",
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "42b7de2bebf307e7f10988c544790cfc",
+        "fd59d8dfddb60ed87a711264915893ee",
+        "344428787e7cbcb8b0dc50eb5c63c12e",
+        "dc0d01e7e53c64c6c2f4784718e4e51d",
+        "86d4198cb307c994431dde21039e8e98"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_runa",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings t7-libero-stage1 run a（RunSpec 轮帽）",
+      "rank": 3,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "1bf02ea873f5fb91555a3d310490f63c",
+        "fd59d8dfddb60ed87a711264915893ee",
+        "42b7de2bebf307e7f10988c544790cfc",
+        "344428787e7cbcb8b0dc50eb5c63c12e",
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "0023944cbf8d46ac9939cacac5d2a014",
+        "62102153d30170907c4fb6badb191f45"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": true,
+      "id": "l_carla",
+      "matched_by": "gold_id",
+      "provenance": "phase1_learnings t8-q2carla accepted_supplementary rung=1（Q2 光学模型参数标定 Phase 3 backlog 同源）",
+      "rank": 1,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "86d4198cb307c994431dde21039e8e98",
+        "de8910c9ece9ca0e82435ed5bb6bc870",
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "4a5e3c0234fe6e48b011539ed1d68ae0",
+        "edf8b68bb23bcd09ed965a35e5528fd8",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "a89d254d5db96d318de9aafdb5ca8d1b",
+        "5f5a383247ec9f99d55fd7ecac804b2a"
+      ],
+      "track": "track2"
+    },
+    {
+      "hit": false,
+      "id": "l_fluid_wall",
+      "matched_by": null,
+      "provenance": "phase1_learnings t8q5-fluid-stage1-20261027a run5 机判墙三新行之一（2026-10-28 负结果结案）",
+      "rank": null,
+      "route": "learnings",
+      "tier": "probe",
+      "top8_ids": [
+        "2f9ca046843efa7a62ddf548af7438ef",
+        "1b10ac8d9d30289f7489723f0d361fa7",
+        "86d4198cb307c994431dde21039e8e98",
+        "de8910c9ece9ca0e82435ed5bb6bc870",
+        "4a5e3c0234fe6e48b011539ed1d68ae0",
+        "edf8b68bb23bcd09ed965a35e5528fd8",
+        "a89d254d5db96d318de9aafdb5ca8d1b",
+        "1bf02ea873f5fb91555a3d310490f63c"
+      ],
+      "track": "track2"
+    }
+  ],
+  "fixture": "/home/vipuser/sim-praxis/tests/milestone25/fixtures/planner_golden_queries.json",
+  "iteration": 3,
+  "iterations": [
+    {
+      "iteration": 3,
+      "learning_route": 0.9167,
+      "overall": 0.8085,
+      "rules_version": "r3",
+      "solution_route": 0.7778
+    }
+  ],
+  "metrics": {
+    "all_pass": true,
+    "kb_route_observed": {
+      "hits": 13,
+      "total": 17
+    },
+    "learning_route": {
+      "gold_at_8": 0.9167,
+      "hits": 11,
+      "pass": true,
+      "threshold": 0.75,
+      "total": 12
+    },
+    "misses": [
+      {
+        "id": "kb_check_success",
+        "provenance": "通用复现流程指南 5.2；Task7 LIBERO 战役 telemetry 判分争议（Rung1–3 结构不可判，只信 env.check_success()）",
+        "route": "kb"
+      },
+      {
+        "id": "kb_execmode",
+        "provenance": "LW-BenchHub background 2.4 ExecuteMode 9 种运行语义（lw_benchhub/utils/env.py:46）",
+        "route": "kb"
+      },
+      {
+        "id": "kb_16d_layout",
+        "provenance": "GE-Sim 2.0 background 8.5 工程注意事项 #1 + 7.2 S3（_wm_to_model_layout/wm_to_grip_last 重排两遍）；Task 5 合同/测量墙事实",
+        "route": "kb"
+      },
+      {
+        "id": "kb_pipolicy",
+        "provenance": "genie_sim_v3 tour 代码知识 3.3 PiPolicy；动作从哪来/action chunk 节奏的 policy_closed_loop 核心题面",
+        "route": "kb"
+      },
+      {
+        "id": "sol_win2_servo",
+        "provenance": "stage1_minimal.py 代码窗2 servo()；policy_source=scripted_servo 的 7-DOF delta EEF+夹爪接口实证",
+        "route": "solutions"
+      },
+      {
+        "id": "sol_win3_clearance",
+        "provenance": "stage1_minimal.py 代码窗3（24 角度扫描+run_episode 单控制环纪律）",
+        "route": "solutions"
+      },
+      {
+        "id": "sol_win4_region",
+        "provenance": "stage1_minimal.py 代码窗4 parse_goal_names/resolve_names/resolve_target",
+        "route": "solutions"
+      },
+      {
+        "id": "sol_win6_align",
+        "provenance": "stage1_minimal.py 代码窗6（符号反转重试+restore+下探 0.027/闭爪 16 步/抬升 50 步）",
+        "route": "solutions"
+      },
+      {
+        "id": "l_fluid_wall",
+        "provenance": "phase1_learnings t8q5-fluid-stage1-20261027a run5 机判墙三新行之一（2026-10-28 负结果结案）",
+        "route": "learnings"
+      }
+    ],
+    "n_cases": 47,
+    "overall": {
+      "gold_at_8": 0.8085,
+      "hits": 38,
+      "pass": true,
+      "threshold": 0.8,
+      "total": 47
+    },
+    "solution_route": {
+      "gold_at_8": 0.7778,
+      "hits": 14,
+      "pass": true,
+      "threshold": 0.75,
+      "total": 18
+    }
+  },
+  "refreeze": {
+    "corpus_rows": {
+      "kb_chunks": 1542,
+      "phase1_learnings": 44,
+      "phase2_learnings": 1,
+      "solution_chunks": 106
+    },
+    "generated_by": "scripts/phase27/refreeze_phase25_anchors.py",
+    "kind": "phase27_task6_content_expansion",
+    "reason": "Phase 2.7 Task 6 按计划回收 track1_tools/04_libero_vla，solution_chunks 94→106；solutions 路 top-8 重排，hit 判定零漂移。",
+    "supersedes": "planner_gold_iter3_*.json（sha f1c0e7f4caf32e066ef7ed4dbac9a75f02e32fc9e3876e42180e10ba267fa307）"
+  },
+  "rules_version": "r3",
+  "schema": "simpraxis.phase25.planner_gold_eval.v1",
+  "top_k": 8,
+  "ts_utc": "2026-11-04T12:59:57Z"
+}

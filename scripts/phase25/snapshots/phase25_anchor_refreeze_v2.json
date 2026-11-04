@@ -1,0 +1,430 @@
+{
+  "corpus_rows": {
+    "kb_chunks": 1542,
+    "phase1_learnings": 44,
+    "phase2_learnings": 1,
+    "solution_chunks": 106
+  },
+  "flip_loss": {
+    "v1": [],
+    "v2": []
+  },
+  "generated_by": "scripts/phase27/refreeze_phase25_anchors.py",
+  "hit_drift": {
+    "r3": [],
+    "r4": []
+  },
+  "metrics_v1_v2": {
+    "r3": {
+      "learning_route_v1": {
+        "gold_at_8": 0.9167,
+        "hits": 11,
+        "pass": true,
+        "threshold": 0.75,
+        "total": 12
+      },
+      "learning_route_v2": {
+        "gold_at_8": 0.9167,
+        "hits": 11,
+        "pass": true,
+        "threshold": 0.75,
+        "total": 12
+      },
+      "solution_route_v1": {
+        "gold_at_8": 0.7778,
+        "hits": 14,
+        "pass": true,
+        "threshold": 0.75,
+        "total": 18
+      },
+      "solution_route_v2": {
+        "gold_at_8": 0.7778,
+        "hits": 14,
+        "pass": true,
+        "threshold": 0.75,
+        "total": 18
+      },
+      "v1": {
+        "gold_at_8": 0.8085,
+        "hits": 38,
+        "pass": true,
+        "threshold": 0.8,
+        "total": 47
+      },
+      "v2": {
+        "gold_at_8": 0.8085,
+        "hits": 38,
+        "pass": true,
+        "threshold": 0.8,
+        "total": 47
+      }
+    },
+    "r4": {
+      "v1": {
+        "kb_route": {
+          "gold_at_8": 0.9412,
+          "hits": 16,
+          "total": 17
+        },
+        "learning_route": {
+          "gold_at_8": 0.9167,
+          "hits": 11,
+          "total": 12
+        },
+        "overall": {
+          "gold_at_8": 0.9574,
+          "hits": 45,
+          "total": 47
+        },
+        "solution_route": {
+          "gold_at_8": 1.0,
+          "hits": 18,
+          "total": 18
+        }
+      },
+      "v2": {
+        "kb_route": {
+          "gold_at_8": 0.9412,
+          "hits": 16,
+          "total": 17
+        },
+        "learning_route": {
+          "gold_at_8": 0.9167,
+          "hits": 11,
+          "total": 12
+        },
+        "overall": {
+          "gold_at_8": 0.9574,
+          "hits": 45,
+          "total": 47
+        },
+        "solution_route": {
+          "gold_at_8": 1.0,
+          "hits": 18,
+          "total": 18
+        }
+      }
+    }
+  },
+  "rank_drift": {
+    "r3": {
+      "sol_bddl_readme": {
+        "v1": 5,
+        "v2": 6
+      },
+      "sol_win8_benchmark": {
+        "v1": 7,
+        "v2": 2
+      }
+    },
+    "r4": {
+      "sol_bddl_readme": {
+        "v1": 1,
+        "v2": 2
+      },
+      "sol_win2_servo": {
+        "v1": 5,
+        "v2": 4
+      },
+      "sol_win4_region": {
+        "v1": 5,
+        "v2": 6
+      },
+      "sol_win6_align": {
+        "v1": 4,
+        "v2": 5
+      },
+      "sol_win8_benchmark": {
+        "v1": 3,
+        "v2": 5
+      }
+    }
+  },
+  "reason": "Phase 2.7 Task 6 内容层回收（KB b5de4bd，Gate2 三卡 approve）：solution_chunks 94→106，solutions 路 top-8 重排。",
+  "schema": "simpraxis.phase27.phase25_anchor_refreeze.v1",
+  "top8_drift": {
+    "r3": {
+      "sol_bddl_readme": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0"
+        ]
+      },
+      "sol_manifest": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0"
+        ]
+      },
+      "sol_win10_exit": {
+        "added": [
+          "81c8000f7a6a3969836581eb11fa7ad9",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "568774a54aafefd210e280b632441d23"
+        ]
+      },
+      "sol_win1_env": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "568774a54aafefd210e280b632441d23"
+        ]
+      },
+      "sol_win2_servo": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "85cecf4469e244080bd003f2e16b2453"
+        ]
+      },
+      "sol_win3_clearance": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "85cecf4469e244080bd003f2e16b2453"
+        ]
+      },
+      "sol_win4_region": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "85cecf4469e244080bd003f2e16b2453"
+        ]
+      },
+      "sol_win5_finger": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "a13906551ee98fe4311469fc57d1c9f1"
+        ]
+      },
+      "sol_win6_align": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "94ea9d7d55ea86ad807d6131f32f2116"
+        ]
+      },
+      "sol_win7_held": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "94ea9d7d55ea86ad807d6131f32f2116"
+        ]
+      },
+      "sol_win8_benchmark": {
+        "added": [
+          "7f9bdabc4e7286f7c1d58ce8972fea64",
+          "81c8000f7a6a3969836581eb11fa7ad9",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "9a15e94c83e73ca331cfdd5b4420feed",
+          "cc5167b3ec658f8cbbd13ec7ace0303b"
+        ]
+      },
+      "sol_win9_results": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "a5daf81e266f9ee2b61b332b47209f3a"
+        ]
+      }
+    },
+    "r4": {
+      "sol_bddl_readme": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "796001d2356395a869c5418389374fec"
+        ]
+      },
+      "sol_manifest": {
+        "added": [
+          "81c8000f7a6a3969836581eb11fa7ad9"
+        ],
+        "order_changed": false,
+        "removed": [
+          "cc5167b3ec658f8cbbd13ec7ace0303b"
+        ]
+      },
+      "sol_mujoco": {
+        "added": [],
+        "order_changed": true,
+        "removed": []
+      },
+      "sol_pincompat": {
+        "added": [
+          "81c8000f7a6a3969836581eb11fa7ad9"
+        ],
+        "order_changed": false,
+        "removed": [
+          "947d4633823cd48f901678879f59c41a"
+        ]
+      },
+      "sol_win10_exit": {
+        "added": [
+          "81c8000f7a6a3969836581eb11fa7ad9",
+          "d76cae44234a3d20d04847eaacd4720b",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "94ea9d7d55ea86ad807d6131f32f2116",
+          "aa3b2529b29e6977a0c56507a740495c",
+          "da29c534890a62be11ff326ca75103a6"
+        ]
+      },
+      "sol_win1_env": {
+        "added": [
+          "d76cae44234a3d20d04847eaacd4720b",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "50405f5cb4ec13d2e84b61d40bb609b3",
+          "568774a54aafefd210e280b632441d23"
+        ]
+      },
+      "sol_win2_servo": {
+        "added": [],
+        "order_changed": true,
+        "removed": []
+      },
+      "sol_win3_clearance": {
+        "added": [
+          "81c8000f7a6a3969836581eb11fa7ad9",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "94ea9d7d55ea86ad807d6131f32f2116"
+        ]
+      },
+      "sol_win4_region": {
+        "added": [
+          "51767b2cf323c957ef88f2fa41e8618c",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "94ea9d7d55ea86ad807d6131f32f2116"
+        ]
+      },
+      "sol_win5_finger": {
+        "added": [
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "9a15e94c83e73ca331cfdd5b4420feed"
+        ]
+      },
+      "sol_win6_align": {
+        "added": [
+          "d76cae44234a3d20d04847eaacd4720b",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "cb1f008d670f1ff7d53eac4d7a15f96d"
+        ]
+      },
+      "sol_win7_held": {
+        "added": [
+          "d76cae44234a3d20d04847eaacd4720b",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "018286cd723b0a4e95bbb09d0b4b56b0",
+          "9a15e94c83e73ca331cfdd5b4420feed"
+        ]
+      },
+      "sol_win8_benchmark": {
+        "added": [
+          "d267cd60385f8af11feaa305f7edd4ab",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "9a15e94c83e73ca331cfdd5b4420feed",
+          "e38d1726723f084e98a7e3c78264ea45"
+        ]
+      },
+      "sol_win9_results": {
+        "added": [
+          "51767b2cf323c957ef88f2fa41e8618c",
+          "81c8000f7a6a3969836581eb11fa7ad9",
+          "dffe749a07b7fd97953e048d418a54c6"
+        ],
+        "order_changed": false,
+        "removed": [
+          "2e7d3ac99db9cbb7e791f8355f13af51",
+          "467276ad24fdee3f274120de4951c603",
+          "9a15e94c83e73ca331cfdd5b4420feed"
+        ]
+      }
+    }
+  },
+  "ts_utc": "2026-11-04T13:00:42Z",
+  "v1": {
+    "iter3_report": {
+      "path": "phase25 根 task6_recall/planner_gold_iter3_*.json",
+      "sha256": "f1c0e7f4caf32e066ef7ed4dbac9a75f02e32fc9e3876e42180e10ba267fa307"
+    },
+    "point_predictions": {
+      "path": "scripts/phase25/snapshots/task6_r4_point_predictions.json",
+      "sha256": "e7e1bc3853ac199bdc25bb99feabda19b1f688b5f4f214f10483f6a9d0740a76"
+    },
+    "prod_union_snapshot": {
+      "note": "本件由 scripts/phase25/gen_r3_prod_union_snapshot.py 在 106 行活库上机产重产（Task 6 收口），重产取证见 phase27 证据包 manifests/r3_prod_union_snapshot_refresh.json。",
+      "path": "scripts/phase25/snapshots/task6_r3_mpnet_prod_union_snapshot.json",
+      "sha256_after_task6": "0aead65078e8a7088e1907693a724239ca530d451861466dabd9ee145fb0c96a",
+      "sha256_pre_task6": "53c043dc202c7de8c611fb523ee842546b47f9d5cbbbaf72633064fcbf98cc7b"
+    }
+  },
+  "v2": {
+    "iter3_report": {
+      "path": "scripts/phase25/snapshots/planner_gold_iter3_corpus106.json",
+      "sha256": "c9435b633e49b77418b4c357e0b61fdde31b7d79526b035b10b0e2fa32218d28"
+    },
+    "point_predictions": {
+      "path": "scripts/phase25/snapshots/task6_r4_point_predictions_corpus106.json",
+      "sha256": "3cf131031f5875c282aac9615473ffa9a56506f1d0bcd944c41d512afed1a5e6"
+    }
+  }
+}
