@@ -2,7 +2,7 @@
 """Phase 2.7 AC 达成度看板（0 付费、只读）。
 
 产出 ``$SIMPRAXIS_PHASE27_ROOT/task7_milestone/dashboard_phase27.json``：
-git 状态、三段测试读数（冷跑 / kbint / 容器场）、四表行数、账本汇总、
+git 状态、四段测试读数（冷跑 / kbint / 容器场 / 验收套）、四表行数、账本汇总、
 逐 Task 结果、环境出清、AC 计数。
 
 **契约**（与 ``check_phase27_closure.py`` 互证，但实现独立——D7-1）：
@@ -235,6 +235,10 @@ def build(*, cold_run: Path, kbint: Path, container_run: Path,
     }
     # 「半张绿」守卫：任一段红即拒绝出板。冷跑是主判据，活库/容器套同样是
     # 锁内适配 2 纳入收尾的判据——只守冷跑会让 kbint 红着也能出绿板。
+    #
+    # 锁内适配 3：验收套（AC-T7-1..7）**不进看板**。它读的正是本看板与本
+    # 证据包，若在此处要求它绿，就形成「看板要绿→验收套要跑→验收套要读
+    # 看板」的死循环；它作为独立车道留日志，由 AC-T7-7 与 §8 对账。
     for key in ("cold_run", "kbint", "container_run"):
         blk = tests[key]
         if blk["rc"] != 0 or blk["failed"] != 0:
