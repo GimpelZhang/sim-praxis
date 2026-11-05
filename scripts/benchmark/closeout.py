@@ -151,9 +151,10 @@ def _run_lane(cmd: "list[str]", env: "dict[str, str]", log: Path,
     }
 
 
-def _collect_marked(env: "dict[str, str]", marker: str) -> int:
+def _collect_marked(env: "dict[str, str]", marker: str,
+                    target: str = "tests/benchmark") -> int:
     """带 marker 的采集条数（用同一条 env 口径，避免「环境没开→0 条→空绿」）。"""
-    cmd = [MAIN_PYTHON, "-m", "pytest", "tests/benchmark", "--collect-only",
+    cmd = [MAIN_PYTHON, "-m", "pytest", target, "--collect-only",
            "-q", "-m", marker]
     proc = subprocess.run(cmd, cwd=str(_REPO), env=env, capture_output=True,
                           text=True, timeout=600)
@@ -161,6 +162,25 @@ def _collect_marked(env: "dict[str, str]", marker: str) -> int:
         raise RuntimeError(f"collect -m {marker} 失败：{proc.stdout[-400:]}")
     return sum(1 for line in proc.stdout.splitlines()
                if line.strip().startswith("tests/benchmark/"))
+
+
+#: 两条验收车道跑的具体件（采集条数与车道命令必须指向同一路径，否则「采集
+#: 数」与「实际执行数」可以漂移成两个不相干的数字）
+MILESTONE_LANE_TARGET = "tests/benchmark/test_task7_closeout.py"
+CONTAINER_LANE_TARGET = "tests/benchmark"
+
+
+def acceptance_envs(root: Path) -> "tuple[dict[str, str], dict[str, str]]":
+    """两条车道的子进程环境（**两条都必须显式开闸**）。
+
+    评审修复批次（5083b52）把 ``SIMPRAXIS_MILESTONE_CLOSEOUT="1"`` 收进了
+    ``_subprocess_env(root)`` 的重构缝隙里——里程碑车道因此在**未开闸**的
+    环境里跑，全部用例被收集期 deselect（37 deselected / 0 passed / rc=5），
+    是一条「什么都没验却看着跑完了」的空车道。单列成纯函数，让
+    ``test_ac_p0_7_9_acceptance_lane_env_logic`` 把这两个开关钉成机判。
+    """
+    return (_subprocess_env(root, SIMPRAXIS_MILESTONE_CLOSEOUT="1"),
+            _subprocess_env(root, SIMPRAXIS_CONTAINER="1"))
 
 
 def cmd_acceptance(root: Path) -> dict:
@@ -174,19 +194,20 @@ def cmd_acceptance(root: Path) -> dict:
     out = root / "closeout"
     out.mkdir(parents=True, exist_ok=True)
     # 评审 W4-05：子进程必须读同一个根（否则 --root 指别处时读 A 根、写 B 根）。
-    env = _subprocess_env(root)
-    container_env = _subprocess_env(root, SIMPRAXIS_CONTAINER="1")
+    env, container_env = acceptance_envs(root)
 
     lane_log = out / "acceptance_lane.log"
-    lane = _run_lane([MAIN_PYTHON, "-m", "pytest",
-                      "tests/benchmark/test_task7_closeout.py",
+    lane = _run_lane([MAIN_PYTHON, "-m", "pytest", MILESTONE_LANE_TARGET,
                       "-m", "milestone_closeout", "-q"], env, lane_log)
+    lane["selected"] = _collect_marked(env, "milestone_closeout",
+                                       MILESTONE_LANE_TARGET)
 
     container_log = out / "container_lane.log"
-    container = _run_lane([MAIN_PYTHON, "-m", "pytest", "tests/benchmark",
+    container = _run_lane([MAIN_PYTHON, "-m", "pytest", CONTAINER_LANE_TARGET,
                            "-m", "container", "-q"], container_env,
                           container_log)
-    container["selected"] = _collect_marked(container_env, "container")
+    container["selected"] = _collect_marked(container_env, "container",
+                                            CONTAINER_LANE_TARGET)
 
     doc = {
         "schema": "simpraxis.benchmark.acceptance_lane.v1",

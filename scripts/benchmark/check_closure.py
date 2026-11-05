@@ -54,6 +54,15 @@ EXPECTED_MODE = {"mujoco_contact_push_v1": ("host", None),
 #: 而要求实时 ``origin/main`` ∈ {基线, HEAD} 且是 HEAD 的祖先（见
 #: ``verify_origin_anchor``）。
 ORIGIN_MAIN = "4b5d134a447b2069b050887d63f3ddd4e687f123"
+#: 人工 STOP 门**放行过**的推送头（除基线 ``ORIGIN_MAIN`` 外）——每一条都必须
+#: 在 Complete 里有对应的推送窗口记录。``origin/main`` 只允许停在这些值之一，
+#: 或等于当前 ``HEAD``（=本阶段即将/已经经门推送）。名单是**精确集合**，不是
+#: ``>=`` 式放水：任何未经记录的新 sha 仍判红。
+#: - ``5895fe0``：2026-11-05 19:41–19:43 CST 推送窗口（Complete §8，用户逐字指示；
+#:   11 条 phase28 提交，含 Task 7 收尾件）。
+AUTHORIZED_PUSH_HEADS = (
+    "5895fe02e8cbda2a6962f8aa9a178268e7e5d991",
+)
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
 #: Task 5 预注册控制组规模（§3 Task 5）：不钉死则「缩水也算过」（W4-15）。
@@ -145,20 +154,27 @@ def parse_pytest_summary(text: str) -> "dict | None":
 
 def verify_origin_anchor(origin_main: str, head: str, *,
                          base: str = ORIGIN_MAIN,
+                         authorized: "tuple[str, ...]" = AUTHORIZED_PUSH_HEADS,
                          ancestor: "bool | None" = None) -> "list[str]":
     """I10（评审 W5-01 **改向不放水**）：推送是人工 STOP 门，不是「永不推送」。
 
-    本阶段允许的实时 ``origin/main`` 只有两个值——Task 0 基线 ``base``，或
-    本阶段 HEAD（＝人工 STOP 门放行后的推送结果）；且 ``origin/main`` 必须是
-    ``HEAD`` 的祖先（改写已推历史即违规）。任何第三方 sha、或非祖先关系都判红。
+    本阶段允许的实时 ``origin/main`` 是**有限集合**：Task 0 基线 ``base``、
+    每条经人工 STOP 门记录在案的推送头 ``authorized``（见
+    ``AUTHORIZED_PUSH_HEADS``），或本阶段 ``HEAD``（＝本次放行后的推送结果）；
+    且 ``origin/main`` 必须是 ``HEAD`` 的祖先（改写已推历史即违规）。任何名单
+    外的第三方 sha、或非祖先关系都判红——推过几次就有几个值，新增一个就必须
+    先更新名单，不存在「只要不是基线就放行」的缝。
     """
     problems = []
     if not _COMMIT_RE.fullmatch(str(origin_main or "")):
         problems.append(f"origin/main 非 40 hex：{origin_main!r}")
         return problems
-    if origin_main not in (base, head):
-        problems.append(f"origin/main={origin_main} 既非基线 {base} 也非 HEAD "
-                        f"{head}（未经审的推送/改写？）")
+    allowed = tuple(dict.fromkeys((base, *authorized, head)))
+    if origin_main not in allowed:
+        problems.append(
+            f"origin/main={origin_main} 不在 {len(allowed)} 个放行值内"
+            f"（基线 {base} / 已记录推送头 {list(authorized)} / HEAD {head}）"
+            f"——未经审的推送或改写？")
     if ancestor is False:
         problems.append("HEAD 不是 origin/main 的祖先（已推送历史被改写）")
     return problems
@@ -906,6 +922,10 @@ def check_ledgers(root: Path) -> "tuple[list[str], dict]":
 #: 评审 W5-17：container 车道的下限条数。低于此值即视为「标记没生效/被整套
 #: deselect」，而不是「容器车道通过」——防止空绿。
 CONTAINER_LANE_MIN = 2
+#: 里程碑车道同理（评审修复批次自伤回归：5083b52 把
+#: ``SIMPRAXIS_MILESTONE_CLOSEOUT=1`` 丢在重构缝里，车道 0 条全 deselect、
+#: rc=5，而旧判据只要求 rc=0/passed≥1，等于「什么都没验也算跑过」）。
+MILESTONE_LANE_MIN = 1
 
 
 def _check_lane(detail: dict, doc: dict, log: Path, label: str) -> "list[str]":
@@ -940,6 +960,18 @@ def check_acceptance(root: Path) -> "tuple[list[str], dict]":
     detail.update({k: lane.get(k) for k in ("cmd", "rc", "passed", "failed",
                                            "summary")})
     problems.extend(_check_lane(detail, lane, lane_log, "验收车道"))
+    #: 里程碑车道同样不许「标记没开所以 0 条」的空绿：采集条数与实跑条数
+    #: 必须相等且不低于下限（``closeout.acceptance_envs()`` 负责开闸，
+    #: ``test_ac_p0_7_9_acceptance_lane_env_logic`` 把开关钉成机判）。
+    ml_selected = int(lane.get("selected", 0))
+    detail["验收车道.selected"] = ml_selected
+    if ml_selected < MILESTONE_LANE_MIN:
+        problems.append(
+            f"验收车道采集 {ml_selected} 条 < 下限 {MILESTONE_LANE_MIN}"
+            f"（标记未生效或测试被删）")
+    elif int(lane.get("passed", 0)) != ml_selected:
+        problems.append(
+            f"验收车道 passed={lane.get('passed')} ≠ 采集 {ml_selected}")
 
     # 评审 W5-17：容器车道是验收的第二段，必须真跑且记录采集条数——只认
     # passed ≥ 下限，不认「标记没开所以 0 条」的空绿。

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import json
 import subprocess
 import sys
@@ -28,6 +29,7 @@ for extra in (str(REPO), str(REPO / "scripts" / "benchmark")):
 
 import build_evidence_pack as packer  # noqa: E402
 import check_closure as judge  # noqa: E402
+import closeout  # noqa: E402
 from orchestrator.agent_runner.runner import RunSpec  # noqa: E402
 from orchestrator.agentic.config import AgenticConfig  # noqa: E402
 from orchestrator.benchmark import intake as bench_intake  # noqa: E402
@@ -263,6 +265,34 @@ def test_ac_p0_7_5_three_signs_logic():
 
 
 # --------------------------------------------------------------------------
+# AC-T7-9 验收车道必须真开闸（评审修复批次自伤回归）
+# --------------------------------------------------------------------------
+
+def test_ac_p0_7_9_acceptance_lane_env_logic(tmp_path: Path):
+    """两条验收车道各自带自己的开关，缺一即「空车道」。
+
+    回归背景：5083b52 的重构把 ``SIMPRAXIS_MILESTONE_CLOSEOUT="1"`` 从
+    里程碑车道环境里丢掉了，车道在未开闸环境里收集期 **全部 deselect**
+    （实测 37 deselected / 0 passed / rc=5）——判据只看 rc/passed 时这不是
+    「红」而是「什么都没验」。本用例把两个开关与两条采集目标钉成机判。
+    """
+    lane_env, container_env = closeout.acceptance_envs(tmp_path)
+    assert lane_env["SIMPRAXIS_MILESTONE_CLOSEOUT"] == "1"
+    assert "SIMPRAXIS_CONTAINER" not in lane_env          # 两开关不互相顶替
+    assert container_env["SIMPRAXIS_CONTAINER"] == "1"
+    assert "SIMPRAXIS_MILESTONE_CLOSEOUT" not in container_env
+    # 两条车道都读同一个根（评审 W4-05）
+    assert lane_env["SIMPRAXIS_BENCHMARK_ROOT"] == str(tmp_path.resolve())
+    assert container_env["SIMPRAXIS_BENCHMARK_ROOT"] == str(tmp_path.resolve())
+    # 采集目标必须与车道命令指向同一路径，否则「采集数」与「实跑数」脱钩
+    assert closeout.MILESTONE_LANE_TARGET == \
+        "tests/benchmark/test_task7_closeout.py"
+    assert closeout.CONTAINER_LANE_TARGET == "tests/benchmark"
+    # 判据侧下限：两条车道都不许 0 条（空绿）
+    assert judge.MILESTONE_LANE_MIN >= 1 and judge.CONTAINER_LANE_MIN >= 1
+
+
+# --------------------------------------------------------------------------
 # AC-T7-6 五本账冻结
 # --------------------------------------------------------------------------
 
@@ -353,10 +383,21 @@ def test_ac_p0_7_8_invariants_i1_i12_logic():
 
 
 @MARK
-def test_acc_p0_7_8_invariants_i1_i12_live():
+def test_acc_p0_7_8_invariants_i1_i12_live(tmp_path: Path):
+    """12 条不变量活车道必须逐个真跑。
+
+    ``I11`` 是唯一带 ``tmp_path`` 形参的不变量；早先这里无参调用，一旦里程碑
+    车道真的开闸就抛 ``TypeError: missing 1 required positional argument``。
+    改为按签名注入（有 ``tmp_path`` 就给一个独立子目录），既修崩溃又不让
+    将来新增带参不变量再次「调用即崩」。
+    """
     module = sys.modules[__name__]
     for name in INVARIANTS:
-        getattr(module, name)()
+        func = getattr(module, name)
+        if "tmp_path" in inspect.signature(func).parameters:
+            func(tmp_path / name)
+        else:
+            func()
 
 
 @MARK
@@ -470,9 +511,11 @@ def test_inv_i10_no_push():
         ["git", "-C", str(REPO), "merge-base", "--is-ancestor", origin, head],
         capture_output=True, text=True).returncode == 0
     assert judge.verify_origin_anchor(origin, head, ancestor=ancestor) == []
-    # 基线不是 HEAD 时，origin/main 必须仍停在基线（未推送）；是 HEAD 时则
-    # 两者必须相等——两种合法态都被上面一条覆盖，这里再钉住「不得第三值」。
-    assert origin in (judge.ORIGIN_MAIN, head), origin
+    # 基线不是 HEAD 时，origin/main 必须停在基线或某个**已记录**的推送头
+    # （每一条都对应 Complete 里的一次人工 STOP 门放行）；是 HEAD 时则两者
+    # 必须相等——三种合法态都被上面一条覆盖，这里再钉住「不得名单外取值」。
+    assert origin in judge.AUTHORIZED_PUSH_HEADS + (judge.ORIGIN_MAIN, head), \
+        origin
 
 
 @MARK
@@ -641,13 +684,19 @@ def test_judge_secret_exemption_only_inside_selftest_param():
 
 
 def test_judge_origin_anchor_two_valued():
-    """W5-01/W4-15：origin/main ∈ {基线, HEAD} 且必须是 HEAD 的祖先。"""
+    """W5-01/W4-15：origin/main ∈ {基线 ∪ 已记录推送头, HEAD} 且为 HEAD 祖先。"""
     base, other = "a" * 40, "b" * 40
     assert judge.verify_origin_anchor(base, base, base=base) == []
     assert judge.verify_origin_anchor(base, other, base=base) == []
     assert judge.verify_origin_anchor(other, other, base=base) == []
     problems = judge.verify_origin_anchor(other, base, base=base)
-    assert any("既非基线" in p for p in problems), problems
+    assert any("不在" in p and "放行值" in p for p in problems), problems
+    # 名单是封闭集合：把已记录推送头放进 allowed 才放行，随便给个 sha 仍然红
+    pushed = judge.AUTHORIZED_PUSH_HEADS[0]
+    assert judge.verify_origin_anchor(
+        pushed, other, base=base, authorized=(pushed,)) == []
+    assert judge.verify_origin_anchor(
+        "c" * 40, other, base=base, authorized=(pushed,))
     assert any("改写" in p for p in
                judge.verify_origin_anchor(base, other, base=base,
                                           ancestor=False))
