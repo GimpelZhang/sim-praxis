@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import jsonschema
@@ -68,6 +69,16 @@ def test_ac_p0_5_1_golden_pass(tmp_path: Path):
             assert dim["score"] == pytest.approx(1.0), (case["case_id"], name)
 
 
+def _tracked_under(directory: Path) -> "list[Path]":
+    """只检查**入仓的**夹具件：运行时解释器会在夹具目录里写 `__pycache__/*.pyc`
+    （`.gitignore` 忽略，非夹具内容），拿目录遍历会把它们当文本读而报编码错。"""
+    rel = directory.relative_to(_REPO).as_posix()
+    out = subprocess.run(["git", "ls-files", "-z", "--", rel], cwd=_REPO,
+                         check=True, capture_output=True)
+    return sorted(_REPO / item for item in
+                  out.stdout.decode("utf-8").split("\0") if item)
+
+
 def test_golden_fixtures_are_schema_valid_and_provenanced():
     """T5.5 步骤 1：结构合法 + 逐件 `_provenance` 注记 synthetic_fixture。"""
     fp_schema = _load(_SCHEMAS / "runtime_fingerprint.v1.schema.json")
@@ -82,8 +93,10 @@ def test_golden_fixtures_are_schema_valid_and_provenanced():
         assert directory_prov["synthetic_fixture"] is True
         assert directory_prov["case_id"] == case["case_id"]
         assert directory_prov["inline_provenance_exceptions"]
-        for path in sorted(run_dir.rglob("*")):
-            if not path.is_file() or path.name in _NO_INLINE_PROVENANCE:
+        tracked = _tracked_under(run_dir)
+        assert len(tracked) >= 5, case["case_id"]
+        for path in tracked:
+            if path.name in _NO_INLINE_PROVENANCE:
                 continue
             rel = path.relative_to(run_dir).as_posix()
             if path.suffix in (".json", ".yaml"):
