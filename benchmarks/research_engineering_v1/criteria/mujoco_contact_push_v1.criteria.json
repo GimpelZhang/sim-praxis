@@ -76,6 +76,10 @@
     }
   ],
   "derivation": "阈值不在计划文本中预设，由 Task 1 按任务几何与运动学一次推导生成并随本文件 LOCK（G0-7 附条件 / TD-3）。冻结场景常量（全部可溯到 Phase 1 Task7 track1 参考件 solutions/track1_tools/02_mujoco_contact_push 的 Gate2 accept 原件）：dt=0.002 s、SUBSTEPS=8、SETTLE 0.2 s / PUSH 2.0 s / HOLD 0.8 s、立方体半边长 0.025 m 与 mass 0.1 kg、推板 0.02 kg（半宽 0.01/0.04/0.025 m）、μ=0.3、kp=100 N/m、滑接阻尼 1.0 N·s/m、X_START=−0.04 m、X_END=0.276 m、挡块接触面 0.33 m（立方体中心止于 0.305 m）、目标区中心 (0.30,0,0.025)、目标区半宽 0.05 m、solref=\"0.01 1\"、g=9.81 m/s²。所有阈值只依赖上述常量与本文件内的算式，不依赖任何模型实验输出（预设即编造）。",
-  "evaluator_files": [],
-  "locked_at": null
+  "evaluator_files": [
+    "orchestrator/benchmark/evaluator.py:0cfaf9fd676025ca043c24f2aa0f9529d49abc927c614e868a1a8fcd6a7dc45d",
+    "orchestrator/benchmark/scoring.py:4f98afa01e8c9138f6e6f542ddc80b7a94eb31e957bf9eb6d3ae734e3d287ad0",
+    "orchestrator/benchmark/contracts.py:ecc534ee16bde886883b7bd77a56255ed630be228a209c5b31491b281ff4567d"
+  ],
+  "locked_at": "2026-11-05T08:26:06Z"
 }

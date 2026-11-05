@@ -41,6 +41,10 @@
     }
   ],
   "derivation": "L1 的验收是**结构性**的：B0–B4 五层出生验证逐层独立 subprocess 判定（Plan §3.3），每一层只有 PASS/FAIL/BLOCKED_INFRA/NOT_APPLICABLE，不存在可调数值——故 thresholds 为空对象（D1-5 允许 L1/R1 无数值判据，但 weights/hard_gates/derivation 仍冻结）。观测契约与动作维度是**契约常量**而非容差：action dim、obs keys、reset/step 返回结构一律**精确相等**比较（不用 ± 容差），比较对象由 Task 2 容器探针实测写入 runtime_fingerprint 的 observation_contract / action_contract 段，与 task.yaml 声明逐项比对。镜像身份以不可变 digest 计（sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624），tag 不构成身份。",
-  "evaluator_files": [],
-  "locked_at": null
+  "evaluator_files": [
+    "orchestrator/benchmark/evaluator.py:0cfaf9fd676025ca043c24f2aa0f9529d49abc927c614e868a1a8fcd6a7dc45d",
+    "orchestrator/benchmark/scoring.py:4f98afa01e8c9138f6e6f542ddc80b7a94eb31e957bf9eb6d3ae734e3d287ad0",
+    "orchestrator/benchmark/contracts.py:ecc534ee16bde886883b7bd77a56255ed630be228a209c5b31491b281ff4567d"
+  ],
+  "locked_at": "2026-11-05T08:26:06Z"
 }
