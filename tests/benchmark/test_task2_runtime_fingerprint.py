@@ -174,6 +174,34 @@ def test_ac_p0_2_4_ten_mismatches(host_fingerprint: dict):
     assert len(rf.REQUIRED_CODES) == 10
 
 
+def test_w2_03_mismatch_code_partition_is_complete():
+    """评审 W2-03：生产接线 / 仅 API 两张清单必须恰好划分全部 mismatch 码。
+
+    修复前的缺陷：``API_ONLY_CODES`` 漏登记 ``observation_missing``（两表并集
+    只有 12/13），注释却写「七类」而实际八项。本用例把分类钉成机判：不重、不漏、
+    无未声明码；并逐键对齐**冻结 schema**——生产能传进 requirement 的键必须与
+    ``PRODUCTION_REQUIREMENT_KEYS`` 相等，否则两边会再次漂移。
+    """
+    assert rf.partition_problems() == []
+    codes = set(rf.all_mismatch_codes())
+    # 十类 P0-AC-05 清单 ⊆ 并集（附加细分码也在其中）
+    assert set(rf.REQUIRED_CODES) <= codes
+    assert rf.MismatchCode.OBSERVATION_MISSING in rf.API_ONLY_CODES
+
+    schema_path = (_REPO_ROOT / "benchmarks" / "research_engineering_v1" /
+                   "schemas" / "task_spec.v1.schema.json")
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    runtime = schema["properties"]["runtime"]
+    assert runtime["additionalProperties"] is False
+    #: ``runtime_id`` 是身份标签不参与比对；其余键必须恰是生产接线的要求键
+    assert set(runtime["properties"]) - {"runtime_id"} == set(
+        rf.PRODUCTION_REQUIREMENT_KEYS)
+    #: 生产接线四码全部由这些键驱动（改键不改码时必须同步改本常量）
+    assert set(rf.PRODUCTION_WIRED_CODES) == {
+        rf.MismatchCode.PYTHON_EXECUTABLE, rf.MismatchCode.MUJOCO_VERSION,
+        rf.MismatchCode.PACKAGE_VERSION, rf.MismatchCode.IMAGE_DIGEST}
+
+
 # --------------------------------------------------------------------------
 # AC-T2-5 返回全部不符项（不只第一处）
 # --------------------------------------------------------------------------

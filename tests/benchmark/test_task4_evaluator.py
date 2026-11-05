@@ -1027,3 +1027,98 @@ def test_evaluator_files_format_roundtrip():
     assert ev.self_check(_spec("mujoco_contact_push_v1")) == []
     with pytest.raises(ev.EvaluatorError):
         ev.parse_evaluator_files(["no-colon-here"])
+
+
+def test_w3_04_external_anchor_read_side_fails_closed(tmp_path: Path,
+                                                     monkeypatch: pytest.MonkeyPatch):
+    """评审 W3-04：仓外锚点**只读侧**在场时必须逐件认账；无锚点如实降级。
+
+    修复前的缺陷：``write_evaluator_anchor`` 零生产调用方 ⇒ 锚点永远不落盘，
+    docstring 却声称「候选不可写私有根可防仓内双改」——是假防护。修复后写侧
+    删除、docstring 如实降级，本用例钉住剩下的那一半：只要有人布了锚（仓外
+    私有根），任何源码与锚不符都必须变成问题进行阻断，而不是被忽略。
+    """
+    root = tmp_path / "bench_root"
+    monkeypatch.setenv("SIMPRAXIS_BENCHMARK_ROOT", str(root))
+    anchor = ev.evaluator_anchor_path()
+    assert anchor is not None and anchor.is_file() is False
+    # 无锚点：如实降级（不假报问题，也不声称已防住）
+    assert ev._anchor_problems() == []
+
+    anchor.parent.mkdir(parents=True, exist_ok=True)
+    anchor.write_text(json.dumps({
+        "schema": "simpraxis.benchmark_evaluator_anchor.v1",
+        "files": {rel: _ZERO_SHA for rel in ev.EVALUATOR_SOURCES},
+    }), encoding="utf-8")
+    problems = ev._anchor_problems()
+    assert len(problems) == len(ev.EVALUATOR_SOURCES), problems
+    assert all("与仓外锚点不符" in item for item in problems), problems
+
+    # 锚点缺件同样阻断（不得因「登记不全」静默放行）
+    anchor.write_text(json.dumps({"schema": "x", "files": {
+        ev.EVALUATOR_SOURCES[0]: _ZERO_SHA}}), encoding="utf-8")
+    missing = ev._anchor_problems()
+    assert any("未在仓外锚点登记" in item for item in missing), missing
+
+    # 写侧确实不存在（防止「重新加回来但又没人调用」的假防护复发）
+    assert not hasattr(ev, "write_evaluator_anchor")
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-11：telemetry 的 step 基序无关（判据从未声明 0 基）
+# --------------------------------------------------------------------------
+
+def test_w3_11_step_base_is_agnostic():
+    """评审 W3-11 回归：``step`` 只要求整数、严格递增、平移连续。
+
+    修复前 ``step_ok = all(step == index)`` 把 0 基**隐式**写死（plan §3.2 的
+    字段清单与 task.yaml 都没声明基序），一份从 1 开始或带偏移的合法
+    telemetry 会掉 ``evidence_completeness`` 并触发 HG-EVAL-8 误杀。
+    """
+    spec = _spec("mujoco_contact_push_v1")
+    files = _mujoco_files()
+    telemetry = [json.loads(line) for line in
+                 files["telemetry.jsonl"].splitlines() if line]
+    baseline = scoring.mujoco_facts({"telemetry.jsonl": telemetry}, spec.criteria)
+    assert baseline["step_index_monotonic"] is True, baseline["step_index_monotonic"]
+
+    for offset in (1, 7, 1000):
+        shifted = [dict(row, step=row["step"] + offset) for row in telemetry]
+        facts = scoring.mujoco_facts({"telemetry.jsonl": shifted}, spec.criteria)
+        assert facts["step_index_monotonic"] is True, (offset, facts)
+        assert facts["steps"] == baseline["steps"]
+
+    # 不是「随便递增就过」：跳号/重复/非整数/空 一律 False（fail-closed）
+    assert scoring._step_index_ok([{"step": 0}, {"step": 2}]) is False
+    assert scoring._step_index_ok([{"step": 5}, {"step": 5}]) is False
+    assert scoring._step_index_ok([{"step": 0}, {"step": 1.0}]) is False
+    assert scoring._step_index_ok([{"step": True}, {"step": 2}]) is False
+    assert scoring._step_index_ok([]) is False
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-14：浮点字面量扫描必须盖住 BinOp（10 ** -6 一类）
+# --------------------------------------------------------------------------
+
+def test_w3_14_binop_float_expressions_are_scanned():
+    """评审 W3-14 回归：``10 ** -6`` 这类算术表达式不得逃过 AST 扫描。
+
+    修复前 ``float_literals`` 只收 ``ast.Constant(float)``；冻结的容差
+    ``metrics_abs_tol`` 已移入 criteria（判据数据不进代码），扫描本身的盲区
+    也要补上，否则未来用同样写法藏阈值不会被 AC-T4-7 抓到。
+    """
+    sample = "\n".join([
+        "A = 10 ** -6",            # 幂：浮点结果，必须被收
+        "B = 1e-6",                # 直接浮点常量
+        "C = 2 / 3",               # 除法：浮点结果，必须被收
+        "D = 3 + 4",               # 整数运算：不是浮点，不得误报
+        "E = '10 ** -6'",          # 字符串里的文字不是字面量
+    ])
+    found = scoring.float_literals(sample)
+    assert any(abs(value - 1e-6) < 1e-15 for value in found), found
+    assert any(abs(value - (2 / 3)) < 1e-15 for value in found), found
+    assert all(not float(value).is_integer() for value in found), found
+    # 生产文件本身仍然 0 命中（容差已进 criteria）
+    assert scoring.float_literals(
+        (_REPO / "orchestrator/benchmark/scoring.py").read_text(
+            encoding="utf-8")) == []

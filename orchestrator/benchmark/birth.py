@@ -34,11 +34,20 @@ B4 最小步进  一次真实 reset（若契约要求）+ 一次 step：必须�
 二者中**出现任何** ``RUNNER_MARKER`` 行即判候选伪造出生标记 → 该层 ``FAIL``
 （``contract_error``，detail 前缀「候选伪造出生标记行」）。
 
-残余威胁模型（如实登记，不假装解决）：「恶意候选」在**同一进程**内执行，理论上
-可枚举 ``/proc/self/fd`` 或读取 ``payload.json`` 找到结果路径并抢先写出一条合法
-记录；协议层无法在进程内自证。本修复消除的是**共享通道**这一具体缺陷（候选
-打印标记行即被采信），并把任何伪造尝试变成可检测的篡改证据；真正的进程外隔离
-（OS 沙箱 / 独立 harness 进程）属 Phase 3 backlog。
+**挑战通道（同一条 W2-01 的二次加固）**：``nonce`` 与 ``result_path`` **不进**
+``payload.json``、也不进 argv（候选可读 ``payload.json``、``/proc/self/cmdline``），
+而是父进程在候选代码执行**之前**经 stdin 下发一行 JSON 挑战；运行器先读走该行
+再导入候选，父进程随即关闭写端（候选读 stdin 只得 EOF）。候选即使读遍
+``payload.json`` 与自身 argv 也拿不到 nonce / 结果路径，写出的任何记录都会因
+nonce 校验失败而不被采信（fail-closed 落 ``_GENERIC_REASON``）。
+
+残余威胁模型（如实登记，不假装解决）：「恶意候选」在**同一进程**内执行，仍可在
+运行器读走 stdin 之后从 ``sys.modules['__main__']`` 的全局变量（``NONCE`` /
+``RESULT_PATH``）或调用栈帧里取出这两个值，并写出一条合法记录后 ``os._exit(0)``。
+协议层无法在进程内自证——这是同一进程模型的固有上限，非本通道遗漏。真正的
+进程外隔离（OS 沙箱 / 独立 harness 进程 + 独立通信通道）属 Phase 3 backlog。
+本仓消除的是**共享通道**（候选打印标记行即被采信）与**可枚举通道**
+（payload/argv 直给 nonce），并把 stdout 上的任何伪造尝试变成可检测的篡改证据。
 
 失败 ``reason`` 取值固定（D3-7）：``missing / too_small / symlink / ast_error /
 compile_error / import_error / construction_error / contract_error / step_error /
@@ -147,11 +156,11 @@ MARKER = "__SIMPRAXIS_BIRTH__"
 
 
 def emit(status, reason, detail="", data=None):
-    record = {"level": LEVEL, "nonce": cfg["nonce"], "status": status,
+    record = {"level": LEVEL, "nonce": NONCE, "status": status,
               "reason": reason, "detail": str(detail)[:4000],
               "data": data or {}}
     body = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
-    path = cfg["result_path"]
+    path = RESULT_PATH
     tmp = path + ".tmp.%d" % os.getpid()
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -172,6 +181,29 @@ def emit(status, reason, detail="", data=None):
 
 
 cfg = json.loads(open(sys.argv[1], encoding="utf-8").read())
+
+#: 评审 W2-01 二次加固：一次性 nonce 与结果路径**不在**候选可读的 ``payload.json``
+#: 里，也不进 argv（argv 候选可从 /proc/self/cmdline 读），而是父进程在导入候选
+#: **之前**经 stdin 下发一行挑战。候选代码无论读 payload.json、argv 还是 /proc/self/cmdline
+#: 都拿不到 nonce / 结果路径；父进程写完即关写端，管道里没有任何残留可读内容。
+_CHALLENGE_LINE = sys.stdin.readline()
+try:
+    _CHALLENGE = json.loads(_CHALLENGE_LINE)
+except Exception:
+    _CHALLENGE = None
+if (not isinstance(_CHALLENGE, dict)
+        or not isinstance(_CHALLENGE.get("nonce"), str)
+        or not _CHALLENGE.get("nonce")
+        or not isinstance(_CHALLENGE.get("result_path"), str)
+        or not _CHALLENGE.get("result_path")):
+    sys.stderr.write("runner: 缺少一次性挑战行（stdin），拒绝执行\n")
+    sys.exit(3)
+NONCE = _CHALLENGE["nonce"]
+RESULT_PATH = _CHALLENGE["result_path"]
+#: 不关 fd 0：父进程写完即关闭管道写端，候选读 stdin 自然得到 EOF（``input()``
+#: 抛 EOFError 而不是 ValueError），且管道里再无任何可读内容。
+del _CHALLENGE_LINE, _CHALLENGE
+
 LEVEL = cfg["level"]
 WORKDIR = cfg["workdir"]
 ENTRY_KIND = cfg["entry"]["kind"]
@@ -705,9 +737,12 @@ class BirthValidator:
             return self._not_applicable(level, level_dir)
         nonce = secrets.token_hex(16)
         result_path = level_dir / f"runner_result.{nonce}.json"
+        #: 评审 W2-01 二次加固：payload.json 与 argv 都**不含** nonce / 结果路径
+        #: （二者候选可读），挑战行只经 stdin 在导入候选前下发。
         payload = self._payload(level)
-        payload["nonce"] = nonce
-        payload["result_path"] = str(result_path)
+        challenge = json.dumps(
+            {"nonce": nonce, "result_path": str(result_path)},
+            ensure_ascii=False) + "\n"
         payload_path = level_dir / "payload.json"
         atomic_write_text(payload_path,
                           json.dumps(payload, ensure_ascii=False,
@@ -721,6 +756,7 @@ class BirthValidator:
             proc = subprocess.Popen(
                 [self.python, "-I", "-c", _RUNNER_SRC, str(payload_path)],
                 cwd=str(self.workdir), env=sanitized_env(),
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 # 评审 W2-05：独立进程组，超时可整组击杀（孙进程不再拖住管道）。
                 start_new_session=True,
@@ -737,6 +773,21 @@ class BirthValidator:
                                          indent=2, sort_keys=True) + "\n", 0o600)
             return result
         pid = proc.pid
+        #: 挑战行必须**先于**候选代码执行写入：运行器在 import 候选之前读走整行。
+        #: 写完立刻关闭写端（子进程随之在 stdin 上得到 EOF），再交给 communicate
+        #: 收尾；把句柄置 None 避免 communicate 重复关闭已关的管道。
+        try:
+            proc.stdin.write(challenge)
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
+            proc.stdin = None
         try:
             stdout, stderr = proc.communicate(timeout=self.limits.timeout_s)
             rc = proc.returncode

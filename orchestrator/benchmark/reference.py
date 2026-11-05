@@ -333,7 +333,8 @@ def docker_argv(image_ref: str, mounts: Iterable[Mount],
                 inner_argv: Iterable[str], *, workdir: str = "/work",
                 gpus: bool = True, ipc_host: bool = True,
                 label: str = "simpraxis.benchmark.reference=1",
-                docker: str = "docker") -> "list[str]":
+                docker: str = "docker",
+                interactive: bool = False) -> "list[str]":
     """按 D6-3 拼 docker run 命令；挂载不合规**先于**起容器抛错。
 
     容器一律以镜像默认用户运行：LIBERO 的配置与数据集指针在 ``/root/.libero``
@@ -353,6 +354,10 @@ def docker_argv(image_ref: str, mounts: Iterable[Mount],
     if ipc_host:
         argv += ["--ipc=host"]
     argv += ["--network", "none", "--label", label, "-w", workdir]
+    if interactive:
+        #: 评审 W2-01 二次加固：出生挑战行经 stdin 下发（容器内运行器先读后导入），
+        #: 未附 ``-i`` 时 docker 不会把 stdin 接到容器进程，挑战行必然丢失。
+        argv += ["-i"]
     for mount in mount_list:
         argv += ["-v", mount.flag]
     argv.append(image_ref)
@@ -709,8 +714,12 @@ def birth_container(ref: ResolvedReference, workdir: Path, out_dir: Path, *,
                                  repo_root="/assets", ctx={"workdir": "/work"})
         nonce = secrets.token_hex(16)
         result_name = f"runner_result.{nonce}.json"
-        payload["nonce"] = nonce
-        payload["result_path"] = f"/out/levels/{level}/{result_name}"
+        #: 评审 W2-01 二次加固：nonce / 结果路径不进 payload.json、不进 argv（容器内
+        #: 候选两处都能读），只经 stdin 挑战行下发，运行器导入候选前读走。
+        challenge = json.dumps(
+            {"nonce": nonce,
+             "result_path": f"/out/levels/{level}/{result_name}"},
+            ensure_ascii=False) + "\n"
         #: 容器以镜像默认用户（root）运行——LIBERO 的配置在 /root 下且 0700；
         #: 结果件由运行器按 chown_uid/chown_gid 交回调用者（见 birth._RUNNER_SRC）。
         payload["chown_uid"] = os.getuid()
@@ -725,10 +734,11 @@ def birth_container(ref: ResolvedReference, workdir: Path, out_dir: Path, *,
         )
         inner = ["python3", "-I", "-c", runner_src,
                  f"/out/levels/{level}/payload.json"]
-        argv = docker_argv(image_ref, mounts, inner)
+        argv = docker_argv(image_ref, mounts, inner, interactive=True)
         started = time.monotonic()
         try:
             proc = subprocess.run(argv, capture_output=True, text=True,
+                                  input=challenge,
                                   timeout=timeout, env=rf.sanitized_env())
             rc, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         except (OSError, subprocess.SubprocessError) as exc:

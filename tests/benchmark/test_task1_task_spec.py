@@ -372,3 +372,70 @@ def test_task1_specs_evidence(bench: Path):
                for p in sorted((reg.root / "schemas").glob("*.schema.json"))}
     assert schemas["schemas"] == on_disk
     assert len(on_disk) == 4, on_disk
+
+
+# --------------------------------------------------------------------------
+# 评审 W1-01：清单与磁盘不一致 ⇒ 默认加载路径必须 RegistryError（负例）
+# --------------------------------------------------------------------------
+
+def test_w1_01_manifest_mismatch_raises(tmp_path: Path):
+    """评审 W1-01 回归：``load_all()/get()`` 不得丢弃 ``check_manifest()`` 结果。
+
+    修复前 ``load_all(verify_manifest=True)`` 只调用不判红，改坏 manifest 的
+    ``criteria_lock`` 后 ``load_all()``/``get()`` 照常工作——模块 docstring
+    承诺的 ``RegistryError`` 从不抛出。本负例把那条承诺钉成机判。
+    """
+    root = _copy_root(tmp_path)
+    _set_scalar(root / "manifest.yaml", "criteria_lock", "0" * 64)
+    reg = registry.BenchmarkRegistry(root)
+    with pytest.raises(registry.RegistryError) as excinfo:
+        reg.load_all()
+    msg = str(excinfo.value)
+    assert "清单与磁盘不一致" in msg and "criteria_lock" in msg, msg
+    # 同一实例（缓存已填）的 get() 也必须红，不得「缓存里看着没事就放行」
+    with pytest.raises(registry.RegistryError):
+        reg.get("mujoco_contact_push_v1")
+    # 显式自判路径看到的是同一批问题（不是只有抛错时才可见）
+    report = registry.BenchmarkRegistry(root).check_manifest()
+    assert report["ok"] is False
+    assert any("criteria_lock" in problem for problem in report["problems"])
+
+
+# --------------------------------------------------------------------------
+# 评审 W1-02：裸文件名拒 "." / ".."（schema 正则放行、加载器兜底）
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("field,value", [
+    ("entrypoint.path", ".."),
+    ("entrypoint.path", "."),
+    ("outputs.0", ".."),
+    ("reproducibility.hidden_seed_ref", ".."),
+])
+def test_w1_02_dot_names_rejected(tmp_path: Path, field: str, value: str):
+    """评审 W1-02 回归：schema pattern ``^[A-Za-z0-9_.-]+$`` 接受 ``.``/``..``。
+
+    schema 已冻结（改 pattern 会打穿 Task 1 契约），因此由 ``load_task_spec``
+    的加载期守卫显式拒绝——本用例分别打三处入口，证明守卫不是只盖了一处。
+    """
+    root = _copy_root(tmp_path)
+    src = root / "tasks" / "mujoco_contact_push" / "task.yaml"
+    lines = src.read_text(encoding="utf-8").splitlines()
+    if field == "outputs.0":
+        hits = [i for i, line in enumerate(lines)
+                if line.strip().startswith("- ")]
+        assert hits, "task.yaml 里没有 outputs 列表项"
+        indent = lines[hits[0]][:len(lines[hits[0]]) - len(lines[hits[0]].lstrip())]
+        lines[hits[0]] = f'{indent}- "{value}"'
+    else:
+        key = field.rsplit(".", 1)[-1]
+        hits = [i for i, line in enumerate(lines)
+                if line.strip().startswith(f"{key}:")]
+        assert len(hits) == 1, (field, hits)
+        indent = lines[hits[0]][:len(lines[hits[0]]) - len(lines[hits[0]].lstrip())]
+        lines[hits[0]] = f'{indent}{key}: "{value}"'
+    src.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(ts.TaskSpecError) as excinfo:
+        ts.load_task_spec(src, criteria_dir=root / "criteria")
+    assert "目录穿越" in excinfo.value.detail, excinfo.value.detail
+    assert repr(value) in excinfo.value.detail

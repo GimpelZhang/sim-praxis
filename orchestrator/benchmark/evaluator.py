@@ -22,10 +22,14 @@
 - 评测器源码、``criteria/*.json``、``task.yaml`` 都住在**同一可写引擎仓**。
   ``self_check`` 比对 ``criteria.evaluator_files`` 只能防「改了评测器忘了改登记」
   的误操作；对**同时在仓内改源码与登记**的蓄意篡改无效。
-- 可用的仓外锚点：``$BENCHMARK_ROOT/private/evaluator_keys/evaluator_src.json``
-  （0700 私有根，候选不可写）。该文件存在时，``self_check`` 逐件比对 sha256，
-  不符即 ``BLOCKED_INFRA``；不存在时本模块如实降级为「无仓外锚点」，由
-  ``Phase_2.8.0_Plan_Complete.md`` 登记残余风险（不声称已防住）。
+- 仓外锚点路径 ``$BENCHMARK_ROOT/private/evaluator_keys/evaluator_src.json``
+  （0700 私有根，不在候选的挂载白名单里）：本模块**只保留读侧**——文件存在时
+  逐件复算 sha256，不符即 ``BLOCKED_INFRA``；**写侧未接线**（仓内没有任何生产
+  调用方写出该锚点，评审 W3-04 实测 ``write_evaluator_anchor`` 零调用后已删除）。
+  因此**当前实际等价于「无仓外锚点」**，不得表述为「已防住仓内双改」。
+  真正的锚点需要一次**先于候选**的仓外写入步骤（TOFU 或预跑操作员动作）与
+  刷新流程，属 Phase 3 backlog；残余风险登记在
+  ``Phase_2.8.0_Plan_Complete.md`` §9.3（W3-04 条）。
 - 冻结 schema（``benchmarks/research_engineering_v1/schemas/*.json``）同样是
   仓内文件，对同一威胁模型同样只有误操作防护力。
 """
@@ -205,30 +209,14 @@ def evaluator_anchor_path() -> "Path | None":
     return None if private is None else private / "evaluator_keys" / "evaluator_src.json"
 
 
-def write_evaluator_anchor(*, path: "str | Path | None" = None,
-                           source_root: "str | Path | None" = None) -> Path:
-    """把评测器三件源码的 sha256 写到**仓外**私有根（0700/0600）。
-
-    锚点必须在候选运行**之前**布置，且候选无权写私有根；之后任何对
-    ``evaluator.py`` / ``scoring.py`` / ``contracts.py`` 的改动都会在
-    ``self_check`` 里变成 ``BLOCKED_INFRA``。
-    """
-    target = Path(path) if path is not None else evaluator_anchor_path()
-    if target is None:
-        raise EvaluatorError("无法定位私有根（$SIMPRAXIS_BENCHMARK_ROOT 不可解析）")
-    ensure_private_dir(target.parent)
-    doc = {
-        "schema": "simpraxis.benchmark_evaluator_anchor.v1",
-        "files": evaluator_digests(source_root),
-        "note": "评审 W3-04：仓外信任锚；候选不可写私有根。",
-    }
-    atomic_write_text(target, json.dumps(doc, ensure_ascii=False, indent=2,
-                                         sort_keys=True) + "\n", 0o600)
-    return target
-
-
 def _anchor_problems(source_root: "str | Path | None" = None) -> "list[str]":
-    """仓外锚点存在时逐件复算；不存在只记不阻断（残余风险另行登记）。"""
+    """仓外锚点**只读侧**：存在时逐件复算；不存在只记不阻断。
+
+    评审 W3-04：本模块不提供写侧（原 ``write_evaluator_anchor`` 零生产调用方，
+    属「看起来防住了、实际没人布锚」的假防护，已删除）。当前无任何写入方 ⇒
+    本函数在生产里恒走「无锚点」分支，等价于无仓外锚点；残余风险见模块
+    docstring 与 Phase 2.8.0 Complete §9.3，接线属 Phase 3 backlog。
+    """
     anchor = evaluator_anchor_path()
     if anchor is None or not anchor.is_file():
         return []
@@ -1216,7 +1204,11 @@ class Evaluator:
         log.check("HG-L1-1", fired=bool(mismatches) or bool(impersonation),
                   detail=f"运行时不符：{_joined(mismatches + impersonation) or '无'}")
         if facts is None:
-            for gate in ("HG-L1-2", "HG-L1-3", "HG-L1-4", "HG-L1-5", "HG-L1-6"):
+            #: ``HG-L1-3`` **不在**这个列表里：它只依赖 ``adapter.py`` 源码扫描，
+            #: 在下方无条件检查。早先把它也列进来会在 facts 不可得时重复 check →
+            #: ``EvaluatorError: 硬门被重复检查``，把「候选畸形字段」升级成评测器
+            #: 抛栈（评审 W3-03 的回归用例暴露的第二处崩溃面）。
+            for gate in ("HG-L1-2", "HG-L1-4", "HG-L1-5", "HG-L1-6"):
                 log.check(gate, fired=False, applicable=False,
                           detail="评分事实不可得（已由 HG-EVAL-6 记）")
         else:

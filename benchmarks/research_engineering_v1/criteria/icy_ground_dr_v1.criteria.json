@@ -2,7 +2,7 @@
   "criteria_version": 1,
   "derivation": "R1 是**研究设计质量**评审，全部判据是确定性的结构检查（13 项必填段齐全、参数带单位、三段互斥、Ablation ≥ 3 组、指标可计算且含统计检验、结论能指回条目），没有物理数值阈值；thresholds 仅承载 rubric 已冻结的**结构常量** ablation_min_groups=3（评审 W3-06 要求判分器可读，不得写死在代码里），仍符合 D1-5 的「无物理阈值」口径。权重按路线图 §3.4 rubric 冻结。历史结论冻结条款（逐字）：『历史 Q1 冰面实验 ice/normal = 0.824 < 2.0，结论 contradiction_control_not_robust 已冻结。本 Benchmark **不得**利用新研究计划翻案，**不得**把计划描述成已取得真机 Zero-shot 成功。本任务只评估**研究设计质量**，不执行训练、不产生新实验数据。』——TD-4：本 rubric 是确定性结构检查，不是语义质量评审；语义评审留待 Roadmap Phase 1 或人工 reviewer，不得以「机器判 PASS」冒充质量结论。",
   "evaluator_files": [
-    "orchestrator/benchmark/evaluator.py:6a32a77061cf96b0e5b337adbf197159b11f58c277e6812d20b36eefe97c1984",
+    "orchestrator/benchmark/evaluator.py:36332668d33d8ead3b5a07db31bf588a7f7cb2f6f9ef7a49e3c0c72fabcdc88d",
     "orchestrator/benchmark/scoring.py:d9c42be81e3b0d8a0a45ae32cc26a085c95fca946a40543e7d575da4c4e6784c",
     "orchestrator/benchmark/contracts.py:60c106dcb04af5d33382e37e918d5585fcc6ce664ea4539a475ac79d377a794c"
   ],
@@ -36,7 +36,7 @@
       "statement": "把历史 Q1 负结论（ice/normal=0.824<2.0，contradiction_control_not_robust）描述成已翻案或已成功"
     }
   ],
-  "locked_at": "2026-11-05T14:30:00Z",
+  "locked_at": "2026-11-05T14:37:54Z",
   "schema": "simpraxis.benchmark_criteria.v1",
   "task_id": "icy_ground_dr_v1",
   "thresholds": {

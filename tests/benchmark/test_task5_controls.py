@@ -383,3 +383,38 @@ def test_mutations_keep_manifest_internally_consistent(tmp_path: Path):
             assert snap.digest_ok is True, name
         else:
             assert snap.missing, name
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-03：候选可控畸形字段落状态，不得抛栈中止整批
+# --------------------------------------------------------------------------
+
+def test_w3_03_malformed_contract_field_falls_to_status(tmp_path: Path):
+    """评审 W3-03 回归：畸形 ``action_contract.dim`` 必须落状态而不是 rc=1 崩溃。
+
+    修复前实测：L1 golden 的 ``simulator.action_contract.dim`` 改成 ``"abc"`` 后
+    ``int()`` 抛 ``ValueError``，没有 ``evaluation_result.json``，``run_controls``
+    整批（20 负例 + 10 变异）在此中断。修复后一律落 ``INVALID_ARTIFACT`` +
+    HG-EVAL-6，产物可审计、可复算。
+    """
+    case = next(item for item in controls.load_cases(controls.GOLDEN_CASES)
+                if item["task_id"] == "libero_env_adapter_v1")
+    copy = tmp_path / "run"
+    shutil.copytree(_GOLDEN / case["dir"], copy)
+    fp_path = copy / "runtime_fingerprint.json"
+    doc = json.loads(fp_path.read_text(encoding="utf-8"))
+    doc["simulator"]["action_contract"]["dim"] = "abc"
+    fp_path.write_text(
+        json.dumps(doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    out = controls.evaluate_case(case["task_id"], copy, tmp_path / "eval")
+    assert out["status"] == "INVALID_ARTIFACT", out
+    hit_ids = {hit["id"] for hit in out["hard_gates"]}
+    assert "HG-EVAL-6" in hit_ids, out
+    # 崩溃症状的正面反证：原因被逐步记录在门细节里（不是静默零分）
+    detail = next(hit["detail"] for hit in out["hard_gates"]
+                  if hit["id"] == "HG-EVAL-6")
+    assert "评分无法重算" in detail and "action_contract.dim" in detail, detail
+    # 评分维度全部落 0 且注明原因（facts 不可得不得当作「无问题」）
+    for dim in out["dimensions"].values():
+        assert dim["score"] == 0.0, dim

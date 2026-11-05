@@ -590,9 +590,12 @@ def _ac_rows(root: Path) -> "list[dict]":
             all((root / "fingerprints" / t / "runtime_fingerprint.json").is_file()
                 for t in ("mujoco_contact_push_v1", "libero_env_adapter_v1")),
             "fingerprints/*/runtime_fingerprint.json"),
-        row("P0-AC-05", "Fingerprint Mismatch：十种差异均能识别",
+        row("P0-AC-05", "Fingerprint Mismatch：十种差异均能识别（API 级）",
             ok_05, "tests::test_ac_p0_2_4_ten_mismatches",
-            "task7 matrix 现跑该测试；10/10 断言在测试内部"),
+            "task7 matrix 现跑该测试（10/10 断言在测试内部）；口径为 API 级："
+            "生产 HG-EVAL-1 只接冻结 task.yaml.runtime 四键 ⇒ 实际生效的是 "
+            "PRODUCTION_WIRED_CODES 四类，其余九码仅 API 可达（评审 W2-03，"
+            "边界见 Phase 2.8.0 Complete §9.3）"),
         row("P0-AC-06", "Birth B0–B4：五级验证均出现且状态合法",
             levels_ok, "runs/*/birth/functional_birth.json",
             "五级集合与 birth.LEVELS 相等，逐级 status ∈ LEVEL_STATUSES"),

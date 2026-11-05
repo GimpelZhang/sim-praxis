@@ -591,6 +591,11 @@ REQUIRED_CODES = (
 #: ``task.yaml.runtime`` 段，该段 schema 只声明 ``runtime_id / image_digest /
 #: python / packages`` 四键（``additionalProperties: false``），所以生产链路
 #: 能真正对上的只有解释器、包版本、镜像 digest 这几类。
+#: 评审 W2-03 修复：``runtime_id`` 不参与比对（它是身份标签不是要求），故生产
+#: 生效的要求键恰为 ``PRODUCTION_REQUIREMENT_KEYS``——机判见
+#: ``partition_problems()`` 与 ``test_w2_03_*``（冻结 schema ↔ 常量逐键对齐）。
+PRODUCTION_REQUIREMENT_KEYS = ("image_digest", "packages", "python")
+
 PRODUCTION_WIRED_CODES = (
     MismatchCode.PYTHON_EXECUTABLE,
     MismatchCode.MUJOCO_VERSION,
@@ -598,10 +603,13 @@ PRODUCTION_WIRED_CODES = (
     MismatchCode.IMAGE_DIGEST,
 )
 
-#: 仅 **API 能力**（``compare()`` 支持、但当前生产调用方传不进要求）：这七类
-#: 在真实评测里恒不触发，action_dim/obs 的一致性由 Task 6 的域门（env_probe ↔
-#: 指纹 simulator 段）承担。**不得表述为「十类生产全覆盖」**——计划 P0-AC-05
-#: 的「均能识别」只在 API/单测层面成立，边界见 Phase 2.8.0 Complete。
+#: 仅 **API 能力**（``compare()`` 支持、但当前生产调用方传不进要求）：这九类
+#: 在真实评测里恒不触发（``observation_missing`` 的唯一触发条件同样是要求侧声明
+#: ``action_dim``/``obs_keys``，而冻结 schema 不收这两个键）；action_dim/obs 的
+#: 一致性由 Task 6 的域门（env_probe ↔ 指纹 simulator 段）承担。
+#: **不得表述为「十类生产全覆盖」**——计划 P0-AC-05 的「均能识别」只在 API/单测
+#: 层面成立，边界见 Phase 2.8.0 Complete §9.3。两张清单由 ``partition_problems()``
+#: 保证**恰好划分**全部 ``MismatchCode``（不重不漏）。
 API_ONLY_CODES = (
     MismatchCode.PYTHON_VERSION,
     MismatchCode.WORKDIR,
@@ -609,9 +617,41 @@ API_ONLY_CODES = (
     MismatchCode.MOUNT_READONLY,
     MismatchCode.ACTION_DIM,
     MismatchCode.OBS_SCHEMA,
+    MismatchCode.OBSERVATION_MISSING,
     MismatchCode.SKILL_MANIFEST,
     MismatchCode.ASSET_MANIFEST,
 )
+
+
+def all_mismatch_codes() -> "tuple[str, ...]":
+    """``MismatchCode`` 声明的全部码（按定义顺序，供划分机判）。"""
+    return tuple(value for name, value in vars(MismatchCode).items()
+                 if not name.startswith("_") and isinstance(value, str))
+
+
+def partition_problems() -> "list[str]":
+    """评审 W2-03：生产接线 / 仅 API 两张清单必须恰好划分全部 mismatch 码。
+
+    返回问题清单（空列表才合格）；重复归属、漏项、未声明的码都算问题。
+    """
+    universe = set(all_mismatch_codes())
+    wired = list(PRODUCTION_WIRED_CODES)
+    api_only = list(API_ONLY_CODES)
+    problems: "list[str]" = []
+    dup = sorted(set(wired) & set(api_only))
+    if dup:
+        problems.append(f"同时登记为生产接线与仅 API：{dup}")
+    if len(set(wired)) != len(wired):
+        problems.append("生产接线清单内部重复")
+    if len(set(api_only)) != len(api_only):
+        problems.append("仅 API 清单内部重复")
+    missing = sorted(universe - set(wired) - set(api_only))
+    if missing:
+        problems.append(f"两张清单都未登记的码：{missing}")
+    unknown = sorted((set(wired) | set(api_only)) - universe)
+    if unknown:
+        problems.append(f"清单里出现未声明的码：{unknown}")
+    return problems
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@
   "criteria_version": 1,
   "derivation": "L1 的验收是**结构性**的：B0–B4 五层出生验证逐层独立 subprocess 判定（Plan §3.3），每一层只有 PASS/FAIL/BLOCKED_INFRA/NOT_APPLICABLE，不存在可调数值——故 thresholds 为空对象（D1-5 允许 L1/R1 无数值判据，但 weights/hard_gates/derivation 仍冻结）。观测契约与动作维度是**契约常量**而非容差：action dim、obs keys、reset/step 返回结构一律**精确相等**比较（不用 ± 容差），比较对象由 Task 2 容器探针实测写入 runtime_fingerprint 的 observation_contract / action_contract 段，与 task.yaml 声明逐项比对。镜像身份以不可变 digest 计（sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624），tag 不构成身份。",
   "evaluator_files": [
-    "orchestrator/benchmark/evaluator.py:6a32a77061cf96b0e5b337adbf197159b11f58c277e6812d20b36eefe97c1984",
+    "orchestrator/benchmark/evaluator.py:36332668d33d8ead3b5a07db31bf588a7f7cb2f6f9ef7a49e3c0c72fabcdc88d",
     "orchestrator/benchmark/scoring.py:d9c42be81e3b0d8a0a45ae32cc26a085c95fca946a40543e7d575da4c4e6784c",
     "orchestrator/benchmark/contracts.py:60c106dcb04af5d33382e37e918d5585fcc6ce664ea4539a475ac79d377a794c"
   ],
@@ -36,7 +36,7 @@
       "statement": "运行 tour 自带 demo / README 流程（违反硬规则 10：任何阶段不实跑 tour 本体）"
     }
   ],
-  "locked_at": "2026-11-05T14:30:00Z",
+  "locked_at": "2026-11-05T14:37:54Z",
   "schema": "simpraxis.benchmark_criteria.v1",
   "task_id": "libero_env_adapter_v1",
   "thresholds": {},

@@ -16,6 +16,7 @@ import ast
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -263,6 +264,44 @@ def test_w2_01_forged_marker_is_rejected(tmp_path: Path):
     stdout = (Path(_written["birth_path"]).parent / "levels" / "B1" /
               "stdout.txt").read_text(encoding="utf-8")
     assert birth.RUNNER_MARKER in stdout
+
+
+def test_w2_01_nonce_channel_is_absent_from_payload(tmp_path: Path):
+    """评审 W2-01 二次加固：``payload.json`` 里不得再有 ``nonce`` / ``result_path``。
+
+    这两个值改由父进程经 stdin 一次性挑战行下发（运行器在 import 候选**之前**
+    读走）。``payload.json`` 的路径既是候选 argv 的 ``sys.argv[1]`` 也是候选
+    ``open()`` 得到的内容——只要它含 nonce，候选就能抢先写出一条合法记录。
+    """
+    wd = _workdir(tmp_path, "good")
+    out = tmp_path / "out"
+    result, _written = _validate(wd, out)
+    assert result.birth_status == "BORN"
+    payloads = sorted((out / "levels").glob("*/payload.json"))
+    assert len(payloads) == len(birth.LEVELS) == 5
+    for path in payloads:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert "nonce" not in doc, path
+        assert "result_path" not in doc, path
+        #: 挑战通道之外的东西都还在（层/工作目录/入口等参数不受影响）
+        assert doc["level"] == path.parent.name
+
+
+def test_w2_01_runner_refuses_without_stdin_challenge(tmp_path: Path):
+    """评审 W2-01 二次加固：拿不到 stdin 挑战行 ⇒ 运行器拒绝执行（rc=3、零结果件）。
+
+    直接起生产同一份 ``birth._RUNNER_SRC``，stdin 置 ``/dev/null``：这证明 nonce
+    不是「候选猜不到」而是**payload/argv 里根本没有**——没有挑战行的运行器不替
+    任何人写结果件（fail-closed），候选自己伪造的 stdout 标记行另有用例覆盖。
+    """
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(json.dumps({"level": "B0"}), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-I", "-c", birth._RUNNER_SRC, str(payload_path)],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
+    assert "挑战行" in proc.stderr
+    assert not list(tmp_path.glob("runner_result*.json"))
 
 
 def test_w2_02_directory_entry_is_rejected(tmp_path: Path):
