@@ -480,6 +480,19 @@ def libero_facts(files: Mapping[str, Any], criteria: Mapping | None = None) -> d
         if isinstance(one_step.get("state"), Mapping) else []
     advanced = one_step.get("advanced") is True
     finite_ok = bool(state_values) and all(_finite(v) for v in state_values)
+    #: AC-13 的机判口径是「每个任务都有非空的 ``recompute_trace.jsonl``」。
+    #: L1 没有逐行数值 telemetry 可重算，能重算的是**从候选快照里抽出来的
+    #: 结构事实**（一个输入件一行）——与 M1 的逐行重算同性质：都由评测器自己
+    #: 读件得出，不采信候选自报的布尔。
+    trace = [
+        {"artifact": "birth/functional_birth.json", "levels": dict(status)},
+        {"artifact": "env_probe.json", "action_dim": action_dim,
+         "observation_keys": list(keys) if obs_ok else []},
+        {"artifact": "runtime_fingerprint.json", "backend": backend,
+         "contracts_compared": compared, "contract_match": contract_match},
+        {"artifact": "one_step_result.json", "advanced": advanced,
+         "state_finite": finite_ok},
+    ]
     return {
         "birth_status": (birth or {}).get("birth_status") if isinstance(
             birth, Mapping) else None,
@@ -498,6 +511,7 @@ def libero_facts(files: Mapping[str, Any], criteria: Mapping | None = None) -> d
         "advanced": advanced,
         "state_finite": finite_ok,
         "fingerprint_present": bool(fingerprint),
+        "trace": trace,
     }
 
 
@@ -755,6 +769,24 @@ def research_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
     criterion_met = outcome.get("criterion_met")
     claimed_success = outcome.get("claimed_success")
     contradiction = claimed_success is True and criterion_met is False
+    #: AC-13 同口径（见 ``libero_facts``）：R1 也没有数值 telemetry，可重算的是
+    #: 从候选快照里重新抽取的结构事实，一个输入件一行。
+    trace = [
+        {"artifact": "experiment_plan.yaml",
+         "sections_present": len(present_sections),
+         "sections_missing": list(missing_sections),
+         "ablation_groups": len(ablation) if isinstance(ablation, list) else 0},
+        {"artifact": "dataset_splits",
+         "split_ids": {name: sorted(split_ids.get(name) or [])
+                       for name in split_names},
+         "overlap_ids": list(overlap), "leak_ok": leak_ok},
+        {"artifact": "evaluation_metrics.json",
+         "metrics_listed": len(metrics_list) if isinstance(metrics_list, list) else 0,
+         "maps_to": list(mapped), "has_stat_test_or_ci": stats_ok,
+         "claimed_success": claimed_success, "criterion_met": criterion_met},
+        {"artifact": "research_report.md", "chars": len(report),
+         "forbidden_claims": list(forbidden)},
+    ]
 
     return {
         "present_sections": present_sections,
@@ -789,6 +821,7 @@ def research_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
         "research_problem_ok": problem_structured,
         "rl_constraints_ok": rl_constraints_ok,
         "report_ok": bool(report.strip()),
+        "trace": trace,
     }
 
 
