@@ -384,6 +384,44 @@ def cmd_lock_criteria(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_capture_runtime(args: argparse.Namespace) -> int:
+    """Task 2：在真正执行任务的环境里采集并冻结六段指纹（0 付费）。"""
+    from orchestrator.benchmark import registry, runtime_fingerprint as rf
+
+    reg = registry.BenchmarkRegistry()
+    try:
+        spec = reg.get(args.task)
+    except Exception as exc:               # noqa: BLE001 - 未登记任务即停
+        print(f"[capture-runtime] 取任务失败：{exc}")
+        return EXIT_STOP
+
+    image = args.image or spec.runtime.get("image_digest")
+    backend = args.backend
+    if backend == "auto":
+        backend = "docker" if image else "host"
+    if backend == "docker" and not args.image_name:
+        args.image_name = {"libero_env_adapter_v1": "sim-praxis/libero:task6"}.get(
+            spec.task_id)
+    try:
+        doc, capture = rf.capture_and_build(
+            spec, image=image, backend=backend, image_name=args.image_name)
+        out_dir = Path(args.dir) if args.dir else (paths.fingerprints_dir() / spec.task_id)
+        written = rf.write_fingerprint(out_dir, doc, capture)
+    except rf.FingerprintError as exc:
+        print(f"[capture-runtime] {spec.task_id}: {exc}")
+        return EXIT_STOP
+
+    print(f"[capture-runtime] task={spec.task_id} backend={capture.backend}")
+    print(f"[capture-runtime] python={doc['python']['executable']} "
+          f"version={doc['python']['version']}")
+    sim = doc.get("simulator") or {}
+    print(f"[capture-runtime] simulator={sim.get('name')}@{sim.get('version')} "
+          f"image={doc['container']['image_digest']}")
+    print(f"[capture-runtime] fingerprint_sha256={written['fingerprint_sha256']}")
+    print(f"[capture-runtime] wrote {written['fingerprint_path']}")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m orchestrator.benchmark.cli",
@@ -406,6 +444,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Task 1：按 D1-5 规范子集回填判据锁（冻结用）")
     lc.add_argument("--phase", default=_PHASE, choices=[_PHASE])
     lc.set_defaults(func=cmd_lock_criteria)
+
+    cr = sub.add_parser("capture-runtime",
+                        help="Task 2：采集并冻结任务运行环境的六段指纹")
+    cr.add_argument("--task", required=True, help="task_id（如 mujoco_contact_push_v1）")
+    cr.add_argument("--backend", default="auto", choices=["auto", "host", "docker"])
+    cr.add_argument("--image", default=None,
+                    help="image@sha256:... 覆盖 task.yaml.runtime.image_digest")
+    cr.add_argument("--image-name", default=None, help="镜像名（仅 docker 后端）")
+    cr.add_argument("--dir", default=None,
+                    help="输出目录（缺省 <bench_root>/fingerprints/<task_id>）")
+    cr.set_defaults(func=cmd_capture_runtime)
     return parser
 
 

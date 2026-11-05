@@ -3,9 +3,12 @@
 # evaluation.criteria_lock_sha256 由 `python -m orchestrator.benchmark.cli
 # lock-criteria` 按 D1-5 规范子集计算回填，不得手改。
 #
-# runtime.packages 的 mujoco 值此刻是镜像 Dockerfile 第 51–53 行的**声明值**；
-# Task 2 在容器内实测后回填为实测值（TD-6 关闭条件）。runtime 段不在 criteria
-# 锁定子集内，回填不改变 criteria_lock_sha256。
+# runtime 段的取值来源：Task 1 时为镜像 Dockerfile 第 51–53 行的**声明值**；
+# Task 2 已在容器内实测复核（`capture-runtime --task libero_env_adapter_v1
+# --backend docker`，指纹 sha256 = 1a4e6098…，包版本 robosuite 1.4.0 /
+# mujoco 2.3.7 / bddl 1.0.1 / libero 0.1.0 与 python /usr/bin/python3 逐字相符），
+# **TD-6 关闭**：声明值与实测值一致，故本段数值不变（仅改注释）。runtime 段不在
+# criteria 锁定子集内，注释变更不改变 criteria_lock_sha256。
 schema: simpraxis.benchmark_task.v1
 task_id: libero_env_adapter_v1
 version: 1
