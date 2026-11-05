@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "r1_n06_contradiction",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "r1_n06_contradiction",
+  "files": [
+    {
+      "rel": "experiment_plan.yaml",
+      "sha256": "e8c9c31981ccedc35fcec3afe4a73e155e8d2c26f8678f5dca1e65879ea42a9c"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

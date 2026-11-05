@@ -1,0 +1,99 @@
+{
+  "captured_in": "container",
+  "config": {
+    "cpu_limit": null,
+    "env": {},
+    "env_passthrough": [],
+    "gpu": {
+      "name": null,
+      "total_mib": null
+    },
+    "memory_limit": null,
+    "network_mode": "disabled",
+    "timeout_s": 900
+  },
+  "container": {
+    "backend": "docker",
+    "container_id": null,
+    "container_python": "/usr/bin/python3",
+    "cuda_runtime": "12.4",
+    "egl_available": true,
+    "gid": 1000,
+    "gpu_visible": false,
+    "image_digest": "sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624",
+    "image_id": "sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624",
+    "image_name": "simpraxis/libero-benchmark:phase28",
+    "kernel": "6.8.0-synthetic",
+    "uid": 1000
+  },
+  "fingerprint_sha256": "d29336f6e916c8337ca07fa78428b21090cfb13d3b2e1380139f4c798d4de096",
+  "mount": {
+    "entries": []
+  },
+  "python": {
+    "argv": [],
+    "executable": "/usr/bin/python3",
+    "implementation": "CPython",
+    "packages": {
+      "bddl": "1.0.1",
+      "mujoco": "2.3.7",
+      "robosuite": "1.4.0"
+    },
+    "sys_path": [],
+    "version": "3.11.8",
+    "workdir": "/workspace"
+  },
+  "repository": {
+    "assets_manifest_sha256": null,
+    "benchmark_version": 1,
+    "criteria_sha256": "8a397336d775b6716165fc5522590ae7ed8156f8acdebcbada70c5eba10f65e3",
+    "engine_dirty": false,
+    "engine_head": "0123456789abcdef0123456789abcdef01234567",
+    "kb_dirty": null,
+    "kb_head": null,
+    "skills_manifest_sha256": null,
+    "task_spec_sha256": "043ab9650d35a417452684e356baea66c8644fe3a4a3a30b3580fc367b83841e",
+    "task_version": 1
+  },
+  "runtime_id": "libero_isolated",
+  "schema": "simpraxis.runtime_fingerprint.v1",
+  "simulator": {
+    "action_contract": {
+      "dim": 7,
+      "high": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "low": [
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1,
+        -1
+      ],
+      "space": "Box"
+    },
+    "api_identity": "libero.envs.env_wrapper.ControlEnv",
+    "name": "libero",
+    "observation_contract": {
+      "dtype": "float32",
+      "keys": [
+        "obs",
+        "state"
+      ],
+      "shape": [
+        2
+      ]
+    },
+    "scene_identity": "l1_n05_action_dim/libero_spatial/KITCHEN_SCENE",
+    "version": "0.1.0"
+  },
+  "task_id": "libero_env_adapter_v1"
+}

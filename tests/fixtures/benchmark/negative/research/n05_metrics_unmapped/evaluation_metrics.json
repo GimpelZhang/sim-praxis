@@ -1,0 +1,22 @@
+{
+  "_provenance": {
+    "case_id": "r1_n05_metrics_unmapped",
+    "note": "指标结论（合成；不主张成功）",
+    "synthetic_fixture": true
+  },
+  "conclusion": {
+    "claimed_success": false,
+    "criterion_met": false
+  },
+  "metrics": [
+    {
+      "ci": [
+        0.4,
+        0.6
+      ],
+      "name": "success_rate",
+      "statistical_test": "Welch t",
+      "value": 0.5
+    }
+  ]
+}

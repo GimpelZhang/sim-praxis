@@ -1,0 +1,15 @@
+{
+  "case_id": "m1_n02_contact_zero",
+  "defect": "全程接触力为 0 却报告位移（位移非接触产生）",
+  "inline_provenance_exceptions": [
+    "run_manifest.json：schema additionalProperties=false，不可内联",
+    "runtime_fingerprint.json：schema additionalProperties=false，不可内联",
+    "telemetry.jsonl：逐行数据日志，插入注记行会污染重算",
+    "evidence/manifest.json：_provenance 已内联"
+  ],
+  "note": "M1 负例：必须被评测器拒绝",
+  "origin": "Task 5 合成夹具（非能力证据；真实参考在 Task 6）",
+  "schema": "simpraxis.benchmark_fixture_provenance.v1",
+  "synthetic_fixture": true,
+  "task_id": "mujoco_contact_push_v1"
+}

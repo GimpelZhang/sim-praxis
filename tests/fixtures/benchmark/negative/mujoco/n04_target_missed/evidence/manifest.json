@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "m1_n04_target_missed",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "m1_n04_target_missed",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "09d0af594e9e343b004a0ff6c07c2ec124fbddf72678273cea3382862a52fe06"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "bb165ee65debacf51fcbc1cf99ddb651628144c7242188374a9c91ab544bdd23"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

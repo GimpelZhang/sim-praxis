@@ -1,0 +1,61 @@
+{
+  "captured_in": "host",
+  "config": {
+    "cpu_limit": null,
+    "env": {},
+    "env_passthrough": [],
+    "gpu": {
+      "name": null,
+      "total_mib": null
+    },
+    "memory_limit": null,
+    "network_mode": "disabled",
+    "timeout_s": 600
+  },
+  "container": {
+    "backend": "host",
+    "container_id": null,
+    "container_python": null,
+    "cuda_runtime": null,
+    "egl_available": null,
+    "gid": 1000,
+    "gpu_visible": false,
+    "image_digest": null,
+    "image_id": null,
+    "image_name": null,
+    "kernel": "6.8.0-synthetic",
+    "uid": 1000
+  },
+  "fingerprint_sha256": "6dd4e56b33fcb5fc14c77aee66f5201d9d7176328157f8561aef7965774776ee",
+  "mount": {
+    "entries": []
+  },
+  "python": {
+    "argv": [],
+    "executable": "/mnt/venvs/simpraxis/bin/python",
+    "implementation": "CPython",
+    "packages": {
+      "PyYAML": "6.0.3",
+      "jsonschema": "4.26.0"
+    },
+    "sys_path": [],
+    "version": "3.10.12",
+    "workdir": "/workspace"
+  },
+  "repository": {
+    "assets_manifest_sha256": null,
+    "benchmark_version": 1,
+    "criteria_sha256": "17448a739363e9bee437251d14c1ac0393460646aa0af258640db4e7ccc4dbf0",
+    "engine_dirty": false,
+    "engine_head": "0123456789abcdef0123456789abcdef01234567",
+    "kb_dirty": null,
+    "kb_head": null,
+    "skills_manifest_sha256": null,
+    "task_spec_sha256": "dfd6257526c8506721daf2c4f127a4a2cfb8e6df12f945c8a902c47d7605d0be",
+    "task_version": 1
+  },
+  "runtime_id": "document_only",
+  "schema": "simpraxis.runtime_fingerprint.v1",
+  "simulator": null,
+  "task_id": "icy_ground_dr_v1"
+}

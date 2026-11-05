@@ -1,0 +1,91 @@
+{
+  "captured_in": "host",
+  "config": {
+    "cpu_limit": null,
+    "env": {},
+    "env_passthrough": [],
+    "gpu": {
+      "name": null,
+      "total_mib": null
+    },
+    "memory_limit": null,
+    "network_mode": "disabled",
+    "timeout_s": 600
+  },
+  "container": {
+    "backend": "host",
+    "container_id": null,
+    "container_python": null,
+    "cuda_runtime": null,
+    "egl_available": null,
+    "gid": 1000,
+    "gpu_visible": false,
+    "image_digest": null,
+    "image_id": null,
+    "image_name": null,
+    "kernel": "6.8.0-synthetic",
+    "uid": 1000
+  },
+  "fingerprint_sha256": "6a99663f88785257e271722339d3ec99a4d3d02d3f7888a446b7071fea253026",
+  "mount": {
+    "entries": []
+  },
+  "python": {
+    "argv": [],
+    "executable": "/mnt/venvs/simpraxis/bin/python",
+    "implementation": "CPython",
+    "packages": {
+      "mujoco": "3.15.0",
+      "numpy": "1.26.4",
+      "trimesh": "5.1.1"
+    },
+    "sys_path": [],
+    "version": "3.10.12",
+    "workdir": "/workspace"
+  },
+  "repository": {
+    "assets_manifest_sha256": null,
+    "benchmark_version": 1,
+    "criteria_sha256": "6cdb18604362bcb7f10007954876a1b168ef1d661470bff1d8559ec631216e2a",
+    "engine_dirty": false,
+    "engine_head": "0123456789abcdef0123456789abcdef01234567",
+    "kb_dirty": null,
+    "kb_head": null,
+    "skills_manifest_sha256": null,
+    "task_spec_sha256": "e7a531ad673d46b0f743b28b6f0accb0d30d098406de66cabfdccce3e63f0ee4",
+    "task_version": 1
+  },
+  "runtime_id": "mujoco_315",
+  "schema": "simpraxis.runtime_fingerprint.v1",
+  "simulator": {
+    "action_contract": {
+      "dim": 3,
+      "high": [
+        1,
+        1,
+        1
+      ],
+      "low": [
+        -1,
+        -1,
+        -1
+      ],
+      "space": "Box"
+    },
+    "api_identity": "mujoco.MjModel",
+    "name": "mujoco",
+    "observation_contract": {
+      "dtype": "float64",
+      "keys": [
+        "cube_pos",
+        "target_pos"
+      ],
+      "shape": [
+        6
+      ]
+    },
+    "scene_identity": "golden_m1/synthetic_push_v1",
+    "version": "3.15.0"
+  },
+  "task_id": "mujoco_contact_push_v1"
+}

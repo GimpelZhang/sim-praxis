@@ -1,0 +1,9 @@
+{
+  "_provenance": {
+    "case_id": "m1_n03_penetration_exceed",
+    "note": "同/跨种子复现（合成）",
+    "synthetic_fixture": true
+  },
+  "cross_seed_max_delta_m": 0.00028000000000000003,
+  "same_seed_identical": true
+}

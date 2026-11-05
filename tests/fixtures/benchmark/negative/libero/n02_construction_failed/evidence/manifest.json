@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "l1_n02_construction_failed",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "l1_n02_construction_failed",
+  "files": [
+    {
+      "rel": "adapter.py",
+      "sha256": "086992da49e5252e9213e1c3bdcaa4c3494fef60bd490429620e532132508f56"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

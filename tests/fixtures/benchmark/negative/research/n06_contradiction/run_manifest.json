@@ -1,0 +1,19 @@
+{
+  "birth_result_sha256": null,
+  "candidate_artifact_sha256": "7f974ec1de96f2859b2658617f8218a75428375876bdd515b8daa79d5c790f4a",
+  "criteria_lock_sha256": "2321a27365724c5ea9fc7baff641e80c441604ce1ed0e0f84b52e9d1e57a7240",
+  "criteria_sha256": "17448a739363e9bee437251d14c1ac0393460646aa0af258640db4e7ccc4dbf0",
+  "evaluator_version": 1,
+  "evidence_manifest_sha256": "370c0117912dee2412d2a5d8c94ba93d23575e265cfc4336c18b042335f73b9d",
+  "mode": "negative_control",
+  "paid_model_calls": 0,
+  "repository_sha": "0123456789abcdef0123456789abcdef01234567",
+  "run_id": "r1_n06_contradiction",
+  "runtime_fingerprint_sha256": "0ffaa574ef7182f48e67c16db9d73268622b40169dc99522062d71498ce6d6ca",
+  "schema": "simpraxis.benchmark_run.v1",
+  "seed": 0,
+  "status": "PASS",
+  "task_id": "icy_ground_dr_v1",
+  "task_spec_sha256": "dfd6257526c8506721daf2c4f127a4a2cfb8e6df12f945c8a902c47d7605d0be",
+  "task_version": 1
+}

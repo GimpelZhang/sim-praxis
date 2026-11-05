@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "r1_n05_metrics_unmapped",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "r1_n05_metrics_unmapped",
+  "files": [
+    {
+      "rel": "experiment_plan.yaml",
+      "sha256": "fba2bd64564dbaadab4d6efc0d5897a2a58168f47ee74c94ed3c362b43ff0032"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

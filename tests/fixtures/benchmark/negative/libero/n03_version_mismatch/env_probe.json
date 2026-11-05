@@ -1,0 +1,18 @@
+{
+  "_provenance": {
+    "case_id": "l1_n03_version_mismatch",
+    "note": "环境探针（合成）",
+    "synthetic_fixture": true
+  },
+  "action_dim": 7,
+  "captured_in": "container",
+  "env_name": "KITCHEN_SCENE",
+  "image_digest": "sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624",
+  "observation_keys": [
+    "obs",
+    "state"
+  ],
+  "python_executable": "/usr/bin/python3",
+  "python_version": "3.11.8",
+  "task_suite": "libero_spatial"
+}

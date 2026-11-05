@@ -1,0 +1,239 @@
+{
+  "cases": [
+    {
+      "case_id": "m1_n01_no_motion",
+      "defect": "物理动作无法产生（立方体从未位移、无接触推动）",
+      "dir": "mujoco/n01_no_motion",
+      "expected_detail": "cube_moved=False",
+      "expected_gates": [
+        "HG-M1-4",
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "m1_n02_contact_zero",
+      "defect": "全程接触力为 0 却报告位移（位移非接触产生）",
+      "dir": "mujoco/n02_contact_zero",
+      "expected_detail": "contact_peak=0.0",
+      "expected_gates": [
+        "HG-M1-4"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "m1_n03_penetration_exceed",
+      "defect": "最大穿模超过上限（真实穿模/隧穿）",
+      "dir": "mujoco/n03_penetration_exceed",
+      "expected_detail": "最大穿模",
+      "expected_gates": [
+        "HG-M1-3",
+        "HG-EVAL-3"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "m1_n04_target_missed",
+      "defect": "物理动作成立但末位未达目标区（功能性失败）",
+      "dir": "mujoco/n04_target_missed",
+      "expected_detail": "functional_correctness",
+      "expected_gates": [
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "m1_n05_forged_success",
+      "defect": "metrics.json 自报与 telemetry 重算不一致",
+      "dir": "mujoco/n05_forged_success",
+      "expected_detail": "endpoint_distance_m",
+      "expected_gates": [
+        "HG-M1-7"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "m1_n06_not_reproducible",
+      "defect": "同种子两次结果不一致（不可复现）",
+      "dir": "mujoco/n06_not_reproducible",
+      "expected_detail": "同种子逐位相等=False",
+      "expected_gates": [
+        "HG-EVAL-4",
+        "HG-M1-5"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "l1_n01_wrong_module_path",
+      "defect": "错模块路径（真实 import 失败）",
+      "dir": "libero/n01_wrong_module_path",
+      "expected_detail": "birth_status",
+      "expected_gates": [
+        "HG-L1-4",
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "l1_n02_construction_failed",
+      "defect": "import 成功但构造失败仍报成功",
+      "dir": "libero/n02_construction_failed",
+      "expected_detail": "B2='FAIL'",
+      "expected_gates": [
+        "HG-L1-4",
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "l1_n03_version_mismatch",
+      "defect": "运行时指纹与 task.yaml.runtime 不符",
+      "dir": "libero/n03_version_mismatch",
+      "expected_detail": "要求镜像",
+      "expected_gates": [
+        "HG-EVAL-1",
+        "HG-L1-1"
+      ],
+      "expected_status": "INVALID_RUNTIME",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "l1_n04_reset_structure",
+      "defect": "reset 结构错误（B3 失败，调用了不存在的键）",
+      "dir": "libero/n04_reset_structure",
+      "expected_detail": "B3='FAIL'",
+      "expected_gates": [
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "l1_n05_action_dim",
+      "defect": "action dim 与观测/动作契约声明不一致",
+      "dir": "libero/n05_action_dim",
+      "expected_detail": "action_dim 探针 8",
+      "expected_gates": [
+        "HG-L1-5",
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "l1_n06_illegal_step",
+      "defect": "step 未推进（非法物理状态）",
+      "dir": "libero/n06_illegal_step",
+      "expected_detail": "advanced=False",
+      "expected_gates": [
+        "HG-L1-6"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "l1_n07_host_impersonation",
+      "defect": "宿主冒充容器（captured_in=host 却声称容器版本）",
+      "dir": "libero/n07_host_impersonation",
+      "expected_detail": "captured_in",
+      "expected_gates": [
+        "HG-L1-1",
+        "HG-L1-2"
+      ],
+      "expected_status": "INVALID_RUNTIME",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "r1_n01_missing_units",
+      "defect": "参数缺物理单位",
+      "dir": "research/n01_missing_units",
+      "expected_detail": "参数缺物理单位",
+      "expected_gates": [
+        "HG-R1-2"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    },
+    {
+      "case_id": "r1_n02_independent_but_correlated",
+      "defect": "声称各参数独立随机化却给出相关性",
+      "dir": "research/n02_independent_but_correlated",
+      "expected_detail": "parameter_relationships",
+      "expected_gates": [
+        "HG-EVAL-8"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    },
+    {
+      "case_id": "r1_n03_leak",
+      "defect": "训练集与 Holdout 重叠（信息泄漏）",
+      "dir": "research/n03_leak",
+      "expected_detail": "重叠 id",
+      "expected_gates": [
+        "HG-R1-3"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    },
+    {
+      "case_id": "r1_n04_no_holdout",
+      "defect": "无独立 Holdout",
+      "dir": "research/n04_no_holdout",
+      "expected_detail": "无独立 Holdout",
+      "expected_gates": [
+        "HG-R1-4"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    },
+    {
+      "case_id": "r1_n05_metrics_unmapped",
+      "defect": "指标不能回答研究问题（与 13 项无映射）",
+      "dir": "research/n05_metrics_unmapped",
+      "expected_detail": "指标未映射",
+      "expected_gates": [
+        "HG-R1-5"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    },
+    {
+      "case_id": "r1_n06_contradiction",
+      "defect": "结论与预注册判据矛盾仍宣称成功",
+      "dir": "research/n06_contradiction",
+      "expected_detail": "判据未达却宣称成功",
+      "expected_gates": [
+        "HG-R1-6"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    },
+    {
+      "case_id": "r1_n07_distribution_only",
+      "defect": "仅扩大参数分布即声称覆盖真实差异",
+      "dir": "research/n07_distribution_only",
+      "expected_detail": "翻案/成功措辞",
+      "expected_gates": [
+        "HG-R1-7"
+      ],
+      "expected_status": "FAIL",
+      "task_id": "icy_ground_dr_v1"
+    }
+  ],
+  "counts": {
+    "libero": 7,
+    "mujoco": 6,
+    "research": 7
+  },
+  "schema": "simpraxis.benchmark_negative_cases.v1",
+  "synthetic": true
+}

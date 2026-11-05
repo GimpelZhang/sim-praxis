@@ -1,0 +1,88 @@
+research_problem: 冰面域随机化对推箱策略鲁棒性的影响（研究设计，不执行训练）
+parameter_definitions:
+- name: friction
+  unit: '1'
+  range:
+  - 0.05
+  - 0.95
+- name: contact_stiffness
+  unit: N/m
+  range:
+  - 500
+  - 5000
+- name: joint_damping
+  unit: N*m*s/rad
+  range:
+  - 0.1
+  - 2.0
+probability_distributions:
+  friction:
+    family: uniform
+    low: 0.05
+    high: 0.95
+  contact_stiffness:
+    family: log-uniform
+    low: 500
+    high: 5000
+  joint_damping:
+    family: uniform
+    low: 0.1
+    high: 2.0
+parameter_correlations:
+- pair:
+  - friction
+  - contact_stiffness
+  rationale: 冰面湿滑与接触刚度同源物理耦合（合成夹具理由）
+randomization_method: 每次 episode 开始时按参数类别独立采样
+sampling_strategy: 拉丁超立方 + 分层覆盖
+curriculum: 第 1 阶段低摩擦权重 0.5，第 2 阶段线性升至 0.9
+dataset_splits:
+  disjoint: true
+  train:
+    ids:
+    - e1
+    - e2
+    - e3
+    episodes: 3
+  validation:
+    ids:
+    - v1
+    - v2
+    episodes: 2
+  holdout:
+    ids:
+    - h1
+    - h2
+    episodes: 2
+random_seeds:
+- 0
+- 1
+- 2
+metrics:
+- name: success_rate
+  maps_to: metrics
+- name: ice_ratio
+  maps_to: parameter_definitions
+ablation_study:
+- name: no_dr
+  removes: randomization_method
+- name: no_iciness
+  removes: probability_distributions
+- name: no_curriculum
+  removes: curriculum
+failure_taxonomy:
+  slip_off: 冰面滑出目标区
+  stuck: 接触力不足无法推动
+sim_to_real_risks:
+- 真实冰面摩擦系数分布未知，仿真区间可能过窄
+- 接触刚度在低温下非线性，线性近似项不可消除
+conclusion_criteria:
+  rule: 若 holdout 成功率相对基线的提升 <5% 则判不成立
+  evidence_refs:
+  - metrics
+  - dataset_splits
+  - ablation_study
+_provenance:
+  synthetic_fixture: true
+  case_id: r1_n06_contradiction
+  note: 研究设计（合成）

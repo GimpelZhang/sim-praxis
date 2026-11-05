@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "r1_n01_missing_units",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "r1_n01_missing_units",
+  "files": [
+    {
+      "rel": "experiment_plan.yaml",
+      "sha256": "d09194e7a481a696c256f8089bfdeb03e396c840863c0ac49348ea71f959de33"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

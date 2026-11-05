@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "m1_n05_forged_success",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "m1_n05_forged_success",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "9408aaad37d41ef867c4ef8df11ee91245ee154931fb8497afc9d539ff73e34e"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "3e277be7c6d2e967d57236a10988e21035f0ac60af3ccc0dbbf1a7231d4a415a"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

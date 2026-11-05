@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "m1_n01_no_motion",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "m1_n01_no_motion",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "3db6adf25b1ae7eb9c1785779f8938fd8b6b880950a33bc6c3da32e04c7debc5"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "d5e403be6360c469dfb1d6a3082efebab5e70f977716412dcb8cf0ebebbc7084"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

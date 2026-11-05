@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "l1_n01_wrong_module_path",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "l1_n01_wrong_module_path",
+  "files": [
+    {
+      "rel": "adapter.py",
+      "sha256": "a44ec29bfd84d9c919d4c7111882f5bbf4ccace23a7928a6a5f9210807bfc077"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

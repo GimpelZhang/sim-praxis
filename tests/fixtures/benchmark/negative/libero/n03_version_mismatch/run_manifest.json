@@ -1,0 +1,19 @@
+{
+  "birth_result_sha256": "8f306bc9e6065cda916fb9efdfbc6fa9be531ffa9298a08a3c6ce8c5314e526a",
+  "candidate_artifact_sha256": "8908acae4f5c10091bebf67440ce906946c9222ea6d4396ed47ea0575e414903",
+  "criteria_lock_sha256": "fc0f0eb8d9599894f09b026dd16f09d9d913ab48c56e56b3b9afddc8cfabb740",
+  "criteria_sha256": "8a397336d775b6716165fc5522590ae7ed8156f8acdebcbada70c5eba10f65e3",
+  "evaluator_version": 1,
+  "evidence_manifest_sha256": "355545676adf348adcc665a91ad1df60ba798d7421b3059ac3ba3314ade8119e",
+  "mode": "negative_control",
+  "paid_model_calls": 0,
+  "repository_sha": "0123456789abcdef0123456789abcdef01234567",
+  "run_id": "l1_n03_version_mismatch",
+  "runtime_fingerprint_sha256": "e0fc40f3e036309406d023247dcc8e1be0824138965635d5c455e0d4cf81885f",
+  "schema": "simpraxis.benchmark_run.v1",
+  "seed": 0,
+  "status": "PASS",
+  "task_id": "libero_env_adapter_v1",
+  "task_spec_sha256": "043ab9650d35a417452684e356baea66c8644fe3a4a3a30b3580fc367b83841e",
+  "task_version": 1
+}

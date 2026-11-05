@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "m1_n02_contact_zero",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "m1_n02_contact_zero",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "5adac60f56548a9615bcab7abaad503cf1ad1157dfbefee210b1a2f46207d358"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "f7f6f2ef9a244815193c730a13788be9835d7b93042faf34cb99fac5d83b278a"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

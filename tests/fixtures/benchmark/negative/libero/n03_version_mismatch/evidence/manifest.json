@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "l1_n03_version_mismatch",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "l1_n03_version_mismatch",
+  "files": [
+    {
+      "rel": "adapter.py",
+      "sha256": "385ce6c36c0f4ec46561e1fcd4ae58e6dbffe631578db11b9b167c76a5b7b57b"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

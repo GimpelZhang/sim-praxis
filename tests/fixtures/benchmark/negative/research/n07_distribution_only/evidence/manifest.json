@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "r1_n07_distribution_only",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "r1_n07_distribution_only",
+  "files": [
+    {
+      "rel": "experiment_plan.yaml",
+      "sha256": "5a3d7c5544f04771ff85e47e8c0737dc7fbea20ad1a411c3af0b2e33389d981b"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

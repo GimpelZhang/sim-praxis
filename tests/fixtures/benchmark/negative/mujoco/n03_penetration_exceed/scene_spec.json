@@ -1,0 +1,9 @@
+{
+  "_provenance": {
+    "case_id": "m1_n03_penetration_exceed",
+    "note": "冻结场景结构（合成）",
+    "synthetic_fixture": true
+  },
+  "block_half_size_m": 0.025,
+  "scene": "push"
+}

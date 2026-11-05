@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "golden_m1",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "golden_m1",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "9408aaad37d41ef867c4ef8df11ee91245ee154931fb8497afc9d539ff73e34e"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "a5f2f807e647f4a1ba4526434981c145d8f7891554715db5ccfc5b563c2ebd52"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "golden_r1",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "golden_r1",
+  "files": [
+    {
+      "rel": "experiment_plan.yaml",
+      "sha256": "2af7cf4a2b16dbcdf6952f914e12dab961797ceee989a5797c4070722876910a"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

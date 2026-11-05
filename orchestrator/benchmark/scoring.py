@@ -61,6 +61,9 @@ R1_PARAMETER_CLASSES = ("friction", "contact_stiffness", "joint_damping")
 R1_FORBIDDEN_CLAIMS = (
     "零样本成功", "zero-shot 成功", "zero-shot success", "已翻案",
     "冰面实验已成功", "contradiction_control_not_robust 已被推翻",
+    # Task 5 负例 r1_07：把「只扩大参数分布」当作 Sim-to-Real 有效性的充分
+    # 论证（只扩大分布无法覆盖分布外真实差异，须有 Holdout/风险分析支撑）
+    "仅扩大分布",
 )
 
 
@@ -276,6 +279,20 @@ def libero_facts(files: Mapping[str, Any]) -> dict:
         and action_dim > 0
     fp_action = fingerprint.get("action_contract") or {}
     fp_obs = fingerprint.get("observation_contract") or {}
+    # Task 5：schema 合法的指纹把契约放在 simulator 段（action_contract.dim /
+    # observation_contract.keys）；顶层的旧形态（Task 4 合成样本）优先，两者
+    # 都认，但不臆造：都没有就按「无可对契约」处理。
+    simulator = fingerprint.get("simulator") or {}
+    if isinstance(simulator, Mapping):
+        if not isinstance(fp_action, Mapping) or \
+                fp_action.get("action_dim") is None:
+            sim_action = simulator.get("action_contract")
+            if isinstance(sim_action, Mapping) and sim_action.get("dim") is not None:
+                fp_action = {"action_dim": sim_action.get("dim")}
+        if not isinstance(fp_obs, Mapping) or fp_obs.get("keys") is None:
+            sim_obs = simulator.get("observation_contract")
+            if isinstance(sim_obs, Mapping) and sim_obs.get("keys") is not None:
+                fp_obs = {"keys": sim_obs.get("keys")}
     contract_match = True
     contract_notes = []
     if isinstance(fp_action, Mapping) and fp_action.get("action_dim") is not None:

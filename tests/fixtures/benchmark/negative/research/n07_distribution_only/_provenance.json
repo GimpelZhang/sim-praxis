@@ -1,0 +1,15 @@
+{
+  "case_id": "r1_n07_distribution_only",
+  "defect": "仅扩大参数分布即声称覆盖真实差异",
+  "inline_provenance_exceptions": [
+    "run_manifest.json：schema additionalProperties=false，不可内联",
+    "runtime_fingerprint.json：schema additionalProperties=false，不可内联",
+    "telemetry.jsonl：逐行数据日志，插入注记行会污染重算",
+    "evidence/manifest.json：_provenance 已内联"
+  ],
+  "note": "R1 负例：必须被评测器拒绝",
+  "origin": "Task 5 合成夹具（非能力证据；真实参考在 Task 6）",
+  "schema": "simpraxis.benchmark_fixture_provenance.v1",
+  "synthetic_fixture": true,
+  "task_id": "icy_ground_dr_v1"
+}

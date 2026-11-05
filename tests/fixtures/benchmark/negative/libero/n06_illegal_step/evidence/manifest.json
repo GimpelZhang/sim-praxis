@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "l1_n06_illegal_step",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "l1_n06_illegal_step",
+  "files": [
+    {
+      "rel": "adapter.py",
+      "sha256": "13d67a726efd0d1c513a8c215a76860376b6dbee8eca8832b56349bf4dbba854"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

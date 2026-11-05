@@ -62,7 +62,24 @@ EXTRA_EVIDENCE = (
     "reproducibility.json",
     "hidden_access_audit.json",
     "birth/functional_birth.json",
+    # Task 5：证据清单本身也是证据（run_manifest.evidence_manifest_sha256
+    # 必须与它的实测 sha256 绑定，见 HG-EVAL-6）
+    "evidence/manifest.json",
 )
+
+#: 候选目录里出现这些名字即视为「伪造判决件」（Task 5 / 路线图 §9.4）：
+#: 判决只能由评测器写进 out_dir，候选自带的 PASS/判决文件一律不采信。
+FORGED_VERDICT_NAMES = frozenset({
+    "evaluation_result.json",
+    "evaluation_result.sha256",
+    "judge_report.json",
+    "closure_judge.json",
+    "acceptance.json",
+    "snapshot_manifest.json",
+    "PASS",
+    "PASS.txt",
+    "pass.json",
+})
 
 #: 候选无权访问的私有前缀（命中任一即 HG-EVAL-2）
 PRIVATE_PREFIX = "private/"
@@ -80,6 +97,11 @@ GATE_STATUS = {
     "HG-EVAL-5": "INCOMPLETE_EVIDENCE",
     "HG-EVAL-6": "INVALID_ARTIFACT",
     "HG-EVAL-7": "BLOCKED_INFRA",
+    # Task 5（T5.9 失败处理的修复，Complete A28 系列留痕）：验收门。
+    # 路线图 §8.6 的 PASS 语义是「所有必要验收项通过」——没有硬门命中并不等于
+    # 通过：任一度量维度 < 1（含部分通过）或 birth 契约不满足，一律 FAIL。
+    # 该门是评测器定义的通用门，不写在 criteria.hard_gates 里（判据锁不变）。
+    "HG-EVAL-8": "FAIL",
     # 域门（criteria/*.criteria.json 冻结声明的 HG-<task>-<n>）
     "HG-M1-1": "INVALID_RUNTIME", "HG-M1-2": "FAIL", "HG-M1-3": "FAIL",
     "HG-M1-4": "FAIL", "HG-M1-5": "FAIL", "HG-M1-6": "FAIL",
@@ -167,6 +189,40 @@ def criteria_integrity(spec: ts.TaskSpec) -> "list[str]":
     return []
 
 
+def find_forged_verdicts(run_dir: "str | Path", *, max_depth: int = 4,
+                         limit: int = 32) -> "list[str]":
+    """在候选目录里找伪造判决件（只看名字，不跟随符号链接，深度有界）。"""
+    root = Path(run_dir)
+    hits: "list[str]" = []
+    if not root.is_dir():
+        return hits
+    stack: "list[tuple[Path, int]]" = [(root, 0)]
+    while stack:
+        directory, depth = stack.pop()
+        try:
+            entries = sorted(os.scandir(directory), key=lambda e: e.name)
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                rel = str(Path(entry.path).relative_to(root))
+            except ValueError:                      # pragma: no cover - 防御
+                continue
+            if entry.is_symlink():
+                if entry.name in FORGED_VERDICT_NAMES:
+                    hits.append(rel)
+                continue
+            if entry.is_dir(follow_symlinks=False):
+                if depth + 1 <= max_depth:
+                    stack.append((Path(entry.path), depth + 1))
+                continue
+            if entry.name in FORGED_VERDICT_NAMES:
+                hits.append(rel)
+        if len(hits) >= limit:
+            break
+    return sorted(hits)[:limit]
+
+
 # --------------------------------------------------------------------------
 # D4-1 快照
 # --------------------------------------------------------------------------
@@ -189,6 +245,8 @@ class Snapshot:
     # 参与 candidate_artifact_sha256 聚合的相对路径（= 契约 outputs 去掉
     # run_manifest.json 的自我引用）。附加证据件只复制留档，不进聚合。
     aggregate_files: "list[str]" = field(default_factory=list)
+    #: 候选目录里出现的伪造判决件（Task 5，HG-EVAL-6）
+    forged: "list[str]" = field(default_factory=list)
 
     @property
     def digest_set(self) -> "list[str]":
@@ -233,6 +291,7 @@ def snapshot(run_dir: "str | Path", out_dir: "str | Path",
 
     snap = Snapshot(run_dir=source, directory=directory, files={}, digests={},
                     aggregate_sha256="", declared_sha256=None, digest_ok=False)
+    snap.forged = find_forged_verdicts(source)
     for rel in wanted:
         src = source / rel
         must_exist = rel in required
@@ -297,6 +356,7 @@ def write_snapshot_manifest(snap: Snapshot, *, run_id: str,
         "digest_ok": snap.digest_ok,
         "missing": sorted(snap.missing),
         "escaped": sorted(snap.escaped),
+        "forged_verdicts": sorted(snap.forged),
         "manifest_sha256": snap.manifest_sha256,
         "manifest_error": snap.manifest_error,
     }
@@ -498,7 +558,8 @@ class Evaluator:
         trace_path = out_dir / TRACE_NAME
         self._write_trace(trace_path, facts)
 
-        self._generic_gates(log, snap, files, facts, parse_errors, scoring_error)
+        self._generic_gates(log, snap, files, facts, parse_errors, scoring_error,
+                            dims)
         self._domain_gates(log, snap, files, facts, parse_errors, scoring_error)
 
         status = aggregate_status(log.hits, GATE_STATUS)
@@ -543,7 +604,8 @@ class Evaluator:
     def _generic_gates(self, log: GateLog, snap: Snapshot,
                        files: Mapping[str, Any], facts: "dict | None",
                        parse_errors: Mapping[str, str],
-                       scoring_error: "str | None") -> None:
+                       scoring_error: "str | None",
+                       dims: Mapping[str, Any] | None = None) -> None:
         spec = self.spec
         # HG-EVAL-1 运行时身份
         mismatches = self._runtime_mismatches(files)
@@ -610,9 +672,12 @@ class Evaluator:
             problems.append(f"快照聚合 sha256 {snap.aggregate_sha256} ≠ run_manifest "
                             f"声明 {snap.declared_sha256!r}")
         problems += snap.escaped
+        problems += [f"候选目录含伪造判决件 {rel}（判决只由评测器写）"
+                     for rel in snap.forged]
         problems += [f"{rel} 不可解析（{msg}）" for rel, msg in parse_errors.items()]
         if snap.manifest_error:
             problems.append(f"run_manifest.json 不合规：{snap.manifest_error}")
+        problems += self._manifest_bindings(snap)
         paid = snap.manifest.get("paid_model_calls")
         if paid is not None and paid != 0:
             problems.append(f"paid_model_calls={paid!r}（本阶段必须为 0）")
@@ -628,6 +693,96 @@ class Evaluator:
         # HG-EVAL-7 由自校验前置处理；此处记「已检查、未触发」
         log.check("HG-EVAL-7", fired=False,
                   detail="评测器/判据自校验通过")
+
+        # HG-EVAL-8 验收门（Task 5）：PASS 语义 = 所有必要验收项通过
+        unmet = self._acceptance_problems(files, dims or {})
+        log.check("HG-EVAL-8", fired=bool(unmet),
+                  detail=f"必要验收项未通过：{_joined(unmet)}")
+
+    def _manifest_bindings(self, snap: Snapshot) -> "list[str]":
+        """run_manifest 与本次评测身份/快照实测值的绑定（Task 5 / HG-EVAL-6）。
+
+        刻意**不绑定** ``criteria_sha256``：判据文件整文件哈希会随
+        ``evaluator_files`` 重登记而变，绑定它会让每次重 LOCK 都把历史运行
+        判成无效；锁定语义由 ``criteria_lock_sha256``（白名单子集）承担。
+        """
+        manifest = snap.manifest
+        if not manifest:
+            return []
+        spec = self.spec
+        problems: "list[str]" = []
+        for key, expected in (("task_id", spec.task_id),
+                              ("task_version", spec.version),
+                              ("evaluator_version", EVALUATOR_VERSION),
+                              ("criteria_lock_sha256",
+                               spec.criteria_lock_sha256),
+                              ("task_spec_sha256", spec.task_file_sha256)):
+            got = manifest.get(key)
+            if got != expected:
+                problems.append(f"run_manifest.{key}={got!r} ≠ 期望 {expected!r}")
+        for rel, key in (("runtime_fingerprint.json",
+                          "runtime_fingerprint_sha256"),
+                         ("birth/functional_birth.json",
+                          "birth_result_sha256"),
+                         ("evidence/manifest.json",
+                          "evidence_manifest_sha256")):
+            actual = snap.digests.get(rel)
+            declared = manifest.get(key)
+            if actual is not None and declared != actual:
+                problems.append(f"run_manifest.{key}={declared!r} ≠ 实测 "
+                                f"sha256({rel})={actual}")
+        if "evidence/manifest.json" not in snap.digests and \
+                manifest.get("evidence_manifest_sha256") not in (None, ""):
+            problems.append("run_manifest 声明 evidence_manifest_sha256，"
+                            "但缺 evidence/manifest.json")
+        return problems
+
+    def _acceptance_problems(self, files: Mapping[str, Any],
+                             dims: Mapping[str, Any]) -> "list[str]":
+        """路线图 §8.6：PASS 必须是「所有必要验收项通过」。
+
+        1. 任一度量维度 score < 1（含部分通过）即不满足；
+        2. birth 产物在场时：``birth_status`` 必须是 ``BORN``，且
+           ``birth_contract`` 要求的每个等级都必须 ``PASS``。
+           **容错读取**（只看 ``birth_status``/``levels`` 两个字段，
+           不对 schema id 做硬校验）——Task 4 的合成样本用的是占位 schema id，
+           这里只判语义，不为 schema 兼容性放水也不拿它当额外判据。
+        """
+        problems: "list[str]" = []
+        for name in sorted(dims):
+            dim = dims[name]
+            try:
+                score = float(dim.score)
+            except (TypeError, ValueError):     # pragma: no cover - 防御
+                score = 0.0
+            if score < 1.0:
+                problems.append(f"维度 {name}={score:.6f} < 1.0")
+        birth = files.get("birth/functional_birth.json")
+        if not isinstance(birth, Mapping):
+            return problems
+        status = birth.get("birth_status")
+        if status != "BORN":
+            problems.append(f"birth_status={status!r} ≠ BORN")
+        levels = birth.get("levels")
+        if not isinstance(levels, Mapping):
+            problems.append("birth.levels 缺失（无法证明逐级通过）")
+            return problems
+        contract = dict(self.spec.birth_contract)
+        required = {
+            "B0": True,
+            "B1": bool(contract.get("import_required")),
+            "B2": bool(contract.get("construction_required")),
+            "B3": bool(contract.get("contract_required")),
+            "B4": bool(contract.get("minimal_step_required")),
+        }
+        for level in ("B0", "B1", "B2", "B3", "B4"):
+            if not required[level]:
+                continue
+            entry = levels.get(level)
+            got = entry.get("status") if isinstance(entry, Mapping) else None
+            if got != "PASS":
+                problems.append(f"{level}={got!r}（birth_contract 要求 PASS）")
+        return problems
 
     def _threshold_or_none(self, name: str) -> "float | None":
         entry = (self.spec.thresholds or {}).get(name)
@@ -694,8 +849,22 @@ class Evaluator:
                       facts: "dict | None",
                       parse_errors: Mapping[str, str]) -> None:
         mismatches = self._runtime_mismatches(files) or []
-        log.check("HG-L1-1", fired=bool(mismatches),
-                  detail=f"运行时不符：{_joined(mismatches)}")
+        # HG-L1-1 判据原文还覆盖「宿主冒充容器（captured_in != container 而
+        # 声称容器版本）」；Task 5 负例 l1_07 暴露此前的实现只对 runtime 段，
+        # 这里按判据原文补齐（只认 backend↔captured_in 这一条，不扩大口径）。
+        impersonation: "list[str]" = []
+        fingerprint = files.get("runtime_fingerprint.json")
+        probe = files.get("env_probe.json")
+        if isinstance(fingerprint, Mapping) and isinstance(probe, Mapping):
+            backend = str((fingerprint.get("container") or {}).get("backend") or "")
+            expected_in = {"docker": "container", "host": "host"}.get(backend)
+            got_in = str(probe.get("captured_in") or "")
+            if expected_in and got_in != expected_in:
+                impersonation.append(
+                    f"captured_in={got_in!r} 与指纹 backend={backend!r} "
+                    f"（应为 {expected_in!r}）不符")
+        log.check("HG-L1-1", fired=bool(mismatches) or bool(impersonation),
+                  detail=f"运行时不符：{_joined(mismatches + impersonation) or '无'}")
         if facts is None:
             for gate in ("HG-L1-2", "HG-L1-3", "HG-L1-4", "HG-L1-5", "HG-L1-6"):
                 log.check(gate, fired=False, applicable=False,

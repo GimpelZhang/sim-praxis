@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "r1_n02_independent_but_correlated",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "r1_n02_independent_but_correlated",
+  "files": [
+    {
+      "rel": "experiment_plan.yaml",
+      "sha256": "965fab64ee676a97b1bde0ef26464fa3fe0c24b270cfd0dc817a933192a04c28"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

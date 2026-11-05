@@ -1,0 +1,122 @@
+{
+  "birth_status": "BORN",
+  "contract": {
+    "author_outputs": [
+      "env_probe.json",
+      "one_step_result.json"
+    ],
+    "builder": "build_env",
+    "description": "LIBERO Environment：构造/reset/step 三段契约",
+    "name": "libero_adapter",
+    "needs_object": true,
+    "reset_required": true
+  },
+  "entry": {
+    "kind": "python_script",
+    "path": "adapter.py"
+  },
+  "levels": {
+    "B0": {
+      "data": {},
+      "detail": "合成夹具：等级结果（Task 6 由真实 BirthValidator 产出）",
+      "duration_s": 0.125,
+      "evidence": {
+        "meta": "levels/B0/meta.json",
+        "stderr": "levels/B0/stderr.txt",
+        "stdout": "levels/B0/stdout.txt"
+      },
+      "exit_code": 0,
+      "pid": null,
+      "reason": null,
+      "status": "PASS",
+      "stderr_bytes": 0,
+      "stdout_bytes": 0
+    },
+    "B1": {
+      "data": {},
+      "detail": "合成夹具：等级结果（Task 6 由真实 BirthValidator 产出）",
+      "duration_s": 0.125,
+      "evidence": {
+        "meta": "levels/B1/meta.json",
+        "stderr": "levels/B1/stderr.txt",
+        "stdout": "levels/B1/stdout.txt"
+      },
+      "exit_code": 0,
+      "pid": null,
+      "reason": null,
+      "status": "PASS",
+      "stderr_bytes": 0,
+      "stdout_bytes": 0
+    },
+    "B2": {
+      "data": {},
+      "detail": "合成夹具：等级结果（Task 6 由真实 BirthValidator 产出）",
+      "duration_s": 0.125,
+      "evidence": {
+        "meta": "levels/B2/meta.json",
+        "stderr": "levels/B2/stderr.txt",
+        "stdout": "levels/B2/stdout.txt"
+      },
+      "exit_code": 0,
+      "pid": null,
+      "reason": null,
+      "status": "PASS",
+      "stderr_bytes": 0,
+      "stdout_bytes": 0
+    },
+    "B3": {
+      "data": {},
+      "detail": "合成夹具：等级结果（Task 6 由真实 BirthValidator 产出）",
+      "duration_s": 0.125,
+      "evidence": {
+        "meta": "levels/B3/meta.json",
+        "stderr": "levels/B3/stderr.txt",
+        "stdout": "levels/B3/stdout.txt"
+      },
+      "exit_code": 0,
+      "pid": null,
+      "reason": null,
+      "status": "PASS",
+      "stderr_bytes": 0,
+      "stdout_bytes": 0
+    },
+    "B4": {
+      "data": {},
+      "detail": "合成夹具：等级结果（Task 6 由真实 BirthValidator 产出）",
+      "duration_s": 0.125,
+      "evidence": {
+        "meta": "levels/B4/meta.json",
+        "stderr": "levels/B4/stderr.txt",
+        "stdout": "levels/B4/stdout.txt"
+      },
+      "exit_code": 0,
+      "pid": null,
+      "reason": null,
+      "status": "PASS",
+      "stderr_bytes": 0,
+      "stdout_bytes": 0
+    }
+  },
+  "limits": {
+    "cpu_s": 180,
+    "mem_bytes": 4294967296,
+    "timeout_s": 120.0
+  },
+  "network_audit": {
+    "attempts": [],
+    "mode": "disabled"
+  },
+  "problems": [],
+  "required": {
+    "B0": true,
+    "B1": true,
+    "B2": true,
+    "B3": true,
+    "B4": true
+  },
+  "schema": "simpraxis.functional_birth.v1",
+  "task_id": "libero_env_adapter_v1",
+  "task_success": null,
+  "ts_iso": "2026-11-05T00:00:00Z",
+  "workdir": "/workspace/l1_n06_illegal_step"
+}

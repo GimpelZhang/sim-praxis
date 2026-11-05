@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "l1_n04_reset_structure",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "l1_n04_reset_structure",
+  "files": [
+    {
+      "rel": "adapter.py",
+      "sha256": "8f81d6da3b8045e30fdb89c91a4230a2959a3b04d66d4945eeb0bccb3bd68499"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

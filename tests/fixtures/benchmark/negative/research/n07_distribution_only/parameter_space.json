@@ -1,0 +1,24 @@
+{
+  "_provenance": {
+    "case_id": "r1_n07_distribution_only",
+    "note": "参数空间（合成）",
+    "synthetic_fixture": true
+  },
+  "parameters": [
+    {
+      "class": "friction",
+      "name": "friction",
+      "unit": "1"
+    },
+    {
+      "class": "contact_stiffness",
+      "name": "stiffness",
+      "unit": "N/m"
+    },
+    {
+      "class": "joint_damping",
+      "name": "damping",
+      "unit": "N*m*s/rad"
+    }
+  ]
+}

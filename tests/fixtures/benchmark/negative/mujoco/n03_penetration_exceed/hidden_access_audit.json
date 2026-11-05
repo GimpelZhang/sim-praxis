@@ -1,0 +1,10 @@
+{
+  "_provenance": {
+    "case_id": "m1_n03_penetration_exceed",
+    "note": "隐藏输入审计（合成，未触碰 private/）",
+    "synthetic_fixture": true
+  },
+  "modified": [],
+  "read": [],
+  "written": []
+}

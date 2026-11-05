@@ -1,0 +1,21 @@
+{
+  "cases": [
+    {
+      "case_id": "golden_m1",
+      "dir": "mujoco",
+      "task_id": "mujoco_contact_push_v1"
+    },
+    {
+      "case_id": "golden_l1",
+      "dir": "libero",
+      "task_id": "libero_env_adapter_v1"
+    },
+    {
+      "case_id": "golden_r1",
+      "dir": "research",
+      "task_id": "icy_ground_dr_v1"
+    }
+  ],
+  "schema": "simpraxis.benchmark_golden_cases.v1",
+  "synthetic": true
+}

@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "m1_n03_penetration_exceed",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "m1_n03_penetration_exceed",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "ea12712c7d44e005ea90f9c1884c428c4a739b2c8cecad5fa086394db8c2574a"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "86ca86624d607a805dd636e6d81091f042c036fef81703e687e04080232afef3"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

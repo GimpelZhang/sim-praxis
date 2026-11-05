@@ -1,0 +1,15 @@
+{
+  "_provenance": {
+    "case_id": "l1_n07_host_impersonation",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "l1_n07_host_impersonation",
+  "files": [
+    {
+      "rel": "adapter.py",
+      "sha256": "4e4daf00128ac1dd169ea6e299454a1748aa55951bcf98206b048b3906649647"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}

@@ -1,0 +1,9 @@
+{
+  "_provenance": {
+    "case_id": "m1_n06_not_reproducible",
+    "note": "同/跨种子复现（合成）",
+    "synthetic_fixture": true
+  },
+  "cross_seed_max_delta_m": 0.0056,
+  "same_seed_identical": false
+}

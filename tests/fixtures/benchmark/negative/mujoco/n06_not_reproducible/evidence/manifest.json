@@ -1,0 +1,19 @@
+{
+  "_provenance": {
+    "case_id": "m1_n06_not_reproducible",
+    "note": "证据清单（合成）：只列关键件，供绑定校验",
+    "synthetic_fixture": true
+  },
+  "case_id": "m1_n06_not_reproducible",
+  "files": [
+    {
+      "rel": "telemetry.jsonl",
+      "sha256": "9408aaad37d41ef867c4ef8df11ee91245ee154931fb8497afc9d539ff73e34e"
+    },
+    {
+      "rel": "metrics.json",
+      "sha256": "67cc862a6e4ad9f0664d914a06e8f3da35258ce9e2fc435032485f0e58da30a3"
+    }
+  ],
+  "schema": "simpraxis.benchmark_evidence.v1"
+}
