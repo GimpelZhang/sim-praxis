@@ -1,0 +1,7 @@
+{
+  "schema": "simpraxis.parameter_space.v1",
+  "parameters": [
+    {"name": "friction", "unit": "dimensionless", "low": 0.02, "high": 0.6},
+    {"name": "slope_deg", "unit": "degree", "low": 0.0, "high": 12.0}
+  ]
+}

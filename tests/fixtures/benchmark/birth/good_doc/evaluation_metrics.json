@@ -1,0 +1,7 @@
+{
+  "schema": "simpraxis.evaluation_metrics.v1",
+  "metrics": [
+    {"name": "ice_vs_normal_ratio", "unit": "dimensionless", "test": "welch_t"},
+    {"name": "success_rate_ci", "unit": "dimensionless", "test": "wilson_ci"}
+  ]
+}

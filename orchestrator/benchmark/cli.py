@@ -422,6 +422,49 @@ def cmd_capture_runtime(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_birth(args: argparse.Namespace) -> int:
+    """Task 3：对候选 workdir 跑 B0→B4 出生验证并落盘（0 付费）。"""
+    import datetime as _dt
+
+    from orchestrator.benchmark import birth, registry
+
+    reg = registry.BenchmarkRegistry()
+    try:
+        spec = reg.get(args.task)
+    except Exception as exc:               # noqa: BLE001 - 未登记任务即停
+        print(f"[birth] 取任务失败：{exc}")
+        return EXIT_STOP
+
+    workdir = Path(args.workdir)
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    out_dir = Path(args.out) if args.out else (
+        paths.runs_dir() / f"{spec.task_id}-birth-{stamp}" / "birth")
+    try:
+        bspec = birth.BirthSpec.from_task_spec(spec)
+        validator = birth.BirthValidator(
+            bspec, workdir=workdir,
+            limits=birth.Limits(timeout_s=args.timeout),
+            network_mode=args.network_mode)
+        result = validator.validate(out_dir)
+        written = birth.write_birth(out_dir, result)
+    except birth.BirthError as exc:
+        print(f"[birth] {spec.task_id}: {exc}")
+        return EXIT_STOP
+
+    print(f"[birth] task={spec.task_id} workdir={validator.workdir}")
+    print(f"[birth] contract={bspec.contract} required={bspec.required_levels()}")
+    for level in birth.LEVELS:
+        item = result.levels[level]
+        print(f"[birth] {level} {item.status:<14} reason={item.reason} "
+              f"{item.detail[:120]}")
+    for problem in result.problems:
+        print(f"[birth] PROBLEM {problem}")
+    print(f"[birth] birth_status={result.birth_status} "
+          f"task_success=None sha256={written['birth_sha256']}")
+    print(f"[birth] wrote {written['birth_path']}")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m orchestrator.benchmark.cli",
@@ -455,6 +498,18 @@ def build_parser() -> argparse.ArgumentParser:
     cr.add_argument("--dir", default=None,
                     help="输出目录（缺省 <bench_root>/fingerprints/<task_id>）")
     cr.set_defaults(func=cmd_capture_runtime)
+
+    bt = sub.add_parser("birth", help="Task 3：B0→B4 出生验证（Birth ≠ Task Success）")
+    bt.add_argument("--task", required=True, help="task_id（如 libero_env_adapter_v1）")
+    bt.add_argument("--workdir", required=True, help="候选交付物目录（绝对路径）")
+    bt.add_argument("--out", default=None,
+                    help="输出目录（缺省 <bench_root>/runs/<task>-birth-<stamp>/birth）")
+    bt.add_argument("--timeout", type=float, default=120.0,
+                    help="每层子进程墙钟上限（秒）")
+    bt.add_argument("--network-mode", default="audited_only",
+                    choices=["none", "audited_only"],
+                    help="none=容器内 --network none（enforced）；默认宿主 audited_only")
+    bt.set_defaults(func=cmd_birth)
     return parser
 
 

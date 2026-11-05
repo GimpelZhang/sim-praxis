@@ -1,0 +1,2 @@
+本目录故意不含 adapter.py：用于「缺文件 → missing」反例。占位文件只为让
+git 能保存这个空目录（Plan T3.6 AC-T3-2）。

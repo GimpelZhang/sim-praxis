@@ -1,0 +1,10 @@
+"""合成反例：语法错误（B0 → ast_error）。
+
+扩展名故意是 .py.txt：`gate_static.sh` 的 py_compile 步骤会编译仓库里所有
+受版本控制的 .py（`git ls-files -co --standard '*.py'`），语法错文件若以 .py
+入库会让静态门禁本身变红。测试在临时 workdir 里把它复制成 adapter.py 再跑。
+"""
+
+
+def build_env(:
+    return None

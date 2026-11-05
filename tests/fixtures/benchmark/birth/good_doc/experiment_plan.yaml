@@ -1,0 +1,12 @@
+# 合成研究报告设计样本（R1 形状）——仅用于出生验证的契约检查。
+schema: simpraxis.research_design.v1
+task_id: icy_ground_dr_v1
+items:
+  - id: F1
+    name: 冰面摩擦系数区间
+    unit: dimensionless
+    range: [0.02, 0.6]
+  - id: F2
+    name: 域随机化采样分布
+    unit: dimensionless
+    range: [0.0, 1.0]
