@@ -79,8 +79,12 @@ import json, os, platform, sys
 from importlib import metadata
 
 _PKGS = ("mujoco", "robosuite", "bddl", "libero", "numpy", "torch", "trimesh")
+#: 固定观测集之外的包名由调用方经 argv 传入（``python -I -c <src> <pkg> ...``）：
+#: 探针必须实测 task.yaml.runtime.packages 里**声明的每一个**包（``compare()``
+#: 按声明名逐个对账），否则声明了固定集之外的包（如 R1 的 PyYAML/jsonschema）
+#: 会恒报「<未安装>」——那是探针覆盖缺口，不是真实的环境不符。
 _pkgs = {}
-for _name in _PKGS:
+for _name in tuple(_PKGS) + tuple(_a for _a in sys.argv[1:] if _a):
     try:
         _pkgs[_name] = metadata.version(_name)
     except Exception:
@@ -120,6 +124,18 @@ sys.stdout.write("\n" + "__SIMPRAXIS_FINGERPRINT__"
 def probe_source() -> str:
     """探针源码（测试与审计要能逐字看到被执行的字符串）。"""
     return _PROBE_SRC
+
+
+def declared_packages(spec: ts.TaskSpec) -> "tuple[str, ...]":
+    """任务 ``runtime.packages`` 声明的包名（排序去重）。
+
+    采集时必须把这份名单传给后端：探针只按名实测，没传的包在指纹里就没有
+    实测值，``compare()`` 便会把整份声明报成不符（HG-EVAL-1 假 RED）。
+    """
+    packages = (spec.runtime or {}).get("packages") or {}
+    if not isinstance(packages, Mapping):
+        return ()
+    return tuple(sorted({str(name) for name in packages}))
 
 
 # --------------------------------------------------------------------------
@@ -180,12 +196,15 @@ class HostBackend:
 
     name = "host"
 
-    def __init__(self, python: str | None = None, timeout: int = PROBE_TIMEOUT_S):
+    def __init__(self, python: str | None = None, timeout: int = PROBE_TIMEOUT_S,
+                 packages: Iterable[str] = ()):
         self.python = python or sys.executable
         self.timeout = timeout
+        #: 任务声明的包名（:func:`declared_packages`）；探针按名逐个实测
+        self.packages = tuple(str(p) for p in packages if str(p))
 
     def command(self) -> "list[str]":
-        return [self.python, "-I", "-c", _PROBE_SRC]
+        return [self.python, "-I", "-c", _PROBE_SRC, *self.packages]
 
     def capture(self) -> Capture:
         cmd = self.command()
@@ -229,7 +248,8 @@ class ContainerBackend:
     name = "docker"
 
     def __init__(self, image: str, *, image_name: str | None = None,
-                 timeout: int = DOCKER_TIMEOUT_S, docker: str = "docker"):
+                 timeout: int = DOCKER_TIMEOUT_S, docker: str = "docker",
+                 packages: Iterable[str] = ()):
         if "@sha256:" not in image:
             raise FingerprintError(
                 f"容器镜像必须按 digest 调用（image@sha256:...），收到 {image!r}")
@@ -237,11 +257,13 @@ class ContainerBackend:
         self.image_name = image_name or image.split("@", 1)[0]
         self.timeout = timeout
         self.docker = docker
+        #: 任务声明的包名（:func:`declared_packages`）；探针按名逐个实测
+        self.packages = tuple(str(p) for p in packages if str(p))
 
     def command(self) -> "list[str]":
         return [self.docker, "run", "--rm", "--network", "none",
                 "--label", "simpraxis.benchmark.fingerprint=1",
-                self.image, "python3", "-c", _PROBE_SRC]
+                self.image, "python3", "-c", _PROBE_SRC, *self.packages]
 
     def _image_id(self) -> "str | None":
         try:
@@ -687,13 +709,15 @@ def capture_and_build(spec: ts.TaskSpec, *, image: str | None = None,
     """按任务定义选后端并组装指纹（``image`` 覆盖 ``runtime.image_digest``）。"""
     digest = image or spec.runtime.get("image_digest")
     chosen = backend or ("docker" if digest else "host")
+    packages = declared_packages(spec)
     if chosen == "docker":
         if not digest:
             raise FingerprintError("docker 后端需要 image@sha256:... 镜像引用")
         ref = digest if "@" in str(digest) else f"{spec.runtime.get('image_name') or _default_image(spec)}@{digest}"
-        cap = ContainerBackend(ref, image_name=image_name).capture()
+        cap = ContainerBackend(ref, image_name=image_name,
+                               packages=packages).capture()
     elif chosen == "host":
-        cap = HostBackend(python).capture()
+        cap = HostBackend(python, packages=packages).capture()
     else:
         raise FingerprintError(f"未知后端：{chosen!r}")
     return build_fingerprint(spec, cap, mounts=mounts,
