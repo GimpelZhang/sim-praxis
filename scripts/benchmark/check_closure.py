@@ -1100,10 +1100,18 @@ def check_invariants(root: Path) -> "tuple[list[str], dict]":
     doc = _json(path)
     if doc.get("schema") != "simpraxis.benchmark.invariants.v1":
         problems.append(f"invariants schema={doc.get('schema')}")
-    rows = {row.get("id"): row for row in doc.get("invariants") or []}
-    detail["n_rows"] = len(rows)
-    if sorted(rows) != list(INVARIANT_IDS):
-        problems.append(f"不变量集不齐：{sorted(rows)}")
+    listed = [row.get("id") for row in doc.get("invariants") or []]
+    rows = {iid: row for iid, row in zip(listed, doc.get("invariants") or [])}
+    detail["n_rows"] = len(listed)
+    # 集齐判：`sorted(rows)` 是字典序（I1,I10,I11,I12,I2,…），与数值序的
+    # INVARIANT_IDS 恒不相等，于是 12 条全 ok 的完美件也会被点名「集不齐」——
+    # 终判从此永不可能 Established（Phase 2.8.0 验证车道现场抓出；5083b52
+    # 引入，原测试只断言「I7 在 problems 里」，覆盖不到「完美件零问题」）。
+    # 改为「条数相等 + 集合相等」，并因此比旧写法更严：重复 id 原先会被 dict
+    # 静默吞掉，现在按条数不符报红。
+    if len(listed) != len(INVARIANT_IDS) or set(listed) != set(INVARIANT_IDS):
+        problems.append(f"不变量集不齐：{sorted(map(str, listed))}"
+                        f"（应为 I1..I12 各恰好一次）")
     for iid in INVARIANT_IDS:
         row = rows.get(iid)
         if row is None:

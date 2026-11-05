@@ -763,6 +763,43 @@ def test_judge_matrix_and_invariants_gate(tmp_path: Path):
     assert any("I7" in p for p in problems), problems
 
 
+def test_judge_invariant_set_check_is_order_agnostic(tmp_path: Path):
+    """集齐判必须与顺序无关（Phase 2.8.0 验证车道抓出的恒红）。
+
+    旧写法 `sorted(rows) != list(INVARIANT_IDS)` 拿字典序（I1,I10,I11,I12,
+    I2,…）比数值序（I1..I12），12 条全 ok 的完美件也会被点名「集不齐」，
+    终判于是永不可能 Established；上一条测试只断言「I7 在 problems 里」，
+    覆盖不到「完美件零问题」。这里正反两面都钉死：条数相等 + 集合相等，
+    重复 id 也要红（旧 dict 构造会把重复静默吞掉）。
+    """
+    root = tmp_path / "bench"
+    (root / "closeout").mkdir(parents=True)
+    (root / "intake").mkdir(parents=True)
+    _write(root / "intake" / "repository_state.json",
+           json.dumps({"head": "0" * 40, "origin_main": "0" * 40}))
+
+    def _doc(ids):
+        return {"schema": "simpraxis.benchmark.invariants.v1", "verdict": "OK",
+                "commit": "0" * 40, "baseline_head": "0" * 40,
+                "invariants": [{"id": iid, "ok": True, "evidence": "x"}
+                               for iid in ids]}
+
+    ids = [f"I{i}" for i in range(1, 13)]
+    _write(root / "closeout" / "invariants.json", json.dumps(_doc(ids)))
+    problems, detail = judge.check_invariants(root)
+    assert not any("集不齐" in p for p in problems), problems
+    assert detail["n_rows"] == 12
+
+    _write(root / "closeout" / "invariants.json", json.dumps(_doc(ids[:-1])))
+    problems, _ = judge.check_invariants(root)
+    assert any("集不齐" in p for p in problems), problems
+
+    _write(root / "closeout" / "invariants.json",
+           json.dumps(_doc(ids + ["I1"])))
+    problems, _ = judge.check_invariants(root)
+    assert any("集不齐" in p for p in problems), problems
+
+
 def test_judge_acceptance_requires_container_lane(tmp_path: Path):
     """W5-17：验收车道缺 container_lane 段 / 采集条数不足都必须红。"""
     root = tmp_path / "bench"
