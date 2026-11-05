@@ -264,8 +264,8 @@ t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest
 计划 `~/文档/Phase_2.5_Plan_detailed.md`（用户 2026-10-28 正式全部签收），执行台账
 `~/文档/Phase_2.5_Plan_Complete.md`（与 Plan 冲突以 Complete 为准）。独立账套命名空间
 `QuotaLedger.phase25()`（现 56 行，**Phase 2.6 起已封存只读**）；提交 攢批108–133
-（`b70a2e2..e259436`，已随 2026-11-02 推送窗口上 origin/main，`main...origin/main`
-无分歧（至 `12538e4`））。
+（`b70a2e2..e259436`，已随 2026-11-02 推送窗口上 origin/main；`main...origin/main`
+无分歧，至 `4b5d134`）。
 
 - **Task 0–5b 全闭**（开工基座/呼量 v2/看门狗 SOP/Stage0 探针/agentic 内环/历史墙 A-B
   三态）：Task 5 判「不成立」（两墙干净触帽 16/16+9/9 共 25 呼），Task 5b 同冻结墙
@@ -338,5 +338,7 @@ Task 9 对账按 `event != "call"` 排除），永不删除以保 seq 连续。
 `RunSpec.agentic` 维持 **opt-in / 冻结**。账：116 受账实呼 + selfcheck 开账行 1（占 seq 不计
 实呼）+ 账外 validate 4 = 真实 120；T4 实花 48（V3 20 + V4 28），帽 56 余 8 不再使用；
 三本旧账仍封存只读。T4b 尾债 10 条留档，重启任一 Task 须新票据 + 用户裁决。
-本地领先 origin/main 12 提交（攒批纪律；推送是人工 STOP 门，本批尚未过门）。
+**推送状态（2026-11-05 更新）**：本地攒批 12 条已随 2026-11-05 推送窗口
+（`12538e4..4b5d134`，共 34 条＝Phase 2.6 的 12 条 + Phase 2.7 的 22 条，经用户
+指示过人工 STOP 门）全部上 origin/main；`main...origin/main` 无分歧，HEAD `4b5d134`。
 Phase 2.6 的产物口径：Task 0–3 全闭 + Task 4 两次预注册负结论，**不得表述为「全部完成」**。
