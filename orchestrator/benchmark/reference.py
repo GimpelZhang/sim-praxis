@@ -1034,12 +1034,15 @@ class ReferenceRunner:
     def _assets_root() -> Path:
         """L1 的 ``/assets`` 挂载源 = **引擎仓根**（只读）。
 
-        容器里跑的出生验证器是 ``birth._RUNNER_SRC``，它第一步就
-        ``sys.path.insert(0, cfg["repo_root"])`` 再 ``from orchestrator.benchmark
-        import contracts``（该模块只用 stdlib，无第三方依赖），所以 ``/assets``
-        必须是引擎仓。L1 的 ``task.yaml.assets_manifest_sha256`` 为 null（任务
-        本身没有 assets），因此这一格不与「任务资产」冲突；KB 技能包另有
-        ``/skills`` 挂载。挂载仍走白名单（⊆ {/work,/skills,/assets,/out}）。
+        容器里跑的出生验证器是 ``birth._RUNNER_SRC``：它**第一步**是读父进程
+        经 stdin 下发的一次性挑战行（nonce + 结果路径，评审 W2-01 二次加固，
+        候选代码在任何导入之前都拿不到它），挑战缺失即以 rc=3 拒绝执行；
+        读完之后才 ``sys.path.insert(0, cfg["repo_root"])`` 并
+        ``from orchestrator.benchmark import contracts``（该模块只用 stdlib，
+        无第三方依赖），所以 ``/assets`` 必须是引擎仓。L1 的
+        ``task.yaml.assets_manifest_sha256`` 为 null（任务本身没有 assets），
+        因此这一格不与「任务资产」冲突；KB 技能包另有 ``/skills`` 挂载。
+        挂载仍走白名单（⊆ {/work,/skills,/assets,/out}）。
         """
         return REPO_ROOT
 

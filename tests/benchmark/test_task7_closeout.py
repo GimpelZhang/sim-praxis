@@ -289,7 +289,9 @@ def test_ac_p0_7_9_acceptance_lane_env_logic(tmp_path: Path):
         "tests/benchmark/test_task7_closeout.py"
     assert closeout.CONTAINER_LANE_TARGET == "tests/benchmark"
     # 判据侧下限：两条车道都不许 0 条（空绿）
-    assert judge.MILESTONE_LANE_MIN >= 1 and judge.CONTAINER_LANE_MIN >= 1
+    # 下限不是「≥1 即可」：1 条也能通过的话，「被削到只剩一条」与空绿只差一步。
+    assert judge.MILESTONE_LANE_MIN >= 10
+    assert judge.CONTAINER_LANE_MIN >= 2
 
 
 # --------------------------------------------------------------------------

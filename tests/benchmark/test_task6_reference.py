@@ -379,6 +379,29 @@ def test_ac_p0_6_8_mount_whitelist():
                         only_two_ro, ["python3", "adapter.py"])
 
 
+def test_w2_01_container_argv_keeps_stdin_open_for_challenge():
+    """评审 W2-01 容器侧接线：一次性挑战经 stdin 下发，``docker run`` 必须带 ``-i``。
+
+    挑战行由父进程写入容器 stdin、写端随即关闭；缺 ``-i`` 时 docker 不会把
+    宿主 stdin 接到容器里，运行器读到的不是挑战而是 EOF，出生层会以 rc=3
+    「缺少一次性挑战行」整体拒跑——等于 L1 容器出生永远 BLOCKED。
+    这里只钉接线（argv 里必须有且仅在显式 ``interactive=True`` 时出现 ``-i``），
+    运行器侧的「无挑战即 rc=3」另有 ``test_w2_01_runner_refuses_without_stdin_challenge``。
+    """
+    image = "sim-praxis/libero:task6@sha256:" + "0" * 64
+    mounts = [ref.Mount(Path("/tmp"), "/work", "ro"),
+              ref.Mount(Path("/tmp"), "/skills", "ro"),
+              ref.Mount(Path("/tmp"), "/assets", "ro"),
+              ref.Mount(Path("/tmp"), "/out", "rw")]
+    plain = ref.docker_argv(image, mounts, ["python3", "adapter.py"])
+    piped = ref.docker_argv(image, mounts, ["python3", "adapter.py"],
+                            interactive=True)
+    assert "-i" not in plain, plain[:8]
+    assert "-i" in piped, piped[:8]
+    # 除 -i 外两条命令逐项相同（不夹带 --tty / --interactive 变体）
+    assert [tok for tok in piped if tok != "-i"] == plain
+
+
 # --------------------------------------------------------------------------
 # OI-4 隐藏变体登记（非 AC）：manifest 逐件 sha256 ↔ 活文件 + 与 task.yaml 对账
 # --------------------------------------------------------------------------

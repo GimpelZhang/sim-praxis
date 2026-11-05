@@ -453,15 +453,18 @@ def write_invariants(root: Path) -> dict:
     head = _git("rev-parse", "HEAD")
     origin = _git("rev-parse", "origin/main")
     # 评审 W5-01（改向不放水）：推送是人工 STOP 门，不是「永不推送」。
-    # 实时 origin/main 只允许是 {Task 0 基线, 本阶段 HEAD} 且为 HEAD 祖先；
-    # 不得删断言、不得豁免环境变量。
+    # 实时 origin/main 只允许落在**封闭集合** {Task 0 基线} ∪
+    # ``judge.AUTHORIZED_PUSH_HEADS``（已登记的人工推送窗口落点）∪ {本阶段 HEAD}，
+    # 且必须是 HEAD 的祖先；名单外任何 sha 一律红。扩集合＝改代码登记新推送头，
+    # 不是改断言放宽。不得删断言、不得豁免环境变量。
     ancestor = subprocess.run(
         ["git", "merge-base", "--is-ancestor", origin, head],
         cwd=str(_REPO), capture_output=True, text=True, timeout=120
     ).returncode == 0
     anchor_problems = judge.verify_origin_anchor(origin, head,
                                                  ancestor=ancestor)
-    add("I10", "推送只经人工 STOP 门：origin/main ∈ {基线, HEAD} ∧ 是 HEAD 祖先",
+    add("I10", "推送只经人工 STOP 门：origin/main ∈ {基线} ∪ 已登记推送头 ∪ {HEAD}"
+        " ∧ 是 HEAD 祖先",
         not anchor_problems,
         {"origin_main": origin, "head": head, "baseline": judge.ORIGIN_MAIN,
          "origin_is_ancestor": ancestor, "problems": anchor_problems})

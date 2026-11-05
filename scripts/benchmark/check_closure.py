@@ -925,7 +925,11 @@ CONTAINER_LANE_MIN = 2
 #: 里程碑车道同理（评审修复批次自伤回归：5083b52 把
 #: ``SIMPRAXIS_MILESTONE_CLOSEOUT=1`` 丢在重构缝里，车道 0 条全 deselect、
 #: rc=5，而旧判据只要求 rc=0/passed≥1，等于「什么都没验也算跑过」）。
-MILESTONE_LANE_MIN = 1
+#: 下限取 10 而不是 1：车道当前常态采集 19 条，若哪天被削到 1 条，
+#: ``passed == selected`` 仍会成立、下限 1 也仍成立——那正是空绿的近亲
+#: （不足但不为零）。10 是「里程碑主体仍在」的保守地板，且不随新增用例漂移
+#: （19→20 之类不会误红）；真删到 10 条以下属实质性删减，必须红。
+MILESTONE_LANE_MIN = 10
 
 
 def _check_lane(detail: dict, doc: dict, log: Path, label: str) -> "list[str]":
