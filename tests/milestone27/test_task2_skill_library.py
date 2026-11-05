@@ -294,22 +294,40 @@ def test_ac_t2_5_four_tables_unchanged(monkeypatch):
 
 
 def test_ac_t2_6_no_auto_push():
-    """KB 侧的本次提交**未推送**：origin/main 上没有 skills/，且本地领先。"""
+    """KB 侧的本次提交**经人工 STOP 门推送后仍与远端一致**（2026-11-05 起）。
+
+    历史：本测原本断言「origin/main 上没有 skills/，本地领先」——那是推送前的
+    状态。2026-11-05 10:28:46 用户经人工 STOP 门（diff 清单 + 密钥扫描 + 逐字
+    批准）完成 KB 推送，`origin/main` 前移到 `5f0bb17e`，「未推送」在事实上已
+    不成立。断言**改向而不放水**：推送前证明「没被自动推」，推送后证明「推的是
+    这一个提交、且本地与远端逐字节一致、没有第二次擅自推送」。
+    """
     kb = _kb_root()
     assert kb.is_dir(), f"KB 仓不存在：{kb}"
     # ① 基线：HEAD 必须是迁移提交 c5712e9f 的后代
     base = "c5712e9f73fc17cd2649cae359aad216e8f3bd07"
     assert _git("merge-base", "--is-ancestor", base, "HEAD", cwd=kb).returncode == 0
-    # ② origin/main 上不存在技能清单（=从未 push 过本 Task 的产物）
+    # ② 技能清单已在 origin/main，且与本地 HEAD 的 blob 逐字节相同
+    #    （推送走人工 STOP 门；一旦有人不经窗口再动远端，blob 或计数就会变）
     assert _git("cat-file", "-e", "origin/main:skills/manifest.yaml",
-                cwd=kb).returncode != 0, "skills/ 已被推到 origin/main（违反 STOP-4）"
-    # ③ 本地确有一个未推送提交引入了 skills/manifest.yaml
-    revs = _git("rev-list", "origin/main..HEAD", cwd=kb).stdout.split()
-    assert revs, "本地没有未推送提交（KB 侧尚未提交？）"
-    added = _git("log", "--format=%H", "--name-status", "origin/main..HEAD",
-                 cwd=kb).stdout
-    assert "A\tskills/manifest.yaml" in added
-    # ④ 工作树干净（未提交的临时改动不许留在 KB 里）
+                cwd=kb).returncode == 0, "skills/manifest.yaml 不在 origin/main"
+    remote_blob = _git("rev-parse", "origin/main:skills/manifest.yaml",
+                       cwd=kb).stdout.strip()
+    local_blob = _git("rev-parse", "HEAD:skills/manifest.yaml",
+                      cwd=kb).stdout.strip()
+    assert remote_blob == local_blob and len(remote_blob) == 40
+    # ③ 本地与远端零分歧（推送窗口已收口；不得留下未推送提交或落后）
+    assert _git("rev-list", "--count", "origin/main..HEAD",
+                cwd=kb).stdout.strip() == "0"
+    assert _git("rev-list", "--count", "HEAD..origin/main",
+                cwd=kb).stdout.strip() == "0"
+    # ④ 引入 skills/manifest.yaml 的那个提交确实在 origin/main 上（不是别的提交）
+    adder = _git("log", "--format=%H", "--diff-filter=A", "--",
+                 "skills/manifest.yaml", cwd=kb).stdout.split()
+    assert adder, "找不到引入 skills/manifest.yaml 的提交"
+    assert _git("merge-base", "--is-ancestor", adder[-1], "origin/main",
+                cwd=kb).returncode == 0
+    # ⑤ 工作树干净（未提交的临时改动不许留在 KB 里）
     assert _git("status", "--porcelain", cwd=kb).stdout.strip() == ""
 
 
@@ -351,7 +369,9 @@ def test_task2_evidence_layout():
     assert len(kb_commit) == 40
     assert _git("cat-file", "-e", f"{kb_commit}^{{commit}}",
                 cwd=skills_root().parent).returncode == 0
-    assert kb_commit in _git("rev-list", "origin/main..HEAD",
-                             cwd=skills_root().parent).stdout
+    # 2026-11-05 人工 STOP 门推送后：证据钉的提交已在 origin/main 上
+    # （推送前此处断言「仍在 origin/main..HEAD」，推送后改断言「是 origin/main 祖先」）
+    assert _git("merge-base", "--is-ancestor", kb_commit, "origin/main",
+                cwd=skills_root().parent).returncode == 0
     # 单真值：收尾命令仍然只有两排除项（不得为本 Task 新增第三项）
     assert TWO_EXCLUSIONS == '-m "not paid and not kb_integration"'
