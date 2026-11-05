@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simpraxis.local/benchmark/schemas/run_manifest.v1.schema.json",
+  "title": "SimPraxis benchmark run manifest (v1)",
+  "description": "路线图 §10.4 字段 + paid_model_calls=0 常量。所有 sha256 必须由真实机器产物重算得到，禁止手写（路线图 §10.4 末条）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "mode",
+    "task_id",
+    "task_version",
+    "repository_sha",
+    "runtime_fingerprint_sha256",
+    "task_spec_sha256",
+    "criteria_sha256",
+    "criteria_lock_sha256",
+    "seed",
+    "candidate_artifact_sha256",
+    "birth_result_sha256",
+    "evaluator_version",
+    "status",
+    "paid_model_calls",
+    "evidence_manifest_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "simpraxis.benchmark_run.v1"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "mode": {
+      "enum": ["reference", "candidate", "negative_control"],
+      "description": "reference=本阶段参考实现；candidate=待评；negative_control=负控夹具。"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$"
+    },
+    "task_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "repository_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runtime_fingerprint_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "task_spec_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "criteria_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "criteria_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "seed": {
+      "type": "integer"
+    },
+    "candidate_artifact_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "birth_result_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "evaluator_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED_INFRA",
+        "INVALID_RUNTIME",
+        "INVALID_ARTIFACT",
+        "INCOMPLETE_EVIDENCE",
+        "NOT_APPLICABLE"
+      ]
+    },
+    "paid_model_calls": {
+      "const": 0
+    },
+    "evidence_manifest_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

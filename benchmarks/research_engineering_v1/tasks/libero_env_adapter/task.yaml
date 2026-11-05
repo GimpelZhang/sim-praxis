@@ -1,0 +1,57 @@
+# L1 — libero_env_adapter_v1（Track 1 / environment_integration）
+# 冻结判据在 criteria/libero_env_adapter_v1.criteria.json；本文件的
+# evaluation.criteria_lock_sha256 由 `python -m orchestrator.benchmark.cli
+# lock-criteria` 按 D1-5 规范子集计算回填，不得手改。
+#
+# runtime.packages 的 mujoco 值此刻是镜像 Dockerfile 第 51–53 行的**声明值**；
+# Task 2 在容器内实测后回填为实测值（TD-6 关闭条件）。runtime 段不在 criteria
+# 锁定子集内，回填不改变 criteria_lock_sha256。
+schema: simpraxis.benchmark_task.v1
+task_id: libero_env_adapter_v1
+version: 1
+track: track1
+task_type: environment_integration
+objective: >
+  在隔离的 LIBERO 容器内跑通完整环境契约：真实 import → 构造指定任务
+  Environment → reset → 一次预注册 step，产出可核验的环境探针与运行身份。
+runtime:
+  runtime_id: libero_isolated
+  image_digest: "sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624"
+  python: /usr/bin/python3
+  packages:
+    robosuite: "1.4.0"
+    mujoco: "2.3.7"
+    bddl: "1.0.1"
+inputs:
+  assets_manifest_sha256: null
+  skills_manifest_sha256: "12957dfc799e3e6b48f84513007cda6d509a52d5690ecb4ba47e22f100cf51ea"
+  fixture_manifest_sha256: null
+entrypoint:
+  kind: python_script
+  path: adapter.py
+birth_contract:
+  import_required: true
+  construction_required: true
+  contract_required: true
+  minimal_step_required: true
+outputs:
+  - adapter.py
+  - env_probe.json
+  - one_step_result.json
+  - runtime_fingerprint.json
+  - run_manifest.json
+evaluation:
+  evaluator_id: libero_env_adapter_v1
+  evaluator_version: 1
+  criteria_lock_sha256: "fc0f0eb8d9599894f09b026dd16f09d9d913ab48c56e56b3b9afddc8cfabb740"
+budget:
+  model_calls: 0
+  wall_time_seconds: 900
+  max_output_bytes: 67108864
+reproducibility:
+  seeds: [0]
+  hidden_seed_ref: libero_variant.json
+constraints:
+  network: disabled
+  readonly_assets: true
+  readonly_skills: true

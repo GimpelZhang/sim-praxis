@@ -1,0 +1,46 @@
+{
+  "schema": "simpraxis.benchmark_criteria.v1",
+  "task_id": "libero_env_adapter_v1",
+  "criteria_version": 1,
+  "weights": {
+    "import_and_construction": 0.2,
+    "reset_and_step": 0.3,
+    "observation_action_contract": 0.2,
+    "runtime_identity": 0.2,
+    "evidence_completeness": 0.1
+  },
+  "thresholds": {},
+  "hard_gates": [
+    {
+      "id": "HG-L1-1",
+      "statement": "运行时指纹与 task.yaml.runtime 不符，或宿主冒充容器（captured_in != container 而声称容器版本）"
+    },
+    {
+      "id": "HG-L1-2",
+      "statement": "使用假 env_spec.json（与容器探针实测不一致）"
+    },
+    {
+      "id": "HG-L1-3",
+      "statement": "以 compile()/exec() 代替真实 import（B1 必须是真 import 语义）"
+    },
+    {
+      "id": "HG-L1-4",
+      "statement": "import 成功但构造失败仍报成功（B2 必须构造真实 Environment，禁止 mock）"
+    },
+    {
+      "id": "HG-L1-5",
+      "statement": "action dim 与 task.yaml / 观测契约声明不一致"
+    },
+    {
+      "id": "HG-L1-6",
+      "statement": "step 产生 NaN/Inf 或非法物理状态（状态未推进、越界、对象数异常）"
+    },
+    {
+      "id": "HG-L1-7",
+      "statement": "运行 tour 自带 demo / README 流程（违反硬规则 10：任何阶段不实跑 tour 本体）"
+    }
+  ],
+  "derivation": "L1 的验收是**结构性**的：B0–B4 五层出生验证逐层独立 subprocess 判定（Plan §3.3），每一层只有 PASS/FAIL/BLOCKED_INFRA/NOT_APPLICABLE，不存在可调数值——故 thresholds 为空对象（D1-5 允许 L1/R1 无数值判据，但 weights/hard_gates/derivation 仍冻结）。观测契约与动作维度是**契约常量**而非容差：action dim、obs keys、reset/step 返回结构一律**精确相等**比较（不用 ± 容差），比较对象由 Task 2 容器探针实测写入 runtime_fingerprint 的 observation_contract / action_contract 段，与 task.yaml 声明逐项比对。镜像身份以不可变 digest 计（sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624），tag 不构成身份。",
+  "evaluator_files": [],
+  "locked_at": null
+}

@@ -1,0 +1,286 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simpraxis.local/benchmark/schemas/runtime_fingerprint.v1.schema.json",
+  "title": "SimPraxis runtime fingerprint (v1)",
+  "description": "六段运行身份（路线图 §6.3 A–F）。**必须在真正执行任务的解释器/容器内生成**：backend=host 时 container 身份字段一律 null，禁止宿主冒充容器（Plan T2.1 不变量 1 / HG-L1-1）。fingerprint_sha256 对**除自身以外**的 payload 做确定性 JSON（key 排序、无时间戳、无随机量、无 secret）取 sha256。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "captured_in",
+    "task_id",
+    "runtime_id",
+    "repository",
+    "container",
+    "python",
+    "mount",
+    "config",
+    "simulator",
+    "fingerprint_sha256"
+  ],
+  "properties": {
+    "schema": {
+      "const": "simpraxis.runtime_fingerprint.v1"
+    },
+    "captured_in": {
+      "enum": ["host", "container"]
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$"
+    },
+    "runtime_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine_head",
+        "engine_dirty",
+        "kb_head",
+        "kb_dirty",
+        "benchmark_version",
+        "task_version",
+        "task_spec_sha256",
+        "criteria_sha256",
+        "assets_manifest_sha256",
+        "skills_manifest_sha256"
+      ],
+      "properties": {
+        "engine_head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "engine_dirty": {"type": "boolean"},
+        "kb_head": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "kb_dirty": {"type": ["boolean", "null"]},
+        "benchmark_version": {"type": "integer", "minimum": 1},
+        "task_version": {"type": "integer", "minimum": 1},
+        "task_spec_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "criteria_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "assets_manifest_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "skills_manifest_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "image_name",
+        "image_digest",
+        "image_id",
+        "container_id",
+        "container_python",
+        "uid",
+        "gid",
+        "kernel",
+        "gpu_visible",
+        "cuda_runtime",
+        "egl_available"
+      ],
+      "properties": {
+        "backend": {"enum": ["host", "docker"]},
+        "image_name": {"type": ["string", "null"], "minLength": 1},
+        "image_digest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "image_id": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+        "container_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{12,64}$"},
+        "container_python": {"type": ["string", "null"], "minLength": 1},
+        "uid": {"type": ["integer", "null"], "minimum": 0},
+        "gid": {"type": ["integer", "null"], "minimum": 0},
+        "kernel": {"type": "string", "minLength": 1},
+        "gpu_visible": {"type": "boolean"},
+        "cuda_runtime": {"type": ["string", "null"], "minLength": 1},
+        "egl_available": {"type": ["boolean", "null"]}
+      }
+    },
+    "python": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "executable",
+        "version",
+        "implementation",
+        "sys_path",
+        "workdir",
+        "packages",
+        "argv"
+      ],
+      "properties": {
+        "executable": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "implementation": {"type": "string", "minLength": 1},
+        "sys_path": {"type": "array", "items": {"type": "string"}},
+        "workdir": {"type": "string", "minLength": 1},
+        "packages": {
+          "type": "object",
+          "additionalProperties": {"type": "string", "minLength": 1}
+        },
+        "argv": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "mount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries"],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "destination",
+              "mode",
+              "readonly",
+              "source_sha256"
+            ],
+            "properties": {
+              "source": {"type": "string", "minLength": 1},
+              "destination": {"type": "string", "minLength": 1},
+              "mode": {"enum": ["ro", "rw"]},
+              "readonly": {"type": "boolean"},
+              "source_sha256": {
+                "type": ["string", "null"],
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "env_passthrough",
+        "env",
+        "network_mode",
+        "timeout_s",
+        "cpu_limit",
+        "memory_limit",
+        "gpu"
+      ],
+      "properties": {
+        "env_passthrough": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+          "description": "只记变量名；凭据/密钥值一律不进指纹。"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "network_mode": {"type": "string", "minLength": 1},
+        "timeout_s": {"type": "integer", "minimum": 1},
+        "cpu_limit": {"type": ["string", "null"]},
+        "memory_limit": {"type": ["string", "null"]},
+        "gpu": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "total_mib"],
+          "properties": {
+            "name": {"type": ["string", "null"]},
+            "total_mib": {"type": ["integer", "null"], "minimum": 0}
+          }
+        }
+      }
+    },
+    "simulator": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "api_identity",
+        "observation_contract",
+        "action_contract",
+        "scene_identity"
+      ],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "api_identity": {"type": "string", "minLength": 1},
+        "observation_contract": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["keys", "dtype", "shape"],
+          "properties": {
+            "keys": {"type": "array", "items": {"type": "string"}},
+            "dtype": {"type": ["string", "null"]},
+            "shape": {
+              "type": "array",
+              "items": {"type": "integer", "minimum": 0}
+            }
+          }
+        },
+        "action_contract": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["space", "dim", "low", "high"],
+          "properties": {
+            "space": {"type": "string", "minLength": 1},
+            "dim": {"type": "integer", "minimum": 0},
+            "low": {"type": "array", "items": {"type": "number"}},
+            "high": {"type": "array", "items": {"type": "number"}}
+          }
+        },
+        "scene_identity": {"type": "string", "minLength": 1}
+      },
+      "description": "R1（document_only）无模拟器，整段为 null；其余任务必须给满。"
+    },
+    "fingerprint_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "对除本键外的 payload 做 canonical JSON（sort_keys, separators=(',',':'), ensure_ascii=False）取 sha256。"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"captured_in": {"const": "host"}},
+        "required": ["captured_in"]
+      },
+      "then": {
+        "properties": {
+          "container": {
+            "properties": {
+              "backend": {"const": "host"},
+              "image_name": {"const": null},
+              "image_digest": {"const": null},
+              "image_id": {"const": null},
+              "container_id": {"const": null},
+              "container_python": {"const": null}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"captured_in": {"const": "container"}},
+        "required": ["captured_in"]
+      },
+      "then": {
+        "properties": {
+          "container": {
+            "properties": {
+              "backend": {"const": "docker"},
+              "image_digest": {"type": "string"},
+              "container_python": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

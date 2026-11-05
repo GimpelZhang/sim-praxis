@@ -1,0 +1,38 @@
+# 负例 fixture（AC-T1-3）：缺必要段 birth_contract → TaskSpecError(reason="missing_field")
+# _provenance: synthetic_fixture=true
+schema: simpraxis.benchmark_task.v1
+task_id: fixture_missing_field_v1
+version: 1
+track: track1
+task_type: engineering
+objective: 合成负例：缺少 birth_contract 段，必须被拒绝，不得给默认值兜底。
+runtime:
+  runtime_id: mujoco_315
+  image_digest: null
+  python: /mnt/venvs/simpraxis/bin/python
+  packages:
+    mujoco: "3.15.0"
+inputs:
+  assets_manifest_sha256: null
+  skills_manifest_sha256: null
+  fixture_manifest_sha256: null
+entrypoint:
+  kind: python_script
+  path: solution.py
+outputs:
+  - solution.py
+evaluation:
+  evaluator_id: fixture_missing_field_v1
+  evaluator_version: 1
+  criteria_lock_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+budget:
+  model_calls: 0
+  wall_time_seconds: 60
+  max_output_bytes: 1048576
+reproducibility:
+  seeds: [0]
+  hidden_seed_ref: null
+constraints:
+  network: disabled
+  readonly_assets: true
+  readonly_skills: true

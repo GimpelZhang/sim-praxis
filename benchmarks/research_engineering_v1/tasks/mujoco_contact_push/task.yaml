@@ -1,0 +1,53 @@
+# M1 — mujoco_contact_push_v1（Track 1 / engineering）
+# 冻结判据在 criteria/mujoco_contact_push_v1.criteria.json；本文件的
+# evaluation.criteria_lock_sha256 由 `python -m orchestrator.benchmark.cli
+# lock-criteria` 按 D1-5 规范子集计算回填，不得手改。
+schema: simpraxis.benchmark_task.v1
+task_id: mujoco_contact_push_v1
+version: 1
+track: track1
+task_type: engineering
+objective: >
+  在冻结的 MuJoCo 场景中用接触推动把 5 cm 立方体推入目标区并使末位满足
+  几何判据，同时留下逐帧 telemetry 与可复算 metrics，全部证据 0 模型调用。
+runtime:
+  runtime_id: mujoco_315
+  image_digest: null
+  python: /mnt/venvs/simpraxis/bin/python
+  packages:
+    mujoco: "3.15.0"
+    numpy: "1.26.4"
+    trimesh: "5.1.1"
+inputs:
+  assets_manifest_sha256: "681615fdfc5dc31b8309e9cf59b74ac05f8c814eef93acd75349444fcd664050"
+  skills_manifest_sha256: "12957dfc799e3e6b48f84513007cda6d509a52d5690ecb4ba47e22f100cf51ea"
+  fixture_manifest_sha256: null
+entrypoint:
+  kind: python_script
+  path: solution.py
+birth_contract:
+  import_required: false
+  construction_required: true
+  contract_required: true
+  minimal_step_required: true
+outputs:
+  - solution.py
+  - scene_spec.json
+  - metrics.json
+  - telemetry.jsonl
+  - run_manifest.json
+evaluation:
+  evaluator_id: mujoco_contact_push_v1
+  evaluator_version: 1
+  criteria_lock_sha256: "2d3a4413754324fc599e73ec21634f551bb5612154e1ed72a577ece856e4f045"
+budget:
+  model_calls: 0
+  wall_time_seconds: 600
+  max_output_bytes: 67108864
+reproducibility:
+  seeds: [0, 1]
+  hidden_seed_ref: mujoco_seeds.json
+constraints:
+  network: disabled
+  readonly_assets: true
+  readonly_skills: true

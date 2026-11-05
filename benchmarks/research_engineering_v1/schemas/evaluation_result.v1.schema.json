@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simpraxis.local/benchmark/schemas/evaluation_result.v1.schema.json",
+  "title": "SimPraxis evaluation result (v1)",
+  "description": "七态枚举保留、不得压成一个布尔（Plan D4-6 / 路线图 §8.6）。hard_gates 只列**被触发**的硬门（空列表 = 无硬门命中，AC-T4-1）；被检查过但未触发的门记在 gates_checked。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "run_id",
+    "evaluator_id",
+    "evaluator_version",
+    "criteria_lock_sha256",
+    "status",
+    "dimensions",
+    "weighted_score",
+    "hard_gates",
+    "gates_checked"
+  ],
+  "properties": {
+    "schema": {
+      "const": "simpraxis.benchmark_evaluation.v1"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+    },
+    "evaluator_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$"
+    },
+    "evaluator_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "criteria_lock_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED_INFRA",
+        "INVALID_RUNTIME",
+        "INVALID_ARTIFACT",
+        "INCOMPLETE_EVIDENCE",
+        "NOT_APPLICABLE"
+      ]
+    },
+    "dimensions": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["weight", "score", "detail"],
+        "properties": {
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "detail": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "weighted_score": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "hard_gates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "detail"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^HG-[A-Z0-9]+-[0-9]+$"
+          },
+          "detail": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "gates_checked": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^HG-[A-Z0-9]+-[0-9]+$"
+      }
+    }
+  }
+}

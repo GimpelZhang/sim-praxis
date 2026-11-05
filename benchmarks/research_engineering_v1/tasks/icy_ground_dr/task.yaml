@@ -1,0 +1,58 @@
+# R1 — icy_ground_dr_v1（Track 2 / research_design）
+# 冻结判据在 criteria/icy_ground_dr_v1.criteria.json；本文件的
+# evaluation.criteria_lock_sha256 由 `python -m orchestrator.benchmark.cli
+# lock-criteria` 按 D1-5 规范子集计算回填，不得手改。
+#
+# 历史结论冻结条款（逐字，不得改写）：
+#   历史 Q1 冰面实验 ice/normal = 0.824 < 2.0，结论 contradiction_control_not_robust
+#   已冻结。本 Benchmark 不得利用新研究计划翻案，不得把计划描述成已取得真机
+#   Zero-shot 成功。本任务只评估研究设计质量，不执行训练、不产生新实验数据。
+schema: simpraxis.benchmark_task.v1
+task_id: icy_ground_dr_v1
+version: 1
+track: track2
+task_type: research_design
+objective: >
+  针对冰面域随机化（icy ground domain randomization）提交一份可机检的研究
+  设计方案：13 项必填结构完整、参数带物理单位、三段划分互斥、指标可计算
+  且含统计检验，结论能指回条目；不执行训练、不产生新实验数据。
+runtime:
+  runtime_id: document_only
+  image_digest: null
+  python: /mnt/venvs/simpraxis/bin/python
+  packages:
+    PyYAML: "6.0.3"
+    jsonschema: "4.26.0"
+inputs:
+  assets_manifest_sha256: null
+  skills_manifest_sha256: null
+  fixture_manifest_sha256: null
+entrypoint:
+  kind: document_bundle
+  path: experiment_plan.yaml
+birth_contract:
+  import_required: false
+  construction_required: false
+  contract_required: true
+  minimal_step_required: false
+outputs:
+  - experiment_plan.yaml
+  - research_report.md
+  - parameter_space.json
+  - evaluation_metrics.json
+  - run_manifest.json
+evaluation:
+  evaluator_id: icy_ground_dr_v1
+  evaluator_version: 1
+  criteria_lock_sha256: "2321a27365724c5ea9fc7baff641e80c441604ce1ed0e0f84b52e9d1e57a7240"
+budget:
+  model_calls: 0
+  wall_time_seconds: 120
+  max_output_bytes: 10485760
+reproducibility:
+  seeds: []
+  hidden_seed_ref: null
+constraints:
+  network: disabled
+  readonly_assets: true
+  readonly_skills: true

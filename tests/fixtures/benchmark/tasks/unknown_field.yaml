@@ -1,0 +1,44 @@
+# 负例 fixture（AC-T1-2）：顶层多一个未登记字段 → TaskSpecError(reason="unknown_field")
+# _provenance: synthetic_fixture=true（合成错误样本，不是任何真实任务定义）
+schema: simpraxis.benchmark_task.v1
+task_id: fixture_unknown_field_v1
+version: 1
+track: track1
+task_type: engineering
+objective: 合成负例：顶层出现 schema 未声明的字段，必须被 fail-closed 拒绝而不是被忽略。
+runtime:
+  runtime_id: mujoco_315
+  image_digest: null
+  python: /mnt/venvs/simpraxis/bin/python
+  packages:
+    mujoco: "3.15.0"
+inputs:
+  assets_manifest_sha256: null
+  skills_manifest_sha256: null
+  fixture_manifest_sha256: null
+entrypoint:
+  kind: python_script
+  path: solution.py
+birth_contract:
+  import_required: false
+  construction_required: true
+  contract_required: true
+  minimal_step_required: true
+outputs:
+  - solution.py
+evaluation:
+  evaluator_id: fixture_unknown_field_v1
+  evaluator_version: 1
+  criteria_lock_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+budget:
+  model_calls: 0
+  wall_time_seconds: 60
+  max_output_bytes: 1048576
+reproducibility:
+  seeds: [0]
+  hidden_seed_ref: null
+constraints:
+  network: disabled
+  readonly_assets: true
+  readonly_skills: true
+unregistered_field: "整份定义必须被拒绝"

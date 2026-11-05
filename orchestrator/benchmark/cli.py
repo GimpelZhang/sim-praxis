@@ -230,6 +230,160 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# --------------------------------------------------------------------------
+# Task 1：validate-specs / lock-criteria
+# --------------------------------------------------------------------------
+
+_PHASE = "roadmap_phase0"
+
+
+def _specs_report(reg) -> dict:
+    """任务定义的全量结构化校验结果（Task 1 证据件 validation_report.json）。"""
+    from orchestrator.benchmark import registry, task_spec as ts
+
+    report = {
+        "schema": "simpraxis.benchmark_validation_report.v1",
+        "generated_by": intake.GENERATED_BY,
+        "ts_iso": intake._now(),
+        "benchmark_root": str(reg.root),
+        "tasks": [],
+        "manifest_check": {},
+        "problems": [],
+        "ok": False,
+    }
+    try:
+        specs = reg.load_all(verify_manifest=False)
+    except (ts.TaskSpecError, registry.RegistryError) as exc:
+        report["problems"].append(f"{type(exc).__name__}: {exc}")
+        return report
+
+    manifest = reg.check_manifest()
+    report["manifest_check"] = manifest
+    report["problems"].extend(manifest["problems"])
+    report["manifest_sha256"] = reg.manifest_sha256()
+    report["criteria_lock"] = reg.criteria_aggregate_sha256()
+    for tid in sorted(specs):
+        spec = specs[tid]
+        criteria = spec.criteria
+        report["tasks"].append({
+            "task_id": tid,
+            "version": spec.version,
+            "track": spec.track,
+            "task_type": spec.task_type,
+            "criteria_version": criteria["criteria_version"],
+            "criteria_lock_sha256": spec.criteria_lock_sha256,
+            "criteria_sha256": spec.criteria_sha256,
+            "criteria_file": spec.criteria_file,
+            "task_file": spec.task_file,
+            "task_file_sha256": spec.task_file_sha256,
+            "weights": dict(criteria["weights"]),
+            "weights_sum": round(sum(float(w) for w in criteria["weights"].values()), 12),
+            "thresholds": {
+                key: {"value": item["value"], "unit": item["unit"],
+                      "derivation_chars": len(item["derivation"])}
+                for key, item in criteria["thresholds"].items()
+            },
+            "hard_gates": [gate["id"] for gate in criteria["hard_gates"]],
+            "outputs": list(spec.outputs),
+            "model_calls": spec.budget["model_calls"],
+            "birth_contract": dict(spec.birth_contract),
+            "seeds": list(spec.reproducibility["seeds"]),
+        })
+    if len(report["tasks"]) != len(specs):
+        report["problems"].append("任务快照数与加载数不符")
+    report["ok"] = not report["problems"]
+    return report
+
+
+def cmd_validate_specs(args: argparse.Namespace) -> int:
+    from orchestrator.benchmark import registry, task_spec as ts
+
+    root = paths.specs_dir()
+    reg = registry.BenchmarkRegistry()
+    report = _specs_report(reg)
+    _write_json(root / "validation_report.json", report)
+    _write_json(root / "registry_snapshot.json", reg.snapshot())
+
+    schemas = {}
+    for path in sorted((reg.root / "schemas").glob("*.schema.json")):
+        schemas[path.name] = ts.sha256_file(path)
+    _write_json(root / "schemas_sha256.json", {
+        "schema": "simpraxis.benchmark_schemas_sha256.v1",
+        "generated_by": intake.GENERATED_BY,
+        "ts_iso": intake._now(),
+        "schemas_dir": str(reg.root / "schemas"),
+        "schemas": schemas,
+    })
+
+    print(f"[validate-specs] root={reg.root}")
+    print(f"[validate-specs] tasks={[t['task_id'] for t in report['tasks']]}")
+    print(f"[validate-specs] manifest_sha256={report.get('manifest_sha256')}")
+    print(f"[validate-specs] criteria_lock={report.get('criteria_lock')}")
+    for problem in report["problems"]:
+        print(f"[validate-specs] PROBLEM {problem}")
+    print(f"[validate-specs] 结论：{'OK' if report['ok'] else 'STOP'}")
+    return EXIT_OK if report["ok"] else EXIT_STOP
+
+
+def _replace_scalar(path: Path, key: str, value: str) -> "tuple[str, str]":
+    """逐行替换 ``key: "..."``（保住 YAML 注释；恰好一处，否则报错）。"""
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    hits = [i for i, line in enumerate(lines)
+            if line.strip().startswith(f"{key}:")]
+    if len(hits) != 1:
+        raise RuntimeError(f"{path}: 期望恰好 1 行 `{key}:`，实为 {len(hits)}")
+    index = hits[0]
+    old = lines[index].split(":", 1)[1].strip().strip('"')
+    indent = lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+    lines[index] = f'{indent}{key}: "{value}"'
+    atomic_write_text(path, "\n".join(lines) + "\n", 0o644)
+    return old, value
+
+
+def cmd_lock_criteria(args: argparse.Namespace) -> int:
+    """按 D1-5 规范子集重算并回填 criteria_lock_sha256（Task 1 冻结用）。"""
+    import yaml
+
+    from orchestrator.benchmark import registry, task_spec as ts
+
+    reg = registry.BenchmarkRegistry()
+    locks: "dict[str, str]" = {}
+    rows = []
+    crit_files = sorted((reg.root / "criteria").glob("*.criteria.json"))
+    if not crit_files:
+        print(f"[lock-criteria] 判据目录为空：{reg.root / 'criteria'}")
+        return EXIT_STOP
+    task_yamls = sorted(reg.tasks_dir.glob("*/task.yaml"))
+    for crit_path in crit_files:
+        doc = json.loads(crit_path.read_text(encoding="utf-8"))
+        ts.validate_criteria(doc, crit_path)
+        lock = ts.criteria_lock_sha256(doc)
+        task_id = doc.get("task_id")
+        if task_id != crit_path.name.replace(".criteria.json", ""):
+            print(f"[lock-criteria] {crit_path.name}: task_id={task_id!r} 与文件名不符")
+            return EXIT_STOP
+        locks[task_id] = lock
+        matched = []
+        for task_yaml in task_yamls:
+            task_doc = yaml.safe_load(task_yaml.read_text(encoding="utf-8"))
+            if task_doc.get("evaluation", {}).get("evaluator_id") == task_id:
+                matched.append(task_yaml)
+        if len(matched) != 1:
+            print(f"[lock-criteria] {task_id} 匹配到 {len(matched)} 个 task.yaml")
+            return EXIT_STOP
+        _replace_scalar(matched[0], "criteria_lock_sha256", lock)
+        rows.append((task_id, str(matched[0].relative_to(reg.root)), lock))
+
+    aggregate = ts.criteria_aggregate_sha256(locks)
+    _replace_scalar(reg.manifest_path, "criteria_lock", aggregate)
+    for task_id, task_file, lock in rows:
+        print(f"[lock-criteria] {task_id:<26} {lock}  <- {task_file}")
+    print(f"[lock-criteria] manifest.criteria_lock={aggregate}")
+    print("[lock-criteria] 结论：OK（现在跑 validate-specs 复核）")
+    return EXIT_OK
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m orchestrator.benchmark.cli",
@@ -237,11 +391,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     pf = sub.add_parser("preflight", help="Task 0：七类基线采集与冻结")
+    pf.add_argument("--phase", default=_PHASE, choices=[_PHASE])
     pf.add_argument("--raw-log", default=None,
                     help="两排除全套的 raw log（缺省 cmd_logs/06_...log）")
     pf.add_argument("--run-tests", action="store_true",
                     help="先真跑一次两排除全套再解析（≈470 s）")
     pf.set_defaults(func=cmd_preflight)
+
+    vs = sub.add_parser("validate-specs", help="Task 1：任务定义与判据锁全量校验")
+    vs.add_argument("--phase", default=_PHASE, choices=[_PHASE])
+    vs.set_defaults(func=cmd_validate_specs)
+
+    lc = sub.add_parser("lock-criteria",
+                        help="Task 1：按 D1-5 规范子集回填判据锁（冻结用）")
+    lc.add_argument("--phase", default=_PHASE, choices=[_PHASE])
+    lc.set_defaults(func=cmd_lock_criteria)
     return parser
 
 

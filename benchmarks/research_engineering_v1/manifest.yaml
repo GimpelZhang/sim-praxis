@@ -1,0 +1,10 @@
+# Benchmark 注册表索引（Plan T1.4）。tasks 按 task_id 字典序排列；
+# criteria_lock 是「task_id \0 criteria_lock_sha256 \n」按 task_id 排序拼接后的
+# sha256（每个任务一条，逐字由 lock-criteria 回填，不得手改）。
+schema: simpraxis.benchmark_manifest.v1
+version: 1
+tasks:
+  - icy_ground_dr_v1
+  - libero_env_adapter_v1
+  - mujoco_contact_push_v1
+criteria_lock: "1c4b7b671bce7de17fbdd54507cf543135975b6e05ba243a8900b48579fd3acf"

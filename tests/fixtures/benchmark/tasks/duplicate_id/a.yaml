@@ -1,0 +1,45 @@
+# 负例 fixture（AC-T1-4）：与 b.yaml **逐字节相同**，两者放进同一个注册表的两个
+# 任务目录时 task_id 重复 → RegistryError。判据锁用 M1 的冻结锁值（LOCK 之后不变，
+# STOP-H），因此本 fixture 不随 task.yaml 正文演进失效。
+# _provenance: synthetic_fixture=true
+schema: simpraxis.benchmark_task.v1
+task_id: mujoco_contact_push_v1
+version: 1
+track: track1
+task_type: engineering
+objective: 合成负例：重复 task_id 必须被注册表拒绝，不得后者覆盖前者。
+runtime:
+  runtime_id: mujoco_315
+  image_digest: null
+  python: /mnt/venvs/simpraxis/bin/python
+  packages:
+    mujoco: "3.15.0"
+inputs:
+  assets_manifest_sha256: null
+  skills_manifest_sha256: null
+  fixture_manifest_sha256: null
+entrypoint:
+  kind: python_script
+  path: solution.py
+birth_contract:
+  import_required: false
+  construction_required: true
+  contract_required: true
+  minimal_step_required: true
+outputs:
+  - solution.py
+evaluation:
+  evaluator_id: mujoco_contact_push_v1
+  evaluator_version: 1
+  criteria_lock_sha256: "2d3a4413754324fc599e73ec21634f551bb5612154e1ed72a577ece856e4f045"
+budget:
+  model_calls: 0
+  wall_time_seconds: 600
+  max_output_bytes: 67108864
+reproducibility:
+  seeds: [0, 1]
+  hidden_seed_ref: mujoco_seeds.json
+constraints:
+  network: disabled
+  readonly_assets: true
+  readonly_skills: true

@@ -16,4 +16,10 @@ if str(REPO_ROOT) not in sys.path:
 from orchestrator.benchmark.cli import main  # noqa: E402
 
 if __name__ == "__main__":
-    raise SystemExit(main(["preflight", *sys.argv[1:]]))
+    argv = sys.argv[1:]
+    # 路线图 §13.1 的命令面：`preflight.py --validate-specs` 等价于
+    # `python -m orchestrator.benchmark.cli validate-specs`（C-01 的薄封装）。
+    if "--validate-specs" in argv:
+        rest = [a for a in argv if a != "--validate-specs"]
+        raise SystemExit(main(["validate-specs", *rest]))
+    raise SystemExit(main(["preflight", *argv]))

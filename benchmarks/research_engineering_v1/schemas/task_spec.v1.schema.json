@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simpraxis.local/benchmark/schemas/task_spec.v1.schema.json",
+  "title": "SimPraxis benchmark task specification (v1)",
+  "description": "任务定义是**数据**不是代码（Plan D1-1）。additionalProperties=false 在每一层：未知字段一律 fail-closed 拒绝，不得靠 schema 放宽吞掉拼写错误。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "task_id",
+    "version",
+    "track",
+    "task_type",
+    "objective",
+    "runtime",
+    "inputs",
+    "entrypoint",
+    "birth_contract",
+    "outputs",
+    "evaluation",
+    "budget",
+    "reproducibility",
+    "constraints"
+  ],
+  "properties": {
+    "schema": {
+      "const": "simpraxis.benchmark_task.v1"
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$",
+      "description": "全局唯一；带 _vN 版本后缀；目录名不带后缀（锁内适配：避免目录名=ID 的隐式约定与版本升级冲突）。"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "track": {
+      "enum": ["track1", "track2"]
+    },
+    "task_type": {
+      "enum": ["engineering", "environment_integration", "research_design"]
+    },
+    "objective": {
+      "type": "string",
+      "minLength": 20
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_id", "image_digest", "python", "packages"],
+      "properties": {
+        "runtime_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "image_digest": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "宿主执行时为 null；容器执行时必须是不可变 digest（tag 不算身份）。"
+        },
+        "python": {
+          "type": "string",
+          "minLength": 1
+        },
+        "packages": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minProperties": 1
+        }
+      }
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "assets_manifest_sha256",
+        "skills_manifest_sha256",
+        "fixture_manifest_sha256"
+      ],
+      "properties": {
+        "assets_manifest_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "skills_manifest_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "fixture_manifest_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path"],
+      "properties": {
+        "kind": {
+          "enum": ["python_script", "document_bundle"]
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "description": "交付件在运行根下的裸文件名；不接受目录穿越。"
+        }
+      }
+    },
+    "birth_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "import_required",
+        "construction_required",
+        "contract_required",
+        "minimal_step_required"
+      ],
+      "properties": {
+        "import_required": {"type": "boolean"},
+        "construction_required": {"type": "boolean"},
+        "contract_required": {"type": "boolean"},
+        "minimal_step_required": {"type": "boolean"}
+      },
+      "description": "决定 B0–B4 哪些层必需（Plan D3-3）；不适用层记 NOT_APPLICABLE 且不计入 PASS。"
+    },
+    "outputs": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluator_id", "evaluator_version", "criteria_lock_sha256"],
+      "properties": {
+        "evaluator_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*_v[0-9]+$",
+          "description": "与 criteria/{evaluator_id}.criteria.json 的文件名一致。"
+        },
+        "evaluator_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "criteria_lock_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "criteria 规范化子集（criteria_version/weights/thresholds/hard_gates/derivation）的 sha256；Task 1 冻结，Task 4 只回填 evaluator_files/locked_at（不在子集内）。"
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_calls", "wall_time_seconds", "max_output_bytes"],
+      "properties": {
+        "model_calls": {
+          "const": 0,
+          "description": "Phase 2.8.0 恒 0；任何非 0 值被 schema 拒绝。"
+        },
+        "wall_time_seconds": {"type": "integer", "minimum": 1},
+        "max_output_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "reproducibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seeds", "hidden_seed_ref"],
+      "properties": {
+        "seeds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "integer"}
+        },
+        "hidden_seed_ref": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_.-]+$",
+          "description": "私有根内文件名；绝对路径与目录穿越一律拒绝。"
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "readonly_assets", "readonly_skills"],
+      "properties": {
+        "network": {"const": "disabled"},
+        "readonly_assets": {"const": true},
+        "readonly_skills": {"const": true}
+      }
+    }
+  }
+}
