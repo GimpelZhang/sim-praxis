@@ -26,7 +26,7 @@
     "kernel": "6.8.0-synthetic",
     "uid": 1000
   },
-  "fingerprint_sha256": "bb202e89c2c325d07e18b8d3fe46e77c130d3a34dde38fa6c05ecaf76a8f0134",
+  "fingerprint_sha256": "fee410ad89ddb0ddc438621056c56cd76d32b9dee91a58b4bafb924adf78d24f",
   "mount": {
     "entries": []
   },
@@ -46,13 +46,13 @@
   "repository": {
     "assets_manifest_sha256": null,
     "benchmark_version": 1,
-    "criteria_sha256": "6cdb18604362bcb7f10007954876a1b168ef1d661470bff1d8559ec631216e2a",
+    "criteria_sha256": "73eb6496d255b05ed72cac3470efe1c2995c81c11f522dbd1612b368db942ebe",
     "engine_dirty": false,
     "engine_head": "0123456789abcdef0123456789abcdef01234567",
     "kb_dirty": null,
     "kb_head": null,
     "skills_manifest_sha256": null,
-    "task_spec_sha256": "e7a531ad673d46b0f743b28b6f0accb0d30d098406de66cabfdccce3e63f0ee4",
+    "task_spec_sha256": "84b9cc7373fa3b6c39e70a7d8345b3745fd8d0d1d5876e719f5bfad13a14c3af",
     "task_version": 1
   },
   "runtime_id": "mujoco_315",

@@ -29,6 +29,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -42,7 +43,33 @@ from orchestrator.common.runtime_paths import (
     phase27_root,
 )
 
+#: Task 0 intake 信封的生成入口（**只**用于 intake 采集器自身）
 GENERATED_BY = "scripts/benchmark/preflight.py"
+#: Task 1 规格证据的生成入口（``python -m orchestrator.benchmark.cli validate-specs``）
+GENERATED_BY_VALIDATE = "orchestrator/benchmark/cli.py"
+
+
+def entry_label(argv: "list[str] | None" = None) -> str:
+    """按**实际调用入口**给出 ``generated_by``（评审 W1-06）。
+
+    早先 ``validation_report.json`` / ``schemas_sha256.json`` 无论由谁生成都
+    盖 ``scripts/benchmark/preflight.py`` 的章，而 Complete 记录的再生成命令
+    是 ``python -m orchestrator.benchmark.cli validate-specs``——证据件自述了
+    一条没发生过的命令。
+    """
+    args = list(sys.argv if argv is None else argv)
+    if not args:
+        return GENERATED_BY_VALIDATE
+    script = Path(args[0]).name
+    rest = " ".join(a for a in args[1:] if a)
+    if script == "preflight.py":
+        base = GENERATED_BY
+    elif script.startswith("cli"):
+        base = GENERATED_BY_VALIDATE
+    else:
+        base = script
+    return f"{base} {rest}".strip()
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: 两排除全套命令（逐字；AC-T0-4 用它与 ``test_baseline.json.cmd`` 比对）
@@ -69,7 +96,33 @@ PHASE28_NEW_PATHS = (
     "orchestrator/benchmark/",
     "scripts/benchmark/",
     "tests/benchmark/",
+    # 评审 W1-03：I9 明确放行、本阶段法定新增的两处，早先漏在名单外
+    "benchmarks/",
+    "tests/fixtures/benchmark/",
 )
+
+
+def _in_phase28(path: str) -> bool:
+    return any(path == p.rstrip("/") or path.startswith(p)
+               for p in PHASE28_NEW_PATHS)
+
+
+def _rename_ends(path: str) -> "list[str]":
+    """把 porcelain 的路径字段拆成「实际涉及的每一端」（评审 W1-03）。
+
+    改名行形如 ``old -> new``（git 同目录改名只回显裸文件名，也可能是
+    ``dir/{a.py -> b.py}`` 的括号形式）。**两端都要在合法前缀内**才允许剔除：
+    否则一次 ``git mv orchestrator/benchmark/x.py orchestrator/graph/x.py``
+    会被整行剔出去，STOP-A 的工作树闸就看不见这次越过边界的改名。
+    """
+    if " -> " not in path:
+        return [path]
+    old, new = (piece.strip() for piece in path.split(" -> ", 1))
+    old = old.rstrip("{").rstrip()
+    new = new.rstrip("}").rstrip()
+    if "/" not in new and "/" in old:
+        new = old.rsplit("/", 1)[0] + "/" + new
+    return [old, new]
 
 
 def split_status(raw: str) -> "tuple[str, list[str]]":
@@ -79,8 +132,7 @@ def split_status(raw: str) -> "tuple[str, list[str]]":
         if not line.strip():
             continue
         path = line[3:] if len(line) > 3 else line
-        if any(path == p.rstrip("/") or path.startswith(p)
-               for p in PHASE28_NEW_PATHS):
+        if all(_in_phase28(part) for part in _rename_ends(path)):
             excluded.append(line)
         else:
             kept.append(line)
@@ -271,7 +323,7 @@ def test_baseline(raw_log: "str | Path") -> dict:
     }
     return _envelope(payload, [{
         "cmd": payload["cmd"],
-        "argv": payload["cmd"].split(),
+        "argv": shlex.split(payload["cmd"]),
         "rc": payload["rc"] if payload["rc"] is not None else -1,
         "ts_iso": _now(),
         "stdout_tail": payload["summary_line"],
@@ -384,7 +436,17 @@ def sealed_ledger_sha256() -> dict:
 # 6. 四张活表行数（只读）
 # --------------------------------------------------------------------------
 
-def table_counts() -> dict:
+def table_counts(*, drift_note: str = "",
+                 drift_signoff_ref: str = "") -> dict:
+    """四张活表只读行数。
+
+    评审 W1-14：计划 AC-T0-7 要求「若漂移则必须带 ``drift_note`` 且用户签收」，
+    但采集函数早先永远写空串，这条流程只能靠手改一个规定「必须机器生成」的
+    JSON 才能走通——等于没有机器通路。现在由 CLI 传入，且**两项必须成对**：
+    只有说明没有签收凭据，等于自说自话。
+    """
+    if bool(drift_note.strip()) != bool(drift_signoff_ref.strip()):
+        raise ValueError("drift_note 与 drift_signoff_ref 必须同时给出或同时为空")
     import lancedb
 
     uri = kb_root() / "data" / "lancedb"
@@ -398,7 +460,8 @@ def table_counts() -> dict:
         "lancedb_uri": str(uri),
         "tables": counts,
         # 漂移时由执行者填「漂移说明 + 用户签收」，默认空串（不预置借口）
-        "drift_note": "",
+        "drift_note": drift_note.strip(),
+        "drift_signoff_ref": drift_signoff_ref.strip(),
     }
     return _envelope(payload, [])
 
@@ -440,11 +503,23 @@ def phase27_pack_sha256(pack: "str | Path | None" = None) -> dict:
     files = sorted(manifest.get("files", []), key=lambda e: e["path"])
     h = hashlib.sha256()
     missing = []
+    #: 评审 W1-08（I6 假阴性修复）：只把 manifest 里登记的三元组拼起来算 sha，
+    #: 包内文件被改而 manifest 不动时摘要完全不变——「证据没变」证明不了。
+    #: 这里对每件**重算字节 sha256**，不符即记 ``..._files_bad``（951 件几十 MB，
+    #: 成本可接受）。
+    bad = []
     for entry in files:
         h.update(f"{entry['path']}\0{entry['sha256']}\0{entry['size']}\n"
                  .encode("utf-8"))
-        if not (pack_dir / entry["path"]).is_file():
+        target = pack_dir / entry["path"]
+        if not target.is_file():
             missing.append(entry["path"])
+            continue
+        actual = _sha256_file(target)
+        if actual != entry["sha256"]:
+            bad.append({"path": entry["path"],
+                        "manifest_sha256": entry["sha256"],
+                        "actual_sha256": actual})
     return {
         "phase27_pack": str(pack_dir),
         "phase27_pack_sha256": h.hexdigest(),
@@ -452,6 +527,7 @@ def phase27_pack_sha256(pack: "str | Path | None" = None) -> dict:
         "phase27_pack_n_files": len(files),
         "phase27_pack_total_bytes": int(manifest.get("total_bytes", 0)),
         "phase27_pack_files_missing": missing,
+        "phase27_pack_files_bad": bad,
     }
 
 

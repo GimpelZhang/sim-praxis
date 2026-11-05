@@ -28,6 +28,18 @@ B4 最小步进  一次真实 reset（若契约要求）+ 一次 step：必须�
 - 断网**分级**：容器路径 ``--network none`` 记 ``enforced``；宿主路径无特权断网
   能力，记 ``audited_only`` 并附 AST 静态扫描命中（D3-6，不假装断网）。
 
+**结果通道（Phase 2.8.0 评审 W2-01 修复）**：运行器的层结果**不再**写 stdout，
+而是写到父进程指定的 ``result_path``（一次性 nonce 文件名，``os.replace`` 原子落盘），
+记录内含 ``level`` 与 ``nonce`` 双字段，父进程逐项校验。stdout/stderr 只当日志；
+二者中**出现任何** ``RUNNER_MARKER`` 行即判候选伪造出生标记 → 该层 ``FAIL``
+（``contract_error``，detail 前缀「候选伪造出生标记行」）。
+
+残余威胁模型（如实登记，不假装解决）：「恶意候选」在**同一进程**内执行，理论上
+可枚举 ``/proc/self/fd`` 或读取 ``payload.json`` 找到结果路径并抢先写出一条合法
+记录；协议层无法在进程内自证。本修复消除的是**共享通道**这一具体缺陷（候选
+打印标记行即被采信），并把任何伪造尝试变成可检测的篡改证据；真正的进程外隔离
+（OS 沙箱 / 独立 harness 进程）属 Phase 3 backlog。
+
 失败 ``reason`` 取值固定（D3-7）：``missing / too_small / symlink / ast_error /
 compile_error / import_error / construction_error / contract_error / step_error /
 non_finite / timeout / memory / path_escape / blocked_infra``。
@@ -36,6 +48,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -52,7 +67,8 @@ from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 __all__ = [
     "BIRTH_SCHEMA", "LEVELS", "LEVEL_STATUSES", "FAILURE_REASONS",
     "CONTRACT_BY_TASK", "BirthError", "BirthSpec", "Limits", "LevelResult",
-    "BirthResult", "BirthValidator", "RUNNER_MARKER", "parse_runner_output",
+    "BirthResult", "BirthValidator", "RUNNER_MARKER", "read_runner_result",
+    "detect_forged_marker",
 ]
 
 BIRTH_SCHEMA = "simpraxis.functional_birth.v1"
@@ -67,6 +83,24 @@ FAILURE_REASONS = ("missing", "too_small", "symlink", "ast_error",
 RUNNER_MARKER = "__SIMPRAXIS_BIRTH__"
 #: D3-4：stdout/stderr 各截断 64 KiB 落盘（meta 里仍记全量字节数）
 MAX_CAPTURE_BYTES = 64 * 1024
+#: 超时后整组击杀，再给管道至多这么多秒排空；仍在拖则不再等待（W2-05）。
+_KILL_GRACE_S = 5.0
+
+
+def _kill_process_group(proc) -> None:
+    """杀掉以 ``proc`` 为首的整个进程组（评审 W2-05）。
+
+    ``start_new_session=True`` 让子进程自成会话/进程组（pgid == pid），
+    因此候选派生的孙进程默认仍在组内；只 ``proc.kill()`` 会留下持有
+    stdout 管道的孙进程，``communicate()`` 随即无上界阻塞。
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 #: 任务 → 契约名（Task 4/6 可直接复用；未知任务必须显式给 contract）
 CONTRACT_BY_TASK = {
@@ -104,17 +138,36 @@ _RUNNER_SRC = r'''
 import ast
 import json
 import math
+import os
 import sys
 import traceback
 
+#: 只用于**父进程**检测伪造：运行器自己不再往 stdout 写任何结果。
 MARKER = "__SIMPRAXIS_BIRTH__"
 
 
 def emit(status, reason, detail="", data=None):
-    sys.stdout.write(MARKER + json.dumps(
-        {"status": status, "reason": reason, "detail": str(detail)[:4000],
-         "data": data or {}}, sort_keys=True, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    record = {"level": LEVEL, "nonce": cfg["nonce"], "status": status,
+              "reason": reason, "detail": str(detail)[:4000],
+              "data": data or {}}
+    body = json.dumps(record, sort_keys=True, ensure_ascii=False) + "\n"
+    path = cfg["result_path"]
+    tmp = path + ".tmp.%d" % os.getpid()
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, body.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    #: 容器形态（L1）以镜像默认用户 root 落盘，宿主 uid 读不回 0600 的 root 文件。
+    #: 载荷里带 ``chown_uid/chown_gid`` 时把结果件交回调用者：root 才能 chown，
+    #: 宿主路径不带这两个键，语义不变（非 root 也无从 chown）。
+    if cfg.get("chown_uid") is not None:
+        try:
+            os.chown(path, int(cfg["chown_uid"]), int(cfg["chown_gid"]))
+        except OSError:
+            pass
     sys.exit(0)
 
 
@@ -143,6 +196,11 @@ def _jail(rel):
         _fail("symlink", "%s 是符号链接（出生验证拒绝链接入口）" % rel)
     if not p.exists():
         _fail("missing", "%s 不存在" % rel)
+    # T3.5-3 明确要求 B0 判 ``is_file``（评审 W2-02）：入口是目录时若放行，
+    # 不带 .py/.yaml 后缀的目录会以 st_size≈4096 直接 PASS B0。D3-7 是固定
+    # 枚举，用 ``missing`` 归因最稳（detail 写明真实形态）。
+    if not p.is_file():
+        _fail("missing", "%s 不是常规文件（is_file=False）" % rel)
     rp = p.resolve(strict=True)
     if rp != wd and wd not in rp.parents:
         _fail("path_escape", "%s 解析到 %s，越过 workdir %s" % (rel, rp, wd))
@@ -201,14 +259,21 @@ def level_b0():
         _fail("too_small", "%s 只有 %d 字节（下限 %d）"
               % (ENTRY_PATH, size, int(cfg["min_bytes"])))
     if rp.suffix == ".py":
+        # 评审 W2-02：候选自己的脏源码（null 字节 → ValueError、
+        # 非 UTF-8 → UnicodeDecodeError）必须归 ``ast_error``，不能穿透到
+        # runner 顶层 ``except BaseException`` 记成 BLOCKED_INFRA——那是把
+        # 候选的错算到基础设施头上，违背 T3.1 不变量 4（模型问题不得记 infra）。
         try:
             ast.parse(rp.read_text(encoding="utf-8"))
-        except SyntaxError as exc:
+        except (SyntaxError, ValueError, UnicodeDecodeError) as exc:
             _fail("ast_error", "%s: %s" % (type(exc).__name__, exc))
     elif rp.suffix in (".yaml", ".yml"):
         try:
             import yaml
             doc = yaml.safe_load(rp.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            _fail("compile_error", "YAML 读取失败：%s: %s"
+                  % (type(exc).__name__, exc))
         except BaseException as exc:
             _fail("compile_error", "YAML 解析失败：%s: %s"
                   % (type(exc).__name__, exc))
@@ -493,14 +558,38 @@ class BirthResult:
 # 运行器输出解析
 # --------------------------------------------------------------------------
 
-def parse_runner_output(stdout: str) -> "dict | None":
-    """取最后一行标记 JSON；没有标记行即 ``None``（子进程自杀/崩溃）。"""
-    for line in reversed(stdout.splitlines()):
-        if line.startswith(RUNNER_MARKER):
-            try:
-                return json.loads(line[len(RUNNER_MARKER):])
-            except json.JSONDecodeError:
-                return None
+def read_runner_result(path: "str | Path", *, level: str, nonce: str) -> "dict | None":
+    """读运行器写出的层结果（``result_path``）；任何不符一律 ``None``。
+
+    拒绝条件（全部 fail-closed）：文件不存在/不可读、记录不止一条（多个写入者）、
+    非单一 JSON 对象、``level`` 或 ``nonce`` 不符、``status`` 不在枚举内。
+    """
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    lines = [line for line in raw.splitlines() if line.strip()]
+    if len(lines) != 1:
+        return None
+    try:
+        doc = json.loads(lines[0])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    if doc.get("level") != level or doc.get("nonce") != nonce:
+        return None
+    if doc.get("status") not in LEVEL_STATUSES:
+        return None
+    return doc
+
+
+def detect_forged_marker(*texts: "str | None") -> "str | None":
+    """stdout/stderr 中出现 ``RUNNER_MARKER`` 行 ⇒ 候选伪造出生标记（返回该行）。"""
+    for text in texts:
+        for line in (text or "").splitlines():
+            if line.startswith(RUNNER_MARKER):
+                return line[:200]
     return None
 
 
@@ -523,6 +612,30 @@ def _scan_network(path: Path) -> "list[dict]":
             if root in _NETWORK_MODULES:
                 hits.append({"module": name, "lineno": getattr(node, "lineno", 0)})
     return hits
+
+
+#: 树扫描上限（防御候选写一万个 .py 把审计拖死）；触顶如实登记
+_NET_SCAN_MAX_FILES = 200
+
+
+def _scan_network_tree(root: Path) -> "tuple[list[dict], int]":
+    """扫 ``workdir`` 下**全部** ``.py``（评审 W2-11）。
+
+    只扫入口文件等于给了绕过口子：候选把 ``import requests`` 放进
+    ``util.py`` 再 import，审计就 0 命中。这里按文件名排序、上限
+    ``_NET_SCAN_MAX_FILES`` 件，命中项带相对路径 ``file``。
+    """
+    if not root.is_dir():
+        return [], 0
+    files = [p for p in sorted(root.rglob("*.py"))
+             if p.is_file() and not p.is_symlink()][:_NET_SCAN_MAX_FILES]
+    hits: "list[dict]" = []
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        for hit in _scan_network(path):
+            hits.append({"file": rel, "module": hit["module"],
+                         "lineno": hit["lineno"]})
+    return hits, len(files)
 
 
 # --------------------------------------------------------------------------
@@ -590,9 +703,14 @@ class BirthValidator:
     def _run_restricted(self, level: str, level_dir: Path) -> LevelResult:
         if not self.spec.required_levels()[level]:
             return self._not_applicable(level, level_dir)
+        nonce = secrets.token_hex(16)
+        result_path = level_dir / f"runner_result.{nonce}.json"
+        payload = self._payload(level)
+        payload["nonce"] = nonce
+        payload["result_path"] = str(result_path)
         payload_path = level_dir / "payload.json"
         atomic_write_text(payload_path,
-                          json.dumps(self._payload(level), ensure_ascii=False,
+                          json.dumps(payload, ensure_ascii=False,
                                      indent=2, sort_keys=True) + "\n", 0o600)
         started = time.monotonic()
         timed_out = False
@@ -604,6 +722,8 @@ class BirthValidator:
                 [self.python, "-I", "-c", _RUNNER_SRC, str(payload_path)],
                 cwd=str(self.workdir), env=sanitized_env(),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                # 评审 W2-05：独立进程组，超时可整组击杀（孙进程不再拖住管道）。
+                start_new_session=True,
                 preexec_fn=self._preexec)
         except (OSError, subprocess.SubprocessError) as exc:
             # 计划 T3.9：setrlimit 不可用必须显式 BLOCKED_INFRA，不得静默跳过限制
@@ -622,20 +742,35 @@ class BirthValidator:
             rc = proc.returncode
         except subprocess.TimeoutExpired:
             timed_out = True
-            proc.kill()
-            stdout, stderr = proc.communicate()
+            _kill_process_group(proc)
+            try:
+                stdout, stderr = proc.communicate(timeout=_KILL_GRACE_S)
+            except subprocess.TimeoutExpired:
+                # 孙进程自建会话仍持有管道：不再等待（否则超时无上界），
+                # 按已读缓冲收尾——证据件缺读入内容本身也是事实。
+                for pipe in (proc.stdout, proc.stderr):
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass
+                stdout = stderr = ""
             rc = proc.returncode
         duration = time.monotonic() - started
 
-        (level_dir / "stdout.txt").write_text(
-            _truncate_capture(stdout), encoding="utf-8")
-        (level_dir / "stderr.txt").write_text(
-            _truncate_capture(stderr), encoding="utf-8")
+        atomic_write_text(level_dir / "stdout.txt",
+                          _truncate_capture(stdout or ""), 0o600)
+        atomic_write_text(level_dir / "stderr.txt",
+                          _truncate_capture(stderr or ""), 0o600)
 
-        parsed = parse_runner_output(stdout)
+        parsed = read_runner_result(result_path, level=level, nonce=nonce)
+        forged = detect_forged_marker(stdout, stderr)
         if timed_out:
             status, reason, detail, data = "FAIL", "timeout", (
                 f"超过 {self.limits.timeout_s}s 上限"), {}
+        elif forged is not None:
+            # 运行器已不再写 stdout：任何标记行都只能是候选自己伪造的
+            status, reason, detail, data = "FAIL", "contract_error", (
+                f"候选伪造出生标记行（已拒绝采信）：{forged}"), {}
         elif parsed is not None:
             status = parsed.get("status")
             reason = parsed.get("reason")
@@ -648,7 +783,7 @@ class BirthValidator:
                 reason = "memory"
             elif rc in (-24, -25):
                 reason = "timeout"
-            detail = (f"子进程未产出标记行（rc={rc}）："
+            detail = (f"子进程未产出层结果（rc={rc}）："
                       f"{stderr.strip().splitlines()[-1] if stderr.strip() else '无 stderr'}")
             data = {}
 
@@ -694,15 +829,17 @@ class BirthValidator:
             level_dir = ensure_private_dir(levels_dir / level)
             levels[level] = self._run_restricted(level, level_dir)
 
-        entry = self.workdir / self.spec.entry_path
-        hits = _scan_network(entry) if entry.is_file() else []
+        hits, scanned = _scan_network_tree(self.workdir)
         audit = {
             "mode": "enforced" if self.network_mode == "none" else "audited_only",
             "network_mode": self.network_mode,
             "static_import_hits": hits,
+            "scanned_files": scanned,
             "note": ("容器 --network none：断网被强制执行"
                      if self.network_mode == "none"
-                     else "宿主无特权断网：仅做 AST 静态审计，如实标注不假装断网"),
+                     else "宿主无特权断网：仅做 AST 静态审计（扫 workdir 下全部 "
+                          ".py，上限 %d 件），如实标注不假装断网"
+                          % _NET_SCAN_MAX_FILES),
         }
         status, problems = self._aggregate(levels)
         result = BirthResult(

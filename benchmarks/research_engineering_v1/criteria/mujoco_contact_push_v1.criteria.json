@@ -1,50 +1,11 @@
 {
-  "schema": "simpraxis.benchmark_criteria.v1",
-  "task_id": "mujoco_contact_push_v1",
   "criteria_version": 1,
-  "weights": {
-    "functional_correctness": 0.4,
-    "physics_validity": 0.3,
-    "reproducibility": 0.2,
-    "evidence_completeness": 0.1
-  },
-  "thresholds": {
-    "endpoint_distance_m": {
-      "value": 0.0146446609,
-      "unit": "m",
-      "derivation": "冻结场景取 Phase 1 Task7 track1 参考场景（solutions/track1_tools/02_mujoco_contact_push，Gate2 真人 accept 原件）：立方体半边长 a=0.025 m（5 cm 块），目标区为半边长 g=0.05 m 的水平方形区域。判定量 d 为立方体几何中心到目标区中心的**水平面**欧氏距离。要求立方体在**任意偏航角**下的水平投影都完整落在目标区内，即 d ≤ g − a·√2（a√2 = 立方体水平投影外接圆半径）；代入 0.05 − 0.025×1.4142135623730951 = 0.01464466094067262 m，向下截断到 1e-10 m 得 0.0146446609（截断而非四舍五入，不放松）。竖直方向：立方体静止时中心 z=a=0.025 m，目标区 z 半宽 0.05 m 覆盖 [−0.025, 0.075]，故水平距离已含竖直约束；竖直异常另由 HG-M1-2（非有限值）与 max_penetration_m 兜住。参考实跑末位 (0.305,0,0.025) 对目标 (0.30,0,0.025) 的 d=0.005 m，在本阈值内自洽。"
-    },
-    "max_penetration_m": {
-      "value": 0.001,
-      "unit": "m",
-      "derivation": "由单步最大位移 + 接触求解时间常数给出上界。冻结场景：dt=0.002 s，solref=\"0.01 1\"（timeconst τ=0.01 s、dampratio=1，τ 与 dt 同量级差 5 倍，属软接触可解区）；min-jerk 推程峰值速度 v_max=1.875·L/T=1.875×0.316/2.0=0.29625 m/s（L=X_END−X_START=0.316 m，T=2.0 s，1.875 为五阶 min-jerk 归一化峰值系数）。单步自由位移 = v_max·dt = 5.925e-4 m：约束求解器在**一步**内最多只能携带 0.59 mm 的几何超前，随后必须被接触约束推出。取 1 mm ≈ 1.7× 单步位移上界、≈4.5× 参考实测（Phase 1 Task7 v4 宿主扫描最大穿模 0.22 mm）。超过 1 mm 意味着嵌入在约束**已激活**的连续两步以上仍在增长——属于真实穿模/隧穿，不是数值抖动（HG-M1-3）。"
-    },
-    "contact_force_peak_n_min": {
-      "value": 0.2943,
-      "unit": "N",
-      "derivation": "下界＝推动立方体所需的最小法向力（摩擦圆）：μ·m·g = 0.3×0.1×9.81 = 0.2943 N。各项取值均来自冻结场景且显式可溯：μ=0.3（干木面量级，场景 <default><geom friction> 显式值）、m=0.1 kg（立方体显式 mass）、g=9.81 m/s²。准静态滑动时推板必须持续提供 ≥ μmg 的水平力，故全程接触合力峰值的模不可能低于 0.2943 N；低于此值而立方体仍位移，说明位移不是接触推动产生（HG-M1-4 未发生真实推动）。参考实测持位合力 0.599 N ≈ 2×μmg，与下界自洽。"
-    },
-    "contact_force_peak_n_max": {
-      "value": 2.765,
-      "unit": "N",
-      "derivation": "上界＝单步动量传递可注入力 + 阻尼项。接触对等效质量 m_eff = m_p·m_c/(m_p+m_c) = 0.02×0.1/0.12 = 0.0166667 kg（推板 0.02 kg、立方体 0.1 kg，均为冻结场景显式值）；峰值速度 v_max = 0.29625 m/s（同 max_penetration_m 的推导）；单步 dt=0.002 s 的动量传递上界 F_imp = m_eff·v_max/dt = 0.0166667×0.29625/0.002 = 2.46875 N；推板滑接阻尼 c=1.0 N·s/m 在峰值速度下的耗散力 F_d = c·v_max = 0.29625 N；两项相加 = 2.76500 N，取 2.765（恰为上界，未上浮）。超过此值意味着作动器注入了超过额定轨迹所能提供的动量（控制器/场景装配错误），而非真实接触。参考实测持位 0.599 N ≪ 上界，自洽。"
-    },
-    "steps_min": {
-      "value": 534,
-      "unit": "step",
-      "derivation": "下界＝额定推程 ÷ 可达最大速度 ÷ 物理步长。冻结场景额定推程 L = X_END − X_START = 0.276 − (−0.04) = 0.316 m（立方体中心 0 → 贴挡块 0.305 m，推板起点 −0.04 m，两者均在冻结场景内）；可达最大速度 = min-jerk 峰值 v_max = 1.875·L/T = 0.29625 m/s（T=2.0 s）；t_min = 0.316/0.29625 = 1.0666667 s；步数 = ceil(t_min/dt) = ceil(1.0666667/0.002) = ceil(533.33) = 534 步（dt=0.002 s）。少于 534 步意味着单位时间位移超过作动器可交付速度——属于位置直赋/瞬移，不是物理步进（Functional 判定与 HG-M1-4 同时覆盖）。"
-    },
-    "steps_max": {
-      "value": 2250,
-      "unit": "step",
-      "derivation": "上界＝参考时长 × 1.5 ÷ dt。参考 profile 总时长 = SETTLE 0.2 + PUSH 2.0 + HOLD 0.8 = 3.0 s（Phase 1 Task7 track1 v4 冻结调度）；1.5 倍松弛 = 4.5 s；步数 = 4.5/0.002 = 2250 步。超过 2250 步即超出 1.5× 时间预算（磨蹭/超时）；与 budget.wall_time_seconds=600（进程墙钟上限）不同口径，二者不互相替代。"
-    },
-    "repro_abs_tol": {
-      "value": 0.0014,
-      "unit": "m",
-      "derivation": "二段口径：(i) **同种子**两条必须逐位相等，容差恒 0（不得 >0；HG-M1-5）；(ii) **跨种子**带宽 = 功能判据半径的 10% = 0.10 × 0.0146446609 = 0.00146446609 m，向下截断到 1e-4 m 得 0.0014 m。上界理由：带宽 < 功能判据半径的 10%，保证复现维度**不可能吞掉**一次功能性失败（否则 Repro 20% 权重会把 Fail 洗成 Pass）。下界理由：隐藏变体（初始位姿 ±2 cm、目标 ±5 cm、质量 ±20%、摩擦 ±0.1）经软接触后的合法端态散布受接触柔度支配——参考实测稳态嵌入 0.22 mm，按 F=k·d、k=0.599 N/0.22 mm≈2723 N/m、力上限 2.765 N 反推最大弹性嵌入 1.02 mm < 1.4 mm；质量 ±20% 改变到达时间而非端态位置（端态由推板轨迹终位决定，与质量无关，准静态推程下）。"
-    }
-  },
+  "derivation": "阈值不在计划文本中预设，由 Task 1 按任务几何与运动学一次推导生成并随本文件 LOCK（G0-7 附条件 / TD-3）。冻结场景常量（全部可溯到 Phase 1 Task7 track1 参考件 solutions/track1_tools/02_mujoco_contact_push 的 Gate2 accept 原件）：dt=0.002 s、SUBSTEPS=8、SETTLE 0.2 s / PUSH 2.0 s / HOLD 0.8 s、立方体半边长 0.025 m 与 mass 0.1 kg、推板 0.02 kg（半宽 0.01/0.04/0.025 m）、μ=0.3、kp=100 N/m、滑接阻尼 1.0 N·s/m、X_START=−0.04 m、X_END=0.276 m、挡块接触面 0.33 m（立方体中心止于 0.305 m）、目标区中心 (0.30,0,0.025)、目标区半宽 0.05 m、solref=\"0.01 1\"、g=9.81 m/s²。所有阈值只依赖上述常量与本文件内的算式，不依赖任何模型实验输出（预设即编造）。",
+  "evaluator_files": [
+    "orchestrator/benchmark/evaluator.py:6a32a77061cf96b0e5b337adbf197159b11f58c277e6812d20b36eefe97c1984",
+    "orchestrator/benchmark/scoring.py:e11bbaddcc921c04655ef35736a222a4b869f250fc1ea48c6eb2dcf09395bba5",
+    "orchestrator/benchmark/contracts.py:60c106dcb04af5d33382e37e918d5585fcc6ce664ea4539a475ac79d377a794c"
+  ],
   "hard_gates": [
     {
       "id": "HG-M1-1",
@@ -75,11 +36,55 @@
       "statement": "伪造 metrics.json（与 telemetry 重算结果不一致）"
     }
   ],
-  "derivation": "阈值不在计划文本中预设，由 Task 1 按任务几何与运动学一次推导生成并随本文件 LOCK（G0-7 附条件 / TD-3）。冻结场景常量（全部可溯到 Phase 1 Task7 track1 参考件 solutions/track1_tools/02_mujoco_contact_push 的 Gate2 accept 原件）：dt=0.002 s、SUBSTEPS=8、SETTLE 0.2 s / PUSH 2.0 s / HOLD 0.8 s、立方体半边长 0.025 m 与 mass 0.1 kg、推板 0.02 kg（半宽 0.01/0.04/0.025 m）、μ=0.3、kp=100 N/m、滑接阻尼 1.0 N·s/m、X_START=−0.04 m、X_END=0.276 m、挡块接触面 0.33 m（立方体中心止于 0.305 m）、目标区中心 (0.30,0,0.025)、目标区半宽 0.05 m、solref=\"0.01 1\"、g=9.81 m/s²。所有阈值只依赖上述常量与本文件内的算式，不依赖任何模型实验输出（预设即编造）。",
-  "evaluator_files": [
-    "orchestrator/benchmark/evaluator.py:9e1338758cb3cd37194eb3123360fbed18ff3ed03f39fb6b5400a44771e5fd0c",
-    "orchestrator/benchmark/scoring.py:e47b75dd179c72841aa3e246cad31b9bc3ba7af8ec989b36bbac3c5846e625e7",
-    "orchestrator/benchmark/contracts.py:ecc534ee16bde886883b7bd77a56255ed630be228a209c5b31491b281ff4567d"
-  ],
-  "locked_at": "2026-11-05T08:26:06Z"
+  "locked_at": "2026-11-05T08:26:06Z",
+  "schema": "simpraxis.benchmark_criteria.v1",
+  "task_id": "mujoco_contact_push_v1",
+  "thresholds": {
+    "contact_force_peak_n_max": {
+      "derivation": "上界＝单步动量传递可注入力 + 阻尼项。接触对等效质量 m_eff = m_p·m_c/(m_p+m_c) = 0.02×0.1/0.12 = 0.0166667 kg（推板 0.02 kg、立方体 0.1 kg，均为冻结场景显式值）；峰值速度 v_max = 0.29625 m/s（同 max_penetration_m 的推导）；单步 dt=0.002 s 的动量传递上界 F_imp = m_eff·v_max/dt = 0.0166667×0.29625/0.002 = 2.46875 N；推板滑接阻尼 c=1.0 N·s/m 在峰值速度下的耗散力 F_d = c·v_max = 0.29625 N；两项相加 = 2.76500 N，取 2.765（恰为上界，未上浮）。超过此值意味着作动器注入了超过额定轨迹所能提供的动量（控制器/场景装配错误），而非真实接触。参考实测持位 0.599 N ≪ 上界，自洽。",
+      "unit": "N",
+      "value": 2.765
+    },
+    "contact_force_peak_n_min": {
+      "derivation": "下界＝推动立方体所需的最小法向力（摩擦圆）：μ·m·g = 0.3×0.1×9.81 = 0.2943 N。各项取值均来自冻结场景且显式可溯：μ=0.3（干木面量级，场景 <default><geom friction> 显式值）、m=0.1 kg（立方体显式 mass）、g=9.81 m/s²。准静态滑动时推板必须持续提供 ≥ μmg 的水平力，故全程接触合力峰值的模不可能低于 0.2943 N；低于此值而立方体仍位移，说明位移不是接触推动产生（HG-M1-4 未发生真实推动）。参考实测持位合力 0.599 N ≈ 2×μmg，与下界自洽。",
+      "unit": "N",
+      "value": 0.2943
+    },
+    "endpoint_distance_m": {
+      "derivation": "冻结场景取 Phase 1 Task7 track1 参考场景（solutions/track1_tools/02_mujoco_contact_push，Gate2 真人 accept 原件）：立方体半边长 a=0.025 m（5 cm 块），目标区为半边长 g=0.05 m 的水平方形区域。判定量 d 为立方体几何中心到目标区中心的**水平面**欧氏距离。要求立方体在**任意偏航角**下的水平投影都完整落在目标区内，即 d ≤ g − a·√2（a√2 = 立方体水平投影外接圆半径）；代入 0.05 − 0.025×1.4142135623730951 = 0.01464466094067262 m，向下截断到 1e-10 m 得 0.0146446609（截断而非四舍五入，不放松）。竖直方向：立方体静止时中心 z=a=0.025 m，目标区 z 半宽 0.05 m 覆盖 [−0.025, 0.075]，故水平距离已含竖直约束；竖直异常另由 HG-M1-2（非有限值）与 max_penetration_m 兜住。参考实跑末位 (0.305,0,0.025) 对目标 (0.30,0,0.025) 的 d=0.005 m，在本阈值内自洽。",
+      "unit": "m",
+      "value": 0.0146446609
+    },
+    "max_penetration_m": {
+      "derivation": "由单步最大位移 + 接触求解时间常数给出上界。冻结场景：dt=0.002 s，solref=\"0.01 1\"（timeconst τ=0.01 s、dampratio=1，τ 与 dt 同量级差 5 倍，属软接触可解区）；min-jerk 推程峰值速度 v_max=1.875·L/T=1.875×0.316/2.0=0.29625 m/s（L=X_END−X_START=0.316 m，T=2.0 s，1.875 为五阶 min-jerk 归一化峰值系数）。单步自由位移 = v_max·dt = 5.925e-4 m：约束求解器在**一步**内最多只能携带 0.59 mm 的几何超前，随后必须被接触约束推出。取 1 mm ≈ 1.7× 单步位移上界、≈4.5× 参考实测（Phase 1 Task7 v4 宿主扫描最大穿模 0.22 mm）。超过 1 mm 意味着嵌入在约束**已激活**的连续两步以上仍在增长——属于真实穿模/隧穿，不是数值抖动（HG-M1-3）。",
+      "unit": "m",
+      "value": 0.001
+    },
+    "metrics_abs_tol": {
+      "derivation": "自报 metrics 与 telemetry 重算值的**对账容差**（HG-M1-7 / metrics 维度共用）。来源：重算值一律 `round(x, 9)` 后写盘与比较，容差取 1e-6 = 1000 个 1e-9 末位——只吸收十进制舍入，不吸收任何物理差异。上界校验（跨单位按绝对数值使用）：最小判据量级为 max_penetration_m = 1e-3 m 与 repro_abs_tol = 1.4e-3 m，本容差小 3 个数量级；力判据区间 [0.2943, 2.765] N、步数区间 [534, 2250] step，1e-6 的相对量级分别 ≤ 3.4e-6 与 ≤ 1.9e-9，均不可能把一次真实不一致（伪造值通常偏 ≥ 10%）洗成一致。评审 W3-14：早先该容差以 `10 ** -6` 写死在 scoring.py（AST 的 BinOp 逃过浮点字面量扫描），判据数据不得藏在代码里。",
+      "unit": "m",
+      "value": 1e-06
+    },
+    "repro_abs_tol": {
+      "derivation": "二段口径：(i) **同种子**两条必须逐位相等，容差恒 0（不得 >0；HG-M1-5）；(ii) **跨种子**带宽 = 功能判据半径的 10% = 0.10 × 0.0146446609 = 0.00146446609 m，向下截断到 1e-4 m 得 0.0014 m。上界理由：带宽 < 功能判据半径的 10%，保证复现维度**不可能吞掉**一次功能性失败（否则 Repro 20% 权重会把 Fail 洗成 Pass）。下界理由：隐藏变体（初始位姿 ±2 cm、目标 ±5 cm、质量 ±20%、摩擦 ±0.1）经软接触后的合法端态散布受接触柔度支配——参考实测稳态嵌入 0.22 mm，按 F=k·d、k=0.599 N/0.22 mm≈2723 N/m、力上限 2.765 N 反推最大弹性嵌入 1.02 mm < 1.4 mm；质量 ±20% 改变到达时间而非端态位置（端态由推板轨迹终位决定，与质量无关，准静态推程下）。",
+      "unit": "m",
+      "value": 0.0014
+    },
+    "steps_max": {
+      "derivation": "上界＝参考时长 × 1.5 ÷ dt。参考 profile 总时长 = SETTLE 0.2 + PUSH 2.0 + HOLD 0.8 = 3.0 s（Phase 1 Task7 track1 v4 冻结调度）；1.5 倍松弛 = 4.5 s；步数 = 4.5/0.002 = 2250 步。超过 2250 步即超出 1.5× 时间预算（磨蹭/超时）；与 budget.wall_time_seconds=600（进程墙钟上限）不同口径，二者不互相替代。",
+      "unit": "step",
+      "value": 2250
+    },
+    "steps_min": {
+      "derivation": "下界＝额定推程 ÷ 可达最大速度 ÷ 物理步长。冻结场景额定推程 L = X_END − X_START = 0.276 − (−0.04) = 0.316 m（立方体中心 0 → 贴挡块 0.305 m，推板起点 −0.04 m，两者均在冻结场景内）；可达最大速度 = min-jerk 峰值 v_max = 1.875·L/T = 0.29625 m/s（T=2.0 s）；t_min = 0.316/0.29625 = 1.0666667 s；步数 = ceil(t_min/dt) = ceil(1.0666667/0.002) = ceil(533.33) = 534 步（dt=0.002 s）。少于 534 步意味着单位时间位移超过作动器可交付速度——属于位置直赋/瞬移，不是物理步进（Functional 判定与 HG-M1-4 同时覆盖）。",
+      "unit": "step",
+      "value": 534
+    }
+  },
+  "weights": {
+    "evidence_completeness": 0.1,
+    "functional_correctness": 0.4,
+    "physics_validity": 0.3,
+    "reproducibility": 0.2
+  }
 }

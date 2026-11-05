@@ -1,19 +1,19 @@
 {
   "birth_result_sha256": null,
   "candidate_artifact_sha256": "fee42b3dd4c5abc0065b687a7dbde85151520415cc81e8a870b73d5c3555c69b",
-  "criteria_lock_sha256": "2d3a4413754324fc599e73ec21634f551bb5612154e1ed72a577ece856e4f045",
-  "criteria_sha256": "6cdb18604362bcb7f10007954876a1b168ef1d661470bff1d8559ec631216e2a",
+  "criteria_lock_sha256": "a9abf30e7ec2ba7aef31dd8efd0c741107358f3fc96bdffd3771f46bbc96f7d9",
+  "criteria_sha256": "73eb6496d255b05ed72cac3470efe1c2995c81c11f522dbd1612b368db942ebe",
   "evaluator_version": 1,
   "evidence_manifest_sha256": "4671b06d57eb7db1a809e591f2f43fb21e059a18088ce5466a85fb69985ea92c",
   "mode": "negative_control",
   "paid_model_calls": 0,
   "repository_sha": "0123456789abcdef0123456789abcdef01234567",
   "run_id": "m1_n05_forged_success",
-  "runtime_fingerprint_sha256": "521d0daf47ba0707670952fe06758239932e8ba4635ae5a45102f061136b4255",
+  "runtime_fingerprint_sha256": "3fc13dd0a70cd9ba7339d77703d07527a2d2cc10e1cf587b7cfe8015445c40de",
   "schema": "simpraxis.benchmark_run.v1",
   "seed": 0,
   "status": "PASS",
   "task_id": "mujoco_contact_push_v1",
-  "task_spec_sha256": "e7a531ad673d46b0f743b28b6f0accb0d30d098406de66cabfdccce3e63f0ee4",
+  "task_spec_sha256": "84b9cc7373fa3b6c39e70a7d8345b3745fd8d0d1d5876e719f5bfad13a14c3af",
   "task_version": 1
 }

@@ -96,7 +96,11 @@
         "container_python": {"type": ["string", "null"], "minLength": 1},
         "uid": {"type": ["integer", "null"], "minimum": 0},
         "gid": {"type": ["integer", "null"], "minimum": 0},
-        "kernel": {"type": "string", "minLength": 1},
+        "kernel": {
+          "type": "string",
+          "minLength": 1,
+          "description": "评审 W2-14：host 后端时这里是宿主内核（容器段其余字段为 null），解读必须结合 backend；docker 后端才是镜像内核。"
+        },
         "gpu_visible": {"type": "boolean"},
         "cuda_runtime": {"type": ["string", "null"], "minLength": 1},
         "egl_available": {"type": ["boolean", "null"]}

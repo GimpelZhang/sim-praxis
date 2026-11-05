@@ -26,7 +26,7 @@
     "kernel": "6.8.0-synthetic",
     "uid": 1000
   },
-  "fingerprint_sha256": "1f2ae8fdcfb850e004cb458ec245d6fffdec692eb1f7d58a71dae3ca68858008",
+  "fingerprint_sha256": "a8ead1a9ea38b90a50a0a131ab4f828fa6b96243380ea620d42826f9f359da6d",
   "mount": {
     "entries": []
   },
@@ -46,7 +46,7 @@
   "repository": {
     "assets_manifest_sha256": null,
     "benchmark_version": 1,
-    "criteria_sha256": "8a397336d775b6716165fc5522590ae7ed8156f8acdebcbada70c5eba10f65e3",
+    "criteria_sha256": "f524e4347a21a6222d9646d03bd8a34ba3fda00d2380fe7367e1d732ac907742",
     "engine_dirty": false,
     "engine_head": "0123456789abcdef0123456789abcdef01234567",
     "kb_dirty": null,

@@ -1,0 +1,11 @@
+{
+  "_provenance": {
+    "case_id": "m1_n01_no_motion",
+    "note": "由 telemetry 重算的 metrics（合成）",
+    "synthetic_fixture": true
+  },
+  "contact_force_peak_n": 0.0,
+  "endpoint_distance_m": 0.063380195,
+  "max_penetration_m": 0.0004,
+  "steps": 600
+}

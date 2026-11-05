@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """Phase 2.8.0 Task 7 收尾编排（0 付费）。
 
-子命令（顺序即防自指协议，见 T7.5 第 4 步）：
+子命令（**可执行**顺序，评审 W4-04：旧文档顺序在 acceptance 之前跑 matrix
+的依赖件，照抄必失败）：
 
-- ``reports``     —— 渲染七件报告到 ``<root>/reports/``（必须在打包之前）
-- ``cold-run``    —— 解析冷跑日志 → ``closeout/cold_run.json``
-- ``pack``        —— ``--clean`` 重建证据包 → ``pack.sha256``
-- ``acceptance``  —— 跑 ``milestone_closeout`` 验收车道，落日志与 rc
-- ``matrix``      —— 写 ``ledger_freeze.json`` / ``kb_integrity.json`` /
-                     ``invariants.json`` / ``acceptance_matrix.json`` /
-                     ``environment_closeout.txt``（判决件族，不入包）
-- ``judge``       —— 调 ``check_closure.run_judge``（``--require-acceptance``
-                     为终判），写 ``closeout/closure_judge.json``
+1. ``reports``     —— 渲染七件报告到 ``<root>/reports/``（必须在打包之前）
+2. ``cold-run``    —— 解析冷跑日志 → ``closeout/cold_run.json``（含 rc 侧车）
+3. ``pack``        —— ``--clean`` 重建证据包 → ``pack.sha256``
+4. ``matrix``      —— 写 ``ledger_freeze.json`` / ``kb_integrity.json`` /
+                     ``invariants.json`` / ``run_identity.json`` /
+                     ``environment_closeout.txt`` / ``acceptance_matrix.json``
+                     （判决件族，不入包；**验收车道读其中三件，故必须在
+                     第 5 步之前跑**）
+5. ``acceptance``  —— 跑 ``milestone_closeout`` 验收车道，落日志与 rc
+6. （人工）三签     —— ``closeout/signs/{executor,reviewer,verifier}.json``
+                     绑 ``manifest.git_commit`` + ``pack.sha256``
+7. ``matrix``（重跑）—— 让 AC-20 读到三签；其余行数值与第 4 步相同
+8. ``judge``       —— 调 ``check_closure.run_judge --require-acceptance``
+                     写 ``closeout/closure_judge.json``
 
 纪律：0 付费、不 push、不改五本账；所有数字现读现算；判决件族不入包。
 """
@@ -82,6 +88,13 @@ def _git(*args: str, cwd: Path = _REPO) -> str:
     return proc.stdout.strip()
 
 
+def _subprocess_env(root: Path, **extra: str) -> "dict[str, str]":
+    """验收/矩阵子进程的环境（评审 W4-05）：根显式传入，杜绝跨根读判。"""
+    env = dict(os.environ, SIMPRAXIS_BENCHMARK_ROOT=str(Path(root).resolve()),)
+    env.update(extra)
+    return env
+
+
 def _run(cmd: "list[str]") -> str:
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     return f"$ {' '.join(cmd)}\n(rc={proc.returncode})\n{proc.stdout}" \
@@ -113,15 +126,11 @@ def cmd_pack(root: Path, clean: bool) -> dict:
 # ④ 验收车道
 # --------------------------------------------------------------------------
 
-def cmd_acceptance(root: Path) -> dict:
-    out = root / "closeout"
-    out.mkdir(parents=True, exist_ok=True)
-    log = out / "acceptance_lane.log"
-    cmd = [MAIN_PYTHON, "-m", "pytest", "tests/benchmark/test_task7_closeout.py",
-           "-m", "milestone_closeout", "-q"]
-    env = dict(os.environ, SIMPRAXIS_MILESTONE_CLOSEOUT="1")
+def _run_lane(cmd: "list[str]", env: "dict[str, str]", log: Path,
+              *, timeout: int = 3600) -> dict:
+    """跑一条 pytest 车道，落日志，返回该车道的机读摘要。"""
     proc = subprocess.run(cmd, cwd=str(_REPO), env=env, capture_output=True,
-                          text=True, timeout=1800)
+                          text=True, timeout=timeout)
     text = f"$ {' '.join(cmd)}\n(rc={proc.returncode})\n" \
            f"{proc.stdout}{proc.stderr}"
     log.write_text(text, encoding="utf-8")
@@ -130,9 +139,7 @@ def cmd_acceptance(root: Path) -> dict:
                                                    "deselected": 0,
                                                    "duration_s": 0.0}
     failed = re.search(r"(\d+) failed", text)
-    doc = {
-        "schema": "simpraxis.benchmark.acceptance_lane.v1",
-        "generated_at": _now(),
+    return {
         "cmd": " ".join(cmd),
         "rc": proc.returncode,
         "passed": summary["passed"],
@@ -142,8 +149,54 @@ def cmd_acceptance(root: Path) -> dict:
         "log": str(log),
         "log_sha256": _sha256(log),
     }
+
+
+def _collect_marked(env: "dict[str, str]", marker: str) -> int:
+    """带 marker 的采集条数（用同一条 env 口径，避免「环境没开→0 条→空绿」）。"""
+    cmd = [MAIN_PYTHON, "-m", "pytest", "tests/benchmark", "--collect-only",
+           "-q", "-m", marker]
+    proc = subprocess.run(cmd, cwd=str(_REPO), env=env, capture_output=True,
+                          text=True, timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(f"collect -m {marker} 失败：{proc.stdout[-400:]}")
+    return sum(1 for line in proc.stdout.splitlines()
+               if line.strip().startswith("tests/benchmark/"))
+
+
+def cmd_acceptance(root: Path) -> dict:
+    """验收 = 两段车道（评审 W5-17：container 车道此前不在任何门禁内）。
+
+    ① ``milestone_closeout`` 不变量车道；
+    ② ``container`` 真容器车道（``SIMPRAXIS_CONTAINER=1``）——宿主冒充容器、
+       镜像 digest 漂移、容器内包版本回归都在这里才被真正执行到；没有这一
+       段，容器快照坏了只要旧产物还在，closeout 依旧 PASS。
+    """
+    out = root / "closeout"
+    out.mkdir(parents=True, exist_ok=True)
+    # 评审 W4-05：子进程必须读同一个根（否则 --root 指别处时读 A 根、写 B 根）。
+    env = _subprocess_env(root)
+    container_env = _subprocess_env(root, SIMPRAXIS_CONTAINER="1")
+
+    lane_log = out / "acceptance_lane.log"
+    lane = _run_lane([MAIN_PYTHON, "-m", "pytest",
+                      "tests/benchmark/test_task7_closeout.py",
+                      "-m", "milestone_closeout", "-q"], env, lane_log)
+
+    container_log = out / "container_lane.log"
+    container = _run_lane([MAIN_PYTHON, "-m", "pytest", "tests/benchmark",
+                           "-m", "container", "-q"], container_env,
+                          container_log)
+    container["selected"] = _collect_marked(container_env, "container")
+
+    doc = {
+        "schema": "simpraxis.benchmark.acceptance_lane.v1",
+        "generated_at": _now(),
+        **lane,
+        "container_lane": container,
+    }
     _write_json(out / "acceptance_lane.json", doc)
     return doc
+
 
 
 # --------------------------------------------------------------------------
@@ -227,16 +280,9 @@ def write_paid_calls(root: Path) -> dict:
             "sha256_after": actual,
             "equal": actual == before["sha256"],
         })
-    gateway = 0
-    needle = re.compile(r"^\s*(?:from\s+orchestrator\.gateway|"
-                        r"import\s+orchestrator\.gateway)", re.MULTILINE)
-    for sub in ("orchestrator/benchmark", "scripts/benchmark",
-                "tests/benchmark"):
-        base = _REPO / sub
-        for path in sorted(base.rglob("*.py")):
-            if needle.search(path.read_text(encoding="utf-8",
-                                            errors="ignore")):
-                gateway += 1
+    # 评审 W5-19：与终判共用同一 AST 实现（`check_closure.count_gateway_imports`），
+    # 不再各自维护一份行级正则。
+    gateway, _gateway_hits = judge.count_gateway_imports()
     added = sum(max(0, (row["rows_after"] or 0) - row["rows_before"])
                 for row in rows)
     zero = (all(row["equal"] for row in rows) and added == 0 and gateway == 0)
@@ -311,16 +357,20 @@ def _probe_agentic_config() -> "tuple[bool, str]":
     return ok, f"AgenticConfig() 布尔开关={booleans}, run_mode={config.run_mode}"
 
 
-def _phase27_pack_sha(root: Path) -> "tuple[str | None, dict]":
-    """Phase 2.7 包的**规范化** sha（与 Task 0 采集同一口径）。"""
+def _phase27_pack_sha(root: Path) -> "tuple[str | None, dict, dict]":
+    """Phase 2.7 包的**规范化** sha（与 Task 0 采集同一口径）。
+
+    评审 W1-08：除摘要本身，还返回逐件重算结果（``files_bad``/``files_missing``），
+    供 I6 判「包内字节没变」而不只是「清单没变」。
+    """
     from orchestrator.benchmark import intake as bench_intake
 
     before = _json(root / "intake" / "invariants_before.json")
     try:
         digest = bench_intake.phase27_pack_sha256(Path(before["phase27_pack"]))
     except FileNotFoundError:
-        return None, before
-    return digest["phase27_pack_sha256"], before
+        return None, before, {}
+    return digest["phase27_pack_sha256"], before, digest
 
 
 def write_invariants(root: Path) -> dict:
@@ -348,13 +398,18 @@ def write_invariants(root: Path) -> dict:
     add("I5", "KB 只读：HEAD/工作树/四表行数不变", not kb_problems,
         {"problems": kb_problems, "detail": kb_detail})
     freeze = _json(root / "closeout" / "ledger_freeze.json")
-    pack_sha, _before = _phase27_pack_sha(root)
-    add("I6", "五本账 SHA256 不变 + Phase 2.7 包 sha 不变",
+    pack_sha, _before, pack_digest = _phase27_pack_sha(root)
+    pack_bytes_ok = not (pack_digest.get("phase27_pack_files_bad")
+                         or pack_digest.get("phase27_pack_files_missing"))
+    add("I6", "五本账 SHA256 不变 + Phase 2.7 包 sha 与逐件字节不变",
         all(row["equal"] for row in freeze["ledgers"])
-        and pack_sha == before["phase27_pack_sha256"],
+        and pack_sha == before["phase27_pack_sha256"] and pack_bytes_ok,
         {"ledgers": {row["phase"]: row["equal"] for row in freeze["ledgers"]},
          "phase27_pack_before": before["phase27_pack_sha256"],
-         "phase27_pack_after": pack_sha})
+         "phase27_pack_after": pack_sha,
+         "phase27_pack_files_bad": pack_digest.get("phase27_pack_files_bad"),
+         "phase27_pack_files_missing":
+             pack_digest.get("phase27_pack_files_missing")})
     diff = _diff_names(base, "orchestrator/agentic/loop.py")
     add("I7", "_entrypoint_ready() 零改动", not diff, {"diff": diff})
     diff = _diff_names(base, "scripts/phase27/")
@@ -364,12 +419,31 @@ def write_invariants(root: Path) -> dict:
     diff = _diff_names(base, ".", ":!benchmarks", ":!orchestrator/benchmark",
                        ":!scripts/benchmark", ":!tests/benchmark",
                        ":!tests/fixtures/benchmark", ":!CLAUDE.md")
-    add("I9", "新代码只落在白名单路径、提交前缀 phase28", not diff,
-        {"diff": diff})
+    # 评审 W5-09：声明里的「提交前缀 phase28」现在真有机判（正则逐条）。
+    subjects = [line for line in _git("log", "--format=%s",
+                                      f"{base}..HEAD").splitlines()]
+    bad_subjects = [s for s in subjects
+                    if not re.match(r"^(feat|fix|docs|test|chore|refactor)"
+                                    r"\(phase28\): ", s)]
+    add("I9", "新代码只落在白名单路径、提交前缀 phase28",
+        not diff and not bad_subjects,
+        {"diff": diff, "subjects": len(subjects),
+         "bad_subjects": bad_subjects})
+    head = _git("rev-parse", "HEAD")
     origin = _git("rev-parse", "origin/main")
-    add("I10", "不 push、不改写历史（origin/main 锚定）",
-        origin == judge.ORIGIN_MAIN, {"origin_main": origin,
-                                      "expected": judge.ORIGIN_MAIN})
+    # 评审 W5-01（改向不放水）：推送是人工 STOP 门，不是「永不推送」。
+    # 实时 origin/main 只允许是 {Task 0 基线, 本阶段 HEAD} 且为 HEAD 祖先；
+    # 不得删断言、不得豁免环境变量。
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", origin, head],
+        cwd=str(_REPO), capture_output=True, text=True, timeout=120
+    ).returncode == 0
+    anchor_problems = judge.verify_origin_anchor(origin, head,
+                                                 ancestor=ancestor)
+    add("I10", "推送只经人工 STOP 门：origin/main ∈ {基线, HEAD} ∧ 是 HEAD 祖先",
+        not anchor_problems,
+        {"origin_main": origin, "head": head, "baseline": judge.ORIGIN_MAIN,
+         "origin_is_ancestor": ancestor, "problems": anchor_problems})
     pack = root / "evidence_pack"
     try:
         packer._check_clean_target(pack, root)
@@ -413,15 +487,28 @@ def write_environment_closeout(root: Path) -> Path:
     return path
 
 
-def _pytest_ok(nodes: "list[str]") -> "tuple[bool, dict]":
+def _pytest_ok(nodes: "list[str]", root: Path) -> "tuple[bool, dict]":
     """跑指定测试节点（0 付费）；rc 即证据，绝不把「没跑」记成 PASS。"""
     cmd = [MAIN_PYTHON, "-m", "pytest", *nodes, "-q"]
-    proc = subprocess.run(cmd, cwd=str(_REPO), capture_output=True, text=True,
-                          timeout=900)
+    proc = subprocess.run(cmd, cwd=str(_REPO), env=_subprocess_env(root),
+                          capture_output=True, text=True, timeout=900)
     summary = judge.parse_pytest_summary(proc.stdout + proc.stderr) or {}
     return proc.returncode == 0 and int(summary.get("passed", 0)) == len(nodes), {
         "cmd": " ".join(cmd), "rc": proc.returncode,
         "passed": summary.get("passed"), "nodes": nodes}
+
+
+def _repro_identical(run: Path, repro: dict) -> bool:
+    """按同种子重跑件逐字段复算（评审 W5-05 的复算口径，AC-15 用）。"""
+    from orchestrator.benchmark import reference as ref
+
+    try:
+        seed = int(repro["seed"])
+        primary = _json(run / "metrics.json")
+        rerun = _json(run / "raw" / "repro" / f"seed{seed}" / "metrics.json")
+    except (OSError, KeyError, ValueError):
+        return False
+    return bool(ref.compare_metrics_same_seed(primary, rerun)["identical"])
 
 
 def _ac_rows(root: Path) -> "list[dict]":
@@ -442,26 +529,52 @@ def _ac_rows(root: Path) -> "list[dict]":
     paid = _json(root / "closeout" / "paid_calls.json")
     kb = _json(root / "closeout" / "kb_integrity.json")
     cold = _json(root / "closeout" / "cold_run.json")
-    recompute = all((root / "evaluator_results" / run_ids[t] /
-                     "recompute_trace.jsonl").is_file() for t in TASKS)
-    levels_ok = all(sorted(births[t]["levels"])[:1] == ["B0"] and
-                    "B4" in births[t]["levels"] for t in TASKS)
-    signatures = {role: (root / "closeout" / "signs" / f"{role}.json").is_file()
-                  for role in judge.ROLES}
+    # 评审 W5-05：能独立复算的行一律调评测器/机判函数复算，不用自述字段；
+    # 不能复算的行显式标 ``strength="existence"``，读者一眼看出证明力档位。
+    from orchestrator.benchmark import birth as birth_mod
+
+    recompute = {
+        t: ((root / "evaluator_results" / run_ids[t] /
+             "recompute_trace.jsonl").is_file()
+            and sum(1 for line in (root / "evaluator_results" / run_ids[t] /
+                                   "recompute_trace.jsonl").read_text(
+                                       encoding="utf-8").splitlines()
+                    if line.strip()) > 0) for t in TASKS}
+    levels_ok = all(
+        set(births[t]["levels"]) == set(birth_mod.LEVELS)
+        and all(row["status"] in birth_mod.LEVEL_STATUSES
+                for row in births[t]["levels"].values()) for t in TASKS)
+
+    def _problems(fn) -> "list[str]":
+        """复算一个判官检查；缺件/抛错即计为问题（不让整条矩阵崩掉）。"""
+        try:
+            return list(fn(root)[0])
+        except Exception as exc:                       # noqa: BLE001
+            return [f"{type(exc).__name__}: {exc}"]
+
+    paid_problems = _problems(judge.check_paid)
+    kb_problems = _problems(judge.check_kb)
+    ledger_problems = _problems(judge.check_ledgers)
+    cold_problems = _problems(judge.check_cold_run)
+    sign_problems = _problems(judge.check_signs)
+    evidence_problems = _problems(judge.check_evidence)
     pack_manifest = root / "evidence_pack" / "manifest.json"
 
-    def row(ac, name, ok, evidence, note=""):
+    def row(ac, name, ok, evidence, note="", strength="recomputed"):
         return {"ac": ac, "name": name, "result": "PASS" if ok else "FAIL",
-                "evidence": evidence, "note": note}
+                "evidence": evidence, "note": note, "strength": strength}
 
     ok_02, ev_02 = _pytest_ok(
-        ["tests/benchmark/test_task1_task_spec.py::test_ac_p0_1_6_deterministic"])
+        ["tests/benchmark/test_task1_task_spec.py::test_ac_p0_1_6_deterministic"],
+        root)
     ok_03, ev_03 = _pytest_ok([
         "tests/benchmark/test_task1_task_spec.py::test_ac_p0_1_2_unknown_field",
         "tests/benchmark/test_task1_task_spec.py::test_ac_p0_1_3_missing_field",
-        "tests/benchmark/test_task1_task_spec.py::test_ac_p0_1_4_duplicate_id"])
+        "tests/benchmark/test_task1_task_spec.py::test_ac_p0_1_4_duplicate_id"],
+        root)
     ok_05, ev_05 = _pytest_ok(
-        ["tests/benchmark/test_task2_runtime_fingerprint.py::test_ac_p0_2_4_ten_mismatches"])
+        ["tests/benchmark/test_task2_runtime_fingerprint.py::test_ac_p0_2_4_ten_mismatches"],
+        root)
     return [
         row("P0-AC-01", "Task Specification：三任务均可加载",
             len(registry["tasks"]) == 3, "specs/registry_snapshot.json"),
@@ -480,8 +593,9 @@ def _ac_rows(root: Path) -> "list[dict]":
         row("P0-AC-05", "Fingerprint Mismatch：十种差异均能识别",
             ok_05, "tests::test_ac_p0_2_4_ten_mismatches",
             "task7 matrix 现跑该测试；10/10 断言在测试内部"),
-        row("P0-AC-06", "Birth B0–B4：五级验证均有测试",
-            levels_ok, "runs/*/birth/functional_birth.json"),
+        row("P0-AC-06", "Birth B0–B4：五级验证均出现且状态合法",
+            levels_ok, "runs/*/birth/functional_birth.json",
+            "五级集合与 birth.LEVELS 相等，逐级 status ∈ LEVEL_STATUSES"),
         row("P0-AC-07", "MuJoCo Reference：真实仿真通过冻结判据",
             manifests["mujoco_contact_push_v1"]["status"] == "PASS",
             f"runs/{run_ids['mujoco_contact_push_v1']}/run_manifest.json"),
@@ -507,27 +621,120 @@ def _ac_rows(root: Path) -> "list[dict]":
             int(mutation["count"]) == int(mutation["rejected"]) > 0,
             "negative_controls/mutation_results.json"),
         row("P0-AC-13", "Independent Score：不信任 Agent 自报",
-            recompute, "evaluator_results/*/recompute_trace.jsonl"),
+            all(recompute.values()), "evaluator_results/*/recompute_trace.jsonl",
+            "逐任务 trace 非空（评测器真读快照重算）"),
         row("P0-AC-14", "Evidence Manifest：每个产物均有 SHA256",
-            pack_manifest.is_file(), "evidence_pack/manifest.json"),
+            pack_manifest.is_file() and not evidence_problems,
+            "evidence_pack/manifest.json",
+            "逐件 sha/字节/模式/超集差集由 check_evidence 独立复算"),
         row("P0-AC-15", "Reproducibility：同环境同输入同种子可复现",
-            bool(repro["same_seed_identical"]),
-            f"runs/{run_ids['mujoco_contact_push_v1']}/reproducibility.json"),
+            # 评审 W5-05 同款：不采信 reproducibility.json 的自述布尔，按同种子
+            # 重跑件逐字段复算（排除 wall_time_seconds）。
+            bool(repro["same_seed_identical"]) and _repro_identical(
+                root / "runs" / run_ids["mujoco_contact_push_v1"], repro),
+            f"runs/{run_ids['mujoco_contact_push_v1']}/reproducibility.json",
+            "同种子重跑件逐字段复算（排除 wall_time_seconds）"),
         row("P0-AC-16", "Paid Calls：0",
-            paid["verdict"] == "ZERO_PAID"
+            not paid_problems
+            and paid["verdict"] == "ZERO_PAID"
             and int(paid["paid_call_rows_added"]) == 0
             and int(paid["gateway_imports_in_benchmark"]) == 0,
-            "closeout/paid_calls.json"),
+            "closeout/paid_calls.json",
+            "check_paid 现算账本 sha + AST 扫 Gateway 引用"),
         row("P0-AC-17", "KB Integrity：工作树与数据层不变",
-            kb["verdict"] == "UNCHANGED", "closeout/kb_integrity.json"),
+            not kb_problems and kb["verdict"] == "UNCHANGED",
+            "closeout/kb_integrity.json", "check_kb 现读 HEAD/porcelain/四表"),
         row("P0-AC-18", "Historical Ledgers：旧账本 SHA256 不变",
-            freezes["verdict"] == "FROZEN", "closeout/ledger_freeze.json"),
+            not ledger_problems and freezes["verdict"] == "FROZEN",
+            "closeout/ledger_freeze.json", "check_ledgers 逐本现算 sha"),
         row("P0-AC-19", "Core Regression：现有测试全套通过",
-            bool(cold["delta_ok"]), "closeout/cold_run.json + cold_run.raw.log"),
+            not cold_problems and bool(cold["delta_ok"]),
+            "closeout/cold_run.json + cold_run.raw.log",
+            "verify_cold_run 从 raw 日志重解析四数字"),
         row("P0-AC-20", "Independent Review：三个独立角色均 APPROVE",
-            all(signatures.values()), "closeout/signs/",
-            "" if all(signatures.values()) else "三签在矩阵重写后补齐"),
+            not sign_problems, "closeout/signs/",
+            "" if not sign_problems else f"三签问题：{sign_problems[:3]}"),
     ]
+
+
+def _select_run(root: Path, task_id: str) -> Path:
+    """从候选 run 里**按证据**挑出被判对象（评审 W4-11 的取号规则）。
+
+    ``run_id`` 含时间戳，字典序最大者可能是任何后跑的诊断 run——所以不能按
+    目录名挑。这里只认两个可核对的属性：
+    ① ``run_manifest.criteria_lock_sha256`` 等于当前冻结判据锁；
+    ② ``run_manifest.criteria_sha256`` 等于当前判据**整文件** sha；
+    ③ ``run_manifest.repository_sha`` 等于当前 HEAD。
+
+    三条同时成立才算是「本次被判对象」：AC-T6-1 本来就要求 run 清单的整文件
+    判据 sha 与当下规格逐字相等，取号规则不能比它松（否则会先钉死一个注
+    定失败的 run，再在 Task 6 变红）。判据文件在 run 之后再被
+    ``lock-criteria`` 重登记（``locked_at``/``evaluator_files`` 属 LOCK 白名
+    单外，内容未变）也会让整文件 sha 变——那不是「同一判据」，如实要求重跑。
+
+    恰好一个候选三条全满足才接受；零个则退化为「总候选恰好一个」；其余一律
+    抛错并点名，交由人显式指定——绝不猜。
+    """
+    runs = sorted(p for p in (root / "runs").glob(f"{task_id}-*") if p.is_dir())
+    if not runs:
+        raise RuntimeError(f"{task_id}: runs/ 下没有任何候选")
+    from orchestrator.benchmark import registry
+
+    spec = registry.BenchmarkRegistry().get(task_id)
+    head = _git("rev-parse", "HEAD")
+    matched = []
+    for run in runs:
+        manifest_path = run / "run_manifest.json"
+        if not manifest_path.is_file():
+            continue
+        manifest = _json(manifest_path)
+        if (manifest.get("criteria_lock_sha256") == spec.criteria_lock_sha256
+                and manifest.get("criteria_sha256") == spec.criteria_sha256
+                and manifest.get("repository_sha") == head):
+            matched.append(run)
+    if len(matched) == 1:
+        return matched[0]
+    if not matched and len(runs) == 1:
+        return runs[0]
+    raise RuntimeError(
+        f"{task_id}: {len(runs)} 个候选里同时满足「判据锁 = 当前 "
+        f"{spec.criteria_lock_sha256[:12]}… ∧ 判据整文件 sha = 当前 "
+        f"{spec.criteria_sha256[:12]}… ∧ repository_sha = HEAD={head}」"
+        f"的有 {len(matched)} 个（{[r.name for r in matched]}），无法唯一确定"
+        f"被判对象；判据/代码若已变更请按计划重跑参考运行，或显式指定")
+
+
+def write_run_identity(root: Path, runs: "dict[str, str] | None" = None) -> dict:
+    """钉死被判 run 的身份（评审 W4-11）：判官/矩阵/报告统一读这一份。
+
+    run_id 含 UTC 时间戳，任何后跑的诊断 run 都会成为字典序最大者；把当前
+    三任务 run 写进 ``closeout/run_identity.json`` 后，``_latest_run`` 只认
+    登记值，诊断 run 不再漂移被判对象。``runs`` 显式给出时用它（人裁定的
+    取号优先），否则按 :func:`_select_run` 的证据规则选取。
+    """
+    chosen = ({task: runs[task] for task in TASKS} if runs
+              else {task: _select_run(root, task).name for task in TASKS})
+    for task, run_id in chosen.items():
+        if not (root / "runs" / run_id).is_dir():
+            raise RuntimeError(f"{task}: 指定的 run 不在场：{run_id}")
+    # 审计面：把被判 run 自述的判据锁/整文件 sha/repository_sha 一并登记，
+    # 这样「取号锚是 lock、整文件 sha 可能因重登记时间戳而不同」这件事在建
+    # 档时就可见可核，而不是留给下一个人去猜（W4-11 的可核对性要求）。
+    audit = {}
+    for task, run_id in chosen.items():
+        manifest = _json(root / "runs" / run_id / "run_manifest.json")
+        audit[task] = {
+            "criteria_lock_sha256": manifest.get("criteria_lock_sha256"),
+            "criteria_sha256": manifest.get("criteria_sha256"),
+            "repository_sha": manifest.get("repository_sha"),
+            "status": manifest.get("status"),
+        }
+    doc = {"schema": "simpraxis.benchmark.run_identity.v1",
+           "generated_at": _now(),
+           "runs": chosen,
+           "audit": audit}
+    _write_json(root / "closeout" / "run_identity.json", doc)
+    return doc
 
 
 def write_acceptance_matrix(root: Path) -> dict:
@@ -560,6 +767,7 @@ def write_acceptance_matrix(root: Path) -> dict:
 
 
 def cmd_matrix(root: Path) -> dict:
+    write_run_identity(root)          # 先钉 run 身份，后续全部读它
     write_ledger_freeze(root)
     write_paid_calls(root)
     write_kb_integrity(root)
@@ -611,6 +819,13 @@ def main(argv: "list[str] | None" = None) -> int:
         out = cmd_judge(root, args.require_acceptance)
     print(json.dumps(out, ensure_ascii=False, indent=1, sort_keys=True,
                      default=str))
+    # 评审 W4-06：rc 必须反映判决/矩阵结果，CI 才能据此失败。
+    if args.cmd == "judge":
+        return 0 if out.get("verdict") == "Established" else 1
+    if args.cmd == "matrix":
+        return 0 if int((out.get("summary") or {}).get("failed", 1)) == 0 else 1
+    if args.cmd == "cold-run":
+        return 0 if out.get("delta_ok") is True else 1
     return 0
 
 

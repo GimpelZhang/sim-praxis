@@ -47,6 +47,14 @@ FORBIDDEN_PHRASES = (
     "证明 Agent 具备",
 )
 
+#: AC-T7-9：结论二值（评审 W5-20：把这一对常量落到实现里，测试断言它）
+VERDICTS = ("Established", "Not Established")
+
+
+def verdict_for(problems: "list[str] | tuple[str, ...]") -> str:
+    """结论唯一产生点：有问题即 ``Not Established``，否则 ``Established``。"""
+    return VERDICTS[0] if not problems else VERDICTS[1]
+
 
 class ReportError(RuntimeError):
     """证据不足以渲染报告（缺件即 fail-closed，不拿空值凑数）。"""
@@ -69,11 +77,11 @@ def _json(path: Path) -> Any:
 
 
 def _latest_run(root: Path, task_id: str) -> Path:
-    runs = sorted(p for p in (Path(root) / "runs").glob(f"{task_id}-*")
-                  if p.is_dir())
-    if not runs:
-        raise ReportError(f"{task_id}: 没有参考运行产物（缺 runs/{task_id}-*）")
-    return runs[-1]
+    """与机判共用同一身份解析（评审 W4-11）。"""
+    try:
+        return paths.pinned_run(root, task_id)
+    except paths.BenchmarkPathError as exc:
+        raise ReportError(f"{task_id}: 没有可判的参考运行产物：{exc}") from exc
 
 
 def _rel(path: Path, root: Path) -> str:
@@ -113,9 +121,12 @@ def task_scores(root: "Path | None" = None, *, now: "datetime | None" = None) ->
                            for name, dim in sorted(evaluation["dimensions"].items())},
             "hard_gates": list(evaluation["hard_gates"]),
             "birth_status": birth["birth_status"],
+            # 评审 W4-13：侧车是 sha256sum 文本（`<sha>  <file>`），不是 JSON；
+            # 旧回退按 JSON 解析必抛，属死路。
             "runtime_fingerprint_sha256": str(
                 fingerprint.get("fingerprint_sha256")
-                or _json(run / "runtime_fingerprint.sha256")["sha256"]),
+                or (run / "runtime_fingerprint.sha256").read_text(
+                    encoding="utf-8").split()[0]),
             "run_dir": _rel(run, root),
         })
     return {"schema": TASK_SCORES_SCHEMA, "generated_at": _now(now),
@@ -339,7 +350,7 @@ def summary(root: "Path | None" = None, *, cold_run: "Mapping | None" = None,
         problems.append("stage_models.yaml 与 Task 0 快照不符")
     if not cold.get("delta_ok"):
         problems.append("冷跑精确增量不成立")
-    verdict = "Established" if not problems else "Not Established"
+    verdict = verdict_for(problems)
     return {
         "schema": SUMMARY_SCHEMA,
         "generated_at": _now(now),
@@ -396,10 +407,25 @@ def _eight_answers(summary_doc: Mapping, scores: Mapping, cold: Mapping,
                if row["status"] in ("BLOCKED_INFRA", "INCOMPLETE_EVIDENCE")]
     pass_tasks = [f"`{row['task_id']}`" for row in rows
                   if row["status"] == "PASS" and row["evaluation_status"] == "PASS"]
+    # 评审 W4-14：首问必须随 blocked/FAIL 行变化，不得恒定「是——」。
+    complete_ok = (not blocked and len(pass_tasks) == len(rows)
+                   and len(rows) == 3)
+    if complete_ok:
+        answer_1 = (f"是——三任务规格/判据/运行时身份/参考运行/独立评测/"
+                    f"证据齐备（{len(pass_tasks)}/{len(rows)} 有 PASS 参考）。")
+    else:
+        reasons = []
+        if blocked:
+            reasons.append(f"阻塞/证据不全：{'、'.join(blocked)}")
+        missing = [f"`{row['task_id']}`" for row in rows
+                   if row["task_id"] not in
+                   {p.strip('`') for p in pass_tasks}]
+        if missing:
+            reasons.append(f"无 PASS 参考：{'、'.join(missing)}")
+        answer_1 = "否——" + "；".join(reasons) + \
+                   f"（{len(pass_tasks)}/{len(rows)} 有 PASS 参考）。"
     answers = [
-        ("1. Benchmark 是否完整？",
-         f"是——三任务规格/判据/运行时身份/参考运行/独立评测/证据齐备"
-         f"（{len(rows)}/3 有 PASS 参考）。"),
+        ("1. Benchmark 是否完整？", answer_1),
         ("2. Evaluator 是否可信（负例/变异全拒）？",
          f"`{summary_doc['evaluator']['verdict']}`（golden "
          f"{summary_doc['evaluator']['golden_cases']} 例、负例 "

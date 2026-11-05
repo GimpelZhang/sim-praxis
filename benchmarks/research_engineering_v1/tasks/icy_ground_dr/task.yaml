@@ -44,7 +44,7 @@ outputs:
 evaluation:
   evaluator_id: icy_ground_dr_v1
   evaluator_version: 1
-  criteria_lock_sha256: "2321a27365724c5ea9fc7baff641e80c441604ce1ed0e0f84b52e9d1e57a7240"
+  criteria_lock_sha256: "bb8334fcf39370bf056f4dc40c08b259b6f92a53acd4dae41d38a50bf08cad4b"
 budget:
   model_calls: 0
   wall_time_seconds: 120

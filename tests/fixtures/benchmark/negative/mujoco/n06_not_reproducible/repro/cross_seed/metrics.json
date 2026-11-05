@@ -1,0 +1,11 @@
+{
+  "_provenance": {
+    "case_id": "m1_n06_not_reproducible",
+    "note": "由 telemetry 重算的 metrics（合成）",
+    "synthetic_fixture": true
+  },
+  "contact_force_peak_n": 1.03551,
+  "endpoint_distance_m": 0.013380195,
+  "max_penetration_m": 0.0004,
+  "steps": 600
+}

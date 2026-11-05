@@ -23,6 +23,7 @@ import pytest
 
 from orchestrator.benchmark import evaluator as ev
 from orchestrator.benchmark import result_schema as rs
+from orchestrator.benchmark import runtime_fingerprint as rf
 from orchestrator.benchmark import scoring
 from orchestrator.benchmark import task_spec as ts
 from orchestrator.benchmark.registry import BenchmarkRegistry
@@ -88,8 +89,9 @@ def _manifest(spec: ts.TaskSpec, files: "dict[str, object]", *,
         "seed": 0,
         "candidate_artifact_sha256": rs.candidate_digest(
             _digest_map(files, spec.outputs)),
-        "birth_result_sha256": hashlib.sha256(
-            _encode(files.get("birth/functional_birth.json", b""))).hexdigest(),
+        "birth_result_sha256": (
+            hashlib.sha256(_encode(files["birth/functional_birth.json"])).hexdigest()
+            if "birth/functional_birth.json" in files else None),
         "evaluator_version": ev.EVALUATOR_VERSION,
         "status": "PASS",
         "paid_model_calls": 0,
@@ -99,37 +101,90 @@ def _manifest(spec: ts.TaskSpec, files: "dict[str, object]", *,
     return doc
 
 
-def _host_fingerprint(spec: ts.TaskSpec, packages: dict) -> dict:
-    return {
+def _fingerprint(spec: ts.TaskSpec, *, backend: str, packages: dict,
+                 simulator: "dict | None") -> dict:
+    """合成一份**过 schema** 的运行指纹（评审 W3-02 起评测器会逐份校验）。
+
+    形状与 ``runtime_fingerprint.v1.schema.json`` 的 required 一一对应；自哈希
+    用与生产同一函数 ``rf.fingerprint_sha256`` 计算，不走捷径。
+    """
+    is_host = backend == "host"
+    digest = spec.runtime["image_digest"]
+    doc = {
         "schema": "simpraxis.runtime_fingerprint.v1",
-        "repository": {}, "config": {}, "mount": {"entries": []},
-        "container": {"kind": "host", "backend": "host",
-                      "image_digest": None, "image_id": None,
-                      "container_id": None, "container_python": None},
-        "python": {"executable": spec.runtime["python"],
-                   "version": "3.10.12", "workdir": str(_REPO),
-                   "packages": dict(packages)},
-        "simulator": {},
+        "captured_in": "host" if is_host else "container",
+        "task_id": spec.task_id,
+        "runtime_id": spec.runtime["runtime_id"],
+        "repository": {
+            "engine_head": "1" * 40, "engine_dirty": False,
+            "kb_head": None, "kb_dirty": None,
+            "benchmark_version": spec.version, "task_version": spec.version,
+            "task_spec_sha256": spec.task_file_sha256,
+            "criteria_sha256": spec.criteria_sha256,
+            "assets_manifest_sha256": None,
+            "skills_manifest_sha256": None,
+        },
+        "container": {
+            "backend": backend,
+            "image_name": None if is_host else "libero_isolated",
+            "image_digest": digest, "image_id": digest,
+            "container_id": None,
+            "container_python": None if is_host else spec.runtime["python"],
+            "uid": 1000, "gid": 1000, "kernel": "6.8.0-test",
+            "gpu_visible": False,
+            "cuda_runtime": None,
+            "egl_available": None if is_host else True,
+        },
+        "python": {
+            "executable": spec.runtime["python"], "version": "3.10.12",
+            "implementation": "CPython", "sys_path": [],
+            "workdir": str(_REPO), "packages": dict(packages), "argv": [],
+        },
+        "mount": {"entries": []},
+        "config": {"env_passthrough": [], "env": {}, "network_mode": "disabled",
+                   "timeout_s": 600, "cpu_limit": None, "memory_limit": None,
+                   "gpu": {"name": None, "total_mib": None}},
+        "simulator": simulator,
     }
+    doc["fingerprint_sha256"] = rf.fingerprint_sha256(doc)
+    return doc
+
+
+def _mujoco_simulator(spec: ts.TaskSpec) -> dict:
+    return {
+        "name": "mujoco",
+        "version": str(spec.runtime["packages"]["mujoco"]),
+        "api_identity": "mujoco.MjModel",
+        "observation_contract": {"keys": ["cube_pos", "target_pos"],
+                                 "dtype": "float64", "shape": [6]},
+        "action_contract": {"space": "Box", "dim": 3,
+                            "low": [-1, -1, -1], "high": [1, 1, 1]},
+        "scene_identity": "synthetic_push_v1",
+    }
+
+
+def _host_fingerprint(spec: ts.TaskSpec, packages: dict) -> dict:
+    simulator = None if spec.task_id == "icy_ground_dr_v1" \
+        else _mujoco_simulator(spec)
+    return _fingerprint(spec, backend="host", packages=packages,
+                        simulator=simulator)
 
 
 def _container_fingerprint(spec: ts.TaskSpec) -> dict:
-    return {
-        "schema": "simpraxis.runtime_fingerprint.v1",
-        "repository": {}, "config": {}, "mount": {"entries": []},
-        "container": {"kind": "docker", "backend": "docker",
-                      "image_digest": spec.runtime["image_digest"],
-                      "image_id": spec.runtime["image_digest"],
-                      "container_id": None,
-                      "container_python": spec.runtime["python"]},
-        "python": {"executable": spec.runtime["python"],
-                   "version": "3.10.12", "workdir": "/workspace",
-                   "packages": {name: str(value) for name, value
-                                in spec.runtime["packages"].items()}},
-        "simulator": {},
-        "action_contract": {"action_dim": 7},
-        "observation_contract": {"keys": ["obs", "state"]},
-    }
+    return _fingerprint(
+        spec, backend="docker",
+        packages={name: str(value) for name, value
+                  in spec.runtime["packages"].items()},
+        simulator={
+            "name": "robosuite",
+            "version": str(spec.runtime["packages"]["robosuite"]),
+            "api_identity": "robosuite.make",
+            "observation_contract": {"keys": ["obs", "state"],
+                                     "dtype": "float64", "shape": [2]},
+            "action_contract": {"space": "Box", "dim": 7,
+                                "low": [-1] * 7, "high": [1] * 7},
+            "scene_identity": "KITCHEN_SCENE",
+        })
 
 
 def _mujoco_files(*, steps: "int | None" = None, endpoint_ratio: float = 0.9,
@@ -164,31 +219,51 @@ def _mujoco_files(*, steps: "int | None" = None, endpoint_ratio: float = 0.9,
             "max_penetration": pen,
             "contact_force_norm": force,
         })
-    recommitted = scoring.mujoco_facts({"telemetry.jsonl": telemetry})["recomputed"]
+    recommitted = scoring.mujoco_facts({"telemetry.jsonl": telemetry},
+                                       spec.criteria)["recomputed"]
     metrics = dict(recommitted)
     if metrics_endpoint is not None:
         metrics["endpoint_distance_m"] = metrics_endpoint
+
+    #: 评审 W3-10：复现结论必须能由两次运行各自的原始件重算。这里按判据
+    #: 造出同种子重跑（逐字段相同，或按 ``same_seed`` 扰动一行末位）与换种子
+    #: 运行（端点整体平移 ``tol * cross_delta_ratio``）。
+    delta = tol * cross_delta_ratio
+    same_rows = [dict(row) for row in telemetry]
+    if not same_seed:
+        same_rows[0]["cube_pos"] = [same_rows[0]["cube_pos"][0] + 1e-9,
+                                    *same_rows[0]["cube_pos"][1:]]
+    cross_rows = [dict(row, cube_pos=[row["cube_pos"][0] + delta,
+                                      *row["cube_pos"][1:]])
+                  for row in telemetry]
+    cross_metrics = dict(recommitted)
+    cross_metrics["endpoint_distance_m"] = round(
+        float(recommitted["endpoint_distance_m"]) + delta, 9)
+
+    def _lines(rows) -> str:
+        return "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
 
     files: "dict[str, object]" = {
         "solution.py": "def build_scene():\n    return {}\n",
         "scene_spec.json": {"scene": "push", "block_half_size_m": 0.025},
         "metrics.json": metrics,
-        "telemetry.jsonl": [json.dumps(row, sort_keys=True) + "\n"
-                            for row in telemetry],
+        "telemetry.jsonl": _lines(telemetry),
         "runtime_fingerprint.json": _host_fingerprint(
             spec, fingerprint_packages
             or {name: str(value) for name, value
                 in spec.runtime["packages"].items()}),
         "reproducibility.json": {
             "same_seed_identical": same_seed,
-            "cross_seed_max_delta_m": tol * cross_delta_ratio,
+            "cross_seed_max_delta_m": delta,
         },
         "hidden_access_audit.json": {"read": list(hidden_reads or []),
                                      "written": [], "modified": []},
+        "repro/same_seed/metrics.json": dict(recommitted),
+        "repro/same_seed/telemetry.jsonl": _lines(same_rows),
+        "repro/cross_seed/metrics.json": cross_metrics,
+        "repro/cross_seed/telemetry.jsonl": _lines(cross_rows),
     }
-    # telemetry.jsonl 以原始文本落盘（逐行 JSON）
-    files["telemetry.jsonl"] = "".join(files["telemetry.jsonl"])
-    (files["metrics.json"]["steps"]) = int(files["metrics.json"]["steps"])
+    files["metrics.json"]["steps"] = int(files["metrics.json"]["steps"])
     return files
 
 
@@ -267,11 +342,26 @@ def _libero_bundle(run_dir: Path, *, run_id: str = "l1-golden",
 # -- R1 ---------------------------------------------------------------------
 
 _R1_PLAN = """\
-research_problem: 冰面域随机化对推箱策略鲁棒性的影响（仅设计，不执行训练）
+research_problem:
+  question: 冰面域随机化对推箱策略鲁棒性的影响（仅设计，不执行训练）
+  motivation: 历史 Q1 给出负结论，本计划只检验随机化设计是否可机检
+  prior_evidence: Phase 1 Q1（ice/normal=0.824<2.0）作为先验证据引用
+  rl_constraints_unchanged: true
 parameter_definitions:
-  - {name: friction, unit: "1", range: [0.05, 0.95]}
+  - {name: friction, unit: "1", range: [0.05, 0.95],
+     rationale: 冰面/干面摩擦实测区间，覆盖滑与涩两端}
+  - {name: contact_stiffness, unit: N/m, range: [500, 5000],
+     rationale: 低温硬化使接触刚度跨一个数量级}
+  - {name: joint_damping, unit: N*m*s/rad, range: [0.1, 2.0],
+     rationale: 常见机器人关节阻尼参数带}
 probability_distributions:
-  friction: {family: uniform, low: 0.05, high: 0.95}
+  friction: {family: uniform, low: 0.05, high: 0.95, support: [0.05, 0.95],
+             rationale: 摩擦无先验方向，均匀分布取最大熵}
+  contact_stiffness: {family: log-uniform, low: 500, high: 5000,
+                      support: [500, 5000],
+                      rationale: 刚度跨一个数量级，对数均匀避免样本挤在上界}
+  joint_damping: {family: uniform, low: 0.1, high: 2.0, support: [0.1, 2.0],
+                  rationale: 阻尼在区间内近似线性可调}
 parameter_correlations:
   - {pair: [friction, contact_stiffness], rationale: 冰面湿滑与接触刚度同源物理耦合}
 randomization_method: 每次 episode 开始时按类别独立采样
@@ -477,9 +567,67 @@ def test_ac_p0_4_2_hard_gates(tmp_path: Path, case):
 
 
 # --------------------------------------------------------------------------
-# AC-T4-3 伪造 metrics → FAIL，且重算值与伪造值不同
+# W3-12 阈值边界：等号必须判过，越界一丁点必须判负
 # --------------------------------------------------------------------------
 
+def test_w3_12_threshold_boundaries(tmp_path: Path):
+    """评审 W3-12：把 ``<=`` 钉死。
+
+    早先没有「恰好等于阈值」的用例：把 ``endpoint_distance_m <= d_max`` 写成
+    ``<``、或把 HG-M1-3 的 ``>`` 写成 ``>=``，测试仍会全绿。这里四类阈值同时
+    取等号（端距 / 穿模 / 接触力下界 / 步数下界）必须满分通过，随后每一类各
+    越界一丁点必须判负——gt/le 的语义由行为钉住，不靠读代码。
+    """
+    spec = _spec("mujoco_contact_push_v1")
+    pen_max = _threshold(spec, "max_penetration_m")
+    steps_min = int(_threshold(spec, "steps_min"))
+
+    # (a) 恰好等于阈值 → PASS，四维全 1.0，HG-M1-3 不触发。
+    #     端距阈值是 10 位小数（0.0146446609），重算值按 9 位四舍五入后**无法**
+    #     精确等于它，所以端距取「刚好在阈值内侧」（ratio<1）；穿模（0.001）与
+    #     接触力下界（0.2943）在 9 位上可精确命中，用来钉住``<=`` 的等号行为。
+    at_run = _mujoco_bundle(tmp_path / "at", endpoint_ratio=0.999999,
+                            penetration_ratio=1.0, force_ratio=0.0,
+                            steps=steps_min)
+    at_out = tmp_path / "at_eval"
+    at = _evaluate("mujoco_contact_push_v1", at_run, at_out)
+    assert at["status"] == "PASS", at
+    assert "HG-M1-3" not in at["hard_gate_ids"], at["hard_gate_ids"]
+    at_doc = _load_result(at_out)
+    for name, dim in at_doc["dimensions"].items():
+        assert dim["score"] == pytest.approx(1.0), (name, dim)
+
+    # (b) 穿模越过上限一点点（0.001 → 0.001000001）→ HG-M1-3 触发、判负
+    over_run = _mujoco_bundle(tmp_path / "over", endpoint_ratio=0.999999,
+                              penetration_ratio=1.0 + 1e-6,
+                              force_ratio=0.0, steps=steps_min)
+    over = _evaluate("mujoco_contact_push_v1", over_run, tmp_path / "over_eval")
+    assert over["status"] == "FAIL", over
+    assert "HG-M1-3" in over["hard_gate_ids"], over["hard_gate_ids"]
+    over_doc = _load_result(tmp_path / "over_eval")
+    assert over_doc["dimensions"]["physics_validity"]["score"] < 1.0
+    hit = [g for g in over_doc["hard_gates"] if g["id"] == "HG-M1-3"]
+    assert hit and "vs 上限" in hit[0]["detail"], over_doc["hard_gates"]
+
+    # (c) 端距越过上限一点点 → 功能维度失分、整体不得 PASS
+    far_run = _mujoco_bundle(tmp_path / "far", endpoint_ratio=1.0 + 1e-4,
+                             penetration_ratio=1.0, force_ratio=0.0,
+                             steps=steps_min)
+    far = _evaluate("mujoco_contact_push_v1", far_run, tmp_path / "far_eval")
+    assert far["status"] != "PASS", far
+
+    # (d) 步数少一步（steps_min-1）→ 功能维度失分、整体不得 PASS
+    short_run = _mujoco_bundle(tmp_path / "short", endpoint_ratio=0.999999,
+                               penetration_ratio=1.0, force_ratio=0.0,
+                               steps=steps_min - 1)
+    short = _evaluate("mujoco_contact_push_v1", short_run,
+                      tmp_path / "short_eval")
+    assert short["status"] != "PASS", short
+
+
+# --------------------------------------------------------------------------
+# AC-T4-3 伪造 metrics → FAIL，且重算值与伪造值不同
+# --------------------------------------------------------------------------
 def test_ac_p0_4_3_forged_metrics(tmp_path: Path):
     spec = _spec("mujoco_contact_push_v1")
     forged = _threshold(spec, "endpoint_distance_m") * 0.001
@@ -493,7 +641,7 @@ def test_ac_p0_4_3_forged_metrics(tmp_path: Path):
             (run_dir / "telemetry.jsonl").read_text(encoding="utf-8").splitlines()],
         "metrics.json": json.loads((run_dir / "metrics.json").read_text(
             encoding="utf-8")),
-    })
+    }, spec.criteria)
     assert facts["metrics_consistent"] is False
     assert facts["recomputed"]["endpoint_distance_m"] != forged
     assert facts["metrics_mismatches"], facts
@@ -752,6 +900,123 @@ def test_snapshot_manifest_and_sha_are_consistent(tmp_path: Path):
     doc = json.loads(path.read_text(encoding="utf-8"))
     assert "run_manifest.json" not in doc["digest_set"]
     assert doc["digest_ok"] is True
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-02：输入件必须按冻结 schema 校验（删段即豁免硬门的漏洞）
+# --------------------------------------------------------------------------
+
+def _rewrite_json(path: Path, mutate) -> None:
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    mutate(doc)
+    path.write_bytes(_encode(doc))
+
+
+def _rebind_manifest(run_dir: Path) -> None:
+    """改写指纹后重绑 run_manifest 的摘要，让失败只可能来自 schema 本身。
+
+    不重绑的话 HG-EVAL-6 会因聚合/绑定不符先红，测不出「schema 有没有被校验」。
+    """
+    path = run_dir / "run_manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["runtime_fingerprint_sha256"] = hashlib.sha256(
+        (run_dir / "runtime_fingerprint.json").read_bytes()).hexdigest()
+    path.write_bytes(_encode(manifest))
+
+
+def _gate_detail(out_dir: Path, gate: str) -> str:
+    doc = _load_result(out_dir)
+    hits = [item["detail"] for item in doc["hard_gates"] if item["id"] == gate]
+    assert hits, doc["hard_gates"]
+    return hits[0]
+
+
+def test_w3_02_input_schema_violations_are_invalid_artifact(tmp_path: Path):
+    """删除必填段 / 类型不对 / 缺 paid_model_calls 一律 HG-EVAL-6。"""
+    # (a) runtime_fingerprint 缺 simulator 段（M1 必须有模拟器身份）
+    run_a = _mujoco_bundle(tmp_path / "a")
+    _rewrite_json(run_a / "runtime_fingerprint.json",
+                  lambda doc: doc.pop("simulator"))
+    _rebind_manifest(run_a)
+    out_a = tmp_path / "a_eval"
+    written_a = _evaluate("mujoco_contact_push_v1", run_a, out_a)
+    assert written_a["status"] == "INVALID_ARTIFACT", written_a
+    assert "HG-EVAL-6" in written_a["hard_gate_ids"], written_a
+    assert "不合 runtime_fingerprint.v1.schema.json" in _gate_detail(
+        out_a, "HG-EVAL-6")
+
+    # (b) action_contract.dim 写成字符串（schema 要求 integer）
+    run_b = _mujoco_bundle(tmp_path / "b")
+    _rewrite_json(
+        run_b / "runtime_fingerprint.json",
+        lambda doc: doc["simulator"]["action_contract"].__setitem__("dim", "7"))
+    _rebind_manifest(run_b)
+    out_b = tmp_path / "b_eval"
+    written_b = _evaluate("mujoco_contact_push_v1", run_b, out_b)
+    assert written_b["status"] == "INVALID_ARTIFACT", written_b
+    assert "不合 runtime_fingerprint.v1.schema.json" in _gate_detail(
+        out_b, "HG-EVAL-6")
+
+    # (c) run_manifest 省略 paid_model_calls（「0 付费」不得靠省略字段豁免）
+    run_c = _mujoco_bundle(tmp_path / "c")
+    _rewrite_json(run_c / "run_manifest.json",
+                  lambda doc: doc.pop("paid_model_calls"))
+    out_c = tmp_path / "c_eval"
+    written_c = _evaluate("mujoco_contact_push_v1", run_c, out_c)
+    assert written_c["status"] == "INVALID_ARTIFACT", written_c
+    detail_c = _gate_detail(out_c, "HG-EVAL-6")
+    assert "paid_model_calls" in detail_c, detail_c
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-01：私有根路径按分段归一化判定（拼写变体不得溜过）
+# --------------------------------------------------------------------------
+
+def test_w3_01_hidden_path_normalization(tmp_path: Path):
+    traversal = [
+        "./private/hidden/x.json",
+        "x/../../private/hidden/y.json",
+        "/mnt/artifacts/simpraxis/benchmark/roadmap_phase0/private/hidden/z.json",
+        "private\\hidden\\w.json",
+    ]
+    for raw in traversal:
+        assert ev.private_hit(raw), raw
+    for benign in ("private/other/x.json", "hidden/x.json", "privatex/hidden/x"):
+        assert not ev.private_hit(benign), benign
+
+    run_dir = _mujoco_bundle(tmp_path / "run", hidden_reads=traversal)
+    out_dir = tmp_path / "eval"
+    written = _evaluate("mujoco_contact_push_v1", run_dir, out_dir)
+    assert written["status"] == "FAIL", written
+    assert "HG-EVAL-2" in written["hard_gate_ids"], written
+    detail = _gate_detail(out_dir, "HG-EVAL-2")
+    for needle in ("x.json", "y.json", "z.json", "w.json"):
+        assert needle in detail, (needle, detail)
+
+    # 同一份产物、只把审计件换成非私有路径 → 不误伤，仍 PASS
+    clean = _mujoco_bundle(tmp_path / "clean",
+                           hidden_reads=["private/other/x.json",
+                                         "hidden/x.json"])
+    assert _evaluate("mujoco_contact_push_v1", clean,
+                     tmp_path / "clean_eval")["status"] == "PASS"
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-08：禁语判定必须识别否定语境（收窄误杀，不放宽判据）
+# --------------------------------------------------------------------------
+
+def test_w3_08_negation_aware_forbidden_claims():
+    # 明确否定 → 不算肯定式违规
+    assert scoring.affirmative_claims("本方案不声称零样本成功") == []
+    assert scoring.affirmative_claims("不能仅扩大分布就宣称鲁棒") == []
+    assert scoring.affirmative_claims("我们没有实现已翻案") == []
+    # 肯定句照旧命中（不是把判据放水）
+    assert scoring.affirmative_claims("我们实现了零样本成功") == ["零样本成功"]
+    assert scoring.affirmative_claims("本工作已翻案") == ["已翻案"]
+    # 否定标记只在同一分句、且位于禁语之前才生效
+    assert scoring.affirmative_claims("不。已翻案") == ["已翻案"]
+    assert scoring.affirmative_claims("这不是空话，已经零样本成功") == [
+        "零样本成功"]
 
 
 def test_evaluator_files_format_roundtrip():

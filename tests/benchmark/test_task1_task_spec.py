@@ -26,16 +26,19 @@ _TASKS = Path(__file__).resolve().parents[2] / "benchmarks" / "research_engineer
 _FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "benchmark" / "tasks"
 
 #: LOCK 冻结值（Task 1 由 `cli lock-criteria` 生成；STOP-H 之后不得漂移）
+#: 2026-11-05 评审 W3-06/W3-14 修复后重新 LOCK（判据新增
+#: ``metrics_abs_tol`` 与结构常量 ``ablation_min_groups``，evaluator_files 同步
+#: 重登记）。冻结值只随「判据内容真的变了」而变，不允许为过测试反向修改。
 _LOCKED = {
     "mujoco_contact_push_v1":
-        "2d3a4413754324fc599e73ec21634f551bb5612154e1ed72a577ece856e4f045",
+        "a9abf30e7ec2ba7aef31dd8efd0c741107358f3fc96bdffd3771f46bbc96f7d9",
     "libero_env_adapter_v1":
         "fc0f0eb8d9599894f09b026dd16f09d9d913ab48c56e56b3b9afddc8cfabb740",
     "icy_ground_dr_v1":
-        "2321a27365724c5ea9fc7baff641e80c441604ce1ed0e0f84b52e9d1e57a7240",
+        "bb8334fcf39370bf056f4dc40c08b259b6f92a53acd4dae41d38a50bf08cad4b",
 }
 _LOCKED_AGGREGATE = (
-    "1c4b7b671bce7de17fbdd54507cf543135975b6e05ba243a8900b48579fd3acf")
+    "59e78c131f660eb4aaf9a43e870240fedc06adb2595b7f8df5dfd9734de7c302")
 
 #: M1 的七个物理阈值（Plan 只给推导，数值由 Task 1 生成并冻结）
 _M1_THRESHOLDS = (
@@ -46,6 +49,7 @@ _M1_THRESHOLDS = (
     "steps_min",
     "steps_max",
     "repro_abs_tol",
+    "metrics_abs_tol",
 )
 
 
@@ -220,6 +224,11 @@ def test_ac_p0_1_5_sha_changes(tmp_path: Path):
         ("hard_gates", lambda d: d["hard_gates"].pop()),
         ("derivation", lambda d: d.update(derivation=d["derivation"] + "（篡改）")),
         ("thresholds", lambda d: d["thresholds"].popitem()),
+        #: 评审 W1-11：删键当然会改哈希，证明不了「阈值**值**被改会变锁」。
+        #: 这里逐值改（0.001 → 0.002），键集不变。
+        ("thresholds_value",
+         lambda d: d["thresholds"]["max_penetration_m"].__setitem__(
+             "value", d["thresholds"]["max_penetration_m"]["value"] * 2)),
     ):
         root_x = _copy_root(tmp_path / key)
         path_x = root_x / "criteria" / "mujoco_contact_push_v1.criteria.json"
@@ -298,16 +307,22 @@ def test_ac_p0_1_7_no_dynamic_code_in_source():
 def test_thresholds_are_derived_not_invented():
     specs = registry.BenchmarkRegistry().load_all()
     m1 = specs["mujoco_contact_push_v1"]
-    assert tuple(m1.thresholds) == _M1_THRESHOLDS
+    # 断言的是「哪些阈值存在」，不是 JSON 键序（判据文件按 sort_keys 落盘，
+    # 键序属序列化细节，钉序会让一次无内容的排序变化变成假红）。
+    assert set(m1.thresholds) == set(_M1_THRESHOLDS)
     for key, item in m1.thresholds.items():
         assert isinstance(item["value"], (int, float))
         assert not isinstance(item["value"], bool)
         assert item["unit"].strip(), key
         # 推导必须长到能看出算式来源，不是一句「按经验」
         assert len(item["derivation"].strip()) >= 40, (key, item["derivation"])
-    # L1/R1 是结构性判定：契约常量精确相等，不留数值容差
+    # L1 是纯契约判定：无阈值；R1 只承载 rubric 冻结的**结构常量**
+    # （评审 W3-06：Ablation ≥ 3 组从散文落成判据），不是物理阈值。
     assert dict(specs["libero_env_adapter_v1"].thresholds) == {}
-    assert dict(specs["icy_ground_dr_v1"].thresholds) == {}
+    r1_thresholds = dict(specs["icy_ground_dr_v1"].thresholds)
+    assert set(r1_thresholds) == {"ablation_min_groups"}
+    assert r1_thresholds["ablation_min_groups"]["value"] == 3
+    assert r1_thresholds["ablation_min_groups"]["unit"] == "group"
 
     for tid, spec in specs.items():
         assert abs(sum(float(w) for w in spec.weights.values()) - 1.0) < 1e-9, tid
@@ -334,7 +349,7 @@ def test_locks_are_frozen():
 def bench(monkeypatch) -> Path:
     monkeypatch.delenv("SIMPRAXIS_PHASE2_ROOT", raising=False)
     from orchestrator.benchmark import paths
-    root = paths.bench_root()
+    root = paths.bench_root(read_only=True)
     assert root.is_dir(), f"数据根不在场：{root}"
     return root
 

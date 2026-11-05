@@ -1,15 +1,11 @@
 {
-  "schema": "simpraxis.benchmark_criteria.v1",
-  "task_id": "libero_env_adapter_v1",
   "criteria_version": 1,
-  "weights": {
-    "import_and_construction": 0.2,
-    "reset_and_step": 0.3,
-    "observation_action_contract": 0.2,
-    "runtime_identity": 0.2,
-    "evidence_completeness": 0.1
-  },
-  "thresholds": {},
+  "derivation": "L1 的验收是**结构性**的：B0–B4 五层出生验证逐层独立 subprocess 判定（Plan §3.3），每一层只有 PASS/FAIL/BLOCKED_INFRA/NOT_APPLICABLE，不存在可调数值——故 thresholds 为空对象（D1-5 允许 L1/R1 无数值判据，但 weights/hard_gates/derivation 仍冻结）。观测契约与动作维度是**契约常量**而非容差：action dim、obs keys、reset/step 返回结构一律**精确相等**比较（不用 ± 容差），比较对象由 Task 2 容器探针实测写入 runtime_fingerprint 的 observation_contract / action_contract 段，与 task.yaml 声明逐项比对。镜像身份以不可变 digest 计（sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624），tag 不构成身份。",
+  "evaluator_files": [
+    "orchestrator/benchmark/evaluator.py:6a32a77061cf96b0e5b337adbf197159b11f58c277e6812d20b36eefe97c1984",
+    "orchestrator/benchmark/scoring.py:e11bbaddcc921c04655ef35736a222a4b869f250fc1ea48c6eb2dcf09395bba5",
+    "orchestrator/benchmark/contracts.py:60c106dcb04af5d33382e37e918d5585fcc6ce664ea4539a475ac79d377a794c"
+  ],
   "hard_gates": [
     {
       "id": "HG-L1-1",
@@ -40,11 +36,15 @@
       "statement": "运行 tour 自带 demo / README 流程（违反硬规则 10：任何阶段不实跑 tour 本体）"
     }
   ],
-  "derivation": "L1 的验收是**结构性**的：B0–B4 五层出生验证逐层独立 subprocess 判定（Plan §3.3），每一层只有 PASS/FAIL/BLOCKED_INFRA/NOT_APPLICABLE，不存在可调数值——故 thresholds 为空对象（D1-5 允许 L1/R1 无数值判据，但 weights/hard_gates/derivation 仍冻结）。观测契约与动作维度是**契约常量**而非容差：action dim、obs keys、reset/step 返回结构一律**精确相等**比较（不用 ± 容差），比较对象由 Task 2 容器探针实测写入 runtime_fingerprint 的 observation_contract / action_contract 段，与 task.yaml 声明逐项比对。镜像身份以不可变 digest 计（sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624），tag 不构成身份。",
-  "evaluator_files": [
-    "orchestrator/benchmark/evaluator.py:9e1338758cb3cd37194eb3123360fbed18ff3ed03f39fb6b5400a44771e5fd0c",
-    "orchestrator/benchmark/scoring.py:e47b75dd179c72841aa3e246cad31b9bc3ba7af8ec989b36bbac3c5846e625e7",
-    "orchestrator/benchmark/contracts.py:ecc534ee16bde886883b7bd77a56255ed630be228a209c5b31491b281ff4567d"
-  ],
-  "locked_at": "2026-11-05T08:26:06Z"
+  "locked_at": "2026-11-05T08:26:06Z",
+  "schema": "simpraxis.benchmark_criteria.v1",
+  "task_id": "libero_env_adapter_v1",
+  "thresholds": {},
+  "weights": {
+    "evidence_completeness": 0.1,
+    "import_and_construction": 0.2,
+    "observation_action_contract": 0.2,
+    "reset_and_step": 0.3,
+    "runtime_identity": 0.2
+  }
 }

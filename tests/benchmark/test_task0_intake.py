@@ -36,7 +36,7 @@ _EMPTY = "(空)"
 def bench(monkeypatch) -> Path:
     """真数据根（不受 conftest 的 phase2 hermetic 重定向影响）。"""
     monkeypatch.delenv("SIMPRAXIS_PHASE2_ROOT", raising=False)
-    root = paths.bench_root()
+    root = paths.bench_root(read_only=True)
     assert root.is_dir(), f"数据根不在场：{root}"
     return root
 
@@ -208,6 +208,41 @@ def _flatten(value) -> "set[str]":
     return out
 
 
+def _cell(value) -> str:
+    """与 ``cli._cell`` 同口径（布尔小写、空串记 ``(空)``、其余 ``str``）。"""
+    if value is None:
+        return "(null)"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value if value else _EMPTY
+    return str(value)
+
+
+def _resolve(doc: dict, key: str):
+    """把报告「项」列按**键路径**取回 JSON 值（评审 W1-10）。
+
+    原实现只断言「值出现在该 JSON 的某个角落」：报告把 A 键的值写到 B 键行上、
+    只要 A 的值也在同一份 JSON 里，仍然绿。现在逐键取值——几类非直读键
+    （``<phase>.rows``、``<phase>.sha256``、四张表名、计数/可选字段）显式登记，
+    其余必须是 ``doc`` 的直接键。
+    """
+    if "." in key:
+        phase, _, field = key.partition(".")
+        if field in ("rows", "sha256"):
+            return doc["ledgers"][phase][field]
+    if key == "status_porcelain_excluded_count":
+        return len(doc["status_porcelain_excluded"])
+    if key in doc.get("tables", {}):
+        return doc["tables"][key]
+    if key in doc.get("packages", {}):
+        return doc["packages"][key]
+    if key == "collect_only":
+        return doc.get("collect_only", "")
+    assert key in doc, f"报告行键 {key!r} 不在 JSON 顶层键中：{sorted(doc)}"
+    return doc[key]
+
+
 def test_ac_p0_0_8_report_crosscheck(bench: Path):
     report = (bench / "intake" / "intake_report.md").read_text(encoding="utf-8")
     rows, orphans = [], []
@@ -230,11 +265,10 @@ def test_ac_p0_0_8_report_crosscheck(bench: Path):
         if not source.endswith(".json"):
             continue
         doc = _load(bench, source)
-        flat = _flatten(doc)
-        if value == _EMPTY:
-            assert "" in flat, f"{source}::{key} 报告写(空)但 JSON 无空串"
-        else:
-            assert value in flat, f"{source}::{key} 报告值 {value!r} 不在 JSON 中"
+        #: 评审 W1-10：按「键 → 值」逐项对账（不是「值出现在 JSON 任意位置」）。
+        expect = _cell(_resolve(doc, key))
+        assert value == expect, (
+            f"{source}::{key} 报告值 {value!r} ≠ JSON 键值 {expect!r}")
         checked += 1
     # 报告行数 ≥ 40（七节全在），防止「删到只剩几行」也能绿
     assert checked >= 40, checked

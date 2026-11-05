@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import numbers
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -55,7 +56,13 @@ def module_get(module: Any, name: str) -> Any:
 
 
 def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
+    """整数判定（评审 W2-13）。
+
+    只认 Python ``int`` 会把 ``numpy.int64``（例如 ``np.prod(shape)`` 的返回值）
+    判成契约不符，而候选只是写了完全合法的整数。接受 ``numbers.Integral``
+    （不 import numpy），布尔仍在外部排除。
+    """
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool)
 
 
 def _is_number(value: Any) -> bool:

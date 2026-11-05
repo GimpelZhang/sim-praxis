@@ -61,7 +61,14 @@ class BenchmarkRegistry:
                 specs[spec.task_id] = spec
             self._cache = dict(sorted(specs.items()))
         if verify_manifest:
-            self.check_manifest()
+            # 评审 W1-01：模块自述「清单与磁盘不一致 → RegistryError」，
+            # 早先这里把 check_manifest() 的返回值直接丢弃，导致默认路径
+            # （load_all()/get()）永不因清单不符而失败——fail-closed 只是
+            # 口号。现在照 docstring 兑现：不一致即抛。
+            report = self.check_manifest()
+            if not report["ok"]:
+                raise RegistryError(
+                    "清单与磁盘不一致：" + "; ".join(report["problems"]))
         return MappingProxyType(self._cache)
 
     def get(self, task_id: str) -> ts.TaskSpec:

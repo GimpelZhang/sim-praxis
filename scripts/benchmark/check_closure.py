@@ -16,12 +16,18 @@
 10. ``kb``         —— KB HEAD/工作树/四表行数与 Task 0 相同
 11. ``ledgers``    —— 五本账 SHA256 与 Task 0 快照逐字相同（FROZEN）
 
-``--require-acceptance`` 额外读验收车道日志与三签，并校验三者与
-``pack.sha256`` 的绑定。输出 ``<root>/closeout/closure_judge.json``。
+``--require-acceptance`` 额外读验收车道日志、三签、``acceptance_matrix.json``
+（20 条 AC 独立复算）与 ``invariants.json``（I1..I12 逐条），并校验与
+``pack.sha256`` / ``manifest.git_commit`` 的绑定。输出
+``<root>/closeout/closure_judge.json``。
+
+评审 W4-03：``verdict=Established`` 只在**全集**（11 类核心 + 验收四类）跑过
+且无问题时给出；子集运行如实记 ``Incomplete``，不得产出 Established 判决。
 """
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import hashlib
 import json
@@ -29,7 +35,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
@@ -43,9 +49,21 @@ EXPECTED_MODE = {"mujoco_contact_push_v1": ("host", None),
                  "libero_env_adapter_v1": ("docker",
                                            "sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624"),
                  "icy_ground_dr_v1": ("host", None)}
+#: Task 0 基线 HEAD（``intake/repository_state.json`` 登记值）。I10 不再要求
+#: 实时 ``origin/main`` 恒等于它（评审 W5-01：合法授权推送会把该断言变活红），
+#: 而要求实时 ``origin/main`` ∈ {基线, HEAD} 且是 HEAD 的祖先（见
+#: ``verify_origin_anchor``）。
 ORIGIN_MAIN = "4b5d134a447b2069b050887d63f3ddd4e687f123"
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
+#: Task 5 预注册控制组规模（§3 Task 5）：不钉死则「缩水也算过」（W4-15）。
+EXPECTED_CONTROLS = {"golden": 3, "negative": 20, "mutation": 10}
+#: 验收组附加检查（``--require-acceptance`` 才有输入，故不进默认 ``CHECKS``）。
+ACCEPTANCE_CHECKS = ("acceptance", "matrix", "invariants", "gaps")
+SIGN_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z")
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 SUMMARY_RE = re.compile(
     r"(\d+) passed(?:, (\d+) skipped)?(?:, (\d+) deselected)?"
     r"(?:, \d+ warnings)? in ([\d.]+)s")
@@ -91,11 +109,22 @@ def _git(*args: str, cwd: "Path | None" = None) -> str:
     return proc.stdout.strip()
 
 
+RUN_IDENTITY = "run_identity.json"
+
+
 def _latest_run(root: Path, task_id: str) -> Path:
-    runs = sorted(p for p in (root / "runs").glob(f"{task_id}-*") if p.is_dir())
-    if not runs:
-        raise JudgeError(f"{task_id}: 缺 runs/{task_id}-*")
-    return runs[-1]
+    """被判 run 的身份来源（评审 W4-11）。
+
+    优先读 ``<root>/intake/run_identity.json`` 的钉死登记；缺该件时才退回
+    「目录唯一」判据——**恰好一个** ``runs/<task_id>-*`` 才接受，多个即
+    ``JudgeError``（禁止「谁最后写入谁被审」）。钉死后诊断 run 不会被误判。
+    """
+    from orchestrator.benchmark import paths as bench_paths
+
+    try:
+        return bench_paths.pinned_run(root, task_id)
+    except bench_paths.BenchmarkPathError as exc:
+        raise JudgeError(f"{task_id}: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
@@ -112,6 +141,27 @@ def parse_pytest_summary(text: str) -> "dict | None":
                     "deselected": int(match.group(3) or 0),
                     "duration_s": float(match.group(4))}
     return None
+
+
+def verify_origin_anchor(origin_main: str, head: str, *,
+                         base: str = ORIGIN_MAIN,
+                         ancestor: "bool | None" = None) -> "list[str]":
+    """I10（评审 W5-01 **改向不放水**）：推送是人工 STOP 门，不是「永不推送」。
+
+    本阶段允许的实时 ``origin/main`` 只有两个值——Task 0 基线 ``base``，或
+    本阶段 HEAD（＝人工 STOP 门放行后的推送结果）；且 ``origin/main`` 必须是
+    ``HEAD`` 的祖先（改写已推历史即违规）。任何第三方 sha、或非祖先关系都判红。
+    """
+    problems = []
+    if not _COMMIT_RE.fullmatch(str(origin_main or "")):
+        problems.append(f"origin/main 非 40 hex：{origin_main!r}")
+        return problems
+    if origin_main not in (base, head):
+        problems.append(f"origin/main={origin_main} 既非基线 {base} 也非 HEAD "
+                        f"{head}（未经审的推送/改写？）")
+    if ancestor is False:
+        problems.append("HEAD 不是 origin/main 的祖先（已推送历史被改写）")
+    return problems
 
 
 def verify_cold_run(doc: dict, log_text: str, baseline: dict) -> "list[str]":
@@ -145,9 +195,10 @@ def verify_cold_run(doc: dict, log_text: str, baseline: dict) -> "list[str]":
     if not nodeids:
         problems.append("new_collected.nodeids 为空（增量无法独立复验）")
     else:
-        joined = "\n".join(nodeids)
+        # 评审 W5-07：§4.1 明文要求「nodeid **排序后** sha256」，两侧同口径。
+        joined = "\n".join(sorted(nodeids))
         if hashlib.sha256(joined.encode()).hexdigest() != new.get("nodeids_sha256"):
-            problems.append("nodeids_sha256 与 nodeids 复算不符")
+            problems.append("nodeids_sha256 与排序后 nodeids 复算不符")
         bad = [n for n in nodeids if not n.startswith("tests/benchmark/")]
         if bad:
             problems.append(f"存在非 tests/benchmark/ 的 nodeid：{bad[:3]}")
@@ -158,7 +209,13 @@ def verify_cold_run(doc: dict, log_text: str, baseline: dict) -> "list[str]":
     return problems
 
 
-def validate_signs(signs: "list[dict]", pack_sha256: str) -> "list[str]":
+def validate_signs(signs: "list[dict]", pack_sha256: str, *,
+                   expected_commit: "str | None" = None) -> "list[str]":
+    """三签校验（评审 W4-07 契约补绑一半 + W4-16 字段名二择一）。
+
+    ``expected_commit`` 给出时（＝``manifest.git_commit``），三签 commit 必须
+    与之相同——只绑 pack 不绑 commit 会让旧提交上的三签被复用。
+    """
     problems = []
     roles = sorted(sign.get("role") for sign in signs)
     if roles != sorted(ROLES):
@@ -170,23 +227,39 @@ def validate_signs(signs: "list[dict]", pack_sha256: str) -> "list[str]":
             problems.append(f"{sign.get('role')}: verdict 非 APPROVE/REJECT")
         elif sign.get("verdict") != "APPROVE":
             problems.append(f"{sign.get('role')}: verdict={sign.get('verdict')}")
-        if not re.fullmatch(r"[0-9a-f]{40}", str(sign.get("commit", ""))):
+        if not _COMMIT_RE.fullmatch(str(sign.get("commit", ""))):
             problems.append(f"{sign.get('role')}: commit 非 40 hex")
-        if not re.fullmatch(r"[0-9a-f]{64}", str(sign.get("pack_sha256", ""))):
+        if not _SHA256_RE.fullmatch(str(sign.get("pack_sha256", ""))):
             problems.append(f"{sign.get('role')}: pack_sha256 非 64 hex")
-        if not str(sign.get("ts_iso", "")).endswith("Z"):
-            problems.append(f"{sign.get('role')}: ts_iso 非严格 Z")
-        if not str(sign.get("reviewer_notes") or "").strip():
-            problems.append(f"{sign.get('role')}: reviewer_notes 为空")
+        # 计划 §4.1 写 notes、实件写 reviewer_notes：二者皆收（W4-16），
+        # 但至少一个非空。
+        notes = sign.get("reviewer_notes") or sign.get("notes")
+        if not str(notes or "").strip():
+            problems.append(f"{sign.get('role')}: reviewer_notes/notes 为空")
+        stamp = str(sign.get("ts_iso", ""))
+        if not SIGN_TS_RE.fullmatch(stamp):
+            problems.append(f"{sign.get('role')}: ts_iso 非 RFC3339-Z：{stamp!r}")
     commits = {sign.get("commit") for sign in signs}
     packs = {sign.get("pack_sha256") for sign in signs}
     if len(commits) != 1:
         problems.append(f"三签 commit 不一致：{sorted(commits)}")
+    elif expected_commit and next(iter(commits)) != expected_commit:
+        problems.append(f"三签 commit={next(iter(commits))} ≠ "
+                        f"manifest.git_commit={expected_commit}")
     if len(packs) != 1:
         problems.append(f"三签 pack_sha256 不一致：{sorted(packs)}")
     elif next(iter(packs)) != pack_sha256:
         problems.append("三签 pack_sha256 ≠ pack.sha256")
     return problems
+
+
+def pack_manifest_commit(root: Path) -> "tuple[str | None, dict]":
+    """证据包 manifest 的 ``git_commit``（三签/矩阵的绑定锚）。"""
+    path = Path(root) / "evidence_pack" / "manifest.json"
+    if not path.is_file():
+        return None, {}
+    manifest = _json(path)
+    return manifest.get("git_commit"), manifest
 
 
 def validate_ledger_freeze(doc: dict) -> "list[str]":
@@ -258,9 +331,22 @@ def check_intake(root: Path) -> "tuple[list[str], dict]":
     elif _sha256(raw) != baseline["raw_log_sha256"]:
         problems.append("基线 raw log sha256 与登记不符")
     state = _json(root / "intake" / "repository_state.json")
-    detail["origin_main"] = state["origin_main"]
+    detail["origin_main_baseline"] = state["origin_main"]
     if state["origin_main"] != ORIGIN_MAIN:
-        problems.append(f"origin/main={state['origin_main']} ≠ {ORIGIN_MAIN}")
+        problems.append(f"Task 0 基线 origin/main={state['origin_main']} ≠ "
+                        f"{ORIGIN_MAIN}")
+    # 评审 W5-01：I10 的实时判据（基线或本阶段 HEAD，且为 HEAD 祖先）。
+    live_origin = _git("rev-parse", "origin/main")
+    live_head = _git("rev-parse", "HEAD")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", live_origin, live_head],
+        cwd=str(_REPO), capture_output=True, text=True, timeout=120
+    ).returncode == 0
+    detail["origin_main_live"] = live_origin
+    detail["head"] = live_head
+    detail["origin_is_ancestor"] = ancestor
+    problems.extend(verify_origin_anchor(live_origin, live_head,
+                                         ancestor=ancestor))
     kb = _json(root / "intake" / "kb_state.json")
     detail["kb_head"] = kb["head"]
     if not re.fullmatch(r"[0-9a-f]{40}", kb["head"]):
@@ -404,22 +490,28 @@ def check_controls(root: Path) -> "tuple[list[str], dict]":
     mutation = _json(base / "mutation_results.json")
     rows = {
         "golden": {"count": int(golden["count"]),
-                   "all_passed": bool(golden["all_passed"])},
+                   "all_passed": bool(golden["all_passed"]),
+                   "expected": EXPECTED_CONTROLS["golden"]},
         "negative": {"count": int(negative["count"]),
                      "rejected": int(negative["rejected"]),
-                     "all_passed": bool(negative["all_passed"])},
+                     "all_passed": bool(negative["all_passed"]),
+                     "expected": EXPECTED_CONTROLS["negative"]},
         "mutation": {"count": int(mutation["count"]),
                      "rejected": int(mutation["rejected"]),
-                     "all_passed": bool(mutation["all_passed"])},
+                     "all_passed": bool(mutation["all_passed"]),
+                     "expected": EXPECTED_CONTROLS["mutation"]},
     }
     detail.update(rows)
-    if rows["golden"]["count"] < 1 or not rows["golden"]["all_passed"]:
+    # 评审 W4-15：规模先钉死（缩水不得算过），再判「全过/全拒」。
+    for name, expected in EXPECTED_CONTROLS.items():
+        if rows[name]["count"] != expected:
+            problems.append(f"{name} 控制组规模 {rows[name]['count']} ≠ "
+                            f"预注册 {expected}")
+    if not rows["golden"]["all_passed"]:
         problems.append("golden 控制组未全通过")
-    if rows["negative"]["count"] < 1 or \
-            rows["negative"]["rejected"] != rows["negative"]["count"]:
+    if rows["negative"]["rejected"] != rows["negative"]["count"]:
         problems.append("负例未全拒")
-    if rows["mutation"]["count"] < 1 or \
-            rows["mutation"]["rejected"] != rows["mutation"]["count"]:
+    if rows["mutation"]["rejected"] != rows["mutation"]["count"]:
         problems.append("变异未全拒")
     return problems, detail
 
@@ -444,16 +536,31 @@ def check_evidence(root: Path) -> "tuple[list[str], dict]":
     if detail["total_bytes"] != sum(int(row["size"]) for row in files):
         problems.append("manifest.total_bytes 与逐件字节和不符")
     pack_resolved = pack.resolve()
+    seen_relpaths: "dict[str, int]" = {}
     for row in files:
         rel = row["relpath"]
+        # 评审 W4-09：relpath 必须是包内相对路径、无 ``..``、且唯一。
+        seen_relpaths[rel] = seen_relpaths.get(rel, 0) + 1
+        pure = PurePosixPath(rel)
+        if pure.is_absolute() or rel.startswith("/"):
+            problems.append(f"manifest relpath 为绝对路径：{rel}")
+            continue
+        if ".." in pure.parts:
+            problems.append(f"manifest relpath 含 '..'：{rel}")
+            continue
         path = pack / rel
+        # 评审 W4-17：原来那条「同时是自己的父目录和自身」恒假；改成真正的
+        # 越界判定——解析后必须仍在 pack 之内。
+        resolved = path.resolve(strict=False)
+        if resolved != pack_resolved and pack_resolved not in resolved.parents:
+            problems.append(f"relpath 越出包目录：{rel}")
+            continue
         if is_judgment_relpath(rel):
             problems.append(f"判决件混入包：{rel}")
         if rel.split("/", 1)[0] in ("closeout", "evidence_pack"):
             problems.append(f"判决目录/包自身混入包：{rel}")
-        if pack_resolved in path.resolve(strict=False).parents and \
-                path.resolve(strict=False) == pack_resolved:
-            problems.append(f"包自身混入包：{rel}")
+        if rel in ("manifest.json", "pack.sha256"):
+            problems.append(f"清单件混入自身条目：{rel}")
         if not path.is_file():
             problems.append(f"缺件：{rel}")
             continue
@@ -467,6 +574,19 @@ def check_evidence(root: Path) -> "tuple[list[str], dict]":
             problems.append(f"超 10 MiB：{rel}")
         if oct(path.stat().st_mode & 0o777) != "0o600":
             problems.append(f"文件模式非 0600：{rel}")
+    dupes = sorted(rel for rel, count in seen_relpaths.items() if count > 1)
+    if dupes:
+        problems.append(f"manifest relpath 重复：{dupes[:5]}")
+    # 评审 W4-01：超集校验——包树实际文件必须**恰好**等于
+    # 清单 ∪ {manifest.json, pack.sha256}；后置混入的判决件/密钥/超限件
+    # 不会改变 pack.sha256（它只覆盖 manifest 字节），必须由这里兜住。
+    actual = {p.relative_to(pack).as_posix() for p in pack.rglob("*")
+              if p.is_file() or p.is_symlink()}
+    expected = set(seen_relpaths) | {"manifest.json", "pack.sha256"}
+    unregistered = sorted(actual - expected)
+    detail["n_unregistered"] = len(unregistered)
+    if unregistered:
+        problems.append(f"包内存在未登记文件（差集非空）：{unregistered[:5]}")
     sha_file = pack / "pack.sha256"
     if not sha_file.is_file():
         problems.append("缺 pack.sha256")
@@ -512,6 +632,39 @@ _TOKEN_PREFIXES = ("hf_", "ghp_", "gho_", "ghu_", "ghs_", "ghr_", "nvapi-",
 
 
 FIXTURE_SELFTEST = "test_scan_detects_all_strict_forms["
+#: 自测 nodeid 的方括号参数（评审 W4-08）：规则①只豁免**参数内**的命中，
+#: 不再整行豁免——同一行里出现真实凭据仍会被抓到。终判侧的解析独立实现
+#: （逐字符找配对方括号），不复用打包侧的行内切分。
+_SELFTEST_HEAD = "test_scan_detects_all_strict_forms"
+
+
+def _selftest_params(line: str) -> "list[str]":
+    """返回该行所有自测 nodeid 的方括号参数文本（判官侧独立解析）。"""
+    params, cursor = [], 0
+    while True:
+        hit = line.find(_SELFTEST_HEAD, cursor)
+        if hit < 0:
+            return params
+        cursor = hit + len(_SELFTEST_HEAD)
+        if cursor >= len(line) or line[cursor] != "[":
+            continue
+        depth, start = 0, cursor
+        while cursor < len(line):
+            char = line[cursor]
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth -= 1
+                if depth == 0:
+                    params.append(line[start + 1:cursor])
+                    cursor += 1
+                    break
+            cursor += 1
+
+
+def _in_selftest_param(line: str, matched: str) -> bool:
+    """规则①收紧后的判据：命中值必须逐字出现在自测 nodeid 的参数内。"""
+    return any(matched in param for param in _selftest_params(line))
 
 
 def _synthetic_token(matched: str) -> bool:
@@ -539,27 +692,26 @@ def _audit_pack_secrets(pack: Path, manifest: dict, detail: dict) -> "list[str]"
     except Exception as exc:  # pragma: no cover
         return [f"无法加载密钥扫描器：{exc}"]
     allowed = set(policy.get("synthetic_entries") or [])
-    for row in manifest.get("files") or []:
-        path = pack / row["relpath"]
+    known = {row["relpath"] for row in manifest.get("files") or []}
+    # 评审 W4-01/W4-09：扫描源改为**实际包树**（含未登记件），不再只信清单。
+    targets = [(rel, pack / rel) for rel in sorted(known)]
+    targets += [(p.relative_to(pack).as_posix(), p)
+                for p in sorted(pack.rglob("*"))
+                if (p.is_file() or p.is_symlink())
+                and p.relative_to(pack).as_posix() not in known]
+    for rel, path in targets:
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
-        rel = row["relpath"]
         for lineno, line in enumerate(text.splitlines(), 1):
-            found = secret_scan.scan_text(line)
-            if not found:
-                continue
-            if FIXTURE_SELFTEST in line:
-                for name, _matched in found:
-                    if f"{rel}::{name}::L{lineno}" not in allowed:
-                        problems.append(f"合成哨兵未在 manifest 登记："
-                                        f"{rel}::{name}::L{lineno}")
-                continue
-            for name, matched in found:
-                if _synthetic_token(matched):
-                    if f"{rel}::{name}::L{lineno}" not in allowed:
-                        problems.append(f"合成哨兵未在 manifest 登记："
-                                        f"{rel}::{name}::L{lineno}")
+            for name, matched in secret_scan.scan_text(line):
+                key = f"{rel}::{name}::L{lineno}"
+                if _in_selftest_param(line, matched):
+                    if key not in allowed:
+                        problems.append(f"合成哨兵未在 manifest 登记：{key}")
+                elif _synthetic_token(matched):
+                    if key not in allowed:
+                        problems.append(f"合成哨兵未在 manifest 登记：{key}")
                 else:
                     problems.append(f"包内真实密钥形态：{rel}::{name}")
     return problems
@@ -578,6 +730,41 @@ def check_cold_run(root: Path) -> "tuple[list[str], dict]":
     detail = {key: doc.get(key) for key in
               ("rc", "passed", "skipped", "deselected", "delta_ok", "verdict")}
     return problems, detail
+
+
+BENCHMARK_CODE_DIRS = ("orchestrator/benchmark", "scripts/benchmark",
+                       "tests/benchmark")
+
+
+def _imports_gateway(path: Path) -> bool:
+    """AST 判定（评审 W5-19）；语法不可解析时 fail-closed 视为引用。"""
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
+    except SyntaxError:
+        return True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "orchestrator.gateway" or \
+                        alias.name.startswith("orchestrator.gateway."):
+                    return True
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            module = node.module or ""
+            if module == "orchestrator.gateway" or \
+                    module.startswith("orchestrator.gateway."):
+                return True
+            if module == "orchestrator" and \
+                    any(alias.name == "gateway" for alias in node.names):
+                return True
+    return False
+
+
+def count_gateway_imports(
+        bases: "tuple[str, ...]" = BENCHMARK_CODE_DIRS) -> "tuple[int, list[str]]":
+    hits = [str(path) for base in bases
+            for path in sorted((_REPO / base).rglob("*.py"))
+            if _imports_gateway(path)]
+    return len(hits), hits
 
 
 def check_paid(root: Path) -> "tuple[list[str], dict]":
@@ -609,22 +796,28 @@ def check_paid(root: Path) -> "tuple[list[str], dict]":
             problems.append(f"{phase}: paid_calls 记录与现算 sha 不符")
         if recorded.get("equal") is not True:
             problems.append(f"{phase}: paid_calls equal 非 true")
-    needle = re.compile(r"^\s*(?:from\s+orchestrator\.gateway|"
-                        r"import\s+orchestrator\.gateway)", re.MULTILINE)
-    for base in (_REPO / "orchestrator" / "benchmark",
-                 _REPO / "scripts" / "benchmark",
-                 _REPO / "tests" / "benchmark"):
-        for path in sorted(base.rglob("*.py")):
-            if needle.search(path.read_text(encoding="utf-8", errors="ignore")):
-                detail["gateway_imports_in_benchmark"] += 1
-                problems.append(f"benchmark 代码引用 Gateway：{path}")
+    # 评审 W5-19：按**真实 import 图**（AST）判，不再用行级正则——正则漏
+    # 多行 import、`from orchestrator import gateway`、括号换行等形态。
+    count, hits = count_gateway_imports(BENCHMARK_CODE_DIRS)
+    detail["gateway_imports_in_benchmark"] = count
+    for hit in hits:
+        problems.append(f"benchmark 代码引用 Gateway：{hit}")
     return problems, detail
 
 
-def check_signs(root: Path) -> "tuple[list[str], dict]":
-    """P0-AC-20：三签逐件校验并与 `pack.sha256` 绑定（`--check signs`）。"""
+def _baseline_head(root: Path) -> str:
+    """Task 0 登记的 HEAD（``intake/repository_state.json``）——矩阵/invariants
+    的 ``baseline_head`` 锚。"""
+    return _json(Path(root) / "intake" / "repository_state.json")["head"]
+
+
+def _collect_signs(root: Path) -> "tuple[list[str], list[dict], dict]":
+    """三签读入 + 与 pack/commit 绑定的**单一实现**（评审 W4-18 去重）。
+
+    ``check_signs`` 与 ``check_acceptance`` 都走这里，字段口径只有一份。
+    """
     problems = []
-    signs_dir = root / "closeout" / "signs"
+    signs_dir = Path(root) / "closeout" / "signs"
     signs = []
     for role in ROLES:
         path = signs_dir / f"{role}.json"
@@ -632,15 +825,26 @@ def check_signs(root: Path) -> "tuple[list[str], dict]":
             problems.append(f"缺三签：{role}.json")
             continue
         signs.append(_json(path))
-    pack_path = root / "evidence_pack" / "pack.sha256"
+    pack_path = Path(root) / "evidence_pack" / "pack.sha256"
     if not pack_path.is_file():
         problems.append("缺 evidence_pack/pack.sha256")
-        return problems, {}
+        return problems, signs, {"pack_sha256": None}
     pack_sha = pack_path.read_text(encoding="utf-8").strip()
+    expected_commit, _manifest = pack_manifest_commit(root)
+    if expected_commit is None:
+        problems.append("缺 evidence_pack/manifest.json 的 git_commit")
     if signs:
-        problems.extend(validate_signs(signs, pack_sha))
-    return problems, {"roles": [s.get("role") for s in signs],
-                      "pack_sha256": pack_sha}
+        problems.extend(validate_signs(signs, pack_sha,
+                                       expected_commit=expected_commit))
+    return problems, signs, {"pack_sha256": pack_sha,
+                             "git_commit": expected_commit,
+                             "roles": [s.get("role") for s in signs]}
+
+
+def check_signs(root: Path) -> "tuple[list[str], dict]":
+    """P0-AC-20：三签逐件校验并与 `pack.sha256`/`git_commit` 绑定。"""
+    problems, _signs, detail = _collect_signs(root)
+    return problems, detail
 
 
 def check_kb(root: Path) -> "tuple[list[str], dict]":
@@ -699,6 +903,216 @@ def check_ledgers(root: Path) -> "tuple[list[str], dict]":
     return problems, detail
 
 
+#: 评审 W5-17：container 车道的下限条数。低于此值即视为「标记没生效/被整套
+#: deselect」，而不是「容器车道通过」——防止空绿。
+CONTAINER_LANE_MIN = 2
+
+
+def _check_lane(detail: dict, doc: dict, log: Path, label: str) -> "list[str]":
+    problems = []
+    if not log.is_file():
+        return [f"缺{label}日志：{log.name}"]
+    if doc.get("rc") != 0:
+        problems.append(f"{label} rc={doc.get('rc')}")
+    if int(doc.get("failed", -1)) != 0:
+        problems.append(f"{label} failed={doc.get('failed')}")
+    if int(doc.get("passed", 0)) < 1:
+        problems.append(f"{label} 0 passed")
+    if _sha256(log) != doc.get("log_sha256"):
+        problems.append(f"{label}日志 sha256 与记录不符")
+    summary = parse_pytest_summary(log.read_text(encoding="utf-8",
+                                                 errors="ignore"))
+    if summary is None or summary["passed"] != int(doc.get("passed", -1)):
+        problems.append(f"{label}日志摘要与 json 不符")
+    detail[f"{label}.passed"] = doc.get("passed")
+    detail[f"{label}.failed"] = doc.get("failed")
+    return problems
+
+
+def check_acceptance(root: Path) -> "tuple[list[str], dict]":
+    problems, detail = [], {}
+    lane_json = root / "closeout" / "acceptance_lane.json"
+    lane_log = root / "closeout" / "acceptance_lane.log"
+    container_log = root / "closeout" / "container_lane.log"
+    if not lane_json.is_file() or not lane_log.is_file():
+        return ["缺验收车道产物（acceptance_lane.json/.log）"], {}
+    lane = _json(lane_json)
+    detail.update({k: lane.get(k) for k in ("cmd", "rc", "passed", "failed",
+                                           "summary")})
+    problems.extend(_check_lane(detail, lane, lane_log, "验收车道"))
+
+    # 评审 W5-17：容器车道是验收的第二段，必须真跑且记录采集条数——只认
+    # passed ≥ 下限，不认「标记没开所以 0 条」的空绿。
+    container = lane.get("container_lane") or {}
+    if not container:
+        problems.append("验收车道缺 container_lane 段（W5-17）")
+    else:
+        problems.extend(_check_lane(detail, container, container_log,
+                                    "容器车道"))
+        selected = int(container.get("selected", 0))
+        passed = int(container.get("passed", 0))
+        detail["容器车道.selected"] = selected
+        if selected < CONTAINER_LANE_MIN:
+            problems.append(
+                f"容器车道采集 {selected} 条 < 下限 {CONTAINER_LANE_MIN}"
+                f"（标记未生效或测试被删）")
+        if passed != selected:
+            problems.append(f"容器车道 passed={passed} ≠ 采集 {selected}")
+
+    # 评审 W4-18：与 `--check signs` 共用同一实现，不再内联第二份。
+    sign_problems, _signs, sign_detail = _collect_signs(root)
+    problems.extend(sign_problems)
+    detail.update(sign_detail)
+    return problems, detail
+
+
+AC_EXPECTED = tuple(f"P0-AC-{i:02d}" for i in range(1, 21))
+T7_EXPECTED = tuple(f"AC-T7-{i}" for i in range(1, 10))
+
+
+def check_matrix(root: Path) -> "tuple[list[str], dict]":
+    """验收矩阵的机判消费者（评审 W4-02 / W5-05）。
+
+    不采信矩阵自述：20 条 AC 逐条复算（能独立复算的类别直接调对应
+    ``check_*``），commit/pack 三方绑定（矩阵 == 包清单 == HEAD）。
+    """
+    problems, detail = [], {}
+    path = Path(root) / "closeout" / "acceptance_matrix.json"
+    if not path.is_file():
+        return ["缺 closeout/acceptance_matrix.json"], {}
+    matrix = _json(path)
+    if matrix.get("schema") != "simpraxis.benchmark.acceptance_matrix.v1":
+        problems.append(f"acceptance_matrix schema={matrix.get('schema')}")
+    acs = matrix.get("acs") or []
+    rows = {row.get("ac"): row for row in acs}
+    detail["n_acs"] = len(acs)
+    if sorted(rows) != list(AC_EXPECTED):
+        problems.append(f"矩阵 AC 集不符：{sorted(rows)}")
+    for ac_id in AC_EXPECTED:
+        row = rows.get(ac_id)
+        if row is None:
+            problems.append(f"矩阵缺 {ac_id}")
+            continue
+        if row.get("result") != "PASS":
+            problems.append(f"{ac_id}: result={row.get('result')}")
+        if not str(row.get("evidence") or "").strip():
+            problems.append(f"{ac_id}: 无 evidence")
+    summary = matrix.get("summary") or {}
+    detail["summary"] = {k: summary.get(k) for k in
+                         ("total", "passed", "failed", "gaps")}
+    if int(summary.get("total", -1)) != 20:
+        problems.append(f"summary.total={summary.get('total')} ≠ 20")
+    if int(summary.get("failed", -1)) != 0:
+        problems.append(f"summary.failed={summary.get('failed')} ≠ 0")
+    if int(summary.get("passed", -1)) != 20:
+        problems.append(f"summary.passed={summary.get('passed')} ≠ 20")
+    t7 = {row.get("ac") for row in matrix.get("task7_acs") or []}
+    if not set(T7_EXPECTED) <= t7:
+        problems.append(f"task7_acs 未覆盖全部九条：缺 "
+                        f"{sorted(set(T7_EXPECTED) - t7)}")
+    # ---- 三方绑定：矩阵 commit/pack == 包清单 == HEAD ----
+    manifest_commit, _manifest = pack_manifest_commit(root)
+    head = _git("rev-parse", "HEAD")
+    pack_path = Path(root) / "evidence_pack" / "pack.sha256"
+    pack_sha = (pack_path.read_text(encoding="utf-8").strip()
+                if pack_path.is_file() else None)
+    detail.update({"commit": matrix.get("commit"),
+                   "manifest_git_commit": manifest_commit,
+                   "head": head,
+                   "pack_sha256": matrix.get("pack_sha256"),
+                   "pack_file_sha256": pack_sha})
+    if matrix.get("commit") != manifest_commit:
+        problems.append(f"矩阵 commit={matrix.get('commit')} ≠ "
+                        f"manifest.git_commit={manifest_commit}")
+    if manifest_commit != head:
+        problems.append(f"manifest.git_commit={manifest_commit} ≠ HEAD={head}")
+    if pack_sha is None:
+        problems.append("缺 evidence_pack/pack.sha256")
+    elif matrix.get("pack_sha256") != pack_sha:
+        problems.append("矩阵 pack_sha256 ≠ pack.sha256")
+    baseline_head = _baseline_head(root)
+    if matrix.get("baseline_head") != baseline_head:
+        problems.append(f"矩阵 baseline_head={matrix.get('baseline_head')} ≠ "
+                        f"Task 0 HEAD {baseline_head}")
+    # ---- 逐条独立复算（W5-05：矩阵行不得只靠自述）----
+    recompute = {}
+    try:
+        recompute["P0-AC-16"] = not check_paid(root)[0]
+        recompute["P0-AC-17"] = not check_kb(root)[0]
+        recompute["P0-AC-18"] = not check_ledgers(root)[0]
+        recompute["P0-AC-19"] = not check_cold_run(root)[0]
+        recompute["P0-AC-20"] = not _collect_signs(root)[0]
+    except (JudgeError, OSError, ValueError, KeyError) as exc:
+        problems.append(f"矩阵逐条复算失败：{type(exc).__name__}: {exc}")
+    detail["recomputed"] = recompute
+    for ac_id, ok in recompute.items():
+        row = rows.get(ac_id) or {}
+        if row.get("result") != ("PASS" if ok else "FAIL"):
+            problems.append(f"{ac_id}: 矩阵 result={row.get('result')} 与独立"
+                            f"复算 {'PASS' if ok else 'FAIL'} 不符")
+        if row.get("strength") not in (None, "recomputed"):
+            problems.append(f"{ac_id}: strength={row.get('strength')} 应为 "
+                            f"recomputed")
+    return problems, detail
+
+
+INVARIANT_IDS = tuple(f"I{i}" for i in range(1, 13))
+
+
+def check_invariants(root: Path) -> "tuple[list[str], dict]":
+    """I1..I12 的终判复核（评审 W5-06）：`invariants.json` 逐条 + 绑定。"""
+    problems, detail = [], {}
+    path = Path(root) / "closeout" / "invariants.json"
+    if not path.is_file():
+        return ["缺 closeout/invariants.json（先跑 closeout matrix）"], {}
+    doc = _json(path)
+    if doc.get("schema") != "simpraxis.benchmark.invariants.v1":
+        problems.append(f"invariants schema={doc.get('schema')}")
+    rows = {row.get("id"): row for row in doc.get("invariants") or []}
+    detail["n_rows"] = len(rows)
+    if sorted(rows) != list(INVARIANT_IDS):
+        problems.append(f"不变量集不齐：{sorted(rows)}")
+    for iid in INVARIANT_IDS:
+        row = rows.get(iid)
+        if row is None:
+            continue
+        if row.get("ok") is not True:
+            problems.append(f"{iid} ok={row.get('ok')}："
+                            f"{str(row.get('evidence'))[:200]}")
+    head = _git("rev-parse", "HEAD")
+    detail.update({"verdict": doc.get("verdict"), "commit": doc.get("commit"),
+                   "baseline_head": doc.get("baseline_head"), "head": head})
+    if doc.get("verdict") != "OK":
+        problems.append(f"invariants.verdict={doc.get('verdict')} 非 OK")
+    if doc.get("commit") != head:
+        problems.append(f"invariants.commit={doc.get('commit')} ≠ HEAD={head}")
+    baseline_head = _baseline_head(root)
+    if doc.get("baseline_head") != baseline_head:
+        problems.append(f"invariants.baseline_head={doc.get('baseline_head')} "
+                        f"≠ Task 0 HEAD {baseline_head}")
+    return problems, detail
+
+
+def check_gaps(root: Path) -> "tuple[list[str], dict]":
+    """acceptance_matrix 的 gaps 逐条必须有归属（owner/reason/evidence）。
+
+    detail 与其他检查同形（dict），``run_judge`` 用 ``detail.get("gaps")`` 取
+    结论件顶层的 gaps 列表；早期版本这里直接返回 list 会让
+    ``--require-acceptance`` 抛 ``AttributeError``（不是判定失败，是崩溃）。
+    """
+    path = root / "closeout" / "acceptance_matrix.json"
+    if not path.is_file():
+        return ["缺 closeout/acceptance_matrix.json"], {"gaps": []}
+    matrix = _json(path)
+    gaps = matrix.get("gaps") or []
+    problems = []
+    for gap in gaps:
+        for key in ("id", "owner", "reason", "evidence"):
+            if not str(gap.get(key) or "").strip():
+                problems.append(f"gap {gap.get('id')}: 缺 {key}（无归属）")
+    return problems, {"gaps": gaps, "count": len(gaps)}
+
+
 CHECK_FUNCS = {
     "intake": check_intake,
     "specs": check_specs,
@@ -712,59 +1126,11 @@ CHECK_FUNCS = {
     "signs": check_signs,
     "kb": check_kb,
     "ledgers": check_ledgers,
+    "acceptance": check_acceptance,
+    "matrix": check_matrix,
+    "invariants": check_invariants,
+    "gaps": check_gaps,
 }
-
-
-def check_acceptance(root: Path) -> "tuple[list[str], dict]":
-    problems, detail = [], {}
-    lane_json = root / "closeout" / "acceptance_lane.json"
-    lane_log = root / "closeout" / "acceptance_lane.log"
-    if not lane_json.is_file() or not lane_log.is_file():
-        return ["缺验收车道产物（acceptance_lane.json/.log）"], {}
-    lane = _json(lane_json)
-    detail.update({k: lane.get(k) for k in ("cmd", "rc", "passed", "failed",
-                                           "summary")})
-    if lane.get("rc") != 0:
-        problems.append(f"验收车道 rc={lane.get('rc')}")
-    if int(lane.get("failed", -1)) != 0:
-        problems.append(f"验收车道 failed={lane.get('failed')}")
-    if int(lane.get("passed", 0)) < 1:
-        problems.append("验收车道 0 passed")
-    if _sha256(lane_log) != lane.get("log_sha256"):
-        problems.append("acceptance_lane.log sha256 与记录不符")
-    summary = parse_pytest_summary(
-        lane_log.read_text(encoding="utf-8", errors="ignore"))
-    if summary is None or summary["passed"] != int(lane.get("passed", -1)):
-        problems.append("验收车道日志摘要与 acceptance_lane.json 不符")
-    signs_dir = root / "closeout" / "signs"
-    signs = []
-    for role in ROLES:
-        path = signs_dir / f"{role}.json"
-        if not path.is_file():
-            problems.append(f"缺三签：{role}.json")
-            continue
-        signs.append(_json(path))
-    pack_sha = (root / "evidence_pack" / "pack.sha256").read_text(
-        encoding="utf-8").strip()
-    problems.extend(validate_signs(signs, pack_sha))
-    detail["roles"] = [sign.get("role") for sign in signs]
-    detail["pack_sha256"] = pack_sha
-    return problems, detail
-
-
-def check_gaps(root: Path) -> "tuple[list[str], list[dict]]":
-    """acceptance_matrix 的 gaps 逐条必须有归属（owner/reason/evidence）。"""
-    path = root / "closeout" / "acceptance_matrix.json"
-    if not path.is_file():
-        return ["缺 closeout/acceptance_matrix.json"], []
-    matrix = _json(path)
-    gaps = matrix.get("gaps") or []
-    problems = []
-    for gap in gaps:
-        for key in ("id", "owner", "reason", "evidence"):
-            if not str(gap.get(key) or "").strip():
-                problems.append(f"gap {gap.get('id')}: 缺 {key}（无归属）")
-    return problems, gaps
 
 
 def run_judge(root: Path, *, checks: "tuple[str, ...]" = CHECKS,
@@ -783,18 +1149,28 @@ def run_judge(root: Path, *, checks: "tuple[str, ...]" = CHECKS,
     gaps: list[dict] = []
     acceptance = None
     if require_acceptance:
-        try:
-            probs, detail = check_acceptance(root)
-        except (JudgeError, OSError, ValueError, KeyError) as exc:
-            probs, detail = [f"{type(exc).__name__}: {exc}"], {}
-        results["acceptance"] = {"ok": not probs, "problems": probs,
-                                 "detail": detail}
-        problems.extend(f"acceptance: {p}" for p in probs)
-        gap_probs, gaps = check_gaps(root)
-        results["gaps"] = {"ok": not gap_probs, "problems": gap_probs,
-                           "detail": {"gaps": gaps}}
-        problems.extend(f"gaps: {p}" for p in gap_probs)
-        acceptance = {"required": True, "ok": not probs}
+        for name in ACCEPTANCE_CHECKS:
+            try:
+                probs, detail = CHECK_FUNCS[name](root)
+            except (JudgeError, OSError, ValueError, KeyError) as exc:
+                probs, detail = [f"{type(exc).__name__}: {exc}"], {}
+            results[name] = {"ok": not probs, "problems": probs,
+                             "detail": detail}
+            problems.extend(f"{name}: {p}" for p in probs)
+            if name == "gaps":
+                gaps = detail.get("gaps") or []
+        acceptance = {"required": True,
+                      "ok": all(results[name]["ok"]
+                                for name in ACCEPTANCE_CHECKS)}
+    # 评审 W4-03：只有全集（11 类核心 + 验收四类）跑过才可能 Established；
+    # 子集运行如实记 Incomplete，避免 ``--check signs`` 伪造终判。
+    complete = (set(checks) == set(CHECKS) and require_acceptance)
+    if problems:
+        verdict = "Not Established"
+    elif not complete:
+        verdict = "Incomplete"
+    else:
+        verdict = "Established"
     doc = {
         "schema": SCHEMA,
         "generated_at": datetime.now(timezone.utc)
@@ -806,11 +1182,12 @@ def run_judge(root: Path, *, checks: "tuple[str, ...]" = CHECKS,
                                            encoding="utf-8").strip()
         if (root / "evidence_pack" / "pack.sha256").is_file() else None,
         "checks_run": list(checks),
+        "checks_required": list(CHECKS) + list(ACCEPTANCE_CHECKS),
         "checks": results,
         "acceptance": acceptance,
         "problems": problems,
         "gaps": gaps,
-        "verdict": "Established" if not problems else "Not Established",
+        "verdict": verdict,
     }
     return doc
 
@@ -819,10 +1196,28 @@ def run_judge(root: Path, *, checks: "tuple[str, ...]" = CHECKS,
 # CLI
 # --------------------------------------------------------------------------
 
+def _resolve_rc(root: Path, rc: "int | None") -> int:
+    """冷跑 rc 的来源（评审 W4-10）：显式参数 → ``closeout/cold_run.rc`` 文件
+    → fail-closed。**禁止**从日志末行文本推断（`1 error`/崩溃/被信号杀死时
+    末行不含 ``failed``，会被记成 rc=0）。"""
+    if rc is not None:
+        return int(rc)
+    rc_file = Path(root) / "closeout" / "cold_run.rc"
+    if rc_file.is_file():
+        text = rc_file.read_text(encoding="utf-8").strip()
+        match = re.fullmatch(r"(?:rc=)?(\d+)", text)
+        if not match:
+            raise JudgeError(f"cold_run.rc 不可解析：{text!r}")
+        return int(match.group(1))
+    raise JudgeError(
+        "冷跑 rc 未知：请传 --rc，或先写 closeout/cold_run.rc（形如 `rc=0`）")
+
+
 def record_cold_run(root: Path, raw_log: Path, rc: "int | None" = None) -> dict:
     """解析冷跑日志 + 测量 ``N_new``，写 ``closeout/cold_run.json``（§4.1）。"""
     import os
 
+    resolved_rc = _resolve_rc(root, rc)
     text = Path(raw_log).read_text(encoding="utf-8", errors="ignore")
     summary = parse_pytest_summary(text)
     if summary is None:
@@ -855,8 +1250,9 @@ def record_cold_run(root: Path, raw_log: Path, rc: "int | None" = None) -> dict:
         "container_deselected": _marked("container"),
         "milestone_deselected": _marked("milestone_closeout"),
         "nodeids": nodeids,
+        # 评审 W5-07：§4.1 要求**排序后** sha256（与 verify_cold_run 同口径）。
         "nodeids_sha256": hashlib.sha256(
-            "\n".join(nodeids).encode()).hexdigest(),
+            "\n".join(sorted(nodeids)).encode()).hexdigest(),
     }
     expected = {"passed": int(baseline["passed"]) + new["total"],
                 "skipped": int(baseline["skipped"]),
@@ -870,8 +1266,7 @@ def record_cold_run(root: Path, raw_log: Path, rc: "int | None" = None) -> dict:
         "cmd": baseline["cmd"],
         "raw_log": str(Path(raw_log).resolve()),
         "raw_log_sha256": _sha256(Path(raw_log)),
-        "rc": int(rc) if rc is not None else (0 if "failed" not in
-        text.splitlines()[-1] else 1),
+        "rc": resolved_rc,
         "passed": summary["passed"],
         "skipped": summary["skipped"],
         "deselected": summary["deselected"],
@@ -889,6 +1284,10 @@ def record_cold_run(root: Path, raw_log: Path, rc: "int | None" = None) -> dict:
     out.write_text(json.dumps(doc, ensure_ascii=False, indent=1,
                               sort_keys=True) + "\n", encoding="utf-8")
     out.chmod(0o600)
+    # 评审 W4-10：rc 同时落独立侧车（下一轮缺 --rc 时可复读，不再从日志推断）。
+    rc_side = root / "closeout" / "cold_run.rc"
+    rc_side.write_text(f"rc={resolved_rc}\n", encoding="utf-8")
+    rc_side.chmod(0o600)
     return doc
 
 
@@ -899,12 +1298,15 @@ def main(argv: "list[str] | None" = None) -> int:
     parser.add_argument("--root", default=None)
     parser.add_argument("--check", choices=tuple(CHECK_FUNCS), action="append",
                         help="只跑某类检查（可重复；缺省全跑）")
-    parser.add_argument("--report", default=None, help="判决件路径")
-    parser.add_argument("--require-acceptance", action="store_true")
+    parser.add_argument("--report", default=None,
+                        help="判决件路径（缺省 <root>/closeout/closure_judge.json）")
+    parser.add_argument("--require-acceptance", action="store_true",
+                        help="追加验收车道/三签/矩阵/不变量四类检查（终判必须带）")
     parser.add_argument("--record-cold-run", default=None,
                         metavar="RAW_LOG", help="解析冷跑日志并写 cold_run.json")
     parser.add_argument("--rc", type=int, default=None,
-                        help="冷跑进程退出码（缺省按日志末行推断）")
+                        help="冷跑进程退出码；缺省读 closeout/cold_run.rc，"
+                             "缺失即 fail-closed（评审 W4-10）")
     args = parser.parse_args(argv)
 
     root = Path(args.root) if args.root else paths.bench_root()
@@ -920,6 +1322,16 @@ def main(argv: "list[str] | None" = None) -> int:
                     require_acceptance=args.require_acceptance)
     out = Path(args.report) if args.report else root / "closeout" / \
         "closure_judge.json"
+    # 评审 W5-18：子集运行（--check）不得顺手覆盖终判件——只打印；要落盘
+    # 必须显式给 --report（且判决必为 Incomplete，见 run_judge）。
+    if args.check and args.report is None:
+        print(json.dumps({"verdict": doc["verdict"],
+                          "problems": doc["problems"],
+                          "checks": {k: v["ok"]
+                                     for k, v in doc["checks"].items()},
+                          "report_written": None},
+                         ensure_ascii=False, indent=1, sort_keys=True))
+        return 0 if doc["verdict"] == "Established" else 1
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(doc, ensure_ascii=False, indent=1,
                               sort_keys=True) + "\n", encoding="utf-8")
@@ -928,7 +1340,9 @@ def main(argv: "list[str] | None" = None) -> int:
                       "problems": doc["problems"],
                       "checks": {k: v["ok"] for k, v in doc["checks"].items()}},
                      ensure_ascii=False, indent=1, sort_keys=True))
-    return 0 if not doc["problems"] else 1
+    # 评审 W4-03/W4-06：rc 跟随判决——只有 Established 才是 0，Incomplete/
+    # Not Established 一律非 0，自动化不得把「没跑全集」当绿灯。
+    return 0 if doc["verdict"] == "Established" else 1
 
 
 if __name__ == "__main__":

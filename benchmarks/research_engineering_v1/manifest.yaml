@@ -7,4 +7,4 @@ tasks:
   - icy_ground_dr_v1
   - libero_env_adapter_v1
   - mujoco_contact_push_v1
-criteria_lock: "1c4b7b671bce7de17fbdd54507cf543135975b6e05ba243a8900b48579fd3acf"
+criteria_lock: "59e78c131f660eb4aaf9a43e870240fedc06adb2595b7f8df5dfd9734de7c302"

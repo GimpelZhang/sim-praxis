@@ -6,7 +6,8 @@
 ``orchestrator/benchmark/controls.py``；本文件只做参数解析与打印（薄封装）。
 
 退出码：全部按预期判过 → 0；任一负例/变异被放过或 golden 被判负 → 1；
-夹具/环境不合法（基建问题）→ 3。
+**部分执行（``--task`` 不跑变异，判据缺失）→ 2**（评审 W3-13：未执行不得
+与「通过」同码）；夹具/环境不合法（基建问题）→ 3。
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXIT_OK = 0
 EXIT_FAIL = 1
+EXIT_PARTIAL = 2
 EXIT_STOP = 3
 
 
@@ -56,6 +58,9 @@ def _main(argv: "list[str] | None" = None) -> int:
         print(f"[controls] {mark} {row['mutation']:<28} "
               f"{row['actual_status']:<18} {row['reason'][:96]}")
     print(f"[controls] wrote {report.out_root}")
+    if report.mutations.get("partial_skip"):
+        print("[controls] 部分执行：变异未跑（判据缺失），不计为通过")
+        return EXIT_PARTIAL
     return EXIT_OK if summary["all_passed"] else EXIT_FAIL
 
 

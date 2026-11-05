@@ -48,12 +48,13 @@ def _spec(task_id: str):
 
 
 def _latest_run(task_id: str) -> Path:
-    """该任务**最新**的参考运行目录（run_id 含 UTC 时间戳，字典序即时序）。"""
-    runs = sorted(p for p in paths.runs_dir().glob(f"{task_id}-*") if p.is_dir())
-    assert runs, (
-        f"{task_id}: 没有参考运行产物——先跑 "
-        f"scripts/benchmark/run_reference.py --task {task_id}")
-    return runs[-1]
+    """被判参考运行（评审 W4-11：读 `closeout/run_identity.json` 钉死值）。"""
+    try:
+        return paths.pinned_run(None, task_id)
+    except paths.BenchmarkPathError as exc:
+        raise AssertionError(
+            f"{task_id}: 没有可判的参考运行产物——先跑 "
+            f"scripts/benchmark/run_reference.py --task {task_id}（{exc}）") from exc
 
 
 def _telemetry(run: Path) -> "list[dict]":
@@ -62,7 +63,7 @@ def _telemetry(run: Path) -> "list[dict]":
 
 
 def _evaluation(run: Path) -> dict:
-    return _json(paths.evaluator_results_dir() / run.name
+    return _json(paths.evaluator_results_dir(read_only=True) / run.name
                  / "evaluation_result.json")
 
 
@@ -124,6 +125,15 @@ def test_ac_p0_6_2_mujoco_reference():
         "scene_spec.json": scene,
         "reproducibility.json": _json(run / "reproducibility.json"),
     }
+    for rel in ("repro/same_seed/metrics.json", "repro/same_seed/telemetry.jsonl",
+                "repro/cross_seed/metrics.json", "repro/cross_seed/telemetry.jsonl"):
+        path = run / rel
+        assert path.is_file(), f"参考运行缺复现件：{rel}"
+        if rel.endswith(".jsonl"):
+            files[rel] = [json.loads(line) for line in
+                          path.read_text(encoding="utf-8").splitlines() if line]
+        else:
+            files[rel] = _json(path)
 
     # 真实物理步进：行数 ≥ 100，且时间轴按 dt 逐行推进（不是一份静态文件）
     assert len(telemetry) >= 100, len(telemetry)
@@ -132,7 +142,7 @@ def test_ac_p0_6_2_mujoco_reference():
         assert abs(float(row["t"]) - (index + 1) * dt) <= 1e-6, (
             f"第 {index} 行 t={row['t']} 与 (i+1)*dt 不符")
 
-    facts = scoring.mujoco_facts(files)
+    facts = scoring.mujoco_facts(files, spec.criteria)
     # 判据来自 Task 1 预注册（只读 spec.criteria；取值口径与评分器同一个访问器）
     steps_min = int(scoring.threshold(spec.criteria, "steps_min"))
     steps_max = int(scoring.threshold(spec.criteria, "steps_max"))
@@ -293,7 +303,7 @@ def test_ac_p0_6_6_research_reference():
                  encoding="utf-8"),
              "parameter_space.json": space,
              "evaluation_metrics.json": metrics_doc}
-    facts = scoring.research_facts(files)
+    facts = scoring.research_facts(files, spec.criteria)
     assert facts["missing_sections"] == []
     assert facts["uncovered_classes"] == []
     assert facts["forbidden_claims"] == []

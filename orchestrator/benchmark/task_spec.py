@@ -248,7 +248,33 @@ def validate_task_spec(doc: Any, path: "str | Path" = "<task>",
         reason = _VALIDATOR_REASON.get(best.validator, "schema_violation")
         where = "/".join(str(p) for p in best.absolute_path) or "<root>"
         raise TaskSpecError(reason, path, f"{where}: {best.message}")
+    # schema 的裸文件名 pattern ``^[A-Za-z0-9_.-]+$`` 本身会接受 ``.`` / ``..``
+    # （评审 W1-02：与 description「不接受目录穿越」自相矛盾）。schema 已冻结，
+    # 故在加载侧做同等的语义拒绝——契约层 fail-closed，不靠下游 B0 jail 兜。
+    problems = _dot_name_problems(doc)
+    if problems:
+        raise TaskSpecError("schema_violation", path, problems[0])
     return doc
+
+
+#: 裸文件名里非法但正则放行的两个取值（目录穿越）
+_DOT_NAMES = frozenset({".", ".."})
+
+
+def _dot_name_problems(doc: dict) -> "list[str]":
+    """拒 ``.`` / ``..``：entrypoint.path、outputs[]、reproducibility.hidden_seed_ref。"""
+    out: "list[str]" = []
+    entry = (doc.get("entrypoint") or {}).get("path")
+    if isinstance(entry, str) and entry in _DOT_NAMES:
+        out.append(f"entrypoint/path: 裸文件名不得为 {entry!r}（目录穿越）")
+    outputs = doc.get("outputs") if isinstance(doc.get("outputs"), list) else ()
+    for index, name in enumerate(outputs):
+        if isinstance(name, str) and name in _DOT_NAMES:
+            out.append(f"outputs/{index}: 裸文件名不得为 {name!r}（目录穿越）")
+    ref = (doc.get("reproducibility") or {}).get("hidden_seed_ref")
+    if isinstance(ref, str) and ref in _DOT_NAMES:
+        out.append(f"reproducibility/hidden_seed_ref: 不得为 {ref!r}（目录穿越）")
+    return out
 
 
 # --------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from orchestrator.benchmark import paths
 from orchestrator.benchmark import result_schema as rs
 from orchestrator.benchmark import task_spec as ts
 from orchestrator.benchmark.registry import BenchmarkRegistry
-from orchestrator.common.fsutil import ensure_private_dir
+from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures" / "benchmark"
@@ -112,7 +112,14 @@ def judge_case(case: dict, doc: dict) -> dict:
     gates_ok = set(expected_gates) <= set(hits)
     detail_ok = (not expected_detail) or any(
         expected_detail in hits.get(gate, "") for gate in expected_gates)
-    rejected = actual_status != "PASS" and gates_ok and detail_ok
+    #: 评审 W3-05：只判「没判 PASS」不够。用例声明的 ``expected_status`` 是
+    #: 判据的一部分（BLOCKED_* / FAIL / INVALID_ARTIFACT 指向完全不同的缺陷类）；
+    #: 期望 FAIL 却拿到 BLOCKED 说明命中原因不对，不能算控制用例通过。
+    expected_status = case.get("expected_status")
+    status_ok = (expected_status is None
+                 or actual_status == str(expected_status))
+    rejected = (status_ok and actual_status != "PASS"
+                and gates_ok and detail_ok)
     return {
         "case_id": case["case_id"],
         "task_id": case["task_id"],
@@ -123,6 +130,7 @@ def judge_case(case: dict, doc: dict) -> dict:
         "expected_detail": expected_detail,
         "actual_status": actual_status,
         "actual_gates": sorted(hits),
+        "status_ok": bool(status_ok),
         "rejected": bool(rejected),
         "gates_ok": bool(gates_ok),
         "detail_ok": bool(detail_ok),
@@ -174,8 +182,6 @@ def _mutation_rows(golden_dir: Path, work: Path) -> "list[dict]":
             case["task_id"], mutated.run_dir, work / f"{spec.name}_eval",
             benchmark_root=mutated.benchmark_root))
         row["mutation"] = spec.name
-        row["status_ok"] = row["actual_status"] == spec.expected_status
-        row["rejected"] = bool(row["rejected"] and row["status_ok"])
         row["notes"] = mutated.notes
         rows.append(row)
     return rows
@@ -253,15 +259,22 @@ def run_controls(*, out_root: "str | Path | None" = None,
         "count": len(mutation_rows),
         "rejected": sum(1 for row in mutation_rows if row["rejected"]),
         "rows": mutation_rows,
+        #: 评审 W3-13：``--task`` 模式不跑变异。空行集上 ``all()`` 恒真，
+        #: 等价于「未执行即通过」——这正是自报立论禁止的东西。这里显式标
+        #: ``partial_skip`` 且 ``all_passed=None``（三态：True/False/未判），
+        #: 下游 ``bool()`` 一律当未通过，CLI 以非零码退出。
         "all_passed": (all(row["rejected"] for row in mutation_rows)
-                       if mutation_rows else True),
+                       if mutation_rows else None),
+        "partial_skip": "mutation" if not mutation_rows else None,
     }
     for name, doc in ((GOLDEN_RESULTS, report.golden),
                       (NEGATIVE_RESULTS, report.negatives),
                       (MUTATION_RESULTS, report.mutations)):
-        (target / name).write_text(
+        #: 评审 W3-09：结果件是控制结论，与证据包内其它产物同口径 0600。
+        atomic_write_text(
+            target / name,
             json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8")
+            0o600)
     return report
 
 

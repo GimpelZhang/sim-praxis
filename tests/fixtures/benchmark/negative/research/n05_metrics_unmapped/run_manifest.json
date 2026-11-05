@@ -1,19 +1,19 @@
 {
   "birth_result_sha256": null,
   "candidate_artifact_sha256": "2284a85efdeea79d3e24fcba1004bf62bf0a93df8a539efcf8f3ee77b10971d0",
-  "criteria_lock_sha256": "2321a27365724c5ea9fc7baff641e80c441604ce1ed0e0f84b52e9d1e57a7240",
-  "criteria_sha256": "17448a739363e9bee437251d14c1ac0393460646aa0af258640db4e7ccc4dbf0",
+  "criteria_lock_sha256": "bb8334fcf39370bf056f4dc40c08b259b6f92a53acd4dae41d38a50bf08cad4b",
+  "criteria_sha256": "17fd3f951858a4359a70441a7d47deea472df7e12acfbb70d76f2fdeb73a1cb0",
   "evaluator_version": 1,
   "evidence_manifest_sha256": "a5a8c0a65a27f5324bf3e99fddcdb92407e34996c3837eeecc25dc6e330f6a6c",
   "mode": "negative_control",
   "paid_model_calls": 0,
   "repository_sha": "0123456789abcdef0123456789abcdef01234567",
   "run_id": "r1_n05_metrics_unmapped",
-  "runtime_fingerprint_sha256": "0ffaa574ef7182f48e67c16db9d73268622b40169dc99522062d71498ce6d6ca",
+  "runtime_fingerprint_sha256": "2fa017a550e3f55ed2b18b5e63e4c51fba6931b7fd32da9298200b99dd2f809a",
   "schema": "simpraxis.benchmark_run.v1",
   "seed": 0,
   "status": "PASS",
   "task_id": "icy_ground_dr_v1",
-  "task_spec_sha256": "dfd6257526c8506721daf2c4f127a4a2cfb8e6df12f945c8a902c47d7605d0be",
+  "task_spec_sha256": "f8f6c13bfccef60a6b4c8eff9f38cb5c3a32269f0e62340fdab9110c71139aef",
   "task_version": 1
 }

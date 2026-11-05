@@ -1,33 +1,52 @@
-research_problem: 冰面域随机化对推箱策略鲁棒性的影响（研究设计，不执行训练）
+research_problem:
+  question: 冰面域随机化对推箱策略鲁棒性的影响（研究设计，不执行训练）
+  motivation: 历史 Q1 冰面实验给出负结论，本计划只回答「随机化设计是否可检验」，不改写历史结论
+  prior_evidence: Phase 1 Q1（ice/normal=0.824<2.0，contradiction_control_not_robust）作为先验证据引用，不作翻案
+  rl_constraints_unchanged: true
 parameter_definitions:
 - name: friction
   unit: '1'
   range:
   - 0.05
   - 0.95
+  rationale: 冰面与地面摩擦系数按干/湿木材与冰面的实测区间取 [0.05, 0.95]，覆盖策略可能遇到的滑/涩两端
 - name: contact_stiffness
   unit: N/m
   range:
   - 500
   - 5000
+  rationale: 低温下接触刚度随材料硬化上升，取 [500, 5000] N/m 覆盖软接触到接近刚体两种极端
 - name: joint_damping
   unit: N*m*s/rad
   range:
   - 0.1
   - 2.0
+  rationale: 关节阻尼受润滑与温度影响，[0.1, 2.0] N*m*s/rad 为常见机器人关节参数带
 probability_distributions:
   friction:
     family: uniform
     low: 0.05
     high: 0.95
+    support:
+    - 0.05
+    - 0.95
+    rationale: 摩擦系数无先验方向，均匀分布是最大熵选择，区间与 parameter_definitions 一致
   contact_stiffness:
     family: log-uniform
     low: 500
     high: 5000
+    support:
+    - 500
+    - 5000
+    rationale: 刚度跨一个数量级，对数均匀避免把采样质量集中在上界
   joint_damping:
     family: uniform
     low: 0.1
     high: 2.0
+    support:
+    - 0.1
+    - 2.0
+    rationale: 阻尼在区间内近似线性可调，均匀分布与硬件标定精度相匹配
 parameter_correlations:
 - pair:
   - friction

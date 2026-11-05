@@ -180,6 +180,12 @@ class Capture:
     command: tuple
     duration_s: float
     image_name: "str | None" = None
+    #: 本次采集真实使用的子进程超时（评审 W2-08：config 段必须记实测值，
+    #: 不能记模块常量——构造参数 ``timeout`` 可改）。
+    timeout: "float | None" = None
+    #: 采集期如实降级的字段名（评审 W2-10：``image_id`` 取不到时不可静默为
+    #: null 而无人知晓）。
+    degraded: tuple = ()
 
     def meta(self) -> dict:
         return {
@@ -188,6 +194,8 @@ class Capture:
             "duration_s": round(self.duration_s, 3),
             "ts_iso": _now_micro(),
             "image_name": self.image_name,
+            "timeout_s": self.timeout,
+            "degraded": list(self.degraded),
         }
 
 
@@ -234,7 +242,7 @@ class HostBackend:
             "egl_available": None,
         }
         return Capture("host", probe, container, tuple(cmd),
-                       time.monotonic() - started)
+                       time.monotonic() - started, timeout=self.timeout)
 
 
 class ContainerBackend:
@@ -291,11 +299,12 @@ class ContainerBackend:
                 f"容器探针 rc={res.returncode}：{(res.stderr or '')[-2000:]}")
         probe = _parse_probe_output(res.stdout, "container")
         digest = self.image.split("@", 1)[1]
+        image_id = self._image_id()
         container = {
             "backend": "docker",
             "image_name": self.image_name,
             "image_digest": digest,
-            "image_id": self._image_id(),
+            "image_id": image_id,
             # 一次性 --rm 容器的 id 每次随机：恒记 None，身份由 digest 承担（D2-4）
             "container_id": None,
             "container_python": str(probe.get("executable") or ""),
@@ -307,7 +316,9 @@ class ContainerBackend:
             "egl_available": None,
         }
         return Capture("docker", probe, container, tuple(cmd),
-                       time.monotonic() - started, image_name=self.image_name)
+                       time.monotonic() - started, image_name=self.image_name,
+                       timeout=self.timeout,
+                       degraded=(() if image_id else ("image_id",)))
 
 
 # --------------------------------------------------------------------------
@@ -369,8 +380,11 @@ def _config_segment(capture: Capture) -> dict:
         "env_passthrough": sorted(env),
         "env": env,
         "network_mode": "none" if capture.backend == "docker" else "host",
-        "timeout_s": DOCKER_TIMEOUT_S if capture.backend == "docker"
-                     else PROBE_TIMEOUT_S,
+        # 评审 W2-08：记本次采集**实际**使用的超时（后端构造参数可改），
+        # 模块常量只在 Capture 未带 timeout 时兜底。
+        "timeout_s": (capture.timeout if capture.timeout is not None
+                      else (DOCKER_TIMEOUT_S if capture.backend == "docker"
+                            else PROBE_TIMEOUT_S)),
         "cpu_limit": None,
         "memory_limit": None,
         "gpu": {"name": None, "total_mib": None},
@@ -432,7 +446,11 @@ def build_fingerprint(spec: ts.TaskSpec, capture: Capture, *,
                          (probe.get("packages") or {}).items() if v},
             "argv": [str(a) for a in probe.get("argv") or ()],
         },
-        "mount": {"entries": [mount_entry(m) for m in (mounts or ())]},
+        # 评审 W2-09：同一挂载集合不得因传入顺序不同而换指纹——按
+        # (destination, source) 排序后再序列化（D2-4 确定性）。
+        "mount": {"entries": [mount_entry(m) for m in sorted(
+            (mounts or ()), key=lambda m: (str(m.get("destination")),
+                                           str(m.get("source"))))]},
         "config": _config_segment(capture),
         "simulator": _simulator_segment(spec, capture, simulator),
     }
@@ -549,6 +567,9 @@ class MismatchCode:
     OBS_SCHEMA = "obs_schema"
     SKILL_MANIFEST = "skill_manifest"
     ASSET_MANIFEST = "asset_manifest"
+    #: 评审 W2-04：要求声明了 action_dim/obs_keys、但运行期没有实测证据时，
+    #: 不再静默通过（缺证据 ≠ 相符）。
+    OBSERVATION_MISSING = "observation_missing"
 
 
 #: 十类（P0-AC-05「均能识别」的机判清单；PACKAGE_VERSION 是附加细分）
@@ -556,6 +577,33 @@ REQUIRED_CODES = (
     MismatchCode.PYTHON_VERSION,
     MismatchCode.MUJOCO_VERSION,
     MismatchCode.IMAGE_DIGEST,
+    MismatchCode.WORKDIR,
+    MismatchCode.MOUNT_MISSING,
+    MismatchCode.MOUNT_READONLY,
+    MismatchCode.ACTION_DIM,
+    MismatchCode.OBS_SCHEMA,
+    MismatchCode.SKILL_MANIFEST,
+    MismatchCode.ASSET_MANIFEST,
+)
+
+
+#: 生产接线（评审 W2-03 的诚实边界）：HG-EVAL-1 的 requirement 来自冻结
+#: ``task.yaml.runtime`` 段，该段 schema 只声明 ``runtime_id / image_digest /
+#: python / packages`` 四键（``additionalProperties: false``），所以生产链路
+#: 能真正对上的只有解释器、包版本、镜像 digest 这几类。
+PRODUCTION_WIRED_CODES = (
+    MismatchCode.PYTHON_EXECUTABLE,
+    MismatchCode.MUJOCO_VERSION,
+    MismatchCode.PACKAGE_VERSION,
+    MismatchCode.IMAGE_DIGEST,
+)
+
+#: 仅 **API 能力**（``compare()`` 支持、但当前生产调用方传不进要求）：这七类
+#: 在真实评测里恒不触发，action_dim/obs 的一致性由 Task 6 的域门（env_probe ↔
+#: 指纹 simulator 段）承担。**不得表述为「十类生产全覆盖」**——计划 P0-AC-05
+#: 的「均能识别」只在 API/单测层面成立，边界见 Phase 2.8.0 Complete。
+API_ONLY_CODES = (
+    MismatchCode.PYTHON_VERSION,
     MismatchCode.WORKDIR,
     MismatchCode.MOUNT_MISSING,
     MismatchCode.MOUNT_READONLY,
@@ -595,7 +643,12 @@ def compare(requirement: Mapping, fingerprint: Mapping, *,
     ``requirement`` 可含：``packages`` / ``python_version`` / ``image_digest`` /
     ``workdir`` / ``mounts``（``[{destination, mode}]``）/ ``action_dim`` /
     ``obs_keys`` / ``assets_manifest_sha256`` / ``skills_manifest_sha256``。
-    ``observed`` 是运行期实测（``env_probe.json`` 的 ``action_dim``/``obs_keys``）。
+    ``observed`` 是运行期实测（``env_probe.json`` 的 ``action_dim``/``obs_keys``）；
+    要求声明了观测契约而实测缺失时返回 ``observation_missing``（不得静默通过）。
+
+    **生产接线边界（评审 W2-03）**：HG-EVAL-1 只传冻结 ``task.yaml.runtime``
+    的四键，因此实际生效的只有 ``PRODUCTION_WIRED_CODES``；``API_ONLY_CODES``
+    里各类仅是该函数的 API 能力，流水线恒不触发（详见 Complete 登记）。
     """
     req = _requirement_of(requirement, spec)
     out: "list[Mismatch]" = []
@@ -659,17 +712,27 @@ def compare(requirement: Mapping, fingerprint: Mapping, *,
 
     obs = dict(observed or {})
     want_dim = req.get("action_dim")
-    if want_dim is not None and obs.get("action_dim") is not None:
-        if int(obs["action_dim"]) != int(want_dim):
+    if want_dim is not None:
+        if obs.get("action_dim") is None:
+            # 评审 W2-04：要求已声明、实测缺失 ⇒ 显式不符（缺证据 ≠ 相符）。
+            out.append(Mismatch(
+                MismatchCode.OBSERVATION_MISSING,
+                f"要求 action_dim={want_dim}，但运行时无实测观测证据"))
+        elif int(obs["action_dim"]) != int(want_dim):
             out.append(Mismatch(MismatchCode.ACTION_DIM,
                                 f"要求 action_dim={want_dim}，实测 "
                                 f"{obs['action_dim']}"))
     want_obs = req.get("obs_keys")
-    if want_obs is not None and obs.get("obs_keys") is not None:
-        missing = [k for k in want_obs if k not in set(obs["obs_keys"])]
-        if missing:
-            out.append(Mismatch(MismatchCode.OBS_SCHEMA,
-                                f"观测缺键：{missing}"))
+    if want_obs is not None:
+        if obs.get("obs_keys") is None:
+            out.append(Mismatch(
+                MismatchCode.OBSERVATION_MISSING,
+                f"要求观测键 {list(want_obs)}，但运行时无实测观测证据"))
+        else:
+            missing = [k for k in want_obs if k not in set(obs["obs_keys"])]
+            if missing:
+                out.append(Mismatch(MismatchCode.OBS_SCHEMA,
+                                    f"观测缺键：{missing}"))
 
     for key, code in (("skills_manifest_sha256", MismatchCode.SKILL_MANIFEST),
                       ("assets_manifest_sha256", MismatchCode.ASSET_MANIFEST)):
@@ -717,6 +780,14 @@ def capture_and_build(spec: ts.TaskSpec, *, image: str | None = None,
         cap = ContainerBackend(ref, image_name=image_name,
                                packages=packages).capture()
     elif chosen == "host":
+        # 评审 W2-07 / T2.1 不变量 1：任务已声明容器镜像时，禁止用宿主后端
+        # 冻结指纹（宿主冒充容器）。冻结件是 O_EXCL 写的，一次误操作会把规范
+        # 路径占死，只能人工清目录——所以在源头拦下。
+        if spec.runtime.get("image_digest"):
+            raise FingerprintError(
+                "任务 %s 的 runtime 已声明镜像 %r：禁止以 host 后端冻结指纹"
+                "（T2.1 不变量 1「禁止宿主冒充容器」；容器失败不得降级为宿主）"
+                % (spec.task_id, spec.runtime.get("image_digest")))
         cap = HostBackend(python, packages=packages).capture()
     else:
         raise FingerprintError(f"未知后端：{chosen!r}")

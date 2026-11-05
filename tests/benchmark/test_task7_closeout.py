@@ -17,7 +17,6 @@ import hashlib
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -65,7 +64,8 @@ def _json(path: Path):
 
 
 def _root() -> Path:
-    return paths.bench_root()
+    # 评审 W5-08：只读解析，数据根缺席时 fail-fast 而不是被 mkdir 掩盖。
+    return paths.bench_root(read_only=True)
 
 
 def _write(path: Path, payload: str) -> Path:
@@ -451,15 +451,33 @@ def test_inv_i9_whitelist_only():
 
 @MARK
 def test_inv_i10_no_push():
-    head = subprocess.run(["git", "-C", str(REPO), "rev-parse", "origin/main"],
-                          capture_output=True, text=True, check=True
-                          ).stdout.strip()
-    assert head == judge.ORIGIN_MAIN
+    """I10：推送只经人工 STOP 门（评审 W5-01/W5-04 修法后的口径）。
+
+    原文「origin/main 恒等于 ``judge.ORIGIN_MAIN``」在推送窗口之后必然恒红：
+    推送本身是被允许的动作，恒红只会训练出「忽略这条」的习惯。改为与
+    ``closeout.write_invariants`` 同一实现的二值 + 祖先谓词：
+    ``origin/main ∈ {Task-0 基线, HEAD}`` 且 ``origin/main`` 是 HEAD 的祖先
+    （后者排除「已推送历史被改写」）。
+    """
+    def _git(*argv: str) -> str:
+        return subprocess.run(["git", "-C", str(REPO), *argv],
+                              capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    origin = _git("rev-parse", "origin/main")
+    head = _git("rev-parse", "HEAD")
+    ancestor = subprocess.run(
+        ["git", "-C", str(REPO), "merge-base", "--is-ancestor", origin, head],
+        capture_output=True, text=True).returncode == 0
+    assert judge.verify_origin_anchor(origin, head, ancestor=ancestor) == []
+    # 基线不是 HEAD 时，origin/main 必须仍停在基线（未推送）；是 HEAD 时则
+    # 两者必须相等——两种合法态都被上面一条覆盖，这里再钉住「不得第三值」。
+    assert origin in (judge.ORIGIN_MAIN, head), origin
 
 
 @MARK
-def test_inv_i11_clean_target_guard():
-    holder = Path(tempfile.mkdtemp(prefix="p28_i11_"))
+def test_inv_i11_clean_target_guard(tmp_path: Path):
+    holder = tmp_path / "p28_i11"
     root = holder / "bench"
     pack = root / "evidence_pack"
     pack.mkdir(parents=True)
@@ -500,8 +518,11 @@ def test_ac_p0_7_9_verdict_binary_logic(tmp_path: Path):
     for phrase in report.FORBIDDEN_PHRASES:
         with pytest.raises(report.ReportError):
             report.assert_report_text(f"……{phrase}……")
-    summary = {"verdict": "Established"}
-    assert summary["verdict"] in ("Established", "Not Established")
+    # 评审 W5-20：对自造 dict 的「in 二元组」断言恒真、证明力为零；改为对
+    # report 的真实结论常量的产生点断言（有问题的输入必须落到另一值）。
+    assert report.VERDICTS == ("Established", "Not Established")
+    assert report.verdict_for(()) == "Established"
+    assert report.verdict_for(["x"]) == "Not Established"
 
 
 @MARK
@@ -527,3 +548,219 @@ def test_ac_p0_7_2_pack_self_not_swallowed(tmp_path: Path):
     assert "evidence_pack/stray.txt" not in {r["relpath"]
                                               for r in manifest["files"]}
     assert not (root / "evidence_pack" / "stray.txt").exists()
+
+
+# --------------------------------------------------------------------------
+# 机判侧新增逻辑的护栏（评审 W4-01/04/08/09/10/12/15、W5-05/06/17）
+# --------------------------------------------------------------------------
+
+def _evidence_root(tmp_path: Path) -> Path:
+    """可跑 ``check_evidence`` 的最小合成根（自洽相位 2.7 包，避免 I6 假红）。"""
+    from orchestrator.benchmark import intake as bench_intake
+
+    root = _fixture_root(tmp_path)
+    phase27 = root / "phase27_pack"
+    _write(phase27 / "a.txt", "phase27\n")
+    _write(phase27 / "manifest.json", json.dumps(
+        {"files": [{"path": "a.txt",
+                    "sha256": _sha(phase27 / "a.txt"),
+                    "size": (phase27 / "a.txt").stat().st_size}]}))
+    digest = bench_intake.phase27_pack_sha256(phase27)
+    _write(root / "intake" / "invariants_before.json", json.dumps({
+        "phase27_pack": str(phase27),
+        "phase27_pack_sha256": digest["phase27_pack_sha256"],
+        "phase27_manifest_sha256": digest["phase27_manifest_sha256"],
+        "phase27_pack_n_files": digest["phase27_pack_n_files"],
+        "phase27_pack_total_bytes": digest["phase27_pack_total_bytes"]}))
+    _build(root)
+    return root
+
+
+def _seal_pack(root: Path) -> Path:
+    """把合成包伪装成「从干净树构建」：改写 git_dirty 并重算 pack.sha256。
+
+    合成根不是 git 仓，打包器如实写 ``git_dirty=True``；本文件其余逻辑与此
+    无关，故只在校验超集/越界两条规则时把它改成干净态。
+    """
+    pack = root / "evidence_pack"
+    manifest = _json(pack / "manifest.json")
+    manifest["git_dirty"] = False
+    (pack / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=1, sort_keys=True) + "\n",
+        encoding="utf-8")
+    (pack / "pack.sha256").write_text(_sha(pack / "manifest.json") + "\n",
+                                      encoding="utf-8")
+    return pack
+
+
+def test_judge_evidence_superset_and_relpath(tmp_path: Path):
+    """W4-01/W4-09：包内多出的未登记件、绝对/上跳 relpath 都必须被抓。"""
+    root = _evidence_root(tmp_path)
+    _seal_pack(root)
+    problems, _detail = judge.check_evidence(root)
+    assert problems == [], problems
+
+    # ① 超集：后置混入一件未登记文件 → 必须报「未登记」
+    _write(root / "evidence_pack" / "intake" / "smuggled.txt", "x\n")
+    problems, detail = judge.check_evidence(root)
+    assert any("未登记" in p for p in problems), problems
+    assert detail["n_unregistered"] == 1
+
+    # ② relpath 越界：manifest 里写 `../` 与绝对路径都必须被拒
+    (root / "evidence_pack" / "intake" / "smuggled.txt").unlink()
+    manifest_path = root / "evidence_pack" / "manifest.json"
+    manifest = _json(manifest_path)
+    manifest["files"].append({"relpath": "../escape.txt", "sha256": "0" * 64,
+                              "size": 1})
+    manifest["files"].append({"relpath": "/abs.txt", "sha256": "0" * 64,
+                              "size": 1})
+    manifest["n_files"] = len(manifest["files"])
+    manifest["total_bytes"] = sum(r["size"] for r in manifest["files"])
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n",
+                             encoding="utf-8")
+    problems, _detail = judge.check_evidence(root)
+    assert any("含 '..'" in p for p in problems), problems
+    assert any("绝对路径" in p for p in problems), problems
+
+
+def test_judge_secret_exemption_only_inside_selftest_param():
+    """W4-08：规则①只豁免**自测 nodeid 方括号参数内**的命中。"""
+    fake = "sk-" + "e" * 20
+    same_line = f"tests/x.py::test_scan_detects_all_strict_forms[{fake}]"
+    assert judge._in_selftest_param(same_line, fake) is True
+    nested = "tests/x.py::test_scan_detects_all_strict_forms[" \
+             f"('{fake}', 'ok')]"
+    assert judge._in_selftest_param(nested, fake) is True
+    # 关键收紧：**同一行**上、参数之外的另一个真凭据不再被顺带豁免
+    other = "ghp_" + "z" * 24
+    line = f'{other} tests/x.py::test_scan_detects_all_strict_forms[{fake}]'
+    assert judge._in_selftest_param(line, fake) is True
+    assert judge._in_selftest_param(line, other) is False
+    # 没有自测 nodeid 的行一律不豁免
+    assert judge._in_selftest_param(f"{fake} plain line", fake) is False
+
+
+def test_judge_origin_anchor_two_valued():
+    """W5-01/W4-15：origin/main ∈ {基线, HEAD} 且必须是 HEAD 的祖先。"""
+    base, other = "a" * 40, "b" * 40
+    assert judge.verify_origin_anchor(base, base, base=base) == []
+    assert judge.verify_origin_anchor(base, other, base=base) == []
+    assert judge.verify_origin_anchor(other, other, base=base) == []
+    problems = judge.verify_origin_anchor(other, base, base=base)
+    assert any("既非基线" in p for p in problems), problems
+    assert any("改写" in p for p in
+               judge.verify_origin_anchor(base, other, base=base,
+                                          ancestor=False))
+    assert any("40 hex" in p for p in
+               judge.verify_origin_anchor("xyz", base))
+
+
+def test_judge_verdict_requires_full_set(tmp_path: Path, monkeypatch):
+    """W4-03：子集运行只能是 Incomplete，永不 Established。"""
+    monkeypatch.setitem(judge.CHECK_FUNCS, "stub", lambda root: ([], {}))
+    doc = judge.run_judge(tmp_path / "bench", checks=("stub",))
+    assert doc["verdict"] == "Incomplete", doc["verdict"]
+    assert doc["acceptance"] is None
+    assert doc["checks_run"] == ["stub"]
+    assert doc["checks_required"] == list(judge.CHECKS) + list(
+        judge.ACCEPTANCE_CHECKS)
+
+
+def test_judge_cold_run_rc_provenance(tmp_path: Path):
+    """W4-10：rc 只认显式参数与侧车，末行文本一律不采信。"""
+    root = tmp_path / "bench"
+    (root / "closeout").mkdir(parents=True)
+    log = root / "cold.raw.log"
+    log.write_text("1 passed in 0.10s\n", encoding="utf-8")
+    with pytest.raises(judge.JudgeError):
+        judge._resolve_rc(root, None)
+    (root / "closeout" / "cold_run.rc").write_text("rc=3\n", encoding="utf-8")
+    assert judge._resolve_rc(root, None) == 3
+    assert judge._resolve_rc(root, 0) == 0
+    (root / "closeout" / "cold_run.rc").write_text("boom\n", encoding="utf-8")
+    with pytest.raises(judge.JudgeError):
+        judge._resolve_rc(root, None)
+
+
+def test_judge_matrix_and_invariants_gate(tmp_path: Path):
+    """W5-05/W5-06：矩阵与不变量都要自称 + 被机判复核，缺件即红。"""
+    root = tmp_path / "bench"
+    (root / "closeout").mkdir(parents=True)
+    (root / "intake").mkdir(parents=True)
+    _write(root / "intake" / "repository_state.json",
+           json.dumps({"head": "0" * 40, "origin_main": "0" * 40}))
+    problems, _ = judge.check_matrix(root)
+    assert any("acceptance_matrix" in p for p in problems), problems
+    problems, _ = judge.check_invariants(root)
+    assert any("invariants" in p for p in problems), problems
+
+    acs = [{"ac": f"P0-AC-{i:02d}", "result": "PASS", "evidence": "x"}
+           for i in range(1, 20)]                 # 缺 P0-AC-20
+    _write(root / "closeout" / "acceptance_matrix.json", json.dumps({
+        "schema": "simpraxis.benchmark.acceptance_matrix.v1", "acs": acs,
+        "summary": {"total": 19, "passed": 19, "failed": 0},
+        "commit": "0" * 40, "pack_sha256": "0" * 64,
+        "baseline_head": "0" * 40}))
+    problems, _ = judge.check_matrix(root)
+    assert any("AC 集不符" in p for p in problems), problems
+    assert any("矩阵缺 P0-AC-20" in p for p in problems), problems
+
+    _write(root / "closeout" / "invariants.json", json.dumps({
+        "schema": "simpraxis.benchmark.invariants.v1",
+        "verdict": "OK", "commit": "0" * 40, "baseline_head": "0" * 40,
+        "invariants": [{"id": f"I{i}", "ok": i != 7, "evidence": "x"}
+                       for i in range(1, 13)]}))
+    problems, _ = judge.check_invariants(root)
+    assert any("I7" in p for p in problems), problems
+
+
+def test_judge_acceptance_requires_container_lane(tmp_path: Path):
+    """W5-17：验收车道缺 container_lane 段 / 采集条数不足都必须红。"""
+    root = tmp_path / "bench"
+    lane_log = _write(root / "closeout" / "acceptance_lane.log",
+                      "$ pytest\n(rc=0)\n12 passed, 3 deselected in 1.00s\n")
+    _write(root / "closeout" / "acceptance_lane.json", json.dumps({
+        "schema": "simpraxis.benchmark.acceptance_lane.v1",
+        "cmd": "pytest", "rc": 0, "passed": 12, "failed": 0,
+        "deselected": 3, "summary": "12 passed",
+        "log": str(lane_log), "log_sha256": _sha(lane_log)}))
+    problems, _ = judge.check_acceptance(root)
+    assert any("container_lane" in p for p in problems), problems
+
+    container_log = _write(root / "closeout" / "container_lane.log",
+                           "$ pytest\n(rc=0)\n2 passed, 30 deselected in 9.0s\n")
+    doc = _json(root / "closeout" / "acceptance_lane.json")
+    doc["container_lane"] = {
+        "cmd": "pytest -m container", "rc": 0, "passed": 2, "failed": 0,
+        "deselected": 30, "summary": "2 passed", "selected": 2,
+        "log": str(container_log), "log_sha256": _sha(container_log)}
+    _write(root / "closeout" / "acceptance_lane.json", json.dumps(doc))
+    problems, detail = judge.check_acceptance(root)
+    assert not any("container_lane" in p or "容器车道" in p for p in problems), \
+        problems
+    assert detail["容器车道.selected"] == 2
+
+    doc["container_lane"]["selected"] = 0          # 标记没生效的空绿
+    _write(root / "closeout" / "acceptance_lane.json", json.dumps(doc))
+    problems, _ = judge.check_acceptance(root)
+    assert any("下限" in p for p in problems), problems
+
+
+def test_record_input_manifest_fail_closed(tmp_path: Path, monkeypatch):
+    """W4-12：既有清单坏了必须抛错，不得静默重置为空（会丢别任务登记）。"""
+    from orchestrator.benchmark import reference as ref
+
+    monkeypatch.setenv("SIMPRAXIS_BENCHMARK_ROOT", str(tmp_path / "bench"))
+    rows = [{"kind": "stage_root", "stage_root": "x", "sha256": "0" * 64}]
+    first = ref.record_input_manifest("task_a", rows)
+    assert "task_a" in first["tasks"]
+
+    path = ref.input_manifest_path()
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ref.ReferenceError):
+        ref.record_input_manifest("task_b", rows)
+    assert path.read_text(encoding="utf-8") == "{not json"
+
+    path.write_text('{"schema": "other"}', encoding="utf-8")
+    with pytest.raises(ref.ReferenceError):
+        ref.record_input_manifest("task_b", rows)

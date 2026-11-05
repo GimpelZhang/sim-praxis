@@ -231,7 +231,7 @@ def test_ac_p0_3_5_isolation(tmp_path: Path, good_run):
     # 子进程自杀只影响它自己：主进程继续、并如实记为失败
     assert result.levels["B1"].status == "FAIL"
     assert result.levels["B1"].reason == "import_error"
-    assert "未产出标记行" in result.levels["B1"].detail
+    assert "未产出层结果" in result.levels["B1"].detail
     assert result.birth_status == "NOT_BORN"
     # sys.modules 污染不跨层：候选从未被主进程 import
     assert "simpraxis_candidate" not in sys.modules
@@ -239,6 +239,70 @@ def test_ac_p0_3_5_isolation(tmp_path: Path, good_run):
     good, _ = good_run
     pids = [good.levels[level].pid for level in birth.LEVELS]
     assert len(set(pids)) == 5
+
+
+def test_w2_01_forged_marker_is_rejected(tmp_path: Path):
+    """评审 W2-01 回归：候选打印伪造标记行 + ``os._exit(0)`` ⇒ 必须 FAIL。
+
+    修复前该用例会得到 B1 PASS / birth_status=BORN（判据被交给被验证方自报）；
+    修复后层结果只认 ``result_path`` 上带 nonce 的记录，stdout 任一标记行即判伪造。
+    """
+    wd = _workdir(tmp_path, "forge_marker")
+    result, _written = _validate(wd, tmp_path / "out")
+    item = result.levels["B1"]
+    assert (item.status, item.reason) == ("FAIL", "contract_error"), (
+        item.status, item.reason, item.detail)
+    assert "伪造出生标记行" in item.detail
+    assert result.birth_status == "NOT_BORN"
+    # 伪造内容绝不可作为层数据进入结果件
+    assert "forged" not in item.data
+    # 五层全部不得 PASS（B0 只看静态，入口本身合法 → PASS 允许）
+    assert all(result.levels[level].status != "PASS"
+               for level in ("B1", "B2", "B3", "B4"))
+    # 证据件如实保留候选的伪造输出，供审计
+    stdout = (Path(_written["birth_path"]).parent / "levels" / "B1" /
+              "stdout.txt").read_text(encoding="utf-8")
+    assert birth.RUNNER_MARKER in stdout
+
+
+def test_w2_02_directory_entry_is_rejected(tmp_path: Path):
+    """评审 W2-02 回归：入口是目录 ⇒ B0 必须 FAIL，且不得因后缀缺省而 PASS。
+
+    修复前：不带 .py/.yaml 后缀的目录 ``suffix == ""`` 跳过 AST 分支，
+    ``st_size``（≈4096）≥ ``min_bytes`` ⇒ B0 PASS。带后缀的目录则
+    ``read_text`` 抛 ``IsADirectoryError`` 穿透成 BLOCKED_INFRA。
+    """
+    wd = _workdir(tmp_path, "good")
+    (wd / "adapter.py").unlink()
+    (wd / "adapter.py").mkdir()
+    (wd / "adapter.py" / "payload.txt").write_text("x", encoding="utf-8")
+    result, _ = _validate(wd, tmp_path / "out")
+    item = result.levels["B0"]
+    assert (item.status, item.reason) == ("FAIL", "missing"), (
+        item.status, item.reason, item.detail)
+    assert "不是常规文件" in item.detail
+    assert result.birth_status == "NOT_BORN"
+
+
+@pytest.mark.parametrize("payload,expected", [
+    (b"def build_env():\n    return None\n\x00\n", "ValueError"),
+    (b"def build_env():\n    return None\n# \xff\xfe\n", "UnicodeDecodeError"),
+])
+def test_w2_02_dirty_source_is_ast_error(tmp_path: Path, payload: bytes,
+                                         expected: str):
+    """评审 W2-02 回归：null 字节/非 UTF-8 源码 ⇒ B0 ast_error，不是 BLOCKED_INFRA。
+
+    修复前该层穿透到 runner 顶层 ``except BaseException`` 记 ``blocked_infra``，
+    把候选自己的脏交付物算成基础设施阻塞（违背 T3.1 不变量 4）。
+    """
+    wd = _workdir(tmp_path, "good")
+    (wd / "adapter.py").write_bytes(payload)
+    result, _ = _validate(wd, tmp_path / "out")
+    item = result.levels["B0"]
+    assert (item.status, item.reason) == ("FAIL", "ast_error"), (
+        item.status, item.reason, item.detail)
+    assert expected in item.detail
+    assert result.birth_status == "NOT_BORN"
 
 
 # --------------------------------------------------------------------------
@@ -291,7 +355,7 @@ def test_ac_p0_3_7_path_jail(tmp_path: Path, ten_runs):
 
 def _bench() -> Path:
     from orchestrator.benchmark import paths
-    root = paths.bench_root()
+    root = paths.bench_root(read_only=True)
     assert root.is_dir(), f"数据根不在场：{root}"
     return root
 

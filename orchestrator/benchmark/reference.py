@@ -27,6 +27,7 @@ import hashlib
 import json
 import math
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -333,7 +334,13 @@ def docker_argv(image_ref: str, mounts: Iterable[Mount],
                 gpus: bool = True, ipc_host: bool = True,
                 label: str = "simpraxis.benchmark.reference=1",
                 docker: str = "docker") -> "list[str]":
-    """按 D6-3 拼 docker run 命令；挂载不合规**先于**起容器抛错。"""
+    """按 D6-3 拼 docker run 命令；挂载不合规**先于**起容器抛错。
+
+    容器一律以镜像默认用户运行：LIBERO 的配置与数据集指针在 ``/root/.libero``
+    （0700），换成非 root 会让导入期弹交互提问并直接 EOF 失败。
+    出生层结果件的属主问题由运行器内的 ``chown_uid/chown_gid`` 交回收尾
+    （见 ``birth._RUNNER_SRC``），不靠这里提权参数。
+    """
     mount_list = list(mounts)
     problems = validate_mounts(mount_list)
     if problems:
@@ -420,16 +427,26 @@ def _merge_inputs(rows: Iterable[Mapping], existing: Any) -> "list[dict]":
 
 def record_input_manifest(task_id: str, rows: Iterable[Mapping], *,
                           recipe_sha256: "str | None" = None) -> dict:
-    """读-改-写 ``private/input_manifest.json``（不丢其他任务的登记）。"""
+    """读-改-写 ``private/input_manifest.json``（不丢其他任务的登记）。
+
+    评审 W4-12：已有清单解析失败时**抛错**而不是静默重置为 ``{}``——重置会把
+    其他任务的登记整份丢掉，写回去等于无声截断（硬规则 7 fail-closed）。
+    """
     path = input_manifest_path()
     doc: "dict[str, Any]" = {}
     if path.is_file():
         try:
             loaded = _read_json(path)
-        except json.JSONDecodeError:
-            loaded = None
-        if isinstance(loaded, dict) and loaded.get("schema") == INPUT_MANIFEST_SCHEMA:
-            doc = loaded
+        except json.JSONDecodeError as exc:
+            raise ReferenceError(
+                f"输入清单不可解析（拒绝覆盖写）：{path}：{exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ReferenceError(f"输入清单根节点不是对象：{path}")
+        if loaded.get("schema") != INPUT_MANIFEST_SCHEMA:
+            raise ReferenceError(
+                f"输入清单 schema 不符（期望 {INPUT_MANIFEST_SCHEMA}，实为 "
+                f"{loaded.get('schema')!r}）：{path}")
+        doc = loaded
     tasks = dict(doc.get("tasks") or {}) if isinstance(doc.get("tasks"), dict) else {}
     recipes = dict(doc.get("recipes") or {}) if isinstance(
         doc.get("recipes"), dict) else {}
@@ -690,6 +707,14 @@ def birth_container(ref: ResolvedReference, workdir: Path, out_dir: Path, *,
             continue
         payload = _birth_payload(bspec, level, workdir="/work",
                                  repo_root="/assets", ctx={"workdir": "/work"})
+        nonce = secrets.token_hex(16)
+        result_name = f"runner_result.{nonce}.json"
+        payload["nonce"] = nonce
+        payload["result_path"] = f"/out/levels/{level}/{result_name}"
+        #: 容器以镜像默认用户（root）运行——LIBERO 的配置在 /root 下且 0700；
+        #: 结果件由运行器按 chown_uid/chown_gid 交回调用者（见 birth._RUNNER_SRC）。
+        payload["chown_uid"] = os.getuid()
+        payload["chown_gid"] = os.getgid()
         payload_path = level_dir / "payload.json"
         _write_json(payload_path, payload)
         mounts = (
@@ -716,12 +741,18 @@ def birth_container(ref: ResolvedReference, workdir: Path, out_dir: Path, *,
                           birth._truncate_capture(stdout), mode=0o600)
         atomic_write_text(level_dir / "stderr.txt",
                           birth._truncate_capture(stderr), mode=0o600)
-        parsed = birth.parse_runner_output(stdout)
-        if parsed is None:
+        parsed = birth.read_runner_result(level_dir / result_name,
+                                          level=level, nonce=nonce)
+        forged = birth.detect_forged_marker(stdout, stderr)
+        if forged is not None:
+            result = birth.LevelResult(
+                level=level, status="FAIL", reason="contract_error",
+                detail=f"候选伪造出生标记行（已拒绝采信）：{forged}", data={})
+        elif parsed is None:
             result = birth.LevelResult(
                 level=level, status="FAIL",
                 reason=birth._GENERIC_REASON[level],
-                detail=f"容器内运行器未产出标记行（rc={rc}）："
+                detail=f"容器内运行器未产出层结果（rc={rc}）："
                        f"{_filtered_output(stderr).strip()[-600:]}", data={})
         else:
             result = birth.LevelResult(
@@ -736,14 +767,14 @@ def birth_container(ref: ResolvedReference, workdir: Path, out_dir: Path, *,
         levels[level] = result
         _write_level_evidence(level_dir, stdout, stderr, result)
 
-    entry = workdir / bspec.entry_path
-    hits = birth._scan_network(entry) if entry.is_file() else []
+    hits, scanned = birth._scan_network_tree(workdir)
     status, problems = aggregate._aggregate(levels)
     result = birth.BirthResult(
         spec=bspec, levels=levels, birth_status=status, problems=problems,
         limits=birth.Limits(timeout_s=timeout),
         network_audit={"mode": "enforced", "network_mode": "none",
                        "static_import_hits": hits,
+                       "scanned_files": scanned,
                        "note": "容器 --network none：断网被强制执行"},
         workdir=str(workdir), ts_iso=_now_iso())
     written = birth.write_birth(out_dir, result)
@@ -1156,6 +1187,9 @@ class ReferenceRunner:
             }
             path = _write_json(run.root / "reproducibility.json", repro)
             written["reproducibility.json"] = _sha256_file(path)
+            #: 评审 W3-10：把两次运行各自的 metrics/telemetry 一并交给评测器。
+            #: 没有这两份，HG-EVAL-4 与 20% 复现维度只能采信自报件。
+            written.update(self._publish_repro_runs(run, execution))
         evidence = evidence_manifest(
             run.run_id, self._evidence_rels(ref, run.root), run.root)
         evidence_dir = ensure_private_dir(run.root / "evidence")
@@ -1163,12 +1197,49 @@ class ReferenceRunner:
         written["evidence/manifest.json"] = _sha256_file(path)
         return written
 
+    def _publish_repro_runs(self, run: RunPaths,
+                            execution: Mapping) -> "dict[str, str]":
+        """把同种子/换种子两次运行的 metrics 与 telemetry 复制到运行根。
+
+        评审 W3-10：``reproducibility.json`` 是**自报**。评测器要能独立重算
+        「同种子逐字段相等」与「跨种子差」就必须拿到两份原始件；因此这里把
+        ``raw/repro/seed<seed>``（同种子重跑）与 ``raw/repro/seed<cross>``
+        （换种子）的 ``metrics.json`` / ``telemetry.jsonl`` 逐件落进
+        ``<run.root>/repro/{same_seed,cross_seed}/``，随证据清单一起被 sha 钉住。
+
+        缺件即 fail-closed：宁可让参考执行报错，也不让评测器退回采信自报。
+        """
+        seed = int(execution["primary"]["seed"])
+        pairs: "list[tuple[str, Path]]" = [
+            ("same_seed", run.raw / "repro" / f"seed{seed}")]
+        cross_seed = execution.get("cross_seed")
+        if cross_seed is not None:
+            pairs.append(
+                ("cross_seed", run.raw / "repro" / f"seed{int(cross_seed)}"))
+        written: "dict[str, str]" = {}
+        for label, source in pairs:
+            target = ensure_private_dir(run.root / "repro" / label)
+            for name in ("metrics.json", "telemetry.jsonl"):
+                src = source / name
+                if not src.is_file():
+                    raise ReferenceError(
+                        f"{label} 运行缺 {name}，无法交付可重算的复现件：{src}")
+                dst = target / name
+                shutil.copyfile(src, dst)
+                os.chmod(dst, 0o600)
+                written[f"repro/{label}/{name}"] = _sha256_file(dst)
+        return written
+
     def _evidence_rels(self, ref: ResolvedReference, root: Path) -> "list[str]":
         spec = registry.BenchmarkRegistry().get(self.task_id)
         rels = [rel for rel in spec.outputs if rel != "run_manifest.json"]
         rels.append(rf.FINGERPRINT_NAME)
         for name in ("reproducibility.json", "hidden_access_audit.json",
-                     "birth/functional_birth.json"):
+                     "birth/functional_birth.json",
+                     "repro/same_seed/metrics.json",
+                     "repro/same_seed/telemetry.jsonl",
+                     "repro/cross_seed/metrics.json",
+                     "repro/cross_seed/telemetry.jsonl"):
             if (Path(root) / name).is_file():
                 rels.append(name)
         return rels

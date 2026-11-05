@@ -39,7 +39,7 @@ outputs:
 evaluation:
   evaluator_id: mujoco_contact_push_v1
   evaluator_version: 1
-  criteria_lock_sha256: "2d3a4413754324fc599e73ec21634f551bb5612154e1ed72a577ece856e4f045"
+  criteria_lock_sha256: "a9abf30e7ec2ba7aef31dd8efd0c741107358f3fc96bdffd3771f46bbc96f7d9"
 budget:
   model_calls: 0
   wall_time_seconds: 600

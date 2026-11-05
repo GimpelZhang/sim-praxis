@@ -16,14 +16,28 @@
 （``HG-M1-*`` / ``HG-L1-*`` / ``HG-R1-*``）。两层都会**逐门**记录到
 ``gates_checked``，被触发的进 ``hard_gates``；域门与通用门对同一事实各判一次
 是刻意的纵深防御（两份独立实现互证）。
+
+信任模型（评审 W3-04，计划不变量 2 的**诚实边界**）：
+
+- 评测器源码、``criteria/*.json``、``task.yaml`` 都住在**同一可写引擎仓**。
+  ``self_check`` 比对 ``criteria.evaluator_files`` 只能防「改了评测器忘了改登记」
+  的误操作；对**同时在仓内改源码与登记**的蓄意篡改无效。
+- 可用的仓外锚点：``$BENCHMARK_ROOT/private/evaluator_keys/evaluator_src.json``
+  （0700 私有根，候选不可写）。该文件存在时，``self_check`` 逐件比对 sha256，
+  不符即 ``BLOCKED_INFRA``；不存在时本模块如实降级为「无仓外锚点」，由
+  ``Phase_2.8.0_Plan_Complete.md`` 登记残余风险（不声称已防住）。
+- 冻结 schema（``benchmarks/research_engineering_v1/schemas/*.json``）同样是
+  仓内文件，对同一威胁模型同样只有误操作防护力。
 """
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping
 
 import yaml
@@ -148,6 +162,265 @@ def parse_evaluator_files(entries: Iterable[str]) -> "dict[str, str]":
     return out
 
 
+# --------------------------------------------------------------------------
+# 私有根路径判定（评审 W3-01）与仓外信任锚（评审 W3-04）
+# --------------------------------------------------------------------------
+
+#: 私有根在数据根里相对路径的分段（``<bench_root>/private/hidden``）
+_PRIVATE_SEGMENTS = ("private", "hidden")
+
+
+def private_hit(raw: Any) -> bool:
+    """报告路径是否落在 ``private/hidden`` 之下（归一化后按分段判断）。
+
+    评审 W3-01：早先只用 ``str(v).startswith("private/")``，``./private/hidden/x``、
+    ``x/../../private/hidden/y``、绝对路径 ``/mnt/.../private/hidden/z`` 全都
+    溜过去。这里把反斜杠折成正斜杠、去掉前导 ``./`` 与根，用 ``PurePosixPath``
+    取分段后**寻找 ``private/hidden`` 连续子序列**——``..`` 不折叠反而更严
+    （任何拼写里只要出现了这一段就算命中）。
+    """
+    text = str(raw or "").strip().replace("\\", "/")
+    if not text:
+        return False
+    parts = tuple(part for part in PurePosixPath(text).parts if part not in ("", "."))
+    width = len(_PRIVATE_SEGMENTS)
+    return any(parts[index:index + width] == _PRIVATE_SEGMENTS
+               for index in range(len(parts) - width + 1))
+
+
+def benchmark_private_dir() -> "Path | None":
+    """数据根私有目录（不存在或不合法时返回 None，**不**创建）。"""
+    try:
+        from orchestrator.common.runtime_paths import phase27_root
+        raw = os.environ.get("SIMPRAXIS_BENCHMARK_ROOT")
+        root = Path(raw) if raw else (
+            phase27_root().parent / "benchmark" / "roadmap_phase0")
+        return root / "private"
+    except Exception:  # noqa: BLE001 - 只用于探测，任何失败都按「不可见」
+        return None
+
+
+def evaluator_anchor_path() -> "Path | None":
+    private = benchmark_private_dir()
+    return None if private is None else private / "evaluator_keys" / "evaluator_src.json"
+
+
+def write_evaluator_anchor(*, path: "str | Path | None" = None,
+                           source_root: "str | Path | None" = None) -> Path:
+    """把评测器三件源码的 sha256 写到**仓外**私有根（0700/0600）。
+
+    锚点必须在候选运行**之前**布置，且候选无权写私有根；之后任何对
+    ``evaluator.py`` / ``scoring.py`` / ``contracts.py`` 的改动都会在
+    ``self_check`` 里变成 ``BLOCKED_INFRA``。
+    """
+    target = Path(path) if path is not None else evaluator_anchor_path()
+    if target is None:
+        raise EvaluatorError("无法定位私有根（$SIMPRAXIS_BENCHMARK_ROOT 不可解析）")
+    ensure_private_dir(target.parent)
+    doc = {
+        "schema": "simpraxis.benchmark_evaluator_anchor.v1",
+        "files": evaluator_digests(source_root),
+        "note": "评审 W3-04：仓外信任锚；候选不可写私有根。",
+    }
+    atomic_write_text(target, json.dumps(doc, ensure_ascii=False, indent=2,
+                                         sort_keys=True) + "\n", 0o600)
+    return target
+
+
+def _anchor_problems(source_root: "str | Path | None" = None) -> "list[str]":
+    """仓外锚点存在时逐件复算；不存在只记不阻断（残余风险另行登记）。"""
+    anchor = evaluator_anchor_path()
+    if anchor is None or not anchor.is_file():
+        return []
+    try:
+        doc = json.loads(anchor.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return [f"仓外评测器锚点不可读：{anchor}: {exc}"]
+    expected = doc.get("files")
+    if not isinstance(expected, Mapping) or not expected:
+        return [f"仓外评测器锚点无 files 段：{anchor}"]
+    actual = evaluator_digests(source_root)
+    problems = []
+    for rel in EVALUATOR_SOURCES:
+        want = expected.get(rel)
+        if want is None:
+            problems.append(f"{rel} 未在仓外锚点登记（{anchor}）")
+        elif actual.get(rel) != want:
+            problems.append(
+                f"{rel} 与仓外锚点不符：锚点 {want}，实测 {actual.get(rel)}")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# 冻结 schema 校验（评审 W3-02）
+# --------------------------------------------------------------------------
+
+#: 输入件的冻结 schema（Task 1 冻结；评测路径必须真校验，不得只做 JSON 解析）
+INPUT_SCHEMAS = {
+    "run_manifest.json": "run_manifest.v1.schema.json",
+    "runtime_fingerprint.json": "runtime_fingerprint.v1.schema.json",
+}
+
+
+def _schema_dir() -> Path:
+    return Path(ts.BENCHMARK_ROOT) / "schemas"
+
+
+def schema_problems(files: Mapping[str, Any]) -> "list[str]":
+    """按冻结 schema 校验运行级输入件；返回人类可读问题列表。
+
+    评审 W3-02：早先评测路径对这两件**零 schema 校验**，删掉
+    ``paid_model_calls`` / ``simulator`` 段即可静默豁免对应硬门。schema 违规
+    本身进 ``HG-EVAL-6``（``INVALID_ARTIFACT``）——缺必填字段是**产物不合规**，
+    不是「不适用」。
+    """
+    import jsonschema
+
+    problems: "list[str]" = []
+    for rel, schema_name in INPUT_SCHEMAS.items():
+        doc = files.get(rel)
+        if doc is None:
+            continue            # 缺件由 HG-EVAL-5 记
+        if not isinstance(doc, Mapping):
+            problems.append(f"{rel} 顶层不是对象（schema {schema_name}）")
+            continue
+        schema_file = _schema_dir() / schema_name
+        try:
+            schema = json.loads(schema_file.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            problems.append(f"冻结 schema 不可读 {schema_file}: {exc}")
+            continue
+        validator = jsonschema.Draft202012Validator(schema)
+        errors = sorted(validator.iter_errors(dict(doc)),
+                        key=lambda err: (list(map(str, err.absolute_path)),
+                                         err.message))
+        for err in errors[:4]:
+            where = "/".join(str(part) for part in err.absolute_path) or "<root>"
+            problems.append(f"{rel} 不合 {schema_name}：{where}: {err.message}")
+        if len(errors) > 4:
+            problems.append(f"{rel} 另有 {len(errors) - 4} 处 schema 违规")
+    fingerprint = files.get("runtime_fingerprint.json")
+    if isinstance(fingerprint, Mapping) and "fingerprint_sha256" in fingerprint:
+        try:
+            recomputed = runtime_fingerprint.fingerprint_sha256(fingerprint)
+        except (TypeError, ValueError) as exc:
+            problems.append(f"runtime_fingerprint 无法重算自身 sha256：{exc}")
+            recomputed = None
+        if recomputed is not None and \
+                fingerprint.get("fingerprint_sha256") != recomputed:
+            problems.append(
+                f"runtime_fingerprint.fingerprint_sha256 不符：声明 "
+                f"{fingerprint.get('fingerprint_sha256')!r}，重算 {recomputed}")
+    return problems
+
+
+# --------------------------------------------------------------------------
+# 私有根独立审计（评审 W3-01）
+# --------------------------------------------------------------------------
+
+PRIVATE_STATE_NAME = "private_root_state.json"
+
+
+def _hidden_registry(directory: Path) -> "dict[str, str]":
+    path = directory / "manifest.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    files = doc.get("files") if isinstance(doc, Mapping) else None
+    if not isinstance(files, Mapping):
+        return {}
+    return {str(name): str(digest) for name, digest in files.items()}
+
+
+def independent_hidden_audit(snap: "Snapshot") -> dict:
+    """评测器**自己**核一遍私有根，而不是只信候选提交的审计件。
+
+    三条独立腿：
+    1. 私有根快照（每个 ``private/hidden/*`` 的 sha256/size/mtime_ns）写入
+       评测器自己的 ``private_root_state.json``（落 out_dir，0600）；
+    2. 与 ``private/hidden/manifest.json`` 登记的 sha256 对账——不一致说明
+       隐藏输入被改过（``registry_mismatch``）；
+    3. 扫描快照里每个文件：与隐藏文件**字节等同**即 ``byte_copies``；
+       隐藏文件的全文（去空白后 ≥24 字符）出现在候选文本里即 ``embedded``。
+
+    诚实的边界：没有 ``fanotify``/``inotify``，本审计只能发现「隐藏内容出现在
+    产物里」与「私有文件被改」，**发现不了**一次只读不驻留的偷看。该残余风险
+    在 ``Phase_2.8.0_Plan_Complete.md`` 登记，不声称已闭环。
+    """
+    private = benchmark_private_dir()
+    directory = None if private is None else private / "hidden"
+    report: "dict[str, Any]" = {
+        "schema": "simpraxis.benchmark_private_root_state.v1",
+        "hidden_dir": str(directory) if directory is not None else None,
+        "available": False,
+        "files": {},
+        "byte_copies": [],
+        "embedded": [],
+        "registry_mismatch": [],
+        "registry_missing": [],
+        "note": "",
+    }
+    if directory is None or not directory.is_dir():
+        report["note"] = ("私有根不可见：独立审计不适用，"
+                          "HG-EVAL-2 仍以候选提交的审计件为准")
+        return report
+    report["available"] = True
+    contents: "dict[str, tuple[str, bytes]]" = {}
+    for path in sorted(directory.iterdir()):
+        if path.is_symlink() or not path.is_file() or path.name == "manifest.json":
+            continue
+        try:
+            data = path.read_bytes()
+            stat = path.stat()
+        except OSError as exc:
+            report.setdefault("errors", []).append(f"{path.name}: {exc}")
+            continue
+        digest = hashlib.sha256(data).hexdigest()
+        contents[path.name] = (digest, data)
+        report["files"][path.name] = {"sha256": digest, "bytes": stat.st_size,
+                                      "mtime_ns": stat.st_mtime_ns}
+    registry = _hidden_registry(directory)
+    for name, want in sorted(registry.items()):
+        if name not in contents:
+            report["registry_missing"].append(name)
+        elif contents[name][0] != want:
+            report["registry_mismatch"].append(
+                f"{name}: 注册 {want} ≠ 实测 {contents[name][0]}")
+    for name, (digest, _data) in sorted(contents.items()):
+        for rel, snap_digest in sorted(snap.digests.items()):
+            if snap_digest == digest:
+                report["byte_copies"].append(
+                    f"{rel} 与 private/hidden/{name} 字节等同")
+    for name, (_digest, data) in sorted(contents.items()):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        needle = re.sub(r"\s+", "", text)
+        if len(needle) < 24:
+            continue
+        for rel, path in sorted(snap.files.items()):
+            try:
+                body = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if needle and needle in re.sub(r"\s+", "", body):
+                if any(name in row for row in report["byte_copies"]):
+                    continue
+                report["embedded"].append(
+                    f"{rel} 内嵌 private/hidden/{name} 全文")
+    return report
+
+
+def write_private_root_state(report: Mapping[str, Any], out_dir: "str | Path"
+                             ) -> "tuple[Path, str]":
+    path = Path(out_dir) / PRIVATE_STATE_NAME
+    atomic_write_text(path, json.dumps(dict(report), ensure_ascii=False,
+                                       indent=2, sort_keys=True) + "\n", 0o600)
+    return path, ts.sha256_file(path)
+
+
 def self_check(spec: ts.TaskSpec, *,
                source_root: "str | Path | None" = None) -> "list[str]":
     """返回不合规清单（空列表才允许继续评分）。"""
@@ -165,6 +438,7 @@ def self_check(spec: ts.TaskSpec, *,
     unknown = sorted(set(expected) - set(EVALUATOR_SOURCES))
     if unknown:
         problems.append(f"criteria.evaluator_files 登记了未知文件：{unknown}")
+    problems += _anchor_problems(source_root)
     declared = [gate["id"] for gate in spec.hard_gates]
     unmapped = sorted(set(declared) - set(GATE_STATUS))
     if unmapped:
@@ -473,19 +747,40 @@ class Evaluator:
             rid = manifest_run_id
         snap_path, snap_sha = write_snapshot_manifest(
             snap, run_id=rid, task_id=self.spec.task_id)
-        return self._evaluate_snapshot(snap, out_path, rid,
-                                       snapshot_manifest=(snap_path, snap_sha))
+        try:
+            return self._evaluate_snapshot(snap, out_path, rid,
+                                           snapshot_manifest=(snap_path, snap_sha))
+        except (ValueError, TypeError, KeyError, OSError, AttributeError) as exc:
+            #: 评审 W3-03：任何候选可控输入导致的异常都必须落状态
+            #: （``INVALID_ARTIFACT``），不得让评测器以 rc=1 崩掉整批。
+            return self._invalid(out_path, rid, f"{type(exc).__name__}: {exc}")
+
+    def _invalid(self, out_dir: Path, run_id: str, detail: str) -> dict:
+        log = GateLog()
+        log.check("HG-EVAL-6", fired=True,
+                  detail=f"产物不可处理：{detail}")
+        return self._emit(out_dir, run_id, "INVALID_ARTIFACT",
+                          self._zero_dimensions(detail), log)
 
     @property
     def outputs(self) -> "list[str]":
         return list(self.spec.outputs)
 
     def _required_extras(self) -> "list[str]":
-        """运行身份对所有任务必需；复现/隐藏审计按判据与复现声明决定。"""
+        """运行身份对所有任务必需；复现/隐藏审计按判据与复现声明决定。
+
+        评审 W3-10：只要判据声明了 ``repro_abs_tol``，就**必须**提交同种子重跑
+        与换种子运行各自的 ``metrics.json`` / ``telemetry.jsonl``——评测器由此
+        独立重算复现，不再采信候选自报的 ``reproducibility.json``。
+        """
         required = ["runtime_fingerprint.json"]
         thresholds = self.spec.thresholds or {}
         if "repro_abs_tol" in thresholds:
-            required.append("reproducibility.json")
+            required += ["reproducibility.json",
+                         "repro/same_seed/metrics.json",
+                         "repro/same_seed/telemetry.jsonl",
+                         "repro/cross_seed/metrics.json",
+                         "repro/cross_seed/telemetry.jsonl"]
         if self.spec.reproducibility.get("hidden_seed_ref") is not None:
             required.append("hidden_access_audit.json")
         return required
@@ -549,18 +844,32 @@ class Evaluator:
         dims: "dict[str, Dimension]"
         scoring_error: "str | None" = None
         try:
-            facts = scoring.facts_task(self.spec.task_id, files)
+            facts = scoring.facts_task(self.spec.task_id, files,
+                                       self.spec.criteria)
             dims = scoring.score_task(self.spec.task_id, files, self.spec.criteria)
         except scoring.ScoringError as exc:
             scoring_error = str(exc)
             dims = self._zero_dimensions(scoring_error)
+        except (ValueError, TypeError, KeyError) as exc:
+            #: 评审 W3-03：候选可控字段（畸形 dim / keys 等）不得让评测器抛栈。
+            #: 一律落 ``INVALID_ARTIFACT``（HG-EVAL-6），不是 rc=1 崩掉整批。
+            scoring_error = f"{type(exc).__name__}: {exc}"
+            facts = None
+            dims = self._zero_dimensions(scoring_error)
+
+        #: 评审 W3-02：输入件按冻结 schema 校验（产物不合规 → HG-EVAL-6）
+        schema_issues = schema_problems(files)
+        #: 评审 W3-01：评测器自建私有根审计（不依赖候选自报件）
+        hidden_report = independent_hidden_audit(snap)
+        state_path, state_sha = write_private_root_state(hidden_report, out_dir)
 
         trace_path = out_dir / TRACE_NAME
         self._write_trace(trace_path, facts)
 
         self._generic_gates(log, snap, files, facts, parse_errors, scoring_error,
-                            dims)
-        self._domain_gates(log, snap, files, facts, parse_errors, scoring_error)
+                            dims, hidden_report, schema_issues)
+        self._domain_gates(log, snap, files, facts, parse_errors, scoring_error,
+                           hidden_report)
 
         status = aggregate_status(log.hits, GATE_STATUS)
         written = self._emit(out_dir, run_id, status, dims, log, trace_path)
@@ -569,6 +878,9 @@ class Evaluator:
             "snapshot_manifest_sha256": snapshot_manifest[1],
             "snapshot_aggregate_sha256": snap.aggregate_sha256,
             "candidate_artifact_sha256": snap.declared_sha256,
+            "private_root_state": str(state_path),
+            "private_root_state_sha256": state_sha,
+            "private_root_audit_available": bool(hidden_report.get("available")),
             "evaluation_path": written.get("result_path"),
             "evaluation_sha256": written.get("result_sha256"),
         })
@@ -589,23 +901,54 @@ class Evaluator:
             observed=observed)
         return [f"{item.code}: {item.detail}" for item in mismatches]
 
-    def _hidden_access(self, files: Mapping[str, Any]) -> "list[str] | None":
+    def _hidden_access(self, files: Mapping[str, Any],
+                       independent: Mapping[str, Any] | None = None
+                       ) -> "list[str] | None":
+        """自报审计件（归一化后判定）+ 评测器独立审计（W3-01）。"""
+        findings: "list[str]" = []
         audit = files.get("hidden_access_audit.json")
-        if not isinstance(audit, Mapping):
+        if isinstance(audit, Mapping):
+            for key in ("read", "written", "modified"):
+                values = audit.get(key) or ()
+                if isinstance(values, (list, tuple)):
+                    findings += [f"审计件 {key}: {value}"
+                                 for value in values if private_hit(value)]
+        independent_available = bool(independent and independent.get("available"))
+        if independent_available:
+            for key in ("byte_copies", "embedded", "registry_mismatch",
+                        "registry_missing"):
+                values = independent.get(key) or ()
+                if isinstance(values, (list, tuple)):
+                    findings += [f"独立审计 {key}: {value}" for value in values]
+        if not isinstance(audit, Mapping) and not independent_available:
             return None
-        touched: "list[str]" = []
-        for key in ("read", "written", "modified"):
-            values = audit.get(key) or ()
-            if isinstance(values, (list, tuple)):
-                touched += [str(v) for v in values
-                            if str(v).startswith(PRIVATE_PREFIX)]
-        return touched
+        return sorted(set(findings))
+
+    def _repro_verdict(self, files: Mapping[str, Any], facts: "Mapping | None"
+                       ) -> "tuple[bool, bool | None, Any, str]":
+        """复现结论的取数来源（评审 W3-10）。
+
+        优先用评测器从**两份 telemetry/metrics 重算**的结果（``facts.repro``）；
+        没有可重算来源时才退回候选自报的 ``reproducibility.json``，并在 detail
+        里点名来源，读者能分清「算出来的」与「候选人写的」。
+        """
+        recomputed = facts.get("repro") if isinstance(facts, Mapping) else None
+        if isinstance(recomputed, Mapping) and recomputed.get("independent"):
+            return (True, recomputed.get("same_seed_identical"),
+                    recomputed.get("cross_seed_max_delta_m"), "重算")
+        repro = files.get("reproducibility.json")
+        if isinstance(repro, Mapping):
+            return (True, repro.get("same_seed_identical") is True,
+                    repro.get("cross_seed_max_delta_m"), "自报")
+        return (False, None, None, "无")
 
     def _generic_gates(self, log: GateLog, snap: Snapshot,
                        files: Mapping[str, Any], facts: "dict | None",
                        parse_errors: Mapping[str, str],
                        scoring_error: "str | None",
-                       dims: Mapping[str, Any] | None = None) -> None:
+                       dims: Mapping[str, Any] | None = None,
+                       hidden_report: Mapping[str, Any] | None = None,
+                       schema_issues: "list[str] | None" = None) -> None:
         spec = self.spec
         # HG-EVAL-1 运行时身份
         mismatches = self._runtime_mismatches(files)
@@ -615,9 +958,9 @@ class Evaluator:
             log.check("HG-EVAL-1", fired=bool(mismatches),
                       detail=f"运行时不符：{_joined(mismatches)}")
 
-        # HG-EVAL-2 隐藏输入
+        # HG-EVAL-2 隐藏输入（自报审计归一化 + 评测器独立审计）
         hidden_ref = spec.reproducibility.get("hidden_seed_ref")
-        touched = self._hidden_access(files)
+        touched = self._hidden_access(files, hidden_report)
         if hidden_ref is None:
             log.check("HG-EVAL-2", fired=False, applicable=False,
                       detail="本任务无隐藏输入")
@@ -626,7 +969,7 @@ class Evaluator:
                       detail="审计件缺失（由 HG-EVAL-5 计证据缺失）")
         else:
             log.check("HG-EVAL-2", fired=bool(touched),
-                      detail=f"访问/改动私有输入：{_joined(touched)}")
+                      detail=f"访问/改动私有输入：{_joined(touched) or '无'}")
 
         # HG-EVAL-3 关键物理约束
         if facts is None or spec.task_id == "icy_ground_dr_v1":
@@ -643,14 +986,12 @@ class Evaluator:
                       detail="one_step 状态非 finite" if fired
                       else "one_step 状态 finite")
 
-        # HG-EVAL-4 可复现
-        repro = files.get("reproducibility.json")
-        if not isinstance(repro, Mapping):
+        # HG-EVAL-4 可复现（优先从两份 telemetry 重算，W3-10）
+        applicable, same_seed, delta, source = self._repro_verdict(files, facts)
+        if not applicable:
             log.check("HG-EVAL-4", fired=False, applicable=False,
                       detail="无 reproducibility.json（本任务不声明复现产物）")
         else:
-            same_seed = repro.get("same_seed_identical") is True
-            delta = repro.get("cross_seed_max_delta_m")
             tol = self._threshold_or_none("repro_abs_tol")
             delta_ok = True
             if delta is not None and tol is not None:
@@ -658,8 +999,11 @@ class Evaluator:
                     delta_ok = float(delta) <= tol
                 except (TypeError, ValueError):
                     delta_ok = False
-            log.check("HG-EVAL-4", fired=not (same_seed and delta_ok),
-                      detail=f"同种子逐位相等={same_seed}；跨种子差 {delta!r}")
+            elif tol is not None and delta is None:
+                delta_ok = False
+            log.check("HG-EVAL-4", fired=not (same_seed is True and delta_ok),
+                      detail=f"[{source}] 同种子逐位相等={same_seed}；"
+                             f"跨种子差 {delta!r} m ≤ {tol}")
 
         # HG-EVAL-5 证据缺失
         missing = list(snap.missing)
@@ -668,6 +1012,7 @@ class Evaluator:
 
         # HG-EVAL-6 产物完整性与权限
         problems: "list[str]" = []
+        problems += list(schema_issues or [])
         if snap.manifest_path is not None and not snap.digest_ok:
             problems.append(f"快照聚合 sha256 {snap.aggregate_sha256} ≠ run_manifest "
                             f"声明 {snap.declared_sha256!r}")
@@ -678,8 +1023,12 @@ class Evaluator:
         if snap.manifest_error:
             problems.append(f"run_manifest.json 不合规：{snap.manifest_error}")
         problems += self._manifest_bindings(snap)
+        #: 评审 W3-02：``paid_model_calls`` 是冻结 schema 的必填字段，
+        #: 缺失视为违规（「0 付费」硬门不得靠省略字段豁免）。
         paid = snap.manifest.get("paid_model_calls")
-        if paid is not None and paid != 0:
+        if paid is None:
+            problems.append("run_manifest.paid_model_calls 缺失（必填；本阶段必须为 0）")
+        elif paid != 0:
             problems.append(f"paid_model_calls={paid!r}（本阶段必须为 0）")
         mode = snap.manifest.get("mode")
         if mode is not None and mode not in ("reference", "candidate",
@@ -720,21 +1069,21 @@ class Evaluator:
             got = manifest.get(key)
             if got != expected:
                 problems.append(f"run_manifest.{key}={got!r} ≠ 期望 {expected!r}")
-        for rel, key in (("runtime_fingerprint.json",
-                          "runtime_fingerprint_sha256"),
-                         ("birth/functional_birth.json",
-                          "birth_result_sha256"),
-                         ("evidence/manifest.json",
-                          "evidence_manifest_sha256")):
+        #: 评审 W3-02：绑定「声明了就必须在场」——``birth_result_sha256``
+        #: 早先只判 ``actual is not None``，声明了却缺文件被静默放过。
+        bindings = (("runtime_fingerprint.json", "runtime_fingerprint_sha256"),
+                    ("birth/functional_birth.json", "birth_result_sha256"),
+                    ("evidence/manifest.json", "evidence_manifest_sha256"))
+        for rel, key in bindings:
             actual = snap.digests.get(rel)
             declared = manifest.get(key)
-            if actual is not None and declared != actual:
+            if actual is None:
+                if declared not in (None, ""):
+                    problems.append(f"run_manifest 声明 {key}，但缺 {rel}")
+                continue
+            if declared != actual:
                 problems.append(f"run_manifest.{key}={declared!r} ≠ 实测 "
                                 f"sha256({rel})={actual}")
-        if "evidence/manifest.json" not in snap.digests and \
-                manifest.get("evidence_manifest_sha256") not in (None, ""):
-            problems.append("run_manifest 声明 evidence_manifest_sha256，"
-                            "但缺 evidence/manifest.json")
         return problems
 
     def _acceptance_problems(self, files: Mapping[str, Any],
@@ -794,10 +1143,11 @@ class Evaluator:
     def _domain_gates(self, log: GateLog, snap: Snapshot,
                       files: Mapping[str, Any], facts: "dict | None",
                       parse_errors: Mapping[str, str],
-                      scoring_error: "str | None") -> None:
+                      scoring_error: "str | None",
+                      hidden_report: Mapping[str, Any] | None = None) -> None:
         task = self.spec.task_id
         if task == "mujoco_contact_push_v1":
-            self._gates_mujoco(log, files, facts)
+            self._gates_mujoco(log, files, facts, hidden_report)
         elif task == "libero_env_adapter_v1":
             self._gates_libero(log, files, facts, parse_errors)
         elif task == "icy_ground_dr_v1":
@@ -806,14 +1156,15 @@ class Evaluator:
             raise EvaluatorError(f"未知任务：{task!r}")
 
     def _gates_mujoco(self, log: GateLog, files: Mapping[str, Any],
-                      facts: "dict | None") -> None:
+                      facts: "dict | None",
+                      hidden_report: Mapping[str, Any] | None = None) -> None:
         spec = self.spec
         mismatches = self._runtime_mismatches(files) or []
         log.check("HG-M1-1", fired=bool(mismatches),
                   detail=f"BLOCKED_RUNTIME_MISMATCH：{_joined(mismatches)}")
-        touched = self._hidden_access(files) or []
+        touched = self._hidden_access(files, hidden_report) or []
         log.check("HG-M1-6", fired=bool(touched),
-                  detail=f"私有输入被动过：{_joined(touched)}")
+                  detail=f"私有输入被动过：{_joined(touched) or '无'}")
         if facts is None:
             for gate in ("HG-M1-2", "HG-M1-3", "HG-M1-4", "HG-M1-5", "HG-M1-7"):
                 log.check(gate, fired=False, applicable=False,
@@ -829,11 +1180,10 @@ class Evaluator:
         log.check("HG-M1-4", fired=not moved,
                   detail=f"cube_moved={facts['cube_moved']} "
                          f"contact_peak={facts['contact_force_peak_n']}")
-        repro = files.get("reproducibility.json")
-        if isinstance(repro, Mapping):
-            same_seed = repro.get("same_seed_identical") is True
-            log.check("HG-M1-5", fired=not same_seed,
-                      detail=f"同种子逐位相等={same_seed}")
+        applicable, same_seed, delta, source = self._repro_verdict(files, facts)
+        if applicable:
+            log.check("HG-M1-5", fired=same_seed is not True,
+                      detail=f"[{source}] 同种子逐位相等={same_seed}")
         else:
             log.check("HG-M1-5", fired=False, applicable=False,
                       detail="无复现产物（已由 HG-EVAL-5 记）")

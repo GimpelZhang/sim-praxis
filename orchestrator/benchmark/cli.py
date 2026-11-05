@@ -186,7 +186,9 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         "test_baseline": intake.test_baseline(raw_log),
         "environment_baseline": intake.environment_baseline(),
         "sealed_ledger_sha256": intake.sealed_ledger_sha256(),
-        "table_counts": intake.table_counts(),
+        "table_counts": intake.table_counts(
+            drift_note=args.drift_note,
+            drift_signoff_ref=args.drift_signoff_ref),
         "invariants_before": intake.invariants_before(),
     }
 
@@ -243,7 +245,7 @@ def _specs_report(reg) -> dict:
 
     report = {
         "schema": "simpraxis.benchmark_validation_report.v1",
-        "generated_by": intake.GENERATED_BY,
+        "generated_by": intake.entry_label(),
         "ts_iso": intake._now(),
         "benchmark_root": str(reg.root),
         "tasks": [],
@@ -309,7 +311,7 @@ def cmd_validate_specs(args: argparse.Namespace) -> int:
         schemas[path.name] = ts.sha256_file(path)
     _write_json(root / "schemas_sha256.json", {
         "schema": "simpraxis.benchmark_schemas_sha256.v1",
-        "generated_by": intake.GENERATED_BY,
+        "generated_by": intake.entry_label(),
         "ts_iso": intake._now(),
         "schemas_dir": str(reg.root / "schemas"),
         "schemas": schemas,
@@ -477,6 +479,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="两排除全套的 raw log（缺省 cmd_logs/06_...log）")
     pf.add_argument("--run-tests", action="store_true",
                     help="先真跑一次两排除全套再解析（≈470 s）")
+    # 评审 W1-14：漂移处置的机器通路（两项必须成对，缺一即拒）
+    pf.add_argument("--drift-note", default="",
+                    help="四表行数漂移时的说明（须与 --drift-signoff-ref 同时给）")
+    pf.add_argument("--drift-signoff-ref", default="",
+                    help="用户签收凭据（消息/文档定位），与 --drift-note 成对")
     pf.set_defaults(func=cmd_preflight)
 
     vs = sub.add_parser("validate-specs", help="Task 1：任务定义与判据锁全量校验")

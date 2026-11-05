@@ -290,6 +290,63 @@ def test_ac_p0_5_6_fail_closed(tmp_path: Path, monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# 评审 W3-05：expected_status 是判据的一部分（「判负」不等于「按预期判负」）
+# --------------------------------------------------------------------------
+
+def _case(expected_status) -> dict:
+    return {"case_id": "w3-05", "task_id": "mujoco_contact_push_v1",
+            "dir": "synthetic", "expected_status": expected_status,
+            "expected_gates": ["HG-EVAL-5"], "expected_detail": ""}
+
+
+def _doc(status: str, gate: str = "HG-EVAL-5") -> dict:
+    return {"status": status,
+            "hard_gates": [{"id": gate, "detail": "缺件：metrics.json"}]}
+
+
+def test_w3_05_expected_status_is_enforced():
+    # 期望 FAIL 却拿到 BLOCKED_INFRA：命中原因不对，不算控制用例通过
+    row = controls.judge_case(_case("FAIL"), _doc("BLOCKED_INFRA"))
+    assert row["status_ok"] is False
+    assert row["rejected"] is False
+    assert row["actual_status"] == "BLOCKED_INFRA"
+
+    # 状态相符且未 PASS、门与明细都对 → 通过
+    ok = controls.judge_case(_case("FAIL"), _doc("FAIL"))
+    assert ok["status_ok"] is True and ok["rejected"] is True
+
+    # 未声明 expected_status 时退化为旧语义（只要求「未判 PASS」）
+    loose = controls.judge_case(
+        {**_case(None), "expected_status": None}, _doc("INVALID_ARTIFACT"))
+    assert loose["status_ok"] is True and loose["rejected"] is True
+
+
+# --------------------------------------------------------------------------
+# 评审 W3-09 / W3-13：结果件 0600；部分执行不得与「通过」同码
+# --------------------------------------------------------------------------
+
+def test_w3_13_partial_run_is_not_a_pass(tmp_path: Path):
+    script = _load_script_module()
+    out = tmp_path / "partial"
+    report = controls.run_controls(out_root=out,
+                                   tasks=["mujoco_contact_push_v1"])
+
+    # 三态：未跑的变异不是「全过」，下游 bool() 一律当未通过
+    assert report.mutations["rows"] == []
+    assert report.mutations["all_passed"] is None
+    assert report.mutations["partial_skip"] == "mutation"
+    assert report.all_passed is False
+    assert script._main(["--task", "mujoco_contact_push_v1",
+                         "--out-root", str(tmp_path / "partial2")]) == 2
+
+    # 评审 W3-09：结果件与证据包其余产物同口径 0600
+    for name in (controls.GOLDEN_RESULTS, controls.NEGATIVE_RESULTS,
+                 controls.MUTATION_RESULTS):
+        mode = (out / name).stat().st_mode & 0o777
+        assert mode == 0o600, (name, oct(mode))
+
+
+# --------------------------------------------------------------------------
 # 支撑断言：变异只在副本上做（D5-3），golden 原件逐字节不变
 # --------------------------------------------------------------------------
 

@@ -286,7 +286,7 @@ def test_ac_p0_2_8_host_not_container(host_fingerprint: dict):
 def bench(monkeypatch) -> Path:
     monkeypatch.delenv("SIMPRAXIS_PHASE2_ROOT", raising=False)
     from orchestrator.benchmark import paths
-    root = paths.bench_root()
+    root = paths.bench_root(read_only=True)
     assert root.is_dir(), f"数据根不在场：{root}"
     return root
 
