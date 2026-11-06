@@ -1,0 +1,38 @@
+{
+  "icy_ground_dr_v1|rep0": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "icy_ground_dr_v1|rep1": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "icy_ground_dr_v1|rep2": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "libero_env_adapter_v1|rep0": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "libero_env_adapter_v1|rep1": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "libero_env_adapter_v1|rep2": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "mujoco_contact_push_v1|rep0": [
+    "agentic_v1",
+    "legacy_v1"
+  ],
+  "mujoco_contact_push_v1|rep1": [
+    "legacy_v1",
+    "agentic_v1"
+  ],
+  "mujoco_contact_push_v1|rep2": [
+    "legacy_v1",
+    "agentic_v1"
+  ]
+}

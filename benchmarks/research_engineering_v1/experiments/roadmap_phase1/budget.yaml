@@ -1,0 +1,42 @@
+# Phase 2.8.1 预注册：预算分解与记账口径。
+#
+# 等式（计划 §1.3）：单 Trial 帽 10 呼
+#   Pilot        = 3 任务 × 2 臂 × 1 rep × 10 = 60
+#   Confirmatory = 3 任务 × 2 臂 × 2 rep × 10 = 120
+#   HARD_CAP     = 180（**独立字面量**，不取 60+120 的表达式——与 Phase 2.6/2.7
+#                  同一做法，防止「顺手改一处」让两个数字悄悄分叉）
+schema: simpraxis.phase281_budget.v1
+experiment_id: roadmap_phase1_v1
+
+budgets:
+  call_cap_per_trial: 10
+  pilot: 60
+  confirmatory: 120
+  hard_cap: 180
+  per_task_cap: 60
+
+#: 一次逻辑调用最多一次 HTTP。失败（供应侧/解析）**仍占 seq 与预算**——
+#: 否则「失败重试」就是免费加预算。
+max_attempts: 1
+
+accounting:
+  counts_toward_budget:
+    - 逻辑调用成功（ledger event=call, ok=true）
+    - 逻辑调用失败（供应侧/解析；仍占 seq）
+  does_not_count:
+    - preflight 被拒（seq=null，占批次不占实呼）
+    - 开账 selfcheck 行（event=selfcheck，占 seq 不计实呼）
+    - dry run / 干跑（假网关，0 触网）
+    - 容器未起、候选未出生即失败（0 呼）
+  unattempted_budget_not_refilled: >-
+    Pilot 若只花了 47 呼，Confirmatory 仍是 120 的帽，**不得**把节余挪去做
+    「补测」。总实呼 <= 180 即可，不要求花满。
+  no_extra_paid_validation: >-
+    本阶段不安排账外实呼（模型面已冻结，不需要 --validate-models）。
+
+#: LOCK 写入时的账本行数快照（由 registration.build_lock 现算，勿手改）
+lock_precondition:
+  call_rows_must_equal: 0
+  reason: >-
+    写 LOCK 之前账本必须 0 行 call。一旦有实呼再「补 LOCK」，预注册就变成了
+    事后叙事；STOP-13 的整个意义依赖这个顺序。

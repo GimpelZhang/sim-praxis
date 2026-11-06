@@ -1,0 +1,30 @@
+{
+  "schema": "simpraxis.phase281_randomization.v1",
+  "experiment_id": "roadmap_phase1_v1",
+  "purpose": "决定同一 (task, rep) 内两臂的执行先后；只决定顺序，不决定隐藏变体。",
+  "algorithm": "sha256-tiebreak",
+  "seed_template": "{experiment_id}|{task_id}|{pair_index}",
+  "seed_repr": "sha256(...).hexdigest()（§9.4 逐字；§1.4.2 提到的「前 16 hex」只作人读标签，不参与键派生）",
+  "arm_tiebreak_template": "{seed}|{arm_id}",
+  "tiebreak": "两臂按 sha256(arm_tiebreak).hexdigest() 升序排列",
+  "pair_key_template": "{task_id}|rep{pair_index}",
+  "order_file": "trial_order.json",
+  "order_serialization": "json.dumps(order, ensure_ascii=False, sort_keys=True, indent=2) + \"\\n\"",
+  "pairs": [
+    {"task_id": "icy_ground_dr_v1", "pair_index": 0, "key": "icy_ground_dr_v1|rep0", "phase": "pilot"},
+    {"task_id": "icy_ground_dr_v1", "pair_index": 1, "key": "icy_ground_dr_v1|rep1", "phase": "confirmatory"},
+    {"task_id": "icy_ground_dr_v1", "pair_index": 2, "key": "icy_ground_dr_v1|rep2", "phase": "confirmatory"},
+    {"task_id": "libero_env_adapter_v1", "pair_index": 0, "key": "libero_env_adapter_v1|rep0", "phase": "pilot"},
+    {"task_id": "libero_env_adapter_v1", "pair_index": 1, "key": "libero_env_adapter_v1|rep1", "phase": "confirmatory"},
+    {"task_id": "libero_env_adapter_v1", "pair_index": 2, "key": "libero_env_adapter_v1|rep2", "phase": "confirmatory"},
+    {"task_id": "mujoco_contact_push_v1", "pair_index": 0, "key": "mujoco_contact_push_v1|rep0", "phase": "pilot"},
+    {"task_id": "mujoco_contact_push_v1", "pair_index": 1, "key": "mujoco_contact_push_v1|rep1", "phase": "confirmatory"},
+    {"task_id": "mujoco_contact_push_v1", "pair_index": 2, "key": "mujoco_contact_push_v1|rep2", "phase": "confirmatory"}
+  ],
+  "invariants": [
+    "同一 (task, rep) 的两臂必须按本表顺序执行",
+    "同一 (task, rep) 的两臂须在同一小时内跑完（减少时段漂移）",
+    "隐藏变体按 pair_index 固定，不由 arm 决定；随机化不得触碰变体面",
+    "trial_order.json 的 sha256 进 LOCK；LOCK 后任何变动 = STOP-13"
+  ]
+}

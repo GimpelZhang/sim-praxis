@@ -1,0 +1,82 @@
+# Phase 2.8.1 预注册：17 条 STOP 的机判触发面（计划 §15.2 逐条对名）。
+#
+# 判据（AC-P281-5-12）：id 集合**恰好**等于 {STOP-01 … STOP-17}，多一条或
+# 漏一条都判红；每条必须有非空 `detector`（说出「用什么机判面判它」）。
+# 没有 detector 的 STOP 只是一句祈祷——它不会在跑的时候响。
+schema: simpraxis.phase281_stopping.v1
+experiment_id: roadmap_phase1_v1
+
+stops:
+  - id: STOP-01
+    trigger: Repository 状态与冻结基线不一致
+    action: 停，不自动修
+    detector: AC-P281-0-01..05 的基线对账 + AC-P281-6-07 干跑的仓状态复核
+  - id: STOP-02
+    trigger: Phase 2.7 或更早账本发生变化
+    action: 停，人工核查
+    detector: AC-P281-0-10 的封存账只读对账 + AC-P281-9-16 的收尾复核
+  - id: STOP-03
+    trigger: KB 状态 / 四表 / Manifest 变化
+    action: 停
+    detector: AC-P281-9-15 的四表行数与 kb_pins 单真值对账
+  - id: STOP-04
+    trigger: stage_models 或 endpoint 变化
+    action: 停，按硬规则 1 走溯源与用户裁决
+    detector: AC-P281-0-07 的 stage_models.yaml sha256 与 experiment.yaml.model_freeze 对账
+  - id: STOP-05
+    trigger: 无有效仓外 Anchor
+    action: 禁付费
+    detector: AC-P281-1-04/06 的 trust anchor 校验（锚件缺失/被改即拦下所有付费路径）
+  - id: STOP-06
+    trigger: Birth 无法可靠隔离验证
+    action: 禁付费
+    detector: AC-P281-2-01..10 的出生隔离机判（两进程 + 事件流一致性）
+  - id: STOP-07
+    trigger: Runtime 与任务要求不符
+    action: 不当能力证据
+    detector: AC-P281-2-12/14 的 runtime attestation 与 runtime_requirement.yaml 逐键对账
+  - id: STOP-08
+    trigger: Gateway 未绑定 phase281 账
+    action: 禁触网
+    detector: AC-P281-3-05/06 的网关账绑定断言 + AC-P281-7-03 的实呼前复核
+  - id: STOP-09
+    trigger: trace 的 seq 与账本不一致
+    action: 停，留现场
+    detector: AC-P281-7-05 的 trace/ledger seq 集合对账 + AC-P281-9-14 的收尾复核
+  - id: STOP-10
+    trigger: 跨 Trial / 跨 Arm 缓存命中
+    action: 实验无效，停机调查
+    detector: AC-P281-3-07 的缓存纪元断言 + AC-P281-4-10 的每 Trial 独享 call_cache + AC-P281-8-06
+  - id: STOP-11
+    trigger: >-
+      hidden/、references/、solutions/ 泄漏（两条通道都算：召回通道与文件系统通道）
+    action: 停，不自动删证据
+    detector: >-
+      AC-P281-4-02/05 的召回与判据隔离断言 + AC-P281-4-19 的 leak_scan 三项扫描
+      （绝对路径字面 / 产出物 sha256 交集 / 判据阈值常量）
+  - id: STOP-12
+    trigger: 达批准上限
+    action: 停，不发下一次
+    detector: AC-P281-7-03 的账本硬帽与任务帽判定 + AC-P281-8-03 的确认性预算门
+  - id: STOP-13
+    trigger: 预注册 LOCK 被改
+    action: 本批作废，另立新实验
+    detector: AC-P281-5-04/05 的 verify_lock 五条断言（含 trial_order_sha256 与镜像对账）
+  - id: STOP-14
+    trigger: 判据或权重被改
+    action: 停
+    detector: AC-P281-5-06 的 arms 镜像等值 + AC-P281-8-04 的 criteria_lock 复核
+  - id: STOP-15
+    trigger: 试图调阈值/换种子/改判据救结果
+    action: 拒绝，保留原失败
+    detector: AC-P281-4-01 的两臂参数等值 + AC-P281-9-05 的冻结件对账（矛盾即结论）
+  - id: STOP-16
+    trigger: 容器未清理、显存异常残留
+    action: 停后续 Trial
+    detector: >-
+      AC-P281-7-10 / AC-P281-8-07 / AC-P281-9-17 的 docker ps -a 与显存阈值
+      （容器 0 残留、显存 <= 200 MiB）
+  - id: STOP-17
+    trigger: 未获用户对 Pilot 报告的继续同意（G281-6）
+    action: 不启动确认性阶段，如实报因
+    detector: AC-P281-8-01 的 analysis/confirmatory_consent.json 与 pilot_report.json sha256 对账

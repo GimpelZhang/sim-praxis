@@ -1,0 +1,38 @@
+{
+  "arms": {
+    "agentic_v1": "9ff7eafa480b1eeab1208f646136ac823080c678e85d161624882f304723b26e",
+    "legacy_v1": "c81fcffe471708a8b1da237f383bff69345059377c59045ef4c8093a3383d355"
+  },
+  "budget": {
+    "call_cap_per_trial": 10,
+    "confirmatory": 120,
+    "hard_cap": 180,
+    "per_task_cap": 60,
+    "pilot": 60
+  },
+  "criteria": {
+    "icy_ground_dr_v1": "bb8334fcf39370bf056f4dc40c08b259b6f92a53acd4dae41d38a50bf08cad4b",
+    "libero_env_adapter_v1": "fc0f0eb8d9599894f09b026dd16f09d9d913ab48c56e56b3b9afddc8cfabb740",
+    "mujoco_contact_push_v1": "a9abf30e7ec2ba7aef31dd8efd0c741107358f3fc96bdffd3771f46bbc96f7d9"
+  },
+  "experiment_id": "roadmap_phase1_v1",
+  "git_commit": "b5ee5e961124137d3fabbbe2ba054229205549c0",
+  "ledger_rows_at_lock": {
+    "calls": 0,
+    "total": 0
+  },
+  "lock_sha256": "f36695ece997f0a553f377d6e0e0e7283b04bbeb4779fc1ebe7dd75d5516fa95",
+  "manifest_criteria_lock": "59e78c131f660eb4aaf9a43e870240fedc06adb2595b7f8df5dfd9734de7c302",
+  "preregistration": {
+    "arms.yaml": "abaf5765f903b4852e04c96e860a2b971ef7ed1b804b7dc5d9ed81a5e90ba2f9",
+    "budget.yaml": "2f8aabc0519ade2eab00466bf9e0ace7bb1d1a27331557efb1303be4368645d1",
+    "experiment.yaml": "5df81d00528fb333ec8a9a94bb0f410c5b078255199585b4670d51c5abe0a895",
+    "randomization.json": "cfee1fa90e5ab49d0f9f73cf8939c875ba1518033093398c659a6d87123e9788",
+    "runtime_requirement.yaml": "74b77c0c8d35cf2fbb6e8d71765c34b185491efbbd0fe7723f3189aa48509a14",
+    "statistics.yaml": "bb57bea2eb8630c123273f1740e9862d80204b1c211047f1fa610ef0afc2d097",
+    "stopping.yaml": "c3cebcdd40ca6d2563c7399159c95ec4046d06004720dc7be006c628a93e9dab",
+    "tasks.yaml": "fdba68709e998d6c98efa2f90318cfda237e93f3dbf0e31f098cbc0ed75efa47"
+  },
+  "schema": "simpraxis.phase281_lock.v1",
+  "trial_order_sha256": "632d76e2ece6ecc75b851f38e246eb705cbfb37518e3623d99765a40eb76e20b"
+}

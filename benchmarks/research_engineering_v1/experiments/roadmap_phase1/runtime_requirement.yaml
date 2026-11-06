@@ -1,0 +1,50 @@
+schema: simpraxis.phase281_runtime_requirement.v1
+experiment_id: roadmap_phase1_v1
+derived_by: python -m orchestrator.benchmark.phase281.registration --derive-requirements
+source: benchmarks/research_engineering_v1/tasks/*/task.yaml#runtime
+note: 手写本件 = 伪造预注册；它必须是派生输出。
+tasks:
+  mujoco_contact_push_v1:
+    runtime:
+      runtime_id: mujoco_315
+      image_digest: null
+      python: /mnt/venvs/simpraxis/bin/python
+      packages:
+        mujoco: 3.15.0
+        numpy: 1.26.4
+        trimesh: 5.1.1
+    harness:
+      task_no: 1
+      short: M1
+      form: host
+      task_file: benchmarks/research_engineering_v1/tasks/mujoco_contact_push/task.yaml
+      probe_relpath: analysis/run_form_probe.json
+  libero_env_adapter_v1:
+    runtime:
+      runtime_id: libero_isolated
+      image_digest: sha256:83304574517980a2b5f94d8e45b5c3f361182d0fa40fdd27f6c1713040eca624
+      python: /usr/bin/python3
+      packages:
+        robosuite: 1.4.0
+        mujoco: 2.3.7
+        bddl: 1.0.1
+    harness:
+      task_no: 2
+      short: L1
+      form: docker
+      task_file: benchmarks/research_engineering_v1/tasks/libero_env_adapter/task.yaml
+      probe_relpath: analysis/run_form_probe.json
+  icy_ground_dr_v1:
+    runtime:
+      runtime_id: document_only
+      image_digest: null
+      python: /mnt/venvs/simpraxis/bin/python
+      packages:
+        PyYAML: 6.0.3
+        jsonschema: 4.26.0
+    harness:
+      task_no: 3
+      short: R1
+      form: host
+      task_file: benchmarks/research_engineering_v1/tasks/icy_ground_dr/task.yaml
+      probe_relpath: analysis/run_form_probe.json

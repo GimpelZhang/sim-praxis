@@ -1,0 +1,178 @@
+# Phase 2.8.1 预注册：允许与禁止的统计面（计划 §1.5 / §18.2）。
+#
+# 判据（AC-P281-5-11）：`forbidden` 键**之外**的任何字符串都不得含有
+# `forbidden[].keyword` 里的词；同时每个 keyword 必须在 `forbidden` 块里
+# 至少出现一次（禁令清单本身不许漏项）。
+#
+# 为什么这样扫而不是全文扫：禁令清单必须能写出被禁方法的名字，否则它无法
+# 被 review。把「写出名字的地方」与「被承诺不出现的地方」分开，扫描才有意义
+# ——这与 §18.3 报告首页的 sha256 整块豁免同一思路。
+schema: simpraxis.phase281_statistics.v1
+experiment_id: roadmap_phase1_v1
+
+sample:
+  per_cell: 3
+  pilot: 1
+  confirmatory: 2
+  note: >-
+    n=3（配对 n=6）。这是小样本能力评估，产出效应量估计与可行性证据。
+    Pilot 的 1 个重复不进入 H1–H5 的成立/推翻计数，但必须原样留存并在报告中单列。
+
+allowed:
+  - id: STAT-01
+    name: 原始计数
+    content: >-
+      PASS / FAIL / BLOCKED_INFRA / INVALID_ARTIFACT 的逐格次数，逐任务分列。
+  - id: STAT-02
+    name: 每格原始成功率
+    content: x/3，逐任务逐臂给出；不合并任务。
+  - id: STAT-03
+    name: 中位数与极值
+    content: >-
+      首次出生轮次、每 Trial 调用数、token、执行步数、墙钟的中位数与最小/最大值，
+      **只作描述**。
+  - id: STAT-04
+    name: 逐配对差值
+    content: >-
+      同一 (task, rep) 下两臂原始计数之差，逐对列出，**只作描述**，不做汇总。
+  - id: STAT-05
+    name: 失败原因分布
+    content: 按 verdict 与问题码分类的计数。
+
+# ---------------------------------------------------------------------------
+# 判决面（计划 §13.3）：**两层，别混**
+#   ① 一个 Trial（task × arm × rep）→ 四值 verdict + failure_class
+#   ② 一个假设 H1–H5 → 三态判决
+# 把两层写成一个块，就会出现「两重复一过一败」这种既不是 PASS 也不是 FAIL 的
+# 未定义格。本文件 2026-11-07 冻结前正是这样写的，已改正（见 Complete 偏差登记）。
+# ---------------------------------------------------------------------------
+decision:
+  trial:
+    verdicts: [PASS, FAIL, BLOCKED_INFRA, INVALID_ARTIFACT]
+    failure_classes: [NONE, MODEL_FAILURE, TASK_FAILURE, INVALID_ARTIFACT, BLOCKED_INFRA]
+    failure_rules:
+      - when: verdict 为 BLOCKED_INFRA 或 INVALID_ARTIFACT
+        failure_class: 与 verdict 同名
+      - when: verdict 为 FAIL 且 birth_level < B4
+        failure_class: TASK_FAILURE      # 任务没跑起来
+      - when: verdict 为 FAIL 且 birth_level == B4
+        failure_class: MODEL_FAILURE     # 跑起来了但不达标
+      - when: verdict 为 PASS
+        failure_class: NONE
+    rerun_rule: >-
+      BLOCKED_INFRA / INVALID_ARTIFACT 的 Trial 修好基础设施后重跑**同一**预注册
+      Trial（不占新预算）；重跑后仍落四类之一再进统计。**不得**把基础设施失败
+      算成候选自身的失败。
+  hypothesis:
+    verdicts: [CAPABILITY_DEMONSTRATED, NOT_ESTABLISHED, INCONCLUSIVE]
+    sample: >-
+      12 个确认性 Trial（3 任务 × 2 臂 × rep1/rep2）；Pilot 的 6 个 Trial 只用于
+      接线与可行性，**不进入**任何 H 的成立/推翻计数（结果原样留存、报告单列）。
+    rules:
+      - id: DEC-H1
+        hypothesis: H1
+        needs: L1 的 4 个确认性 Trial 的 verdict
+        branches:
+          - when: "#PASS(agentic) - #PASS(legacy) > 0"
+            verdict: CAPABILITY_DEMONSTRATED
+          - when: "#PASS(agentic) - #PASS(legacy) == 0"
+            verdict: INCONCLUSIVE
+            note: 样本量下无法区分「持平」与「有差但没抽到」
+          - when: "#PASS(agentic) - #PASS(legacy) < 0"
+            verdict: NOT_ESTABLISHED
+            conclusion_literal: legacy_superior_on_L1
+      - id: DEC-H2
+        hypothesis: H2
+        needs: 12 个确认性 Trial 的首次出生轮次（未出生记 +infinity 并计入中位数）
+        branches:
+          - when: median(agentic) < median(legacy)
+            verdict: CAPABILITY_DEMONSTRATED
+          - when: median(agentic) == median(legacy)
+            verdict: INCONCLUSIVE
+          - when: median(agentic) > median(legacy)
+            verdict: NOT_ESTABLISHED
+      - id: DEC-H3
+        hypothesis: H3
+        needs: 臂间差 d_task = #PASS(agentic) - #PASS(legacy)，每任务各 4 个确认性 Trial
+        range_note: >-
+          计划 §13.3.2 写「每个任务各 4 个确认性 Trial ⇒ d ∈ {-4..4}」，但每任务的
+          4 个确认性 Trial 是**两臂各 2 个**，故 d 的实际取值域是 {-2..+2}；
+          「-4..4」是算术笔误。P281-9 的 verdict.py 按 {-2..+2} 实现并逐值单测。
+        branches:
+          - when: abs(d_M1) < abs(d_L1)
+            verdict: CAPABILITY_DEMONSTRATED
+          - when: abs(d_M1) > abs(d_L1)
+            verdict: NOT_ESTABLISHED
+          - when: abs(d_M1) == abs(d_L1)
+            verdict: INCONCLUSIVE
+      - id: DEC-H4
+        hypothesis: H4
+        needs: R1 的 4 个确认性 Trial 的 evaluator.json 结构分（语义车道开启时另加双盲分）
+        branches:
+          - when: 结构分逐 rep 无一严格劣 且 结构中位数 >= legacy
+            verdict: CAPABILITY_DEMONSTRATED
+            precondition: semantic_lane == enabled
+          - when: 任一方向（结构或已开启的语义）严格劣
+            verdict: NOT_ESTABLISHED
+          - when: semantic_lane == disabled
+            verdict: INCONCLUSIVE
+            note: >-
+              默认 disabled（用户 2026-11-06 裁决「暂缓至 P281-7 前再定」）。
+              此时 H4 只得结构性结论，报告须逐字写「R1 仅得结构性结论」。
+      - id: DEC-H5
+        hypothesis: H5
+        needs: 12 个确认性 Trial 的账本 tokens 中位数
+        branches:
+          - when: median_tokens(agentic) > median_tokens(legacy)
+            verdict: CAPABILITY_DEMONSTRATED
+            note: 这里「成立」指「成本更高这一事实成立」，不含优劣判断
+          - when: median_tokens(agentic) <= median_tokens(legacy)
+            verdict: NOT_ESTABLISHED
+            note: 若此时 H1/H4 亦无差，结论直接指向「不该启用 agentic」
+    mutually_exclusive_and_exhaustive: >-
+      每个 H 的分支必须覆盖符号 {-1, 0, +1}（H4 另含语义车道两态），由 P281-9 的
+      verdict.py 逐分支单测钉死（AC-P281-9-02/05）。缺一个分支即红。
+    inconclusive_discipline: >-
+      INCONCLUSIVE 只在「数据本身不足以区分」时用；「方向与预期相反」永远记
+      NOT_ESTABLISHED，不得为体面改记 INCONCLUSIVE。
+  per_task_only: >-
+    不得把 L1 的失败用 M1 的成功「平均掉」；报告必须逐任务给结论，最后才给
+    一句跨任务的、限定语满格的总结。
+  no_single_score: 不得构造单一综合平均分把多任务多指标合成一个数。
+
+forbidden:
+  - id: STAT-F01
+    keyword: wilson
+    reason: 区间估计；n=3 下自我矛盾。
+  - id: STAT-F02
+    keyword: bootstrap
+    reason: 区间估计；同上。
+  - id: STAT-F03
+    keyword: 正态近似
+    reason: 区间估计；同上。
+  - id: STAT-F04
+    keyword: p 值
+    reason: 显著性检验；n=6 做不了，写了就是夸大。
+  - id: STAT-F05
+    keyword: p-value
+    reason: 同上（英文写法同禁）。
+  - id: STAT-F06
+    keyword: 显著
+    reason: 任何「显著」字样都在声称一件本实验无法声称的事。
+  - id: STAT-F07
+    keyword: 置信区间
+    reason: 区间估计；同上。
+  - id: STAT-F08
+    keyword: composite
+    reason: 综合评分会把多任务多指标糊成一个无定义数字。
+  - id: STAT-F09
+    keyword: 符号检验
+    reason: >-
+      n=6 时最小可能 p 为 2*(1/2)^6=0.03125，只要 6 对全同向就必然「通过」，
+      测不出任何东西，反而制造虚假确定性。
+  - id: STAT-F10
+    keyword: t 检验
+    reason: 参数检验假设不成立且样本量不足。
+  - id: STAT-F11
+    keyword: anova
+    reason: 同上（英文写法同禁）。

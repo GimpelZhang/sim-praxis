@@ -1,0 +1,53 @@
+# Phase 2.8.1 预注册：两臂冻结参数。
+#
+# **镜像关系**：本文件的 `arms` 块与 `orchestrator/benchmark/phase281/arm_adapter.py`
+# 的 `ARMS` 表**逐值互为镜像**（AC-P281-5-06 双向机判）。任一侧改动而另一侧
+# 未跟 = STOP-14（判据或权重被改）。别处不得再写第三份「两臂参数」。
+#
+# 等价性（与 AC-P281-4-01 同口径，双向）：
+#   必须逐值相同：max_coding_rounds、call_cap      —— 定义「一次 Trial 能花多少」
+#   必须逐值不同：engine、runspec_agentic、tool_grants、step_cap、token_cap、
+#                 agentic_config                    —— 它们**就是**自变量本身
+schema: simpraxis.phase281_arms.v1
+experiment_id: roadmap_phase1_v1
+
+arms:
+  legacy_v1:
+    arm_id: legacy_v1
+    engine: agent_runner
+    runspec_agentic: false
+    max_coding_rounds: 10
+    tool_grants: []
+    step_cap: 0
+    token_cap: 0
+    call_cap: 10
+    agentic_config: null
+  agentic_v1:
+    arm_id: agentic_v1
+    engine: agentic_loop
+    runspec_agentic: true
+    max_coding_rounds: 10
+    tool_grants: [read_file, list_dir, grep, "write:", "run:python", finish, fail]
+    step_cap: 60
+    token_cap: 100000
+    call_cap: 10
+    agentic_config: null
+
+# 等价性声明（机判用 arms 块本身，本块只作人读与报告引用）
+parity:
+  equal_fields: [max_coding_rounds, call_cap]
+  different_fields:
+    - engine
+    - runspec_agentic
+    - tool_grants
+    - step_cap
+    - token_cap
+    - agentic_config
+  note: >-
+    `write:`（而不是裸 `write_file`）是刻意的：裸名不会往 GrantTable.write_roots
+    里放任何前缀，policy._check_write 在空根上一律拒绝，agentic 臂会在第一次
+    落盘就被自己的策略拒——整臂溃败会被误读成「能力不足」（P281-4 的 R17 假阴性）。
+  recall_granted: false
+  recall_rationale: >-
+    两臂同等地不给召回（experiment.yaml 的 validity.recall_disabled_both_arms）。
+    solutions/track1_tools/03_libero 是 L1 的同题已批准解，开召回即答案泄漏。

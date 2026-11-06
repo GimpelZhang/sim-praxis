@@ -1,0 +1,71 @@
+# Phase 2.8.1 预注册：任务面与调用帽。
+#
+# `task_no` 是**账本 `task` 字段**的取值（1/2/3），与 `constants.TASK_ORDER`
+# 逐字一致；它对不上就等于账本归因错任务。`runtime` 决定 harness 形态
+# （`host` 宿主进程 / `docker` 兄弟容器，见计划 §8.5.3）。
+schema: simpraxis.phase281_tasks.v1
+experiment_id: roadmap_phase1_v1
+
+caps:
+  call_cap_per_trial: 10
+  per_task_cap: 60          # = 2 臂 × (1 Pilot + 2 Confirmatory) × 10
+  wallclock_cap_s: 1800
+  max_coding_rounds: 10
+
+reps:
+  pilot: 1                  # rep0
+  confirmatory: 2           # rep1, rep2
+  total: 3
+
+tasks:
+  - task_id: mujoco_contact_push_v1
+    short: M1
+    task_no: 1
+    runtime: host
+    task_file: benchmarks/research_engineering_v1/tasks/mujoco_contact_push/task.yaml
+    criteria_file: benchmarks/research_engineering_v1/criteria/mujoco_contact_push_v1.criteria.json
+    tests: 环境识别 + 物理参数调试 + 数值收敛
+    contributes_to: [H2, H3, H5]
+    trials_pilot: 2
+    trials_confirmatory: 4
+    calls_pilot: 20
+    calls_confirmatory: 40
+  - task_id: libero_env_adapter_v1
+    short: L1
+    task_no: 2
+    runtime: docker
+    task_file: benchmarks/research_engineering_v1/tasks/libero_env_adapter/task.yaml
+    criteria_file: benchmarks/research_engineering_v1/criteria/libero_env_adapter_v1.criteria.json
+    tests: 真容器环境适配、依赖/路径/资产身份识别、迭代诊断
+    contributes_to: [H1, H2, H3, H5]
+    trials_pilot: 2
+    trials_confirmatory: 4
+    calls_pilot: 20
+    calls_confirmatory: 40
+  - task_id: icy_ground_dr_v1
+    short: R1
+    task_no: 3
+    runtime: host
+    task_file: benchmarks/research_engineering_v1/tasks/icy_ground_dr/task.yaml
+    criteria_file: benchmarks/research_engineering_v1/criteria/icy_ground_dr_v1.criteria.json
+    tests: 研究设计（实验方案、统计、可复现性；不训练）
+    contributes_to: [H2, H4, H5]
+    trials_pilot: 2
+    trials_confirmatory: 4
+    calls_pilot: 20
+    calls_confirmatory: 40
+
+# Pilot / Confirmatory 拆分（预算等式见 budget.yaml）
+phases:
+  pilot:
+    reps: [0]
+    trials: 6
+    calls: 60
+    decides_hypotheses: false
+    purpose: 接线与可行性；结果原样留存并在报告中单列
+  confirmatory:
+    reps: [1, 2]
+    trials: 12
+    calls: 120
+    decides_hypotheses: true
+    gate: G281-6（用户对 Pilot 报告的显式继续同意，STOP-17）

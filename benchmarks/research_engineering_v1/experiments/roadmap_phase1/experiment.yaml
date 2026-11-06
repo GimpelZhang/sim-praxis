@@ -1,0 +1,121 @@
+# Phase 2.8.1（＝SimPraxis Roadmap Phase 1）预注册主件。
+#
+# 本文件是**实验设计面**的单点真值：假设、方向、否证条件、有效性裁定。
+# 它在任何付费调用之前冻结；LOCK（同目录 LOCK.json）记下它的 sha256。
+# LOCK 之后改动本文件 = STOP-13（本批作废，另立新实验），不得就地改。
+#
+# 写作纪律：H1–H5 的**方向**逐字写死。跑了之后发现方向写反，那是结论，
+# 不是要修的 bug（CLAUDE.md 硬规则 7：矛盾即结论）。
+schema: simpraxis.phase281_experiment.v1
+experiment_id: roadmap_phase1_v1
+phase_name: Phase 2.8.1
+plan_ref: ~/文档/Phase_2.8.1_Plan_detailed.md
+roadmap_ref: ~/文档/Evolution_Raodmap.md#phase-1
+
+# ---------------------------------------------------------------------------
+# 被比较的两个实验组（参数在 arms.yaml，本件只写「比较什么」）
+# ---------------------------------------------------------------------------
+comparison:
+  arms: [legacy_v1, agentic_v1]
+  independent_variable: 引擎（旧 AgentRunner 单轮内环 vs agentic 工具内环）
+  # 两臂的差异**不止引擎**：运行形态必然不同（宿主子进程 / 兄弟容器）。
+  # 因此任何结论都不得表述为「纯引擎差异」（见 §18.2 禁用措辞）。
+  known_confounded: [引擎, 部署形态]
+  unit_of_analysis: 一个 Trial（task × arm × rep）
+  paired_by: [task_id, rep]
+
+# ---------------------------------------------------------------------------
+# 冻结的任务面（逐任务细节在 tasks.yaml，判据在仓内 criteria/*.json）
+# ---------------------------------------------------------------------------
+tasks:
+  - mujoco_contact_push_v1     # M1，宿主形态，计入 H3
+  - libero_env_adapter_v1      # L1，容器形态，计入 H1
+  - icy_ground_dr_v1           # R1，宿主形态，计入 H4
+reps:
+  pilot: 1                     # rep0，只做接线与可行性，不进入 H1–H5 判决
+  confirmatory: 2              # rep1/rep2，**只有这两个重复计入判决**
+  total: 3
+
+# ---------------------------------------------------------------------------
+# 假设：陈述 + 方向 + 否证条件（逐条写死，不得事后重解释）
+# ---------------------------------------------------------------------------
+hypotheses:
+  H1:
+    statement: >-
+      agentic_v1 在 L1（真 LIBERO 环境适配，需要环境身份识别 + 迭代诊断）上的
+      CAPABILITY_DEMONSTRATED 数 >= legacy_v1。
+    direction: agentic_v1 >= legacy_v1
+    scope: [libero_env_adapter_v1]
+    decided_by: confirmatory_only
+    falsified_if: >-
+      confirmatory 结束后 legacy_v1 的 CAPABILITY_DEMONSTRATED 数**严格多于**
+      agentic_v1。此时结论逐字写 legacy_superior_on_L1。
+  H2:
+    statement: >-
+      agentic_v1 的首次出生轮次中位数 <= legacy_v1。
+    direction: median(agentic_v1) <= median(legacy_v1)
+    scope: [mujoco_contact_push_v1, libero_env_adapter_v1, icy_ground_dr_v1]
+    decided_by: confirmatory_only
+    falsified_if: >-
+      agentic_v1 的首次出生轮次中位数**严格大于** legacy_v1。
+  H3:
+    statement: >-
+      在 M1（全宿主、反馈快、无容器层）上两臂差异小于 L1。
+    direction: "|delta_M1| < |delta_L1|"
+    scope: [mujoco_contact_push_v1, libero_env_adapter_v1]
+    decided_by: confirmatory_only
+    falsified_if: >-
+      M1 的臂间差的绝对值 >= L1 的臂间差的绝对值。
+  H4:
+    statement: >-
+      R1 上 agentic_v1 的结构分不劣于 legacy_v1，且（若语义车道开启）
+      双盲语义分 >= legacy_v1。
+    direction: agentic_v1 >= legacy_v1 (structural; semantic if enabled)
+    scope: [icy_ground_dr_v1]
+    decided_by: confirmatory_only
+    semantic_lane: >-
+      默认 disabled（用户 2026-11-06 裁决「暂缓至 P281-7 前再定」）。
+      未开启时 H4 只得结构性结论，报告须逐字写「R1 仅得结构性结论」。
+    falsified_if: >-
+      任一方向（结构或已开启的语义）agentic_v1 **严格劣于** legacy_v1。
+  H5:
+    statement: >-
+      agentic_v1 的每 Trial token 消耗**高于** legacy_v1（成本—能力不同向）。
+    direction: median_tokens(agentic_v1) > median_tokens(legacy_v1)
+    scope: [mujoco_contact_push_v1, libero_env_adapter_v1, icy_ground_dr_v1]
+    decided_by: confirmatory_only
+    falsified_if: >-
+      agentic_v1 的 token 中位数 <= legacy_v1。此时若能力也无差，
+      结论直接指向「不该启用 agentic」。
+
+# ---------------------------------------------------------------------------
+# 有效性裁定（写死，不得在结果出来后改口）
+# ---------------------------------------------------------------------------
+validity:
+  recall_disabled_both_arms: true
+  recall_rationale: >-
+    内容层 solutions/track1_tools/03_libero 是 L1 的同题 Gate2 已批准解；
+    任一条臂打开 KB / 方案表召回即等于答案泄漏（STOP-11）。故两臂**同等地**
+    不给召回（legacy 臂注入 NullRecallEngine，agentic 臂不授予 recall）。
+  criteria_isolation: >-
+    判据（criteria/*.json）不在 input/ 也不在 workdir/；TASK.md 逐字不含任何
+    阈值常量；评测器只读仓外快照并只认 delivered/。
+  q1_frozen_constant: >-
+    Q1 结论 contradiction_control_not_robust（ice/normal=0.824 < 界 2.0）
+    在本阶段是**输入常量**；任何候选或评测器都不得通过换种子/改阈值宣称推翻。
+  sample_size_honesty: >-
+    每格 n=3（Pilot 1 + 确认性 2），不足以做统计显著性检验。产出的是效应量
+    估计与可行性证据，不是「统计显著的优劣」。
+
+# ---------------------------------------------------------------------------
+# 模型冻结（硬规则 1：本实验期间不得变更；变更须 STOP + 用户裁决）
+# ---------------------------------------------------------------------------
+model_freeze:
+  stage_models_ref: orchestrator/gateway/stage_models.yaml
+  stages_used: [coding_debug]
+  coding_debug_model: deepseek-v4.1-flash-1017
+  macro_ideation_model: glm-5.3           # 本实验不调用（登记以备审计）
+  visual_rollout_model: deepseek-v4.1-flash-1017   # 本实验不调用
+  note: >-
+    本实验只经 coding_debug 一阶段实呼；macro/visual 两阶段登记在此仅为
+    证明「全体模型面在冻结窗口内未变」，不构成任何调用授权。
