@@ -849,6 +849,24 @@ CALL_CACHE_ALLOWLIST = {
     # `CallReplay(phase1_root() / ".call_cache")` 逐字未改，0 新增落点、
     # 0 新增网关调用（AC-P281-3-03 另以行为断言锁死该路径）。
     ("orchestrator/agentic/wiring.py", 252),
+    # Phase 2.8.1 T4（P281-4，计划 §8.5.4 / AC-P281-4-10）：实验 Trial 流水线
+    # 的**第七落点**——每 Trial 一个独享缓冲目录 `<trial>/call_cache/`
+    # （构造表达式 `CallReplay(base / "call_cache")`，`base` 即该 Trial 目录）。
+    # 这一处与其余六处的**形态不同是设计要求**，不是漏改：AC-P281-4-10 要求
+    # 「两个 Trial 的缓存目录不同、同名 key 不串」，把它指向全局
+    # `phase1_root()/.call_cache` 会让跨 Trial 缓存命中（STOP-10）。
+    # 故本落点由 CALL_CACHE_ARG_FORMS 单独钉形态（见下），其余六处的
+    # 「必须落在 Phase 1 封存目录」断言不变。
+    ("orchestrator/benchmark/phase281/trial_harness.py", 898),
+}
+
+
+#: 每个落点允许的构造实参**形态**（2026-11-07 Phase 2.8.1 T4 起分型）。
+#: 缺省（未列在此表的落点）：必须是 `phase1_root()/.call_cache` —— 禁新开
+#: 第二**全局**落点。列在此表的落点按**逐字形态**钉死，既不许退化成全局
+#: 目录（跨 Trial 命中），也不许换成别的局部路径（旁路 Trial 隔离）。
+CALL_CACHE_ARG_FORMS = {
+    "orchestrator/benchmark/phase281/trial_harness.py": "base / 'call_cache'",
 }
 
 
@@ -864,10 +882,16 @@ def test_s10_call_cache_landing_sites_enumerated():
                     and node.func.id == "CallReplay":
                 found[(rel, node.lineno)] = ast.unparse(node.args[0])
     assert set(found) == CALL_CACHE_ALLOWLIST, (
-        "生产 CallReplay 落点只允许这六处："
+        "生产 CallReplay 落点只允许这七处："
         f"{sorted(set(found) ^ CALL_CACHE_ALLOWLIST)}")
-    # 六处必须显式落在 Phase 1 封存的 phase1_root()/.call_cache（禁新开第二落点）
-    for arg_src in found.values():
+    # 形态分型（Phase 2.8.1 T4 起）：六处全局落点必须显式落在 Phase 1 封存的
+    # phase1_root()/.call_cache（禁新开第二全局落点）；表内特殊的第七处按
+    # 逐字形态钉死（实验 Trial 独享目录，禁退化成全局/别的局部路径）。
+    for (rel, lineno), arg_src in found.items():
+        expected = CALL_CACHE_ARG_FORMS.get(rel)
+        if expected is not None:
+            assert arg_src == expected, (rel, lineno, arg_src)
+            continue
         assert "phase1_root()" in arg_src and ".call_cache" in arg_src, arg_src
 
 
