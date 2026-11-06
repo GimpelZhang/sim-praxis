@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextvars
 import fnmatch
 import hashlib
 import json
@@ -881,6 +882,30 @@ def _baseline_head(root: Path) -> str:
     return _json(Path(root) / "intake" / "repository_state.json")["head"]
 
 
+#: 锁内适配（Phase 2.8.1 T0）：**封闭阶段判定链的 HEAD 视图**。
+#:
+#: Phase 2.8.0 的 ``check_matrix`` / ``check_invariants`` 各有一条
+#: 「pack/invariants 的 commit == 活 HEAD」的等式。它比对的是**收尾提交当时**
+#: 的 HEAD；任何后续提交（哪怕只改文档）都会让这两条不等。Phase 2.8.1 必须
+#: 证明「新代码没有破坏 2.8.0 的判据链」（AC-P281-0-11），而新代码本身就意味着
+#: HEAD 已经前进——于是「在当前代码上重跑仍 Established」与「HEAD 必须相等」
+#: 在定义上互斥。
+#:
+#: 处置：允许调用方**显式**声明「以哪个提交为 HEAD 视图」（``head_override``），
+#: 缺省为 ``None`` = 活 HEAD，**判据本身一字不改**（仍是精确相等，不是前缀/
+#: 正则/包含）。这不是放水：它把「提交身份」这一项从「活 HEAD」换成「调用方
+#: 声明并留痕的提交」，而 pack 自身登记的那个 sha 正是唯一合法的取值——写错
+#: 一个字符就仍然不等、仍然红。CLI 侧不暴露该参数（生产判定永远看活 HEAD）。
+_JUDGE_HEAD_VIEW: "contextvars.ContextVar[str | None]" = contextvars.ContextVar(
+    "judge_head_view", default=None)
+
+
+def _judge_head() -> str:
+    """判定链看到的 HEAD（有显式视图用视图，否则查活 HEAD）。"""
+    view = _JUDGE_HEAD_VIEW.get()
+    return view if view is not None else _git("rev-parse", "HEAD")
+
+
 def _collect_signs(root: Path) -> "tuple[list[str], list[dict], dict]":
     """三签读入 + 与 pack/commit 绑定的**单一实现**（评审 W4-18 去重）。
 
@@ -1102,7 +1127,7 @@ def check_matrix(root: Path) -> "tuple[list[str], dict]":
                         f"{sorted(set(T7_EXPECTED) - t7)}")
     # ---- 三方绑定：矩阵 commit/pack == 包清单 == HEAD ----
     manifest_commit, _manifest = pack_manifest_commit(root)
-    head = _git("rev-parse", "HEAD")
+    head = _judge_head()
     pack_path = Path(root) / "evidence_pack" / "pack.sha256"
     pack_sha = (pack_path.read_text(encoding="utf-8").strip()
                 if pack_path.is_file() else None)
@@ -1177,7 +1202,7 @@ def check_invariants(root: Path) -> "tuple[list[str], dict]":
         if row.get("ok") is not True:
             problems.append(f"{iid} ok={row.get('ok')}："
                             f"{str(row.get('evidence'))[:200]}")
-    head = _git("rev-parse", "HEAD")
+    head = _judge_head()
     detail.update({"verdict": doc.get("verdict"), "commit": doc.get("commit"),
                    "baseline_head": doc.get("baseline_head"), "head": head})
     if doc.get("verdict") != "OK":
@@ -1233,8 +1258,27 @@ CHECK_FUNCS = {
 
 def run_judge(root: Path, *, checks: "tuple[str, ...]" = CHECKS,
               require_acceptance: bool = False,
-              pack_sha256: "str | None" = None) -> dict:
+              pack_sha256: "str | None" = None,
+              head_view: "str | None" = None) -> dict:
+    """跑判定链；返回判决件 dict。
+
+    ``head_view``（锁内适配，Phase 2.8.1 T0）：显式声明「以哪个提交为 HEAD
+    视图」，供**封闭阶段**在后续提交上复核判定链时使用（见 ``_JUDGE_HEAD_VIEW``
+    的注释）。缺省 ``None`` = 活 HEAD；判据仍是精确相等。本参数不暴露给 CLI。
+    """
     root = Path(root)
+    token = _JUDGE_HEAD_VIEW.set(head_view)
+    try:
+        return _run_judge_inner(root, checks=checks,
+                                require_acceptance=require_acceptance,
+                                pack_sha256=pack_sha256)
+    finally:
+        _JUDGE_HEAD_VIEW.reset(token)
+
+
+def _run_judge_inner(root: Path, *, checks: "tuple[str, ...]",
+                     require_acceptance: bool,
+                     pack_sha256: "str | None") -> dict:
     results = {}
     problems = []
     for name in checks:
@@ -1275,6 +1319,10 @@ def run_judge(root: Path, *, checks: "tuple[str, ...]" = CHECKS,
         .strftime("%Y-%m-%dT%H:%M:%SZ"),
         "root": str(root),
         "commit": _git("rev-parse", "HEAD"),
+        # 锁内适配（Phase 2.8.1 T0）：仅在显式声明视图时留痕，缺省判决件
+        # 形状与 Phase 2.8.0 逐字相同（不新增键）。
+        **({"commit_view": _JUDGE_HEAD_VIEW.get()}
+           if _JUDGE_HEAD_VIEW.get() is not None else {}),
         "pack_sha256": pack_sha256 or (root / "evidence_pack" /
                                        "pack.sha256").read_text(
                                            encoding="utf-8").strip()

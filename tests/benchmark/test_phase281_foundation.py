@@ -437,7 +437,19 @@ def test_ac_p281_0_11_p280_judge_unaffected():
         return hashlib.sha256(data).hexdigest(), st.st_mtime_ns, len(data)
 
     before = {p.name: _fingerprint(p) for p in (judge_path, pack_path)}
-    doc = check_closure.run_judge(root, require_acceptance=True)
+    # 锁内适配（Phase 2.8.1 T0）：2.8.0 的判决链有两条「pack/invariants 的
+    # commit == **活 HEAD**」的等式，而本 Task 一提交，HEAD 就前进了——
+    # 「在当前代码上重跑」与「HEAD 相等」在定义上互斥。故显式声明
+    # ``head_view`` = 冻结包里登记的那个 commit（**唯一合法取值**，写错一个
+    # 字符仍不等、仍红）；判据本身一字未改（精确相等）。CLI 不暴露该参数，
+    # 2.8.0 自己的生产判定永远看活 HEAD。
+    manifest = json.loads((root / "evidence_pack" / "manifest.json")
+                          .read_text(encoding="utf-8"))
+    pack_commit = manifest["git_commit"]
+    assert pack_commit == BASELINE_HEAD, (
+        f"冻结包登记的 commit={pack_commit} 不是本阶段基线 {BASELINE_HEAD}")
+    doc = check_closure.run_judge(root, require_acceptance=True,
+                                  head_view=pack_commit)
     after = {p.name: _fingerprint(p) for p in (judge_path, pack_path)}
 
     assert before == after, "run_judge 落盘了（判决件/证据包指纹变了）"
