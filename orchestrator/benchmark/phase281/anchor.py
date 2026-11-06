@@ -53,9 +53,16 @@ RUNTIME_DIR = "runtime"
 #: 锚里登记摘要的评测器模块（相对 ``orchestrator/benchmark/phase281/``）。
 #: ``evaluate_child.py`` 是评测真正跑起来的进程入口、``references.py`` 是参考
 #: 快照的构造者——两者都在信任面内，摘要一起进锚（加模块 = 加严，不改判定）。
+#:
+#: T2 加严（AC-P281-2-01/04/05/09 的判决面）：出生隔离的四个模块同样属于
+#: 「判决所依赖的字节」——``candidate_birth.py`` 是父进程判官，``birth_child.py``
+#: 是证据生产者，``birth_protocol.py`` 是父子共享的事件契约，
+#: ``candidate_runtime.py`` 是每 Trial 的运行时证明。改了其中任何一个都必须重写
+#: 锚，否则「候选碰不到判决字节」这句话就不再成立。
 EVALUATOR_MODULES = ("candidate_manifest.py", "anchor.py",
                      "candidate_evaluator.py", "evaluate_child.py",
-                     "references.py")
+                     "references.py", "candidate_birth.py", "birth_child.py",
+                     "birth_protocol.py", "candidate_runtime.py")
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
