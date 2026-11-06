@@ -9,7 +9,7 @@
      --selftest`` rc=0；
   4. AC-T0-4：``estimates/t0_baseline_phase27.json`` 冻结件与 raw log 摘要行
      逐数字相符（冻结件机产，不得手写）；
-  5. AC-T0-5：``sealed_ledger_paths()`` 长度 4 且四项分指 phase1/2/25/26 账；
+  5. AC-T0-5：``sealed_ledger_paths()`` 长度 5 且各项分指 phase1/2/25/26/27 账；
   6. AC-T0-6：``PHASE27_TASK_CAPS == {4: 63, 6: 85}``、硬帽 178、ns.phase == 27；
   7. AC-T0-7：phase27 落位与计数（phase2 账字节数与 mtime 不变、seq 递增、
      global_used_after 非 0、对 phase2 写打开仍必拒）；
@@ -269,7 +269,7 @@ def test_ac_t0_4_baseline_json_frozen():
 
 
 # ---------------------------------------------------------------------------
-# AC-T0-5：封存集长度 4 且分指四账
+# AC-T0-5：封存集长度 5 且分指五账（Phase 2.8.1 T0 起 phase27 亦封存）
 # ---------------------------------------------------------------------------
 
 def test_ac_t0_5_sealed_set_size(p27_roots):

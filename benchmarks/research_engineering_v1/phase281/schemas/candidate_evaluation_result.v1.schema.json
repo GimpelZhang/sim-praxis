@@ -1,0 +1,223 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "simpraxis.candidate_evaluation_result.v1",
+  "title": "Candidate Evaluation Result v1（Phase 2.8.1 候选评测结果）",
+  "description": "CandidateEvaluator 对一次 Trial 的判决。两条轴分开记账：`criteria` 是**判据数学轴**（每个评分维度一条，事实由评分器从原始产物重算），`gates` 是**事实闸门轴**（自报-重算一致性、运行时身份、出生等，不是分数而是可否给分的前置）。`verdict` 同时看两轴。verdict 枚举与 Phase 2.8.0 的 result_schema.STATUSES **逐字相同**（七态，顺序即优先级）——判据词汇表只允许有一个真值源，另立四态会立刻产生「同名不同义」的漂移。本实验实际只产出其中四态（BLOCKED_INFRA / INVALID_ARTIFACT / FAIL / PASS）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "trial_id",
+    "task_id",
+    "verdict",
+    "criteria",
+    "gates",
+    "facts",
+    "ledger",
+    "manifest_checks",
+    "anchor",
+    "evaluated_at",
+    "evaluator"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "simpraxis.candidate_evaluation_result.v1"
+    },
+    "trial_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_]+__[a-z0-9_]+__rep[0-9]+$",
+      "minLength": 12,
+      "maxLength": 120
+    },
+    "task_id": {
+      "type": ["string", "null"],
+      "enum": [
+        "mujoco_contact_push_v1",
+        "libero_env_adapter_v1",
+        "icy_ground_dr_v1",
+        null
+      ],
+      "description": "BLOCKED_INFRA 时允许为 null（基础设施不确定时不得假装知道被评的是哪个任务）。"
+    },
+    "verdict": {
+      "type": "string",
+      "description": "七态与 Phase 2.8.0 逐字相同（顺序即聚合优先级：BLOCKED_INFRA 最优先）。判定优先级见 evaluator 的显式 if/elif：锚不符或运行时不符 ⇒ BLOCKED_INFRA；manifest 缺失/不符/缺件 ⇒ INVALID_ARTIFACT；claimed 与观测不一致 ⇒ INVALID_ARTIFACT；出生未过 ⇒ FAIL；判据与闸门全过 ⇒ PASS，否则 FAIL。",
+      "enum": [
+        "BLOCKED_INFRA",
+        "INVALID_RUNTIME",
+        "INCOMPLETE_EVIDENCE",
+        "INVALID_ARTIFACT",
+        "FAIL",
+        "PASS",
+        "NOT_APPLICABLE"
+      ]
+    },
+    "criteria": {
+      "type": "array",
+      "description": "判据数学轴：每个评分维度一条。BLOCKED_INFRA 与 INVALID_ARTIFACT 时必须为空数组（禁止在输入不可信时产出任何判据结论）。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "weight", "passed", "fact", "source"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "维度名原样加 DIM_ 前缀（如 DIM_functional_correctness）；前缀让「判据」与「维度键」不会被混读。",
+            "pattern": "^[A-Za-z][A-Za-z0-9_-]{2,63}$"
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "fact": {
+            "type": "object",
+            "description": "评测器自己算出的可核对事实（score / detail）；不得放候选自述。",
+            "additionalProperties": true
+          },
+          "source": {
+            "type": "string",
+            "description": "该条判据的事实来源：recomputed = 评测器从原始产物重算；ledger = 账本行；runner_telemetry = 运行器遥测；file_sha256 = 文件摘要重算。",
+            "enum": ["recomputed", "ledger", "runner_telemetry", "file_sha256"]
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "description": "事实闸门轴：不适用的闸门也要列出来（passed=true + detail 说明「不适用」），保证「有没有查」可审计；BLOCKED_INFRA 时必须为空数组。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "passed", "detail", "source"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^GATE_[A-Z0-9_]{2,59}$"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "detail": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "source": {
+            "type": "string",
+            "enum": ["recomputed", "ledger", "runner_telemetry", "file_sha256"]
+          }
+        }
+      }
+    },
+    "facts": {
+      "type": "object",
+      "description": "评测器自己算出的全部中间量（复算留痕）。不得包含任何 claimed.* 的转抄。",
+      "additionalProperties": true
+    },
+    "ledger": {
+      "type": "object",
+      "description": "以账本为准的调用事实（唯一计费真值源）。",
+      "additionalProperties": false,
+      "required": ["calls", "seqs", "tokens_in", "tokens_out"],
+      "properties": {
+        "calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seqs": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1}
+        },
+        "tokens_in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_out": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "manifest_checks": {
+      "type": "array",
+      "description": "自述 vs 观测的逐字段对账。任一 equal=false ⇒ verdict 至少为 INVALID_ARTIFACT，且该字段必须在此逐条点名。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "claimed", "observed", "equal"],
+        "properties": {
+          "field": {
+            "type": "string",
+            "pattern": "^(claimed|engine|runtime|inputs|deliverables)\\.[A-Za-z0-9_.[\\]-]+$"
+          },
+          "claimed": {},
+          "observed": {},
+          "equal": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "description": "仓外信任锚的重算结果。checked=false 或任一 sha 不符 ⇒ BLOCKED_INFRA。",
+      "additionalProperties": false,
+      "required": ["manifest_sha256", "criteria_sha256", "scoring_sha256", "checked"],
+      "properties": {
+        "manifest_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "criteria_sha256": {
+          "type": ["object", "null"],
+          "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "scoring_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "checked": {
+          "type": "boolean"
+        },
+        "problems": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "evaluated_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    },
+    "evaluator": {
+      "type": "object",
+      "description": "评测器自身的可核对身份（子进程纪律留痕）。",
+      "additionalProperties": false,
+      "required": ["python", "isolated", "argv", "pid"],
+      "properties": {
+        "python": {
+          "type": "string",
+          "minLength": 1,
+          "description": "解释器路径（sys.executable）；子进程纪律由 isolated 与 argv 共同留痕。"
+        },
+        "isolated": {
+          "type": "boolean",
+          "description": "是否在 `-I` 隔离子进程里评测（argv 含 -I 时必须为 true，反之亦然）。"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string"}
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

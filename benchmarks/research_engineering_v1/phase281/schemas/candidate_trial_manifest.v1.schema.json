@@ -1,0 +1,175 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "simpraxis.candidate_trial_manifest.v1",
+  "title": "Candidate Trial Manifest v1（Phase 2.8.1 候选自报清单）",
+  "description": "候选在一次 Trial 结束时对自身的自述。**声明值不被信任**：任何 claimed.* 与账本/运行器观测不一致，以账本与观测为准，并把该 Trial 记为 INVALID_ARTIFACT。本 schema 与 run_manifest.v1.schema.json 零关系——后者是 Phase 2.8.0 的冻结契约（paid_model_calls 恒为 const 0），本 schema 独立成文，不修改它一个字节。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "experiment_id",
+    "trial_id",
+    "arm",
+    "task_id",
+    "runtime",
+    "inputs",
+    "deliverables",
+    "claimed",
+    "engine",
+    "created_at"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "simpraxis.candidate_trial_manifest.v1"
+    },
+    "experiment_id": {
+      "type": "string",
+      "const": "roadmap_phase1_v1"
+    },
+    "trial_id": {
+      "type": "string",
+      "description": "<task_id>__<arm_id>__rep<k>（小写字母、数字与下划线；与目录名逐字相同）",
+      "pattern": "^[a-z0-9_]+__[a-z0-9_]+__rep[0-9]+$",
+      "minLength": 12,
+      "maxLength": 120
+    },
+    "arm": {
+      "type": "string",
+      "enum": ["legacy_v1", "agentic_v1"]
+    },
+    "task_id": {
+      "type": "string",
+      "enum": [
+        "mujoco_contact_push_v1",
+        "libero_env_adapter_v1",
+        "icy_ground_dr_v1"
+      ]
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "fingerprint_sha256"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["host", "docker"]
+        },
+        "fingerprint_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "inputs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relpath", "sha256", "bytes"],
+        "properties": {
+          "relpath": {
+            "type": "string",
+            "description": "相对 Trial 目录的 POSIX 路径；禁止绝对路径、禁止 .. 逃逸",
+            "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._/-]+$",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "deliverables": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relpath", "sha256", "bytes"],
+        "properties": {
+          "relpath": {
+            "type": "string",
+            "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9._/-]+$",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "bytes": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "claimed": {
+      "type": "object",
+      "description": "候选的自述，仅供交叉核对。任何 claimed.* 与账本/运行器观测不一致 ⇒ 该 Trial 记 INVALID_ARTIFACT（不允许「以候选为准」）。paid_model_calls 允许 > 0——本实验的候选可以合法地声明自己花了钱；但声明值本身不被当作证据。",
+      "additionalProperties": false,
+      "required": [
+        "paid_model_calls",
+        "coding_rounds",
+        "first_birth_round",
+        "tool_steps",
+        "tokens_in",
+        "tokens_out"
+      ],
+      "properties": {
+        "paid_model_calls": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "coding_rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_birth_round": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "tool_steps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_in": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tokens_out": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entry", "config_digest"],
+      "properties": {
+        "entry": {
+          "type": "string",
+          "enum": ["agent_runner", "agentic_loop"]
+        },
+        "config_digest": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC，必须严格以 Z 结尾（不接受 +00:00 偏移写法）",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$"
+    }
+  }
+}
