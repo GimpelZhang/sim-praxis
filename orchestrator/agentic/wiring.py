@@ -84,6 +84,10 @@ def build_seq_provider(
     写死旧期会造成**静默证据腐化**——实呼已写进 phase27 账，而读取器仍盯
     封存的 phase26 账 ⇒ 恒返 None，而 trace 里 ``seq=null`` 的既定语义是
     「全缓存命中」，于是每一次真实付费调用都会被记成缓存命中。
+
+    Phase 2.8.1（T3，锁内适配，同一条教训的第三次换期）：缺省 phase27 →
+    **phase281**。phase27 已封存，若继续盯它，本阶段的实呼同样会被记成
+    缓存命中——这是同一腐化机理，不是新问题。
     """
     holder: dict[str, QuotaLedger] = {}
     explicit = ledger
@@ -93,7 +97,10 @@ def build_seq_provider(
         if billing is None:
             return None
         if "ledger" not in holder:
-            holder["ledger"] = explicit or QuotaLedger.phase27()  # 只借命名空间解析账路径
+            # 锁内适配（Phase 2.8.1 T3）：缺省随活跃账换期 phase27 → phase281。
+            # 写死旧期会造成静默证据腐化（实呼写新账、读取器盯旧账 ⇒ 恒 None ⇒
+            # 被记成「缓存命中」）——本 docstring 上方已记录同一教训。
+            holder["ledger"] = explicit or QuotaLedger.phase281()  # 只借命名空间解析账路径
         ledger = holder["ledger"]
         rows = call_lines(read_lines(ledger.ns.ledger_path_fn()))
         same_identity = [
@@ -202,8 +209,21 @@ def run_agentic_for_runspec(
     probe_registry: Any = None,
     call_cache: Any = None,
     nonprod: bool = False,
+    ledger: "QuotaLedger | None" = None,
 ) -> dict[str, Any]:
-    """按 agentic RunSpec 跑一次内环，返回旧接缝同形记录（0 裸异常）。"""
+    """按 agentic RunSpec 跑一次内环，返回旧接缝同形记录（0 裸异常）。
+
+    ``ledger``（Phase 2.8.1 T3）：显式账本命名空间，透传给只读 seq 读取器。
+    缺省 ``None`` = 既有行为（回退期由 ``build_seq_provider`` 决定）。
+
+    显式账本 + 未给隔离缓存 ⇒ 拒绝：跨 Trial 复用 ``phase1_root()/.call_cache``
+    会让一次缓存命中悄悄顶掉另一 Trial 的实呼（STOP-10 的代码面）。实验路径
+    必须每 Trial 一个 ``CallReplay`` 目录（P281-4 的 runner 接线负责落地）。
+    """
+    if ledger is not None and call_cache is None:
+        raise AgenticWiringError(
+            "显式账本模式下必须提供隔离的 call_cache（Phase 2.8.1："
+            "禁止跨 Trial 复用 .call_cache）")
     if engine_for(spec) != "agentic":
         # 组合根分派器的防御性兜底（正常路径懒加载前已按属性分流）。
         raise AgenticWiringError(
@@ -237,7 +257,7 @@ def run_agentic_for_runspec(
         probe_registry=probe_registry, recall_port=recall_port,
         call_cache=call_cache, nonprod=nonprod,
         # M5：只读实呼 seq 读取器（无 billing/全缓存轮 trace seq=null）。
-        seq_provider=build_seq_provider(),
+        seq_provider=build_seq_provider(ledger=ledger),
         agentic_config=cfg)
 
     common = {

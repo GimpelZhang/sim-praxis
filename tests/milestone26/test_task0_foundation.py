@@ -106,10 +106,10 @@ def test_ac_t0_1_dir_modes_seals_watchdog_and_seq_provider(p26_roots):
     # 锁内适配（Phase 2.7 Task0，D0-2 封存 phase26）：本账在 2.7 起不可写，
     # 故写入目标改指 phase27；同时新增「不跨账串读」断言——缺省 phase26 的
     # 读取器绝不读到 phase27 刚写的那一行。
-    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。缺省读取器的
-    # 换期是 P281-3 的接线（计划 §7.2/C5，AC-P281-3-05 锁死），因此本用例此刻
-    # 断言的是「缺省读取器盯封存的 phase27 ⇒ None，绝不串读到 phase281 的新行」；
-    # P281-3 换期后本行必须改回 ``== 1``。
+    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
+    # Phase 2.8.1 T3（P281-3，计划 §7.2/C5，AC-P281-3-05）：缺省读取器随活跃账
+    # 换期 phase27 → phase281，故本行改为 ``== 1``——缺省读取器盯的就是 phase281，
+    # 读得到上面刚写的那一行；封存四期仍恒 ``None``（不跨账串读）。
     from orchestrator.agentic.wiring import build_seq_provider  # noqa: PLC0415
     led281 = ql.QuotaLedger.phase281()
     led27 = ql.QuotaLedger.phase27()          # 只借命名空间解析路径，不写
@@ -122,8 +122,8 @@ def test_ac_t0_1_dir_modes_seals_watchdog_and_seq_provider(p26_roots):
         assert build_seq_provider(ledger=led281)() == 1   # 指向新账：读得到
         # 锁内适配 L-8：缺省读取器随活跃账换期（否则实呼写在活跃账、读取器盯封存
         # 的上一期 ⇒ 恒 None，trace 的 seq=null 语义「全缓存命中」会把每一次真实
-        # 付费调用记成缓存命中）。P281-3 换期到 phase281 前，缺省仍是 phase27。
-        assert build_seq_provider()() is None            # 缺省：phase27（已封存、空）
+        # 付费调用记成缓存命中）。P281-3 起缺省即 phase281（当前唯一可写账）。
+        assert build_seq_provider()() == 1               # 缺省：phase281（读得到）
         assert build_seq_provider(ledger=led27)() is None  # 封存 phase27：读不到
         assert build_seq_provider(ledger=led26)() is None  # 封存 phase26：读不到
         assert build_seq_provider(ledger=led25)() is None  # 封存 phase25：读不到

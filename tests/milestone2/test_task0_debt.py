@@ -842,7 +842,13 @@ CALL_CACHE_ALLOWLIST = {
     # （agentic-v2-/v3-/v4- 三纪元前缀分隔，说明 v4 键空间天然为空），全在构造点
     # 之前，纯位移（230→232）；构造表达式 `CallReplay(phase1_root() / ".call_cache")`
     # 逐字未改，0 新增落点、0 新增网关调用。
-    ("orchestrator/agentic/wiring.py", 232),
+    # Phase 2.8.1 T3（P281-3，计划 §7.2）：`run_agentic_for_runspec` 新增
+    # ``ledger`` 关键字 + 「显式账本必须显式隔离缓存」守卫（+9 行），
+    # ``build_seq_provider`` docstring 补 Phase 2.8.1 段（+4 行）与换期注释
+    # （+3 行）——全部在构造点之前，纯位移（232→252）；构造表达式
+    # `CallReplay(phase1_root() / ".call_cache")` 逐字未改，0 新增落点、
+    # 0 新增网关调用（AC-P281-3-03 另以行为断言锁死该路径）。
+    ("orchestrator/agentic/wiring.py", 252),
 }
 
 
