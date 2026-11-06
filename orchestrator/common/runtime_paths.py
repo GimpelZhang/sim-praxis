@@ -37,6 +37,10 @@ Phase 2.7（Task0，D0-2/D0-3）：封存集再扩为 {phase1, phase2, phase25, 
 【永不再写】；新代码写账一律走 phase27_ledger_path()。``open_ledger_append()`` 的缺省
 目标**仍**留在 phase26（改它会让 Phase 2.6 既有断言红），因此它在 2.7 起**必然抛
 SealedLedgerError**——写入方必须显式传 phase27 路径（见 D0-3）。
+
+Phase 2.8.1（Task0，D0-2/D0-3）：封存集再扩为 {phase1, phase2, phase25, phase26,
+phase27}，五账【永不再写】；新代码写账一律走 ``phase281_ledger_path()``。
+``open_ledger_append()`` 的缺省目标仍留在 phase26，故它在 2.8.1 起同样必然抛。
 """
 from __future__ import annotations
 
@@ -52,6 +56,7 @@ _PHASE2_ENV = "SIMPRAXIS_PHASE2_ROOT"
 _PHASE25_ENV = "SIMPRAXIS_PHASE25_ROOT"
 _PHASE26_ENV = "SIMPRAXIS_PHASE26_ROOT"
 _PHASE27_ENV = "SIMPRAXIS_PHASE27_ROOT"
+_PHASE281_ENV = "SIMPRAXIS_PHASE281_ROOT"
 
 
 class SealedLedgerError(PermissionError):
@@ -322,6 +327,74 @@ def phase27_estimates_dir() -> Path:
     return ensure_private_dir(phase27_root() / "estimates")
 
 
+# ---- Phase 2.8.1 路径族（D0-1 复制而非泛化；env 缺省回退兄弟 phase281/） ----
+
+def phase281_root() -> Path:
+    """Phase 2.8.1 根：显式 env 优先；否则取 phase1 根同级 ``phase281/``。
+
+    生产默认 ``/mnt/artifacts/simpraxis/phase281``——与 phase1/2/25/26/27 同父，
+    故与五者的父子关系一律由 ``assert_phase281_roots_isolated()`` 拦下。
+    """
+    root = os.environ.get(_PHASE281_ENV)
+    if root:
+        return Path(root)
+    return phase1_root().parent / "phase281"
+
+
+def phase281_runs_root() -> Path:
+    return phase281_root() / "runs"
+
+
+def phase281_quota_dir() -> Path:
+    return ensure_private_dir(phase281_root() / "quota")
+
+
+def phase281_ledger_path() -> Path:
+    return phase281_quota_dir() / "ledger.jsonl"
+
+
+def phase281_counters_path() -> Path:
+    return phase281_quota_dir() / "counters.json"
+
+
+def phase281_approvals_dir() -> Path:
+    return ensure_private_dir(phase281_quota_dir() / "approvals")
+
+
+def phase281_gateway_state_dir() -> Path:
+    # Phase 2.8.1 熔断态随本账命名空间隔离（不读不写全局 SIMPRAXIS_GATEWAY_STATE）。
+    return ensure_private_dir(phase281_root() / "quota" / "gateway_state")
+
+
+def phase281_gateway_state_path() -> Path:
+    return phase281_gateway_state_dir() / "quota_pause.json"
+
+
+def assert_phase281_roots_isolated() -> None:
+    """phase281 与五份封存根（phase1/2/2.5/2.6/2.7）两两互异且互不嵌套。
+
+    Phase 2.8.1 起启用（D0-2）：phase27 已封存，phase281 是当前唯一写入者；
+    别名/嵌套时 approvals/*.json、ledger.degraded.*、gateway_state/、
+    .ledger.lock、resume_audit.jsonl、runs/ 都会落进封存树，故须在任何
+    mkdir/写系统调用之前 fail-fast（同 phase25/26/27 的 _assert_roots_isolated）。
+
+    只读引用既有 ``_assert_roots_isolated``（唯一实现），不另写一套判定。
+    """
+    p1 = phase1_root().resolve(strict=False)
+    p2 = phase2_root().resolve(strict=False)
+    p25 = phase25_root().resolve(strict=False)
+    p26 = phase26_root().resolve(strict=False)
+    p27 = phase27_root().resolve(strict=False)
+    p281 = phase281_root().resolve(strict=False)
+    _assert_roots_isolated(
+        phase281_root(), (phase1_root(), phase2_root(), phase25_root(),
+                          phase26_root(), phase27_root()),
+        label="SIMPRAXIS_PHASE281_ROOT",
+        message=("必须与 Phase 1/2/2.5/2.6/2.7 封存根互异且互不嵌套"
+                 f"（解析后）：phase1={p1} phase2={p2} phase25={p25} "
+                 f"phase26={p26} phase27={p27} phase281={p281}"))
+
+
 # ---- 熔断态（沿用独立 env/默认根，Task0 只统一入口、不改 env 契约） ----
 
 def gateway_state_dir() -> Path:
@@ -340,32 +413,35 @@ def phase1_ledger_path() -> Path:
 
 
 def sealed_ledger_paths() -> frozenset[Path]:
-    """Phase 1/2/2.5/2.6 封存账的绝对路径集（resolve 归一；strict=False 允许账体不在场）。
+    """Phase 1/2/2.5/2.6/2.7 封存账的绝对路径集（resolve 归一；strict=False 允许账体不在场）。
 
-    路径以【调用时点】env 解析为准：测试把 SIMPRAXIS_PHASE{1,2,25,26}_ROOT 指向
-    临时根时，守卫随之指向临时根里的账，绝不误判真实 /mnt 账。
+    路径以【调用时点】env 解析为准：测试把 SIMPRAXIS_PHASE{1,2,25,26,27}_ROOT
+    指向临时根时，守卫随之指向临时根里的账，绝不误判真实 /mnt 账。
 
     Phase 2.6（D0-2）：phase25 已结案封存，本集扩为三份；任何写入一律走
     phase26_ledger_path()。
     Phase 2.7（D0-2）：phase26 随 2.6 收束一并封存，本集扩为四份；任何写入一律走
     phase27_ledger_path()（``open_ledger_append()`` 的缺省目标**仍**是 phase26，
     D0-3：改缺省会让 Phase 2.6 既有断言红，故调用方显式传参）。
+    Phase 2.8.1（D0-2，2026-11-06）：phase27 随 2.7 收束一并封存，本集扩为**五份**；
+    任何写入一律走 phase281_ledger_path()（缺省目标同样不动，理由同上）。
     """
     return frozenset({
         phase1_ledger_path().resolve(strict=False),
         phase2_ledger_path().resolve(strict=False),
         phase25_ledger_path().resolve(strict=False),
         phase26_ledger_path().resolve(strict=False),
+        phase27_ledger_path().resolve(strict=False),
     })
 
 
 def assert_not_sealed_ledger(path: "str | Path") -> Path:
-    """写打开前置守卫：目标解析到 Phase 1/2/2.5/2.6 封存账即抛 SealedLedgerError。"""
+    """写打开前置守卫：目标解析到 Phase 1/2/2.5/2.6/2.7 封存账即抛 SealedLedgerError。"""
     p = Path(path)
     if p.resolve(strict=False) in sealed_ledger_paths():
         raise SealedLedgerError(
-            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5/2.6 封存账只读；"
-            "Phase 2.7 新写账必须走 phase27_ledger_path()）")
+            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5/2.6/2.7 封存账只读；"
+            "Phase 2.8.1 新写账必须走 phase281_ledger_path()）")
     return p
 
 

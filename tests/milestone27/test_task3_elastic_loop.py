@@ -1074,12 +1074,16 @@ def _visual_transport(text: str):
 
 @pytest.fixture()
 def p27_env(tmp_path, monkeypatch):
-    """phase27 独立账命名空间 + 三阶段 stage_models（全假 ID，0 触网）。"""
+    """phase281 独立账命名空间 + 三阶段 stage_models（全假 ID，0 触网）。
+
+    锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281（同一组不变量）。
+    """
     for key, name in (("SIMPRAXIS_PHASE1_ROOT", "phase1"),
                       ("SIMPRAXIS_PHASE2_ROOT", "phase2"),
                       ("SIMPRAXIS_PHASE25_ROOT", "phase25"),
                       ("SIMPRAXIS_PHASE26_ROOT", "phase26"),
-                      ("SIMPRAXIS_PHASE27_ROOT", "phase27")):
+                      ("SIMPRAXIS_PHASE27_ROOT", "phase27"),
+                      ("SIMPRAXIS_PHASE281_ROOT", "phase281")):
         monkeypatch.setenv(key, str(tmp_path / name))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     monkeypatch.setenv("SIMPRAXIS_LLM_TOKEN", "t3-fixture-key-redacted-0001")
@@ -1108,11 +1112,11 @@ def p27_env(tmp_path, monkeypatch):
 def _real_gateway(env, transport):
     return R.ModelGateway(stage_models_path=env["map"], sleep=lambda s: None,
                          raw_transport=transport,
-                         ledger=QuotaLedger.phase27())
+                         ledger=QuotaLedger.phase281())  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
 
 
 def _phase27_rows(tmp: Path) -> list[dict]:
-    path = tmp / "phase27" / "quota" / "ledger.jsonl"
+    path = tmp / "phase281" / "quota" / "ledger.jsonl"  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
     if not path.is_file():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8")
@@ -1126,9 +1130,11 @@ def test_ac_t3_10_visual_critic_accounting(p27_env, tmp_path):
     """
     tmp = p27_env["tmp"]
     batch = "P27-T3-FIXTURE-VISUAL"
-    ql.write_approval(batch_id=batch, task=4, stage=R.VISION_STAGE, approved=2,
+    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281；帽集为
+    # {1:60, 2:60, 3:60}，故 task 4→1（本用例只验「一次 call_visual 一行账」）。
+    ql.write_approval(batch_id=batch, task=1, stage=R.VISION_STAGE, approved=2,
                       beyond_normal=False, note="T3 AC-T3-10 零付费夹具",
-                      namespace=ql.PHASE27_NAMESPACE)
+                      namespace=ql.PHASE281_NAMESPACE)
 
     visual_text = "壶口略高于杯沿，倾斜约 20 度即可倒出。" * 10  # 380 字符上下
     visual_text = visual_text[:380]
@@ -1143,7 +1149,7 @@ def test_ac_t3_10_visual_critic_accounting(p27_env, tmp_path):
         + [_play('read_file(path="a.txt")') for _ in range(2)],
         visual=real)
     cfg = AgenticConfig(render_preview=True, visual_critic=True)
-    with billing_context(task=4, batch_id=batch, thread_id="thr-t3-visual"):
+    with billing_context(task=1, batch_id=batch, thread_id="thr-t3-visual"):  # 锁内适配（Phase 2.8.1 T0）：task 4→1
         wd2, _b, _gw, outcome = _run_loop(
             tmp_path / "run", gateway.plays, cfg=cfg, round_cap=3,
             gateway=gateway,

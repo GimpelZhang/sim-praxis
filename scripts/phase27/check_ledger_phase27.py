@@ -139,13 +139,16 @@ def _selfcheck(ledger_arg: str | None) -> int:
             print(f"[selftest] 负样本「{name}」未判红（判据失效）")
             return 1
 
-    # 端到端：真跑 QuotaLedger.phase27() 落三行，再用本脚本口径复算。
+    # 端到端：真跑 QuotaLedger 落三行，再用本脚本口径复算。
+    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281；本段验证的是
+    # analyze() 的判据在「真账形态」上成立，与期号无关（analyze 不读期号/帽集）。
     with tempfile.TemporaryDirectory() as td:
         roots = {"SIMPRAXIS_PHASE1_ROOT": f"{td}/phase1",
                  "SIMPRAXIS_PHASE2_ROOT": f"{td}/phase2",
                  "SIMPRAXIS_PHASE25_ROOT": f"{td}/phase25",
                  "SIMPRAXIS_PHASE26_ROOT": f"{td}/phase26",
                  "SIMPRAXIS_PHASE27_ROOT": f"{td}/phase27",
+                 "SIMPRAXIS_PHASE281_ROOT": f"{td}/phase281",
                  "SIMPRAXIS_GATEWAY_STATE": f"{td}/gwstate"}
         old = {k: os.environ.get(k) for k in roots}
         os.environ.update(roots)
@@ -153,18 +156,18 @@ def _selfcheck(ledger_arg: str | None) -> int:
             # 开账 selfcheck 行由 Task 0 一次性写入（QuotaLedger 无公开 API），
             # 端到端样本按同一形状自行种入，再接 QuotaLedger.record——
             # 「缺 selfcheck 即红」的判据要能在真账形态上验到。
-            led_path = rp.phase27_ledger_path()
+            led_path = rp.phase281_ledger_path()
             led_path.parent.mkdir(parents=True, exist_ok=True)
             led_path.write_text(json.dumps({
                 "ts_iso": ql._now_iso(), "event": "selfcheck", "seq": 1,
                 "model": None, "ok": True, "global_used_after": 0,
             }, ensure_ascii=False) + "\n", encoding="utf-8")
             os.chmod(led_path, 0o600)
-            led = ql.QuotaLedger.phase27()
+            led = ql.QuotaLedger.phase281()
             for i in (1, 2, 3):
                 led.record("coding_debug", task=4, batch_id="P27-SELFTEST",
                            ok=True, model="selftest-model", thread_id=f"t{i}")
-            rows = _rows_from(rp.phase27_ledger_path())
+            rows = _rows_from(rp.phase281_ledger_path())
         finally:
             for k, v in old.items():
                 if v is None:

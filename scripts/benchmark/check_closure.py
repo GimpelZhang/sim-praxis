@@ -62,6 +62,10 @@ ORIGIN_MAIN = "4b5d134a447b2069b050887d63f3ddd4e687f123"
 #:   11 条 phase28 提交，含 Task 7 收尾件）。
 AUTHORIZED_PUSH_HEADS = (
     "5895fe02e8cbda2a6962f8aa9a178268e7e5d991",
+    # Phase 2.8.1 P281-0（2026-11-06 推送窗口）：Phase 2.8.0 的 6 条重建提交
+    # 经人工 STOP 门推送至 origin/main，远端基线由此前移。不加这一项，
+    # 本阶段第一笔提交之后 test_inv_i10_no_push 会**按设计**恒红（计划 F13）。
+    "82a142710127367b0a771d818192321b53e2e951",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
@@ -775,11 +779,59 @@ def _imports_gateway(path: Path) -> bool:
     return False
 
 
+def baseline_benchmark_files(
+        ref: str, bases: "tuple[str, ...]" = BENCHMARK_CODE_DIRS) -> "set[str]":
+    """``ref`` 时点的 benchmark 代码相对路径集（``git ls-tree``，fail-closed）。
+
+    锁内适配（Phase 2.8.1 T0，计划 §16.2 只放了 `AUTHORIZED_PUSH_HEADS` 追加）：
+    本检查是 **Phase 2.8.0 的独立复算**，扫描面必须钉死在 2.8.0 冻结包所对应的
+    那个提交上。Phase 2.8.1 按计划在 ``tests/benchmark/`` 与
+    ``orchestrator/benchmark/phase281/`` 下新增代码，它们合法引用
+    ``orchestrator.gateway``（那是**本阶段**自己的账本）；沿用活树 ``rglob``
+    会把后续相位的代码算进 2.8.0 的复算，让 2.8.0 终判因**跨相位误伤**变红。
+    改成按冻结提交的文件清单逐件复算后：2.8.0 的每一件旧代码仍被逐件 AST 判
+    （判据强度不变，新增文件也无法稀释它），只是不再把别人的代码记成 2.8.0 的。
+
+    空集合**不是**「全过」而是判据失效（评审 W5-19 的 fail-closed 口径）：
+    ``git ls-tree`` 指错提交会得到 0 件，若静默返回 0 命中就是假绿。
+    """
+    out = _git("ls-tree", "-r", "--name-only", ref, "--", *bases)
+    files = {line.strip() for line in out.splitlines()
+             if line.strip().endswith(".py")}
+    if not files:
+        raise JudgeError(
+            f"提交 {ref} 在 benchmark 目录下没有任何 .py——Gateway 引用复算面为空，"
+            "判据失效（指错提交？）")
+    return files
+
+
+def gateway_scan_scope(root: Path) -> "set[str] | None":
+    """Gateway 引用复算的扫描面。
+
+    * 冻结包在场 → 包 ``manifest.json`` 登记的 ``git_commit``（2.8.0 六条重建
+      提交后的 ``82a1427``），按该提交的文件清单逐件复算——与活工作树解耦；
+    * 冻结包未建（打包/冻结前的 ``closeout matrix``）→ ``None``，沿用原口径
+      全扫活树。
+    """
+    manifest = Path(root) / "evidence_pack" / "manifest.json"
+    if not manifest.is_file():
+        return None
+    doc = _json(manifest)
+    return baseline_benchmark_files(str(doc["git_commit"]))
+
+
 def count_gateway_imports(
-        bases: "tuple[str, ...]" = BENCHMARK_CODE_DIRS) -> "tuple[int, list[str]]":
-    hits = [str(path) for base in bases
-            for path in sorted((_REPO / base).rglob("*.py"))
-            if _imports_gateway(path)]
+        bases: "tuple[str, ...]" = BENCHMARK_CODE_DIRS,
+        *, only: "set[str] | None" = None) -> "tuple[int, list[str]]":
+    """统计基准代码里的 Gateway 引用；``only`` 给定时只算该相对路径集
+    （见 :func:`baseline_benchmark_files` 的锁内适配说明）。"""
+    hits = []
+    for base in bases:
+        for path in sorted((_REPO / base).rglob("*.py")):
+            if only is not None and path.relative_to(_REPO).as_posix() not in only:
+                continue
+            if _imports_gateway(path):
+                hits.append(str(path))
     return len(hits), hits
 
 
@@ -814,8 +866,10 @@ def check_paid(root: Path) -> "tuple[list[str], dict]":
             problems.append(f"{phase}: paid_calls equal 非 true")
     # 评审 W5-19：按**真实 import 图**（AST）判，不再用行级正则——正则漏
     # 多行 import、`from orchestrator import gateway`、括号换行等形态。
-    count, hits = count_gateway_imports(BENCHMARK_CODE_DIRS)
+    scope = gateway_scan_scope(root)
+    count, hits = count_gateway_imports(BENCHMARK_CODE_DIRS, only=scope)
     detail["gateway_imports_in_benchmark"] = count
+    detail["gateway_scan_scope"] = "live" if scope is None else f"commit:{len(scope)}件"
     for hit in hits:
         problems.append(f"benchmark 代码引用 Gateway：{hit}")
     return problems, detail

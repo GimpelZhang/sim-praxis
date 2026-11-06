@@ -48,6 +48,8 @@ def p26_roots(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE26_ROOT", str(tmp_path / "phase26"))
     # Phase 2.7 Task0：phase26 已封存，写账目标只能是 phase27（锁内适配）。
     monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
+    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
+    monkeypatch.setenv("SIMPRAXIS_PHASE281_ROOT", str(tmp_path / "phase281"))
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     return tmp_path
 
@@ -85,9 +87,11 @@ def test_ac_t0_1_dir_modes_seals_watchdog_and_seq_provider(p26_roots):
     # (2) 四份封存账：任何写打开必抛 SealedLedgerError。
     # Phase 2.7 Task0（C-3 事实翻转）：phase26 已随 Phase 2.6 收束封存，
     # 原「phase26 不在封存集」的反向断言按事实翻正，并加写打开必拒。
+    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281；封存循环扩入 phase27。
     sealed = rp.sealed_ledger_paths()
     for p in (rp.phase1_ledger_path(), rp.phase2_ledger_path(),
-              rp.phase25_ledger_path(), rp.phase26_ledger_path()):
+              rp.phase25_ledger_path(), rp.phase26_ledger_path(),
+              rp.phase27_ledger_path()):
         assert p.resolve(strict=False) in sealed, p
         with pytest.raises(rp.SealedLedgerError):
             rp.open_ledger_append(p)
@@ -102,19 +106,25 @@ def test_ac_t0_1_dir_modes_seals_watchdog_and_seq_provider(p26_roots):
     # 锁内适配（Phase 2.7 Task0，D0-2 封存 phase26）：本账在 2.7 起不可写，
     # 故写入目标改指 phase27；同时新增「不跨账串读」断言——缺省 phase26 的
     # 读取器绝不读到 phase27 刚写的那一行。
+    # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。缺省读取器的
+    # 换期是 P281-3 的接线（计划 §7.2/C5，AC-P281-3-05 锁死），因此本用例此刻
+    # 断言的是「缺省读取器盯封存的 phase27 ⇒ None，绝不串读到 phase281 的新行」；
+    # P281-3 换期后本行必须改回 ``== 1``。
     from orchestrator.agentic.wiring import build_seq_provider  # noqa: PLC0415
-    led27 = ql.QuotaLedger.phase27()
+    led281 = ql.QuotaLedger.phase281()
+    led27 = ql.QuotaLedger.phase27()          # 只借命名空间解析路径，不写
     led26 = ql.QuotaLedger.phase26()          # 只借命名空间解析路径，不写
     led25 = ql.QuotaLedger.phase25()          # 只借命名空间解析路径，不写
     with ql.billing_context(task=4, batch_id="b-ac1", thread_id="thr-ac1"):
-        rec = led27.record(STAGE, task=4, batch_id="b-ac1", ok=True,
-                           model="fixture-model", thread_id="thr-ac1")
+        rec = led281.record(STAGE, task=4, batch_id="b-ac1", ok=True,
+                            model="fixture-model", thread_id="thr-ac1")
         assert rec["seq"] == 1
-        assert build_seq_provider(ledger=led27)() == 1   # 指向新账：读得到
-        # 锁内适配 L-8：缺省读取器随活跃账换期到 phase27（否则实呼写在
-        # phase27、读取器盯封存的 phase26 ⇒ 恒 None，trace 的 seq=null
-        # 语义「全缓存命中」会把每一次真实付费调用记成缓存命中）。
-        assert build_seq_provider()() == 1               # 缺省：phase27
+        assert build_seq_provider(ledger=led281)() == 1   # 指向新账：读得到
+        # 锁内适配 L-8：缺省读取器随活跃账换期（否则实呼写在活跃账、读取器盯封存
+        # 的上一期 ⇒ 恒 None，trace 的 seq=null 语义「全缓存命中」会把每一次真实
+        # 付费调用记成缓存命中）。P281-3 换期到 phase281 前，缺省仍是 phase27。
+        assert build_seq_provider()() is None            # 缺省：phase27（已封存、空）
+        assert build_seq_provider(ledger=led27)() is None  # 封存 phase27：读不到
         assert build_seq_provider(ledger=led26)() is None  # 封存 phase26：读不到
         assert build_seq_provider(ledger=led25)() is None  # 封存 phase25：读不到
     assert not rp.phase25_ledger_path().exists()
@@ -147,27 +157,29 @@ def test_ac_t0_2_new_ledger_first_seq_one_strict_z(tmp_path):
     #     fixture 的 monkeypatch 会把 phase26 根一直指到 tmp。
     #     锁内适配（Phase 2.7 Task0，D0-2）：phase26 已封存、写打开必拒，故「新账
     #     首行 seq=1」的验证目标改指当前活跃账 phase27；不变量一字未松。
+    #     锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281（同一条不变量）。
     tmp_roots = {
         "SIMPRAXIS_PHASE1_ROOT": str(tmp_path / "phase1"),
         "SIMPRAXIS_PHASE2_ROOT": str(tmp_path / "phase2"),
         "SIMPRAXIS_PHASE25_ROOT": str(tmp_path / "phase25"),
         "SIMPRAXIS_PHASE26_ROOT": str(tmp_path / "phase26"),
         "SIMPRAXIS_PHASE27_ROOT": str(tmp_path / "phase27"),
+        "SIMPRAXIS_PHASE281_ROOT": str(tmp_path / "phase281"),
         "SIMPRAXIS_GATEWAY_STATE": str(tmp_path / "gwstate"),
     }
     with mock.patch.dict(os.environ, tmp_roots):
-        led = ql.QuotaLedger.phase27()
+        led = ql.QuotaLedger.phase281()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
         row = led.record(STAGE, task=4, batch_id=BATCH, ok=True,
                          model="fixture-model", thread_id="t-ac2")
         assert row["seq"] == 1 and row["event"] == "call"
         parse_ts_iso_strict(row["ts_iso"])
         assert STRICT_Z.match(row["ts_iso"]), row["ts_iso"]
-        assert (tmp_path / "phase27" / "quota" / "ledger.jsonl").exists()
+        assert (tmp_path / "phase281" / "quota" / "ledger.jsonl").exists()
         # 封存的 phase26 账在同一 tmp 根下不得被写（反向断言，非放水）。
         with pytest.raises(rp.SealedLedgerError):
             rp.open_ledger_append(rp.phase26_ledger_path())
     # 开账行占 seq=1 后，生产账的下一条实呼必须从 seq=2 起（连续性不被顶掉）。
-    assert rp.phase27_ledger_path() != tmp_path / "phase27" / "quota" / "ledger.jsonl"
+    assert rp.phase281_ledger_path() != tmp_path / "phase281" / "quota" / "ledger.jsonl"  # 锁内适配（Phase 2.8.1 T0）
 
     # (b) 生产根：开账 selfcheck 行（占 seq=1、不计实呼、永不删除）。
     #     锁内适配（Phase 2.7 Task0，D0-2）：phase26 已封存，本测试不得再「补写」
