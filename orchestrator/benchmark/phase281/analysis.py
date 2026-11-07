@@ -127,35 +127,55 @@ def collect_trials(root: Path, *, rep: int = PILOT_REP) -> "list[dict[str, Any]]
 # 账本
 # ---------------------------------------------------------------------------
 
-def ledger_snapshot(ledger_path: Path) -> dict:
+def ledger_snapshot(ledger_path: Path,
+                    batches: "Sequence[str] | None" = None) -> dict:
     """读 phase281 账本（``selfcheck`` 占 seq 不计实呼）。缺件 = 0 行。
 
     机判失败（断号/时区/混列）**不让汇总崩掉**：本函数是「报告现状」的，
     STOP-09 要能被**写进报告**才有人看得见。故先严格判一次，判红则记下
     ``validation_error`` 并用 ``validate=False`` 再汇总一遍——红的事实随报告
     一起出去，而不是把分析器打死在异常里。
+
+    ``batches``：只统计这几个 ``batch_id`` 的行（**重跑批的口径**）。账本是
+    全阶段的 append-only 单文件，首轮 34 行不会消失；重跑批的「本轮 ≤60」
+    必须按批次切窗，否则 34+34 会被读成越帽（STOP-12 假阳）。给 ``batches``
+    时 seq 是**全局**的（从 35 起），故连续性按「本窗内相邻差恒为 1」判，
+    不按「从 1 开始」判。
     """
     from orchestrator.gateway.quota_ledger import (
         LedgerSequenceError, ledger_summary, read_lines)
 
     rows = read_lines(Path(ledger_path)) if Path(ledger_path).is_file() else []
+    if batches is not None:
+        wanted = {str(b) for b in batches}
+        rows = [r for r in rows if str(r.get("batch_id") or "") in wanted]
     validation_error = None
-    try:
-        summary = ledger_summary(rows, allow_events=("selfcheck",))
-    except LedgerSequenceError as exc:
-        validation_error = str(exc)
+    if batches is not None:
+        # 分窗视图下全局 seq 必然不从 1 起：不跑「从 1 连续」的严格校验，
+        # 用窗内连续性代替（上面的 ``gaps`` 就是那个判据）。
         summary = ledger_summary(rows, validate=False, allow_events=("selfcheck",))
+    else:
+        try:
+            summary = ledger_summary(rows, allow_events=("selfcheck",))
+        except LedgerSequenceError as exc:
+            validation_error = str(exc)
+            summary = ledger_summary(rows, validate=False,
+                                     allow_events=("selfcheck",))
     seqs = [int(r["seq"]) for r in rows
             if isinstance(r.get("seq"), int) and not isinstance(r.get("seq"), bool)]
     seqs.sort()
     gaps = [b for a, b in zip(seqs, seqs[1:]) if b != a + 1]
     return {"summary": summary, "seqs": seqs, "gaps": gaps,
-            "validation_error": validation_error}
+            "validation_error": validation_error,
+            "batches": sorted(str(b) for b in batches) if batches else None}
 
 
-def _seq_contiguous(seqs: Sequence[int]) -> bool:
-    """seq 从 1 连续无洞（§11.6 AC-03 / STOP-09）。"""
-    return list(seqs) == list(range(1, len(seqs) + 1))
+def _seq_contiguous(seqs: Sequence[int], *, start: int = 1) -> bool:
+    """seq 从 ``start`` 连续无洞（§11.6 AC-03 / STOP-09）。
+
+    首轮（不切窗）``start=1``；重跑批切窗后 ``start`` 取窗内最小 seq。
+    """
+    return list(seqs) == list(range(start, start + len(seqs)))
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +316,17 @@ def five_gates(*, go_no_go: str, stop_open: Sequence[str], ledger: Mapping[str, 
                   "rc": register.get("rc"),
                   "problems": list(register.get("problems") or []),
                   "detail": f"register --verify rc={register.get('rc')}"}
+    # 首轮不切窗时 seq 从 1 起；重跑批切窗（``--batches``）后从窗内首号起。
+    seqs = list(ledger["seqs"])
+    start = seqs[0] if seqs else 1
+    contiguous = _seq_contiguous(seqs, start=start)
     gates: "dict[str, Any]" = {
         "g281_1": {"ok": go_no_go == "GO", "detail": f"go_no_go={go_no_go}"},
         "g281_2": g281_2,
-        "g281_3": {"ok": calls <= PILOT_CALL_CAP and _seq_contiguous(ledger["seqs"]),
+        "g281_3": {"ok": calls <= PILOT_CALL_CAP and contiguous,
                    "detail": f"calls={calls}<= {PILOT_CALL_CAP}, "
-                             f"seq_contiguous={_seq_contiguous(ledger['seqs'])}"},
+                             f"seq_contiguous={contiguous} (from seq={start}), "
+                             f"batches={ledger.get('batches')}"},
         "g281_4": {"ok": list(stop_open) == [], "detail": f"stop_open={list(stop_open)}"},
     }
     if env is None:
@@ -330,8 +355,13 @@ def _now_iso() -> str:
 def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
                        env: "Mapping[str, Any] | None" = None,
                        register: "Mapping[str, Any] | None" = None,
-                       now: "str | None" = None) -> dict:
-    """产出 ``pilot_report.json`` 的完整文档（字段集**恰为** :data:`REPORT_FIELDS`）。"""
+                       now: "str | None" = None,
+                       batches: "Sequence[str] | None" = None) -> dict:
+    """产出 ``pilot_report.json`` 的完整文档（字段集**恰为** :data:`REPORT_FIELDS`）。
+
+    ``batches``：把账本口径切到本轮批次（重跑批用）。缺省 ``None`` = 全账本
+    （首轮口径，行为与 P281-7 逐位相同）。
+    """
     from orchestrator.benchmark.phase281 import paths
 
     root = Path(root)
@@ -339,19 +369,20 @@ def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
     ledger_path = (Path(root) / "quota" / "ledger.jsonl")
     if not ledger_path.is_file():
         ledger_path = paths.ledger_path()
-    ledger = ledger_snapshot(ledger_path)
+    ledger = ledger_snapshot(ledger_path, batches=batches)
     go_no_go, reasons = decide_go_no_go(rows)
 
     stop_open: "list[str]" = []
+    scope = (f"（口径：批次 {ledger['batches']}）" if ledger.get("batches") else "")
     if ledger["gaps"] or ledger.get("validation_error"):
         stop_open.append("STOP-09")
-        reasons.append(f"seq 断号：gaps={ledger['gaps']}"
+        reasons.append(f"seq 断号：gaps={ledger['gaps']}{scope}"
                        + (f"；机判：{ledger['validation_error']}"
                           if ledger.get("validation_error") else ""))
     calls = int(ledger["summary"].get("call_rows") or 0)
     if calls > PILOT_CALL_CAP:
         stop_open.append("STOP-12")
-        reasons.append(f"实呼 {calls} 越过 Pilot 上限 {PILOT_CALL_CAP}（STOP-12）")
+        reasons.append(f"实呼 {calls} 越过 Pilot 上限 {PILOT_CALL_CAP}（STOP-12）{scope}")
     if env is not None:
         containers = env.get("containers")
         gpu = env.get("gpu_mib")
@@ -410,7 +441,20 @@ def _parser() -> argparse.ArgumentParser:
                     help="同时跑 phase281_register.py --verify（G281-2 的数据源）")
     ap.add_argument("--lock", default=None,
                     help="--verify-register 的 LOCK 路径（缺省交给 register 自己）")
+    ap.add_argument("--batches", default=None,
+                    help="逗号分隔的 batch_id 白名单：把账本口径切到本轮批次"
+                         "（重跑批用，如 P281-B1b-1,P281-B1b-2,P281-B1b-3）。"
+                         "缺省 = 全账本（首轮口径）")
     return ap
+
+
+def _parse_batches(value: "str | None") -> "list[str] | None":
+    """``--batches`` 解析；空串/None ⇒ ``None``（全账本口径，不是空窗）。"""
+    if not value:
+        return None
+    items = [x.strip() for x in str(value).split(",")]
+    wanted = [x for x in items if x]
+    return wanted or None
 
 
 def main(argv: "Iterable[str] | None" = None) -> int:
@@ -420,11 +464,14 @@ def main(argv: "Iterable[str] | None" = None) -> int:
     root = Path(args.root) if args.root else paths.phase281_root()
     env = env_probe() if args.probe_env else None
     register = (register_verify(lock=args.lock) if args.verify_register else None)
-    report = build_pilot_report(root, rep=int(args.rep), env=env, register=register)
+    batches = _parse_batches(args.batches)
+    report = build_pilot_report(root, rep=int(args.rep), env=env, register=register,
+                                batches=batches)
     target = write_report(report, Path(args.out))
     print(json.dumps({"out": str(target), "go_no_go": report["go_no_go"],
                       "reasons": report["reasons"],
-                      "stop_open": report["stop_open"]},
+                      "stop_open": report["stop_open"],
+                      "batches": batches},
                      ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report["go_no_go"] in ("GO", "HOLD") else 1
 

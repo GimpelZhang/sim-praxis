@@ -234,6 +234,81 @@ def test_ac_p281_7_03_seq_gap_detected(p281_roots):
     assert analysis._seq_contiguous(snap["seqs"]) is False
 
 
+def _write_batch_ledger(path: Path, batches: "list[str]") -> None:
+    """写一份合成账本：``batches[i]`` 决定第 i+1 行的 batch_id（seq 从 1 连号）。
+
+    行字段按活账本的最小形状给（seq/event/ok/ts_iso/batch_id/stage/task/model/
+    thread_id）——``ledger_summary`` 只看这些，不补字段会把用例测成 KeyError。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = "2026-11-07T00:00:00Z"
+    rows = []
+    for i, batch in enumerate(batches, start=1):
+        rows.append({"seq": i, "event": "call", "ok": True, "ts_iso": ts,
+                     "batch_id": batch, "stage": STAGE, "task": 1,
+                     "model": "fixture-model", "thread_id": f"t-{i}"})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_a7_9_ledger_snapshot_scopes_by_batch(tmp_path):
+    """重跑批切窗（锁内适配 A7-9）：同账本按 batch_id 分窗，窗内 seq 不从 1 起。"""
+    ledger_path = tmp_path / "ledger.jsonl"
+    _write_batch_ledger(ledger_path,
+                        ["P281-B1-1", "P281-B1-1", "P281-B1-1",
+                         "P281-B1b-1", "P281-B1b-1", "P281-B1b-2"])
+
+    whole = analysis.ledger_snapshot(ledger_path)
+    assert whole["summary"]["call_rows"] == 6
+    assert whole["seqs"] == [1, 2, 3, 4, 5, 6]
+    assert whole["batches"] is None          # 缺省口径 = 全账本（首轮行为不变）
+
+    window = analysis.ledger_snapshot(
+        ledger_path, batches=["P281-B1b-1", "P281-B1b-2"])
+    assert window["summary"]["call_rows"] == 3
+    assert window["seqs"] == [4, 5, 6]       # 全局 seq：窗不从 1 起
+    assert window["gaps"] == []
+    assert window["validation_error"] is None
+    assert window["batches"] == ["P281-B1b-1", "P281-B1b-2"]
+    # 窗内连续按首号起判；按「从 1 起」判会把每一次重跑批都判成断号。
+    assert analysis._seq_contiguous(window["seqs"],
+                                   start=window["seqs"][0]) is True
+    assert analysis._seq_contiguous(window["seqs"]) is False
+
+    # 空窗 ≠ 全账本：一个 batch_id 都不匹配就是 0 行（不许回退成全账本）
+    empty = analysis.ledger_snapshot(ledger_path, batches=["nope"])
+    assert empty["summary"]["call_rows"] == 0
+    assert empty["seqs"] == []
+
+
+def test_a7_9_pilot_report_batches_avoid_stop12_false_positive(tmp_path):
+    """重跑批的「本轮 ≤60」：不切窗会被首轮行数读成越帽（STOP-12 假阳）。"""
+    _fill_all(tmp_path)
+    ledger_path = tmp_path / "quota" / "ledger.jsonl"
+    _write_batch_ledger(ledger_path,
+                        ["P281-B1-1"] * 31 + ["P281-B1b-1"] * 31)   # 全账 62 行
+
+    whole = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
+    assert "STOP-12" in whole["stop_open"]
+    assert whole["five_gates"]["g281_3"]["ok"] is False
+
+    win = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z",
+                                      batches=["P281-B1b-1"])
+    assert "STOP-12" not in win["stop_open"]
+    assert win["five_gates"]["g281_3"]["ok"] is True
+    # 字段集不许因为多了口径参数而漂移
+    assert frozenset(win) == analysis.REPORT_FIELDS
+
+
+def test_a7_9_cli_batches_roundtrip(tmp_path):
+    """``--batches`` 解析：空值 ⇒ None（全账本）；有值 ⇒ 去空白后的白名单。"""
+    assert analysis._parse_batches(None) is None
+    assert analysis._parse_batches("") is None
+    assert analysis._parse_batches("  ") is None
+    assert analysis._parse_batches("P281-B1b-1") == ["P281-B1b-1"]
+    assert analysis._parse_batches(" P281-B1b-1 , P281-B1b-2 ,") == \
+        ["P281-B1b-1", "P281-B1b-2"]
+
+
 # ---------------------------------------------------------------------------
 # AC-P281-7-04 / 07 / 08：终态、报告字段集、规则可复算（合成腿）
 # ---------------------------------------------------------------------------
