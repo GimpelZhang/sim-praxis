@@ -39,13 +39,18 @@ PILOT_REPORT_SCHEMA = "simpraxis.phase281.pilot_report.v1"
 #: AC-P281-7-07：字段集**恰为**这八个（多一个少一个都算契约漂移）
 REPORT_FIELDS = frozenset({"schema", "generated_at", "per_trial", "verdicts",
                            "go_no_go", "reasons", "stop_open", "five_gates"})
+#: §11.9「付费记账证明」伴生件的 schema（M2：与 8 字段契约**分开**成文）
+ACCOUNTING_SCHEMA = "simpraxis.phase281.pilot_accounting.v1"
 #: Pilot 只跑一个重复（§11.1：3 任务 × 2 臂 × 1 重复 = 6）
 PILOT_REP = 0
 #: §11.3：三票各 20，合计 60 = 6 Trial × 10
 PILOT_CALL_CAP = 60
 #: §11.5：``BLOCKED_INFRA`` 达到这个数即 HOLD
 HOLD_BLOCKED_INFRA = 2
-#: Trial 终态集合（与 ``trial_harness.STATUSES`` 同源，这里只读不复制语义）
+#: Trial 终态集合。**L6**：这是 ``trial_harness.STATUSES`` 的镜像而不是导入——
+#: 导入会把 harness 的整条重依赖链（lancedb/引擎）拉进这个纯汇总模块。代价是
+#: 可能漂移，故由 ``test_ac_p281_7_04_terminal_statuses_single_source`` 逐字断言
+#: 两者相等（漂移即红，不再靠注释自觉）。
 TERMINAL_STATUSES = ("FINISHED", "CAP_HIT", "BLOCKED_INFRA", "CRASHED")
 #: 探针判据：显存上限（硬规则 5）
 GPU_LIMIT_MIB = 200
@@ -53,6 +58,16 @@ GPU_LIMIT_MIB = 200
 REGISTER_TIMEOUT_S = 120
 
 TRIAL_JSON = "trial.json"
+
+
+class LedgerMissingError(RuntimeError):
+    """数据根里没有 ``quota/ledger.jsonl``（**H4**：绝不回落到生产账）。
+
+    旧行为是「本根缺账 ⇒ 改读 ``paths.ledger_path()``」。后果不是崩溃而是**假合规**：
+    一个空的 tmp 根实测返回 ``calls=34``（生产账），G281-3 可以是 ``true``，而报告里
+    的呼数与这份根下的 Trial 毫无关系；合成腿也因此**不 hermetic**（读真钱数据）。
+    与仓内 fail-closed 纪律相反，故缺件即抛。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +110,28 @@ def _observed_calls(trial: Mapping[str, Any]) -> "int | None":
     return None
 
 
+def _engine_fields(trial: Mapping[str, Any]) -> "tuple[str | None, str | None]":
+    """读 ``trial.json.engine`` 的 ``(status, reason)``（**H3**）。
+
+    为什么必须读：引擎的 token/round 帽走 ``agentic/wiring.py`` 的**返回字典**
+    （``{"status": "failed", "reason": "[agentic:token_cap] …"}``），不进
+    ``loop.py`` 的 ``CapExceeded`` 异常路径，于是 ``trial_harness`` 的「无异常 ⇒
+    FINISHED」把触帽抹平成 ``FINISHED`` + ``problems=[]``。P281-7 首轮的三份
+    agentic 正是这个形态（token_cap ×2、round_cap ×1），而报告里一个 engine
+    字段都没有——**判决「规则 3 未命中」因此看不见真实帽因**。
+
+    这里只做**可观测性**：把事实搬到 ``per_trial`` 上，**不**改 §11.5 的任何规则。
+    「引擎级帽是否等价 ``CAP_HIT``」是改预注册的问题，须用户裁决（登记在案）。
+    """
+    engine = trial.get("engine")
+    if not isinstance(engine, Mapping):
+        return None, None
+    status = engine.get("status")
+    reason = engine.get("reason")
+    return (str(status) if status is not None else None,
+            str(reason) if reason is not None else None)
+
+
 def collect_trials(root: Path, *, rep: int = PILOT_REP) -> "list[dict[str, Any]]":
     """把 3 任务 × 2 臂的 Trial 记录读成一张表（缺件也占一行，不静默丢）。"""
     rows: "list[dict[str, Any]]" = []
@@ -104,6 +141,8 @@ def collect_trials(root: Path, *, rep: int = PILOT_REP) -> "list[dict[str, Any]]
             trial = read_json(path / TRIAL_JSON)
             eval_path = evaluator_result_path(root, task_id, arm_id, rep)
             evaluation = read_json(eval_path)
+            engine_status, engine_reason = (_engine_fields(trial) if trial
+                                            else (None, None))
             rows.append({
                 "task_id": task_id,
                 "arm_id": arm_id,
@@ -113,6 +152,8 @@ def collect_trials(root: Path, *, rep: int = PILOT_REP) -> "list[dict[str, Any]]
                 "present": trial is not None,
                 "status": (str(trial.get("status") or "") if trial else None),
                 "birth_status": (_birth_status(trial) if trial else None),
+                "engine_status": engine_status,
+                "engine_reason": engine_reason,
                 "used_calls": (trial.get("used_calls") if trial else None),
                 "observed_calls": (_observed_calls(trial) if trial else None),
                 "problems": (list(trial.get("problems") or []) if trial else []),
@@ -200,6 +241,17 @@ def decide_go_no_go(rows: Sequence[Mapping[str, Any]]) -> "tuple[str, list[str]]
     missing = [str(r.get("trial_id")) for r in rows if not r.get("present")]
     if missing:
         reasons.append(f"缺 Trial 产物：{sorted(missing)}")
+        return "HOLD", reasons
+
+    # **M1（评审修）**：非终态 Trial 与「缺件」是同一个前置的两种形态——§11.1 的
+    # 「6 个 Trial 都必须在场」不可能只要求文件存在、却允许它还在跑。旧实现只把
+    # 非终态追加进 reasons（:363-366），判决与 G281-1 都不动 ⇒ 存在但 RUNNING 的
+    # Trial 可以报 GO。这里并入前置：非终态 ⇒ HOLD。
+    non_terminal = [str(r.get("trial_id")) for r in rows
+                    if str(r.get("status")) not in TERMINAL_STATUSES]
+    if non_terminal:
+        reasons.append(f"非终态 Trial：{sorted(non_terminal)}（6 个 Trial 必须都到终态"
+                       "才谈得上判决：还在跑的 Trial 没有判决可读）")
         return "HOLD", reasons
 
     blocked = [str(r.get("trial_id")) for r in rows
@@ -294,18 +346,30 @@ def register_verify(*, lock: "str | Path | None" = None) -> "dict[str, Any]":
         out.update({"ok": None, "rc": None, "problems": [],
                     "error": f"{type(exc).__name__}: {exc}"})
         return out
-    problems = [ln.strip() for ln in proc.stderr.splitlines() if "PROBLEM" in ln]
+    # L5：旧实现按「行内含字面量 PROBLEM」收，且 rc!=0 时丢掉输出尾。两个坑：
+    # (a) ``[consent] PROBLEM …`` 也是 PROBLEM，会被当成 verify 的问题；
+    # (b) register 换个措辞失败 ⇒ ``problems=[]``，「红了」被记成「没发现问题」。
+    # 现在只认 ``[verify] PROBLEM`` 前缀；rc!=0 却一条都没匹配上时，把 stderr 尾巴
+    # 无条件当问题带出去（宁可贵一点，不许把红说成绿）。
+    lines = [ln.strip() for ln in proc.stderr.splitlines() if ln.strip()]
+    problems = [ln for ln in lines if ln.startswith("[verify] PROBLEM")]
+    if proc.returncode != 0 and not problems:
+        problems = lines[-5:] or [
+            f"register --verify rc={proc.returncode} 且无 stderr 输出（原因未知）"]
     out.update({"ok": proc.returncode == 0, "rc": proc.returncode,
                 "problems": problems,
-                "stdout_tail": proc.stdout.strip()[-400:]})
+                "stdout_tail": proc.stdout.strip()[-400:],
+                "stderr_tail": proc.stderr.strip()[-400:]})
     return out
 
 
 def five_gates(*, go_no_go: str, stop_open: Sequence[str], ledger: Mapping[str, Any],
                env: "Mapping[str, Any] | None",
-               register: "Mapping[str, Any] | None" = None) -> dict:
+               register: "Mapping[str, Any] | None" = None,
+               trial_calls: "int | None" = None) -> dict:
     """G281-1..5 的快照（``ok`` 为 ``None`` 表示「本次未探测」，不冒充通过）。"""
     calls = int(ledger["summary"].get("call_rows") or 0)
+    batch_window = ledger.get("batches") or None
     if register is None:
         g281_2 = {"ok": None, "detail": "未探测（CLI 加 --verify-register 才有值）"}
     elif register.get("ok") is None:
@@ -320,13 +384,34 @@ def five_gates(*, go_no_go: str, stop_open: Sequence[str], ledger: Mapping[str, 
     seqs = list(ledger["seqs"])
     start = seqs[0] if seqs else 1
     contiguous = _seq_contiguous(seqs, start=start)
+    # A7-10：切窗后必须对账「窗内实呼行数 vs 各 Trial 自报观测呼数」。
+    # 没有这条，「票号写错 ⇒ 窗内 0 行 ⇒ calls=0 <= 60 ⇒ G281-3 绿」就是一次
+    # 干净的**假阳**：2026-11-07 重跑批正是如此（票 P281-B1b-* 零引用，三个
+    # agentic Trial 一次网没发，而它们的 trial.json 却把首轮 10 呼/111529
+    # tokens 报成本轮观测值，G281-3 报 ok=true）。
+    #
+    # 两条判据（不要求逐 Trial 精确相等——历史轮次的行可能落在别的票名下，
+    # 那是既成事实，不能靠改判据去「凑平」）：
+    #   ①**空虚**：有 Trial 自报花了钱，窗里却 0 行 ⇒ 票号没贯通/窗口选错；
+    #   ②**超报**：窗里的行数比所有 Trial 自报之和还多 ⇒ 窗里混进了不属于
+    #     本轮的行。
+    vacuous = (batch_window is not None and trial_calls is not None
+               and int(trial_calls) > 0 and calls == 0)
+    overclaim = (batch_window is not None and trial_calls is not None
+                 and calls > int(trial_calls))
+    reconciled = None if (batch_window is None or trial_calls is None) \
+        else (not vacuous and not overclaim)
+    g281_3_ok = calls <= PILOT_CALL_CAP and contiguous and reconciled is not False
     gates: "dict[str, Any]" = {
         "g281_1": {"ok": go_no_go == "GO", "detail": f"go_no_go={go_no_go}"},
         "g281_2": g281_2,
-        "g281_3": {"ok": calls <= PILOT_CALL_CAP and contiguous,
+        "g281_3": {"ok": g281_3_ok,
                    "detail": f"calls={calls}<= {PILOT_CALL_CAP}, "
                              f"seq_contiguous={contiguous} (from seq={start}), "
-                             f"batches={ledger.get('batches')}"},
+                             f"batches={batch_window}"
+                             + ("" if reconciled is None else
+                                f", trial_calls={trial_calls}, "
+                                f"reconciled={reconciled}")},
         "g281_4": {"ok": list(stop_open) == [], "detail": f"stop_open={list(stop_open)}"},
     }
     if env is None:
@@ -366,9 +451,12 @@ def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
 
     root = Path(root)
     rows = collect_trials(root, rep=rep)
-    ledger_path = (Path(root) / "quota" / "ledger.jsonl")
+    ledger_path = Path(root) / "quota" / "ledger.jsonl"
     if not ledger_path.is_file():
-        ledger_path = paths.ledger_path()
+        # H4：fail-closed。不回落读生产账——那会把「本根没跑」写成「跑了 N 呼」。
+        raise LedgerMissingError(
+            f"数据根缺账本：{ledger_path}（拒绝回落到 {paths.ledger_path()}："
+            "报告里的呼数必须与同一根下的 Trial 同源）")
     ledger = ledger_snapshot(ledger_path, batches=batches)
     go_no_go, reasons = decide_go_no_go(rows)
 
@@ -391,11 +479,7 @@ def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
             stop_open.append("STOP-16")
             reasons.append(f"收尾不干净：containers={containers}, gpu_mib={gpu}")
 
-    non_terminal = [str(r["trial_id"]) for r in rows
-                    if r.get("present") and str(r.get("status")) not in TERMINAL_STATUSES]
-    if non_terminal:
-        reasons.append(f"非终态 Trial：{sorted(non_terminal)}")
-
+    # 非终态已由 ``decide_go_no_go`` 的前置判掉（M1）；这里不再重复追加 reasons。
     report = {
         "schema": PILOT_REPORT_SCHEMA,
         "generated_at": now or _now_iso(),
@@ -404,11 +488,122 @@ def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
         "go_no_go": go_no_go,
         "reasons": reasons,
         "stop_open": stop_open,
-        "five_gates": five_gates(go_no_go=go_no_go, stop_open=stop_open,
-                                 ledger=ledger, env=env, register=register),
+        "five_gates": five_gates(
+            go_no_go=go_no_go, stop_open=stop_open, ledger=ledger, env=env,
+            register=register,
+            trial_calls=sum(int(r.get("observed_calls") or 0) for r in rows)),
     }
-    assert frozenset(report) == REPORT_FIELDS, sorted(report)
+    # L1：``assert`` 在 ``python -O`` 下被整条剥离，字段集契约会静默失效。
+    if frozenset(report) != REPORT_FIELDS:
+        raise RuntimeError(f"pilot_report 字段集漂移：多/少 "
+                           f"{sorted(frozenset(report) ^ REPORT_FIELDS)}")
     return report
+
+
+def build_accounting(root: Path, *, rep: int = PILOT_REP,
+                     batches: "Sequence[str] | None" = None,
+                     now: "str | None" = None) -> dict:
+    """§11.9「付费记账证明」的**伴生件**（M2，2026-11-07 评审）。
+
+    计划 §11.9 要求报告里逐字给出「实呼数、ok/fail 拆分、by_task、by_stage、
+    seq 区间、每 Trial 的 seq 列表」；而 :data:`REPORT_FIELDS` 把
+    ``pilot_report.json`` 钉死在 8 个字段上（§11.6 的契约，改它就是改预注册）。
+    两者不冲突的做法是**另写一件**：契约文件不动，记账证明单独成文。
+
+    口径与 :func:`ledger_snapshot` 完全一致（同一个 ``batches`` 切窗），差别只在
+    粒度：这里把每一行落到它的 ``thread_id``（= ``trial_id``）上，好让读者逐 Trial
+    核 seq，而不是只看总数。窗内不属于任何预注册 Trial 的行走 ``unattributed``
+    **如实挂牌**——不静默丢，也不摊到某个 Trial 头上。
+
+    顶层的 ``calls/by_task/...`` 是**窗内**视图（与 ``pilot_report`` 同口径，
+    用来回答「本轮是否越帽」）；``full_ledger`` 是**整本**视图（回答 §11.9
+    「Pilot 至今实呼多少」）。两者都在，不靠读者自己加。
+    """
+    from orchestrator.gateway.quota_ledger import ledger_summary, read_lines
+
+    root = Path(root)
+    ledger_path = root / "quota" / "ledger.jsonl"
+    if not ledger_path.is_file():
+        raise LedgerMissingError(
+            f"数据根缺账本：{ledger_path}（记账证明必须与 Trial 同源）")
+    all_rows = read_lines(ledger_path)
+    rows = all_rows
+    if batches is not None:
+        wanted = {str(b) for b in batches}
+        rows = [r for r in all_rows if str(r.get("batch_id") or "") in wanted]
+    summary = ledger_summary(rows, validate=False, allow_events=("selfcheck",))
+    # 全账本视图：切窗只回答「本轮花了多少」，§11.9 要的是**整本**付费证明。
+    # 两栏并陈，读者不必自己把几轮加起来（加错就是把 63 读成 25）。
+    full = ledger_summary(all_rows, validate=False, allow_events=("selfcheck",))
+    seqs = sorted(int(r["seq"]) for r in rows
+                  if isinstance(r.get("seq"), int)
+                  and not isinstance(r.get("seq"), bool))
+    gaps = [b for a, b in zip(seqs, seqs[1:]) if b != a + 1]
+
+    known = {constants.trial_id(t, a, rep) for t in constants.TASK_IDS
+             for a in constants.ARMS}
+    per_trial: "dict[str, dict[str, Any]]" = {
+        tid: {"calls": 0, "ok": 0, "fail": 0, "seqs": [],
+              "tokens_in": 0, "tokens_out": 0}
+        for tid in sorted(known)}
+    unattributed: "list[dict[str, Any]]" = []
+    for r in rows:
+        if r.get("event") != "call" or not isinstance(r.get("seq"), int):
+            continue
+        tid = str(r.get("thread_id") or "")
+        cell = per_trial.get(tid)
+        if cell is None:
+            unattributed.append({"seq": r.get("seq"), "thread_id": tid or None,
+                                 "batch_id": r.get("batch_id")})
+            continue
+        cell["calls"] += 1
+        cell["ok" if r.get("ok") is True else "fail"] += 1
+        cell["seqs"].append(int(r["seq"]))
+        cell["tokens_in"] += int(r.get("tokens_in") or 0)
+        cell["tokens_out"] += int(r.get("tokens_out") or 0)
+    for cell in per_trial.values():
+        cell["seqs"].sort()
+
+    return {
+        "schema": ACCOUNTING_SCHEMA,
+        "generated_at": now or _now_iso(),
+        "ledger": str(ledger_path),
+        "batches": sorted(str(b) for b in batches) if batches else None,
+        "rep": int(rep),
+        "calls": int(summary.get("call_rows") or 0),
+        "calls_ok": summary.get("calls_ok"),
+        "by_task": summary.get("calls_by_task"),
+        "by_stage": summary.get("calls_by_stage"),
+        "blocked_rows": summary.get("blocked_rows"),
+        "selfcheck_rows": summary.get("selfcheck_rows"),
+        "seq_first": summary.get("seq_first"),
+        "seq_last": summary.get("seq_last"),
+        "seqs": seqs,
+        "gaps": gaps,
+        "contiguous": not gaps,
+        "per_trial": per_trial,
+        "unattributed": unattributed,
+        # §11.9 的整本口径：Pilot 至今全部实呼（含首轮 34 行），不受 --batches 影响
+        "full_ledger": {
+            "calls": int(full.get("call_rows") or 0),
+            "calls_ok": full.get("calls_ok"),
+            "by_task": full.get("calls_by_task"),
+            "by_stage": full.get("calls_by_stage"),
+            "seq_first": full.get("seq_first"),
+            "seq_last": full.get("seq_last"),
+            "batches": full.get("batches"),
+        },
+        "tokens_total": {
+            "in": sum(c["tokens_in"] for c in per_trial.values())
+                  + sum(int(r.get("tokens_in") or 0) for r in rows
+                        if r.get("event") == "call"
+                        and str(r.get("thread_id") or "") not in known),
+            "out": sum(c["tokens_out"] for c in per_trial.values())
+                   + sum(int(r.get("tokens_out") or 0) for r in rows
+                         if r.get("event") == "call"
+                         and str(r.get("thread_id") or "") not in known),
+        },
+    }
 
 
 def write_report(report: Mapping[str, Any], out: Path) -> Path:
@@ -445,6 +640,9 @@ def _parser() -> argparse.ArgumentParser:
                     help="逗号分隔的 batch_id 白名单：把账本口径切到本轮批次"
                          "（重跑批用，如 P281-B1b-1,P281-B1b-2,P281-B1b-3）。"
                          "缺省 = 全账本（首轮口径）")
+    ap.add_argument("--accounting-out", default=None,
+                    help="§11.9 记账证明的落盘路径（M2；不给则不写）。"
+                         "与 --out 的 8 字段契约分开，互不覆盖")
     return ap
 
 
@@ -468,10 +666,15 @@ def main(argv: "Iterable[str] | None" = None) -> int:
     report = build_pilot_report(root, rep=int(args.rep), env=env, register=register,
                                 batches=batches)
     target = write_report(report, Path(args.out))
+    acct_path = None
+    if args.accounting_out:
+        acct = build_accounting(root, rep=int(args.rep), batches=batches)
+        acct_path = str(write_report(acct, Path(args.accounting_out)))
     print(json.dumps({"out": str(target), "go_no_go": report["go_no_go"],
                       "reasons": report["reasons"],
                       "stop_open": report["stop_open"],
-                      "batches": batches},
+                      "batches": batches,
+                      "accounting_out": acct_path},
                      ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report["go_no_go"] in ("GO", "HOLD") else 1
 

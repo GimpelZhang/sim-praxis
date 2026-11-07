@@ -84,6 +84,22 @@ for spec in "${TASKS[@]}"; do
   fi
 done
 
+# --- 3 前置（M7，2026-11-07 评审）：冻结臂序必须恰好给出 6 个 Trial -----------
+# 缺一个 Trial 时旧版会**静默少跑**（循环按 ORDER 里的臂逐个走），而报告仍按
+# 「6 个 Trial」判 §11.5——少跑一个 Trial 就少一次观测，判决却不减。
+planned=0
+for task_no in 1 2 3; do
+  spec="${TASKS[$((task_no - 1))]}"
+  n="$("$PY" -c 'import json,sys
+d = json.load(open(sys.argv[1]))
+print(len(d.get(sys.argv[2], [])))' "$ORDER" "$spec|rep$REP")"
+  planned=$((planned + n))
+done
+if [ "$planned" -ne 6 ]; then
+  log "拒绝开跑：trial_order.json 的 rep$REP 只给出 $planned 个 Trial（应为 3 任务 × 2 臂 = 6）"
+  exit 5
+fi
+
 # --- 3) 按 trial_order.json 顺序跑 6 个 Trial --------------------------------
 for task_no in 1 2 3; do
   spec="${TASKS[$((task_no - 1))]}"
@@ -122,6 +138,27 @@ for td in "$ROOT"/runs/*/*/rep"$REP"/; do
     --out "$out"
 done
 
+# --- 4.5) 收尾：容器清干净、显存回基线（硬规则 5） ----------------------------
+# 锁内适配 A7-4：本仓 compose 件在 sandbox/docker-compose.yml，仓库根 `docker compose`
+# 只会报 "no configuration file provided" —— 那句提示会被读成「容器干净」，是假绿。
+#
+# **M3（2026-11-07 评审：G281-5 时序）**：收尾必须排在分析**之前**。原来的顺序是
+# 先 `--probe-env` 再 `down`，于是 `five_gates.g281_5` 读的是**拆除前**的容器/显存——
+# 那道门要证明的恰恰是「收尾之后干净」，用收尾前的读数去过门等于没门。
+log "收尾：docker compose -f sandbox/docker-compose.yml down"
+down_rc=0
+docker compose -f "$REPO_ROOT/sandbox/docker-compose.yml" down || down_rc=$?
+# `down` 的 rc 不再被吞掉，且**收尾后必须再探一次**——「down 说成功」不等于
+# 「容器真走了」（compose 文件改了/daemon 抖动都会留下已退出容器）。硬规则 5
+# 要求含已退出容器不得残留，所以这里把事实打出来并按 rc 退出。
+log "compose down rc=$down_rc"
+left="$(docker compose -f "$REPO_ROOT/sandbox/docker-compose.yml" ps -aq 2>/dev/null || true)"
+if [ -n "$left" ]; then
+  log "收尾不干净：仍有容器 $left（含已退出）"
+  exit 7
+fi
+nvidia-smi --query-gpu=memory.used --format=csv,noheader
+
 # --- 5) Pilot 分析 + go/no-go（0 付费；§11.5 规则，可复算） --------------------
 # `--verify-register` 让 G281-2（LOCK --verify rc==0）由分析器实跑一次登记进
 # pilot_report.five_gates，而不是留 null 让读者去猜（§12.2 把它列为**机判门**）。
@@ -130,22 +167,27 @@ log "分析：pilot_report.json"
 # （BATCH_PREFIX ≠ trial_id）若按全账本读，「本轮 ≤60」会被 34+34 读成越帽
 # （STOP-12 假阳）。故按 §11.3 的三张任务票切窗：本轮只统计这三个 batch_id 的行，
 # seq 连续性改判「窗内相邻差恒为 1」（重跑批 seq 从 35 起，不再从 1 起）。
+# M2（2026-11-07 评审）：§11.9 的记账证明单独落 `pilot_accounting.json`——
+# 8 字段的 `pilot_report.json` 是预注册契约（AC-P281-7-07），往里加字段等于改契约；
+# 逐 Trial 的 seq 列表、by_task/by_stage、ok/fail 拆分放伴生件，两件同口径同窗口。
 if [ "$BATCH_PREFIX" = "trial_id" ]; then
   "$PY" -m orchestrator.benchmark.phase281.analysis --stage pilot \
     --root "$ROOT" --out "$ROOT/analysis/pilot_report.json" \
+    --accounting-out "$ROOT/analysis/pilot_accounting.json" \
     --probe-env --verify-register
 else
   "$PY" -m orchestrator.benchmark.phase281.analysis --stage pilot \
     --root "$ROOT" --out "$ROOT/analysis/pilot_report.json" \
+    --accounting-out "$ROOT/analysis/pilot_accounting.json" \
     --probe-env --verify-register \
     --batches "$TICKET_PREFIX-1,$TICKET_PREFIX-2,$TICKET_PREFIX-3"
 fi
 
-# --- 6) 收尾：容器清干净、显存回基线（硬规则 5） ------------------------------
-# 锁内适配 A7-4：本仓 compose 件在 sandbox/docker-compose.yml，仓库根 `docker compose`
-# 只会报 "no configuration file provided" —— 那句提示会被读成「容器干净」，是假绿。
-log "收尾：docker compose -f sandbox/docker-compose.yml down"
-docker compose -f "$REPO_ROOT/sandbox/docker-compose.yml" down \
-  || log "提示：compose down 返回非 0（无运行中服务时属正常）"
+# --- 6) 终检：再探一次（分析器可能又起了容器，或人工插手） ---------------------
+left2="$(docker compose -f "$REPO_ROOT/sandbox/docker-compose.yml" ps -aq 2>/dev/null || true)"
+if [ -n "$left2" ]; then
+  log "收尾不干净：仍有容器 $left2（含已退出）"
+  exit 7
+fi
 nvidia-smi --query-gpu=memory.used --format=csv,noheader
 log "完成"

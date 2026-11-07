@@ -105,6 +105,19 @@ def _fill_all(root: Path, **kwargs) -> None:
             _write_trial(root, task_id, arm_id, 0, **kwargs)
 
 
+def _empty_ledger(root: Path) -> Path:
+    """在根里放一份**空**账本（0 行）。
+
+    H4 之后 ``build_pilot_report`` 缺账本即抛（不再回落读生产账），故每个要出报告的
+    合成用例都必须显式把本根的账本写出来——这份「显式」就是 hermetic 本身：合成
+    断言永远不会去读真钱数据。
+    """
+    path = Path(root) / "quota" / "ledger.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
+    return path
+
+
 # ---------------------------------------------------------------------------
 # AC-P281-7-01：三份批准件（形状；活产物在下方同号用例）
 # ---------------------------------------------------------------------------
@@ -284,8 +297,10 @@ def test_a7_9_pilot_report_batches_avoid_stop12_false_positive(tmp_path):
     """重跑批的「本轮 ≤60」：不切窗会被首轮行数读成越帽（STOP-12 假阳）。"""
     _fill_all(tmp_path)
     ledger_path = tmp_path / "quota" / "ledger.jsonl"
+    # A7-10 起切窗口径还要与 Trial 自报呼数对账，故本轮行数取 6 Trial × 3 呼
+    # ＝18（``_fill_all`` 的缺省）；全账 44+18＝62 > 60，不切窗仍是 STOP-12 假阳。
     _write_batch_ledger(ledger_path,
-                        ["P281-B1-1"] * 31 + ["P281-B1b-1"] * 31)   # 全账 62 行
+                        ["P281-B1-1"] * 44 + ["P281-B1b-1"] * 18)   # 全账 62 行
 
     whole = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
     assert "STOP-12" in whole["stop_open"]
@@ -323,6 +338,7 @@ def test_ac_p281_7_04_all_terminal_synthetic(tmp_path):
 
 def test_ac_p281_7_07_pilot_report_synthetic(tmp_path):
     _fill_all(tmp_path)
+    _empty_ledger(tmp_path)
     rep = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
     assert frozenset(rep) == analysis.REPORT_FIELDS
     assert rep["schema"] == analysis.PILOT_REPORT_SCHEMA
@@ -344,6 +360,7 @@ def test_ac_p281_7_07_pilot_report_synthetic(tmp_path):
 def test_ac_p281_7_08_rule_reproducible(tmp_path):
     """同一份 Trial 结果重新汇总两次 → 同一判决（规则是数据的外生函数）。"""
     _fill_all(tmp_path)
+    _empty_ledger(tmp_path)
     a = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
     b = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
     assert a["go_no_go"] == b["go_no_go"]
@@ -405,6 +422,79 @@ def test_ac_p281_7_07_stop_open_detects(tmp_path):
     assert rep["five_gates"]["g281_4"]["ok"] is False
 
 
+def test_ac_p281_7_07_stop12_threshold_and_selfcheck(tmp_path):
+    """M9：STOP-12 真的能进报告，且 selfcheck 开账行**不计**实呼（占 seq 不占钱）。"""
+    _fill_all(tmp_path)
+    ts = "2026-11-07T00:00:00Z"
+
+    def _rows(calls: int) -> str:
+        out = [{"seq": 1, "event": "selfcheck", "ok": True, "ts_iso": ts}]
+        for i in range(2, 2 + calls):
+            out.append({"seq": i, "event": "call", "ok": True, "ts_iso": ts,
+                        "task": 1, "stage": STAGE, "model": "fixture-model",
+                        "batch_id": "P281-B1-1"})
+        return "".join(json.dumps(r) + "\n" for r in out)
+
+    path = _empty_ledger(tmp_path)
+    # 60 次实呼 + 1 行 selfcheck：seq 共 61 行、恰在上限。若把 selfcheck 算进实呼
+    # （或把 61 行当 61 呼），这里就会假阳成 STOP-12。
+    path.write_text(_rows(60), encoding="utf-8")
+    rep = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
+    assert "STOP-12" not in rep["stop_open"]
+    assert rep["five_gates"]["g281_3"]["ok"] is True
+
+    # 61 次实呼：越帽必须报出来（STOP-09 不该跟着假阳——seq 仍连续）
+    path.write_text(_rows(61), encoding="utf-8")
+    rep = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
+    assert "STOP-12" in rep["stop_open"]
+    assert "STOP-09" not in rep["stop_open"]
+    assert rep["five_gates"]["g281_3"]["ok"] is False
+
+
+def test_h4_missing_ledger_fails_closed(tmp_path):
+    """H4：本根缺账本 ⇒ 抛错，**不要**偷偷去读生产账（否则报告是假合规）。"""
+    _fill_all(tmp_path)                      # 有 Trial、无账本
+    assert not (tmp_path / "quota" / "ledger.jsonl").exists()
+    with pytest.raises(analysis.LedgerMissingError):
+        analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
+
+
+def test_h3_engine_fields_surface_in_per_trial(tmp_path):
+    """H3：``trial.json.engine`` 必须出现在 ``per_trial``，否则触帽在报告里不可见。"""
+    _fill_all(tmp_path)
+    # 把一条 agentic 改写成「引擎级帽」的真实形状：trial.status=FINISHED、
+    # problems=[]，但 engine.status=failed / reason=[agentic:token_cap] …
+    d = analysis.trial_dir(tmp_path, constants.TASK_IDS[0], "agentic_v1", 0)
+    doc = json.loads((d / "trial.json").read_text(encoding="utf-8"))
+    doc["engine"] = {"status": "failed",
+                     "reason": "[agentic:token_cap] token 帽将被突破：120086/100000"}
+    (d / "trial.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    row = [r for r in analysis.collect_trials(tmp_path)
+           if r["arm_id"] == "agentic_v1" and r["task_id"] == constants.TASK_IDS[0]][0]
+    assert row["status"] == "FINISHED"                    # 引擎帽不改变 Trial 终态
+    assert row["engine_status"] == "failed"
+    assert "token_cap" in (row["engine_reason"] or "")
+
+
+def test_m1_non_terminal_trial_holds(tmp_path):
+    """M1：存在但没跑完（RUNNING）的 Trial 不许报 GO。"""
+    _fill_all(tmp_path)
+    rows = analysis.collect_trials(tmp_path)
+    assert analysis.decide_go_no_go(rows)[0] == "GO"      # 基线：6/6 终态且有人出生
+    rows[0]["status"] = "RUNNING"
+    verdict, reasons = analysis.decide_go_no_go(rows)
+    assert verdict == "HOLD"
+    assert "非终态" in reasons[0]
+
+
+def test_ac_p281_7_04_terminal_statuses_single_source():
+    """L6：``TERMINAL_STATUSES`` 是 harness 状态的镜像，漂移即红（不靠注释自觉）。"""
+    from orchestrator.benchmark.phase281 import trial_harness
+
+    assert set(analysis.TERMINAL_STATUSES) == set(trial_harness.STATUSES)
+
+
 def test_ac_p281_7_07_g281_2_is_a_machine_gate(tmp_path):
     """G281-2 是 §12.2 的**机判门**：探测到就出布尔值，未探测才是 null。
 
@@ -412,6 +502,7 @@ def test_ac_p281_7_07_g281_2_is_a_machine_gate(tmp_path):
     但**探测到 rc!=0 必须 ok=False**——否则 LOCK 被改动会静默通过。
     """
     _fill_all(tmp_path)
+    _empty_ledger(tmp_path)
     # 未探测：null（且不许冒充通过）
     rep = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
     assert rep["five_gates"]["g281_2"]["ok"] is None
@@ -705,3 +796,235 @@ def test_ac_p281_7_10_clean_closeout_live():
     pg = subprocess.run(["pgrep", "-af", "run_watched.*p281-pilot"],
                         capture_output=True, text=True, check=False)
     assert pg.stdout.strip() == "", f"看门狗残留：{pg.stdout}"
+
+
+# ---------------------------------------------------------------------------
+# A7-10：票号端到端贯通（2026-11-07 重跑批事故的回归）
+# ---------------------------------------------------------------------------
+
+def _write_two_round_ledger(path: Path, *, trial_id: str) -> None:
+    """同一 ``thread_id`` 两轮：首轮 ``batch_id=trial_id`` 10 行 + 本轮 0 行。
+
+    这就是 2026-11-07 的真实形状：重跑批把账本切到 ``P281-B1b-*`` 之前/之后，
+    同名 Trial 的首轮 10 行仍然在账上。按 ``thread_id`` 数 ⇒ 帽已满 ⇒
+    一条网都没发就 ``TrialCapReached``。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = "2026-11-07T00:00:00Z"
+    rows = [{"seq": i, "event": "call", "ok": True, "ts_iso": ts,
+             "batch_id": trial_id, "stage": STAGE, "task": 1,
+             "model": "fixture-model", "thread_id": trial_id,
+             "tokens_in": 100, "tokens_out": 10}
+            for i in range(1, 11)]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_a7_10_ledger_call_rows_scopes_by_batch(tmp_path):
+    """按票切窗：同一 Trial 的旧轮行不再算进本轮。"""
+    from orchestrator.benchmark.phase281 import telemetry
+
+    trial_id = "mujoco_contact_push_v1__agentic_v1__rep0"
+    ledger_path = tmp_path / "ledger.jsonl"
+    _write_two_round_ledger(ledger_path, trial_id=trial_id)
+
+    assert len(telemetry.ledger_call_rows(ledger_path, trial_id)) == 10
+    # 缺省（batch_id=None）= 全历史（首轮口径一字未改）
+    assert telemetry.ledger_call_rows(ledger_path, trial_id, batch_id=trial_id) == \
+        telemetry.ledger_call_rows(ledger_path, trial_id)
+    # 切到本轮票 ⇒ 0 行（本轮确实一次网都没发）
+    assert telemetry.ledger_call_rows(ledger_path, trial_id,
+                                      batch_id="P281-B1b-1") == []
+
+
+def test_a7_10_trial_budget_not_blocked_by_previous_round(tmp_path):
+    """重跑批的帽只数本票：上一轮花满 10 呼不得把本轮堵在发网之前。"""
+    from orchestrator.benchmark.phase281 import telemetry
+
+    trial_id = "mujoco_contact_push_v1__agentic_v1__rep0"
+    ledger_path = tmp_path / "ledger.jsonl"
+    _write_two_round_ledger(ledger_path, trial_id=trial_id)
+
+    old = telemetry.TrialBudget(cap=10, ledger=ledger_path, trial_id=trial_id)
+    assert old.used() == 10
+    with pytest.raises(telemetry.TrialCapReached):
+        old.before_call()                     # 旧口径：重跑必然被堵（事故现场）
+
+    new = telemetry.TrialBudget(cap=10, ledger=ledger_path, trial_id=trial_id,
+                                batch_id="P281-B1b-1")
+    assert new.used() == 0
+    new.before_call()                         # 不抛：本轮票下确实还没花
+
+
+def test_a7_10_observed_reads_only_current_ticket(tmp_path):
+    """``observed`` 的呼数/tokens 必须来自本轮票，不得把旧轮数据冒充本轮。"""
+    from orchestrator.benchmark.phase281 import telemetry
+
+    trial_id = "mujoco_contact_push_v1__agentic_v1__rep0"
+    ledger_path = tmp_path / "ledger.jsonl"
+    _write_two_round_ledger(ledger_path, trial_id=trial_id)
+    trial_dir = tmp_path / "trial"
+    trial_dir.mkdir()
+
+    old = telemetry.observed(trial_dir, ledger_path, trial_id=trial_id)
+    assert old["calls"] == 10 and old["tokens_in"] == 1000
+
+    new = telemetry.observed(trial_dir, ledger_path, trial_id=trial_id,
+                             batch_id="P281-B1b-1")
+    assert new["calls"] == 0 and new["tokens_in"] == 0
+
+
+def test_a7_10_g281_3_reconciles_window_against_trials(tmp_path):
+    """切窗后窗内 0 行而 Trial 自报 10 呼 ⇒ G281-3 必须红（不许假阳）。"""
+    ledger_path = tmp_path / "ledger.jsonl"
+    _write_two_round_ledger(ledger_path,
+                            trial_id="mujoco_contact_push_v1__agentic_v1__rep0")
+    window = analysis.ledger_snapshot(ledger_path, batches=["P281-B1b-1"])
+    assert window["summary"]["call_rows"] == 0
+
+    empty_ok = analysis.five_gates(go_no_go="HOLD", stop_open=[], ledger=window,
+                                   env=None, trial_calls=0)
+    assert empty_ok["g281_3"]["ok"] is True          # 真的没人调用：绿得合理
+
+    vacuous = analysis.five_gates(go_no_go="HOLD", stop_open=[], ledger=window,
+                                  env=None, trial_calls=10)
+    assert vacuous["g281_3"]["ok"] is False          # 10 呼不知去向：红
+    assert "reconciled=False" in vacuous["g281_3"]["detail"]
+
+    # 非切窗口径（首轮）不启用对账，行为与 P281-7 逐位相同
+    whole = analysis.ledger_snapshot(ledger_path)
+    legacy = analysis.five_gates(go_no_go="HOLD", stop_open=[], ledger=whole,
+                                 env=None, trial_calls=0)
+    assert legacy["g281_3"]["ok"] is True
+
+
+def test_a7_10_runspec_uses_ticket_batch_id():
+    """``RunSpec.batch_id`` 必须是票号——runner 的内层 billing_context 会覆盖外层。"""
+    from types import SimpleNamespace
+
+    from orchestrator.agent_runner.runner import RunSpec
+    from orchestrator.benchmark.phase281 import trial_harness
+
+    spec = SimpleNamespace(task_id="mujoco_contact_push_v1")
+    arm = SimpleNamespace(max_coding_rounds=10, runspec_agentic=False,
+                          tool_grants=(), step_cap=0, token_cap=0,
+                          agentic_config=None)
+    kwargs = dict(trial_id="mujoco_contact_push_v1__legacy_v1__rep0",
+                  workdir=Path("/tmp/p281-a7-10"), cmd=["python", "x.py"],
+                  telemetry_relpath="telemetry.jsonl", task_title="t",
+                  env_extra={})
+    ticket = trial_harness._build_runspec(spec, arm, batch_id="P281-B1b-1",
+                                          **kwargs)
+    assert isinstance(ticket, RunSpec)
+    assert ticket.batch_id == "P281-B1b-1"
+    # 缺省（首轮口径）仍是 trial_id，两个非重跑调用点行为不变
+    assert trial_harness._build_runspec(spec, arm, **kwargs).batch_id == \
+        "mujoco_contact_push_v1__legacy_v1__rep0"
+
+
+# ---------------------------------------------------------------------------
+# M2（2026-11-07 评审）：§11.9 记账证明是**伴生件**，不进 8 字段契约
+# ---------------------------------------------------------------------------
+
+def _write_accounting_ledger(path: Path) -> None:
+    """两轮的账：seq 1..2 首轮（batch=trial_id）+ seq 3..4 重跑票（P281-B1b-*）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = "2026-11-07T00:00:00Z"
+    rows = [
+        {"seq": 1, "event": "call", "ok": True, "ts_iso": ts, "stage": STAGE,
+         "task": 1, "model": "fixture-model", "batch_id": "t1",
+         "thread_id": "mujoco_contact_push_v1__agentic_v1__rep0",
+         "tokens_in": 10, "tokens_out": 1},
+        {"seq": 2, "event": "call", "ok": False, "ts_iso": ts, "stage": STAGE,
+         "task": 2, "model": "fixture-model", "batch_id": "t2",
+         "thread_id": "libero_env_adapter_v1__legacy_v1__rep0",
+         "tokens_in": 20, "tokens_out": 2},
+        {"seq": 3, "event": "call", "ok": True, "ts_iso": ts, "stage": STAGE,
+         "task": 1, "model": "fixture-model", "batch_id": "P281-B1b-1",
+         "thread_id": "mujoco_contact_push_v1__agentic_v1__rep0",
+         "tokens_in": 30, "tokens_out": 3},
+        {"seq": 4, "event": "call", "ok": True, "ts_iso": ts, "stage": STAGE,
+         "task": 2, "model": "fixture-model", "batch_id": "P281-B1b-2",
+         "thread_id": "libero_env_adapter_v1__agentic_v1__rep0",
+         "tokens_in": 40, "tokens_out": 4},
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_m2_accounting_is_companion_not_report_contract(tmp_path):
+    """§11.9 的记账证明单独成文：``pilot_report`` 仍是**恰好**八个字段。"""
+    root = tmp_path / "root"
+    _write_accounting_ledger(root / "quota" / "ledger.jsonl")
+
+    acct = analysis.build_accounting(root, batches=["P281-B1b-1", "P281-B1b-2"])
+    assert acct["schema"] == analysis.ACCOUNTING_SCHEMA
+    # 两件是**不同的 schema**，落在**不同的文件**里：记账件不进报告契约
+    report = analysis.build_pilot_report(root, batches=["P281-B1b-1", "P281-B1b-2"])
+    assert report["schema"] != acct["schema"]
+    assert frozenset(report) == analysis.REPORT_FIELDS
+    # 契约字段集本身一字未改（改它就是改预注册）
+    assert analysis.REPORT_FIELDS == frozenset(
+        {"schema", "generated_at", "per_trial", "verdicts", "go_no_go",
+         "reasons", "stop_open", "five_gates"})
+
+
+def test_m2_accounting_window_and_full_ledger(tmp_path):
+    """窗口回答「本轮花多少」，``full_ledger`` 回答「至今花多少」，两栏都在。"""
+    root = tmp_path / "root"
+    _write_accounting_ledger(root / "quota" / "ledger.jsonl")
+
+    acct = analysis.build_accounting(root, batches=["P281-B1b-1", "P281-B1b-2"])
+    assert acct["calls"] == 2 and acct["seqs"] == [3, 4]
+    assert acct["calls_ok"] == {"true": 2, "false": 0}
+    assert acct["by_task"] == {"1": 1, "2": 1}
+    assert acct["by_stage"] == {STAGE: 2}
+    assert acct["contiguous"] is True and acct["gaps"] == []
+    # 整本：三票两轮合计 4 呼，ok/fail 拆分如实（含 1 条 fail）
+    assert acct["full_ledger"]["calls"] == 4
+    assert acct["full_ledger"]["calls_ok"] == {"true": 3, "false": 1}
+    assert acct["full_ledger"]["seq_first"] == 1
+    assert acct["full_ledger"]["seq_last"] == 4
+
+
+def test_m2_accounting_per_trial_seqs_and_unattributed(tmp_path):
+    """逐 Trial 的 seq 列表必须点得着；窗外的行进 ``unattributed`` 而非静默丢。"""
+    root = tmp_path / "root"
+    ledger = root / "quota" / "ledger.jsonl"
+    _write_accounting_ledger(ledger)
+    with ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "seq": 5, "event": "call", "ok": True, "ts_iso": "2026-11-07T00:00:00Z",
+            "stage": STAGE, "task": 9, "model": "fixture-model",
+            "batch_id": "P281-B1b-1", "thread_id": "not_a_trial",
+            "tokens_in": 1, "tokens_out": 1}) + "\n")
+
+    acct = analysis.build_accounting(root, batches=["P281-B1b-1"])
+    mujoco = acct["per_trial"]["mujoco_contact_push_v1__agentic_v1__rep0"]
+    assert mujoco["seqs"] == [3] and mujoco["calls"] == 1
+    # 六个预注册 Trial 全在场（没跑的也占一格，读作 0 而不是「不存在」）
+    assert len(acct["per_trial"]) == 6
+    assert acct["per_trial"]["icy_ground_dr_v1__agentic_v1__rep0"]["calls"] == 0
+    assert acct["unattributed"] == [
+        {"seq": 5, "thread_id": "not_a_trial", "batch_id": "P281-B1b-1"}]
+
+
+def test_m2_m3_m7_driver_review_guards():
+    """驱动器三处评审修必须留在脚本里（L2：脚本守卫不许只靠人眼）。"""
+    script = (Path(__file__).resolve().parents[2]
+              / "scripts" / "benchmark" / "phase281_pilot_driver.sh")
+    body = script.read_text(encoding="utf-8")
+
+    # M2：§11.9 记账证明走伴生件，驱动器必须传这个开关
+    assert "--accounting-out" in body
+    assert "pilot_accounting.json" in body
+
+    # M3：收尾（compose down）必须排在分析器之前——G281-5 要证明的是收尾后干净
+    teardown = body.index("docker compose -f \"$REPO_ROOT/sandbox/docker-compose.yml\" down")
+    # 用**调用行**定位（文件头的说明文字也含同一个模块名，按模块名取会拿到注释）
+    analysis_run = body.index("-m orchestrator.benchmark.phase281.analysis")
+    assert teardown < analysis_run, "compose down 必须早于 --probe-env 的分析调用"
+    # 收尾后要再探一次，且不吞 rc
+    assert "ps -aq" in body
+    assert "down_rc=$?" in body
+
+    # M7：冻结臂序给出的 Trial 数必须恰好 6，少一个就拒跑
+    assert '[ "$planned" -ne 6 ]' in body

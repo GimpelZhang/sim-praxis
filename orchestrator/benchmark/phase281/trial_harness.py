@@ -512,8 +512,18 @@ def _pre_birth(spec: Any, *, base: Path, trial_id: str, workdir: Path,
 def _build_runspec(spec: Any, arm: arm_adapter.ArmSpec, *, trial_id: str,
                    workdir: Path, cmd: "Sequence[str]",
                    telemetry_relpath: str, task_title: str,
-                   env_extra: "Mapping[str, str]") -> Any:
-    """两臂共享的同一份 ``RunSpec`` 形态（差异只由臂参数引入）。"""
+                   env_extra: "Mapping[str, str]",
+                   batch_id: "str | None" = None) -> Any:
+    """两臂共享的同一份 ``RunSpec`` 形态（差异只由臂参数引入）。
+
+    A7-10（2026-11-07）：``RunSpec.batch_id`` **必须**是计费票号，不能写死
+    ``trial_id``。``AgentRunner`` 在每次调用前自己进一层
+    ``billing_context(batch_id=spec.batch_id)``（``runner.py:2807``），这层
+    **晚于** harness 的外层上下文、会把它整个覆盖掉——所以 A7-8 只在
+    harness 层设 ``bill_batch`` 是不够的：账本记下的仍是 ``trial_id``，
+    ``P281-B1b-*`` 三张票一行都没被引用（D3 假关闭）。票号从这里一路
+    传到 ``BillingGate.record``。
+    """
     from orchestrator.agent_runner.runner import RunSpec
 
     return RunSpec(
@@ -521,7 +531,7 @@ def _build_runspec(spec: Any, arm: arm_adapter.ArmSpec, *, trial_id: str,
         workdir=Path(workdir),
         cmd=[str(item) for item in cmd],
         telemetry_relpath=str(telemetry_relpath),
-        batch_id=trial_id,
+        batch_id=(str(batch_id) if batch_id else trial_id),
         run_idx=0,
         billing_task=constants.TASK_NO_BY_ID[str(spec.task_id)],
         env_extra=dict(env_extra),
@@ -1008,7 +1018,8 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
     cmd, telemetry_relpath, env_extra = _invocation(spec, seed=seed)
     runspec = _build_runspec(spec, arm, trial_id=trial_id, workdir=workdir,
                              cmd=cmd, telemetry_relpath=telemetry_relpath,
-                             task_title=task_md_text, env_extra=env_extra)
+                             task_title=task_md_text, env_extra=env_extra,
+                             batch_id=bill_batch)
     factory = sandbox_factory or sandbox.sandbox_for
     try:
         sandbox_obj = factory(spec, arm, trial_workdir=workdir,
@@ -1023,8 +1034,11 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
     deployment = _deployment(arm, spec, sandbox_obj, image_ref)
     state["deployment"] = deployment
 
+    # A7-10：帽切窗到本票。按 ``thread_id`` 数全历史会让重跑批在**第一次
+    # 发网之前**就 TrialCapReached（首轮同名 Trial 已花满 10 呼）——2026-11-07
+    # 三个 agentic Trial 的「重跑」就是这样一次网都没发出去的。
     budget = telemetry.TrialBudget(cap=arm.call_cap, ledger=ledger,
-                                   trial_id=trial_id)
+                                   trial_id=trial_id, batch_id=bill_batch)
     # 锁内适配（计划 §10.3「dry_run=True 时只替换 gateway」）：干跑默认换
     # ``_DryRunGateway``（空补丁 ⇒ NOT_BORN），但外部显式传入且**自证**身份的
     # 罐头网关例外——那不是放松判定，是把「只替换网关」这条唯一允许的差异做实。
@@ -1117,14 +1131,16 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
         state["problems"].append("出生判定被判 BLOCKED_INFRA（环境侧）")
 
     # 三源遥测：总结行 → 回读 → 清单 claimed 抄同一份
-    observed = telemetry.observed(base, ledger, trial_id=trial_id)
+    observed = telemetry.observed(base, ledger, trial_id=trial_id,
+                                  batch_id=bill_batch)
     _fill_absent(observed, engine_result=engine_result, arm=arm,
                  trace_files=int(state.get("trace_files") or 0),
                  problems=state["problems"])
     observed["first_birth_round"] = _first_birth_round(watch, birth)
     observed["birth_probe"] = _birth_probe(birth, watch)
     telemetry.write_summary(base, observed)
-    observed = telemetry.observed(base, ledger, trial_id=trial_id)
+    observed = telemetry.observed(base, ledger, trial_id=trial_id,
+                                  batch_id=bill_batch)
     observed["birth_probe"] = _birth_probe(birth, watch)
     # 出生件必须在出生判定之后才在盘上（post 出生是本函数最后一次判定点），
     # 故交付放在这里而不是与 ``_collect_delivered`` 同批。

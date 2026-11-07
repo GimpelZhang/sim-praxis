@@ -110,19 +110,30 @@ def _read_rows(path: Path) -> "list[dict]":
     return rows
 
 
-def ledger_call_rows(ledger: Any, trial_id: str) -> "list[dict]":
+def ledger_call_rows(ledger: Any, trial_id: str, *,
+                     batch_id: "str | None" = None) -> "list[dict]":
     """本 Trial 的**实呼行**（``event=="call"`` 且 ``thread_id==trial_id``）。
 
     为什么按 ``thread_id`` 而不按 ``batch_id``：``thread_id`` 是 ``trial_id``
     的单点派生（``constants.trial_id``），而 ``batch_id`` 是批准凭据的键——
     两者在本阶段同值，但凭据键将来可能被合并成「一批多 Trial」，那时按
     ``batch_id`` 数就把别人的调用算进来了。
+
+    ``batch_id``（**A7-10，2026-11-07**）：显式切窗＝「本 Trial **在本票下**的
+    实呼行」。重跑批（P281-B1b-*）按同一 ``trial_id`` 重开票时，只按 ``thread_id``
+    数会把**上一轮**的同名 Trial 调用算进本轮帽——2026-11-07 的历史事故正是
+    如此：三个 agentic Trial 首轮各花满 10 呼，重跑时 ``used()==10 >= cap``
+    直接 ``TrialCapReached``，**一次网都没发**（账本 0 行），而报告却把首轮的
+    10 呼/111529 tokens 当作本轮观测值。切窗后这类「旧轮数据冒充本轮」不可能
+    再发生——本轮的帽与本轮的观测都只看本票的行。
     """
     out: "list[dict]" = []
     for row in _read_rows(_ledger_path_of(ledger)):
         if row.get("event") != "call":
             continue
         if row.get("thread_id") != trial_id:
+            continue
+        if batch_id is not None and row.get("batch_id") != batch_id:
             continue
         seq = row.get("seq")
         if not isinstance(seq, int) or isinstance(seq, bool):
@@ -142,6 +153,8 @@ class TrialBudget:
     cap: int
     ledger: Any
     trial_id: str
+    #: A7-10：切窗到本票（``None`` = 旧口径，按 ``thread_id`` 数全历史）
+    batch_id: "str | None" = None
     _checks: int = field(default=0, init=False, repr=False)
     _last_used: int = field(default=0, init=False, repr=False)
 
@@ -152,9 +165,13 @@ class TrialBudget:
             raise ValueError("TrialBudget.trial_id 必须是非空字符串")
 
     def used(self) -> int:
-        """账本里本 Trial 的实呼行数（**权威值**，不读内存计数器）。"""
+        """账本里本 Trial 的实呼行数（**权威值**，不读内存计数器）。
+
+        ``batch_id`` 非空时切窗到本票（A7-10）：重跑批的帽只数本轮的调用。
+        """
         self._checks += 1
-        self._last_used = len(ledger_call_rows(self.ledger, self.trial_id))
+        self._last_used = len(ledger_call_rows(
+            self.ledger, self.trial_id, batch_id=self.batch_id))
         return self._last_used
 
     def before_call(self) -> None:
@@ -277,7 +294,8 @@ def _trace_counts(rows: Iterable[Mapping]) -> "tuple[int, int]":
 
 
 def observed(trial_dir: "str | Path", ledger: Any, *,
-             trial_id: "str | None" = None) -> dict:
+             trial_id: "str | None" = None,
+             batch_id: "str | None" = None) -> dict:
     """三源合成的「实际发生了什么」（计划 §8.5.8）。
 
     返回键：``calls`` / ``seqs`` / ``stages`` / ``tokens_in`` / ``tokens_out``
@@ -306,7 +324,9 @@ def observed(trial_dir: "str | Path", ledger: Any, *,
     if not isinstance(trial_id, str) or not trial_id:
         raise ValueError(f"无法确定 trial_id（{base}）：需显式传参")
 
-    rows = ledger_call_rows(ledger, trial_id)
+    # A7-10：切窗到本票 —— 观测值必须是**本轮**的实呼（重跑批不能把旧轮
+    # 10 呼/111529 tokens 冒充成「这一次观测到了什么」）。
+    rows = ledger_call_rows(ledger, trial_id, batch_id=batch_id)
     tokens_in, tokens_out = _sum_tokens(rows)
     stages = [str(row.get("stage") or "") for row in rows]
 
