@@ -123,6 +123,94 @@ def _round_calls(ledger_path: Path) -> "tuple[list[dict], list[dict], list[str] 
     return calls, [r for r in calls if r.get("batch_id") in keep], window
 
 
+# --- AC-05/06/09/10 的判据提取成纯函数（M4：活产物腿 + 合成腿跑**同一份**判据）--
+
+def _check_per_trial_caps(root: Path, all_calls: "list[dict]", calls: "list[dict]",
+                          window: "list[str] | None") -> None:
+    """AC-P281-7-05：逐 Trial 自报呼数与账本对账，且不超单 Trial 帽（A7-11 二分）。
+
+    * 本轮跑过（窗内有行）⇒ 必须等于**窗内**该 thread 的行数（A7-10 的语义）；
+    * 本轮没跑（窗内 0 行）⇒ 必须等于它首轮身份（`batch_id == trial_id`）的行数，
+      且 `finished_at` 早于窗首行 —— 旧产物**不回溯重算**（改了就是伪造观测）。
+    """
+    window_start = min((str(r.get("ts_iso") or "") for r in calls), default="")
+    for row in analysis.collect_trials(root):
+        if not row["present"]:
+            continue          # 缺件是 AC-04 的事；没有自报数就无帽可判（不重复判）
+        trial = json.loads((Path(row["trial_dir"]) / "trial.json").read_text(encoding="utf-8"))
+        observed = int((trial.get("observed") or {}).get("calls") or 0)
+        tid = str(row["trial_id"])
+        assert observed <= constants.CALL_CAP_PER_TRIAL, f"{tid} 超单 Trial 帽"
+        assert trial.get("used_calls") == observed, tid
+        mine = [r for r in calls if r.get("thread_id") == tid]
+        if mine:
+            assert len(mine) == observed, (
+                f"{tid}：observed.calls={observed} 与窗内 thread 行数 {len(mine)} 不等"
+                f"（窗={window}）")
+            continue
+        if observed == 0:
+            continue                      # 没自报花钱 ⇒ 无钱可对
+        assert str(trial.get("finished_at") or "") < window_start, (
+            f"{tid}：本轮（窗首 {window_start}）跑过却没有一行账——票号没贯通或窗选错")
+        legacy = [r for r in all_calls if r.get("thread_id") == tid
+                  and r.get("batch_id") == tid]
+        assert len(legacy) == observed, (
+            f"{tid}：本轮未跑，observed.calls={observed} 与首轮身份"
+            f"（batch_id==trial_id）行数 {len(legacy)} 不等")
+
+
+def _check_task_caps(calls: "list[dict]", all_calls: "list[dict]",
+                     window: "list[str] | None" = None) -> None:
+    """AC-P281-7-06：每任务 ≤20、本轮合计 ≤60、全账 ≤HARD_CAP。"""
+    per_task = {}
+    for task_id in constants.TASK_IDS:
+        no = constants.TASK_NO_BY_ID[task_id]
+        per_task[task_id] = sum(1 for r in calls if r.get("task") == no)
+        assert per_task[task_id] <= PILOT_APPROVED_PER_TASK, (task_id, per_task, window)
+    assert sum(per_task.values()) == len(calls) <= PILOT_TOTAL, window
+    assert len(all_calls) <= constants.HARD_CAP, len(all_calls)
+
+
+def _check_failures_ledgered(ledger_path: Path) -> None:
+    """AC-P281-7-09：失败行必须带 `err` 且占 seq；`call` 行 seq 恰为 1..N。"""
+    rows = ql.read_lines(ledger_path)
+    fails = [r for r in rows if r.get("event") == "call" and r.get("ok") is False]
+    for r in fails:
+        assert isinstance(r.get("seq"), int) and not isinstance(r.get("seq"), bool), r
+        assert r.get("err"), f"失败行 {r.get('seq')} 没有 err 字段"
+    seqs = sorted(int(r["seq"]) for r in _call_rows(ledger_path))
+    assert seqs == list(range(1, len(seqs) + 1)), "失败行没占 seq"
+
+
+def _closeout_probes() -> tuple:
+    """AC-P281-7-10 的三条现场命令（合成腿注入假件，活产物腿真跑）。"""
+    # 锁内适配 A7-4：compose 件在 sandbox/，仓库根裸 `docker compose ps` 只报
+    # "no configuration file provided"——空 stdout 会被读成「容器干净」（假绿）。
+    repo_root = Path(__file__).resolve().parents[2]
+    ps = subprocess.run(
+        ["docker", "compose", "-f", str(repo_root / "sandbox" / "docker-compose.yml"),
+         "ps", "-q"],
+        cwd=str(repo_root), capture_output=True, text=True, timeout=120, check=False)
+    smi = subprocess.run(
+        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
+        capture_output=True, text=True, timeout=60, check=False)
+    # 看门狗残留：本 Task 的包装进程不许还在（p281-pilot）
+    pgrep = subprocess.run(["pgrep", "-af", "run_watched.*p281-pilot"],
+                           capture_output=True, text=True, check=False)
+    return ps, smi, pgrep
+
+
+def _check_clean_closeout(ps: "subprocess.CompletedProcess",
+                         smi: "subprocess.CompletedProcess",
+                         pgrep: "subprocess.CompletedProcess") -> None:
+    """AC-P281-7-10：compose ps rc=0 且空、显存 ≤200 MiB、无看门狗残留。"""
+    assert ps.returncode == 0, ps.stderr[-400:]
+    assert [ln for ln in ps.stdout.splitlines() if ln.strip()] == [], "容器残留"
+    used = [int(x) for x in smi.stdout.replace(",", " ").split() if x.isdigit()]
+    assert used and max(used) <= analysis.GPU_LIMIT_MIB, f"显存残留 {used} MiB"
+    assert pgrep.stdout.strip() == "", f"看门狗残留：{pgrep.stdout}"
+
+
 def _write_trial(root: Path, task_id: str, arm_id: str, rep: int, *,
                  status: str = "FINISHED", birth: str = "BORN",
                  calls: int = 3, verdict: str = "PASS") -> Path:
@@ -367,7 +455,7 @@ def test_a7_9_cli_batches_roundtrip(tmp_path):
 # AC-P281-7-04 / 07 / 08：终态、报告字段集、规则可复算（合成腿）
 # ---------------------------------------------------------------------------
 
-def test_ac_p281_7_04_all_terminal_synthetic(tmp_path):
+def test_ac_p281_7_04_all_terminal(tmp_path):
     _fill_all(tmp_path)
     rows = analysis.collect_trials(tmp_path)
     assert len(rows) == 6
@@ -375,7 +463,7 @@ def test_ac_p281_7_04_all_terminal_synthetic(tmp_path):
     assert all(r["status"] in analysis.TERMINAL_STATUSES for r in rows)
 
 
-def test_ac_p281_7_07_pilot_report_synthetic(tmp_path):
+def test_ac_p281_7_07_pilot_report(tmp_path):
     _fill_all(tmp_path)
     _empty_ledger(tmp_path)
     rep = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
@@ -394,6 +482,150 @@ def test_ac_p281_7_07_pilot_report_synthetic(tmp_path):
     doc = json.loads(out.read_text(encoding="utf-8"))
     assert frozenset(doc) == analysis.REPORT_FIELDS
     assert doc["go_no_go"] == rep["go_no_go"]
+
+
+# --- AC-05/06/09/10 的**合成腿**（M4：与活产物腿跑同一份判据）---------------
+
+def _write_calls(path: Path, rows: "list[dict]") -> Path:
+    """把合成 call 行写成账本（字段与生产行同形：``event="call"`` + int seq）。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(dict(r, event="call")) + "\n" for r in rows),
+                    encoding="utf-8")
+    return path
+
+
+def _call(seq: int, *, task: int, thread: str, batch: str = "", ok: bool = True,
+          ts: str = "2026-11-07T00:00:00Z", **extra) -> dict:
+    row = {"seq": seq, "ok": ok, "ts_iso": ts, "task": task,
+           "thread_id": thread, "batch_id": batch or thread}
+    row.update(extra)
+    return row
+
+
+def test_ac_p281_7_05_per_trial_cap(tmp_path):
+    """AC-P281-7-05 合成腿：逐 Trial 自报呼数必须与账本逐行对得上（正/负例）。"""
+    # 正例：6 Trial × 3 呼 = 18 行，首轮口径（batch_id == trial_id）
+    root = tmp_path / "root"
+    _fill_all(root, calls=3)
+    rows = []
+    seq = 0
+    for task_id in constants.TASK_IDS:
+        for arm_id in constants.ARMS:
+            tid = constants.trial_id(task_id, arm_id, 0)
+            for _ in range(3):
+                seq += 1
+                rows.append(_call(seq, task=constants.TASK_NO_BY_ID[task_id], thread=tid))
+    ledger = _write_calls(root / "quota" / "ledger.jsonl", rows)
+    all_calls, calls, window = _round_calls(ledger)
+    assert window is None and len(calls) == 18
+    _check_per_trial_caps(root, all_calls, calls, window)
+
+    # 负例 1：自报 3 呼、账上只有 2 行 ⇒ 报数不实
+    bad = tmp_path / "bad1"
+    _fill_all(bad, calls=3)
+    short = [r for i, r in enumerate(rows) if i % 3 != 2]     # 每个 Trial 砍一行
+    l1 = _write_calls(bad / "quota" / "ledger.jsonl", short)
+    a1, c1, w1 = _round_calls(l1)
+    with pytest.raises(AssertionError, match="不等"):
+        _check_per_trial_caps(bad, a1, c1, w1)
+
+    # 负例 2：自报超过单 Trial 帽（10）
+    over = tmp_path / "bad2"
+    _fill_all(over, calls=constants.CALL_CAP_PER_TRIAL + 1)
+    l2 = _write_calls(over / "quota" / "ledger.jsonl", rows)
+    a2, c2, w2 = _round_calls(l2)
+    with pytest.raises(AssertionError, match="超单 Trial 帽"):
+        _check_per_trial_caps(over, a2, c2, w2)
+
+
+def test_ac_p281_7_05_per_trial_cap_legacy_branch(tmp_path):
+    """A7-11 二分：本轮未跑的老 Trial 只认它**首轮身份**的行，且必须在窗首之前收尾。"""
+    tid = constants.trial_id(constants.TASK_IDS[0], constants.ARMS[1], 0)
+    root = tmp_path / "root"
+    _write_trial(root, constants.TASK_IDS[0], constants.ARMS[1], 0, calls=10)
+    trial_path = analysis.trial_dir(root, constants.TASK_IDS[0], constants.ARMS[1], 0) / "trial.json"
+    doc = json.loads(trial_path.read_text(encoding="utf-8"))
+    doc["finished_at"] = "2026-11-07T07:04:01Z"      # 早于窗首
+    trial_path.write_text(json.dumps(doc), encoding="utf-8")
+    rows = [_call(i + 1, task=1, thread=tid) for i in range(10)]
+    rows.append(_call(11, task=1, thread="other", batch="P281-B1b-1",
+                      ts="2026-11-07T09:10:00Z"))
+    ledger = _write_calls(root / "quota" / "ledger.jsonl", rows)
+    all_calls, calls, window = _round_calls(ledger)
+    assert window == ["P281-B1b-1", "P281-B1b-2", "P281-B1b-3"]
+    _check_per_trial_caps(root, all_calls, calls, window)
+
+    # 负例：老 Trial 的收尾时间落在窗内 ⇒ 它「本轮跑过」却没有窗内行
+    doc["finished_at"] = "2026-11-07T09:30:00Z"
+    trial_path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(AssertionError, match="没有一行账"):
+        _check_per_trial_caps(root, all_calls, calls, window)
+
+
+def test_ac_p281_7_06_task_cap(tmp_path):
+    """AC-P281-7-06 合成腿：逐 Task ≤20、合计 ≤60、全账 ≤HARD_CAP。"""
+    rows = []
+    seq = 0
+    for no in (1, 2, 3):
+        for _ in range(PILOT_APPROVED_PER_TASK):
+            seq += 1
+            rows.append(_call(seq, task=no, thread=f"t{no}"))
+
+    # 正例：恰好 20/20/20 = 60
+    ledger = _write_calls(tmp_path / "ok" / "quota" / "ledger.jsonl", rows)
+    all_calls, calls, window = _round_calls(ledger)
+    _check_task_caps(calls, all_calls, window)
+
+    # 负例 1：task1 21 呼 ⇒ 逐 Task 越帽
+    over = _write_calls(tmp_path / "over" / "quota" / "ledger.jsonl",
+                        rows + [_call(seq + 1, task=1, thread="t1")])
+    a1, c1, w1 = _round_calls(over)
+    with pytest.raises(AssertionError):
+        _check_task_caps(c1, a1, w1)
+
+    # 负例 2：本轮 60 合法，但全账 181 > HARD_CAP ⇒ 全账越帽（窗口本身没越）
+    with pytest.raises(AssertionError):
+        _check_task_caps(rows, rows + [{}] * (constants.HARD_CAP - 60 + 1))
+
+
+def test_ac_p281_7_09_failures_ledgered(tmp_path):
+    """AC-P281-7-09 合成腿：失败行带 err 且占 seq，seq 连续。"""
+    ok_rows = [_call(1, task=1, thread="a"), _call(2, task=1, thread="a", ok=False,
+                                                   err="EmptyResponseError")]
+    _check_failures_ledgered(_write_calls(tmp_path / "ok" / "q.jsonl", ok_rows))
+
+    # 负例 1：失败行没有 err ⇒ 事后抹平
+    noerr = [_call(1, task=1, thread="a"), _call(2, task=1, thread="a", ok=False)]
+    with pytest.raises(AssertionError, match="没有 err"):
+        _check_failures_ledgered(_write_calls(tmp_path / "noerr" / "q.jsonl", noerr))
+
+    # 负例 2：删掉中间一行 ⇒ seq 断裂
+    gap = [_call(1, task=1, thread="a"), _call(3, task=1, thread="a")]
+    with pytest.raises(AssertionError, match="没占 seq"):
+        _check_failures_ledgered(_write_calls(tmp_path / "gap" / "q.jsonl", gap))
+
+
+def _proc(stdout: str = "", *, returncode: int = 0, stderr: str = "") -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=["x"], returncode=returncode,
+                                       stdout=stdout, stderr=stderr)
+
+
+def test_ac_p281_7_10_clean_closeout():
+    """AC-P281-7-10 合成腿：三条现场命令的判据（正例 + 三负例）。"""
+    _check_clean_closeout(_proc(""), _proc("14\n"), _proc(""))
+
+    # 负例 1：容器残留
+    with pytest.raises(AssertionError, match="容器残留"):
+        _check_clean_closeout(_proc("abc123\n"), _proc("14\n"), _proc(""))
+    # 负例 2：显存超 200 MiB
+    with pytest.raises(AssertionError, match="显存残留"):
+        _check_clean_closeout(_proc(""), _proc("2048\n"), _proc(""))
+    # 负例 3：看门狗残留
+    with pytest.raises(AssertionError, match="看门狗残留"):
+        _check_clean_closeout(_proc(""), _proc("14\n"), _proc("4242 run_watched.sh\n"))
+    # 负例 4：compose 自己报错（不许把「命令失败」读成「没容器」）
+    with pytest.raises(AssertionError):
+        _check_clean_closeout(_proc("", returncode=1, stderr="no config"), _proc("14\n"), _proc(""))
 
 
 def test_ac_p281_7_08_rule_reproducible(tmp_path):
@@ -769,42 +1001,13 @@ def test_ac_p281_7_05_per_trial_cap_live():
     #     （`batch_id == trial_id`）的行数 —— 那是 A7-10 修复前的记账口径，
     #     旧产物**不回溯重算**（改了就是伪造观测）。
     all_calls, calls, window = _round_calls(_live_ledger())
-    window_start = min((str(r.get("ts_iso") or "") for r in calls), default="")
-    for row in analysis.collect_trials(root):
-        trial = json.loads((Path(row["trial_dir"]) / "trial.json").read_text(encoding="utf-8"))
-        observed = int((trial.get("observed") or {}).get("calls") or 0)
-        tid = str(row["trial_id"])
-        assert observed <= constants.CALL_CAP_PER_TRIAL, f"{tid} 超单 Trial 帽"
-        assert trial.get("used_calls") == observed, tid
-        mine = [r for r in calls if r.get("thread_id") == tid]
-        if mine:
-            assert len(mine) == observed, (
-                f"{tid}：observed.calls={observed} 与窗内 thread 行数 {len(mine)} 不等"
-                f"（窗={window}）")
-            continue
-        if observed == 0:
-            continue                      # 没自报花钱 ⇒ 无钱可对
-        assert str(trial.get("finished_at") or "") < window_start, (
-            f"{tid}：本轮（窗首 {window_start}）跑过却没有一行账——票号没贯通或窗选错")
-        legacy = [r for r in all_calls if r.get("thread_id") == tid
-                  and r.get("batch_id") == tid]
-        assert len(legacy) == observed, (
-            f"{tid}：本轮未跑，observed.calls={observed} 与首轮身份"
-            f"（batch_id==trial_id）行数 {len(legacy)} 不等")
+    _check_per_trial_caps(root, all_calls, calls, window)
 
 
 @pytest.mark.kb_integration
 def test_ac_p281_7_06_task_cap_live():
-    root = _live_root()
     all_calls, calls, window = _round_calls(_live_ledger())
-    per_task = {}
-    for task_id in constants.TASK_IDS:
-        no = constants.TASK_NO_BY_ID[task_id]
-        per_task[task_id] = sum(1 for r in calls
-                                if r.get("task") == no)
-        assert per_task[task_id] <= PILOT_APPROVED_PER_TASK, (task_id, per_task, window)
-    assert sum(per_task.values()) == len(calls) <= PILOT_TOTAL, window
-    assert len(all_calls) <= constants.HARD_CAP, len(all_calls)
+    _check_task_caps(calls, all_calls, window)
 
 
 @pytest.mark.kb_integration
@@ -864,38 +1067,15 @@ def test_m8_live_verdicts_match_evaluator_files():
 
 @pytest.mark.kb_integration
 def test_ac_p281_7_09_failures_ledgered_live():
-    rows = ql.read_lines(_live_ledger())
-    fails = [r for r in rows if r.get("event") == "call" and r.get("ok") is False]
-    for r in fails:
-        assert isinstance(r.get("seq"), int) and not isinstance(r.get("seq"), bool), r
-        assert r.get("err"), f"失败行 {r.get('seq')} 没有 err 字段"
-    # 失败行不许被「事后抹平」：seq 全集必须连续覆盖到最大 seq
-    calls = _call_rows(_live_ledger())
-    seqs = sorted(int(r["seq"]) for r in calls)
-    assert seqs == list(range(1, len(seqs) + 1)), "失败行没占 seq"
+    _check_failures_ledgered(_live_ledger())
 
 
 @pytest.mark.kb_integration
 def test_ac_p281_7_10_clean_closeout_live():
-    root = _live_root()
-    # 锁内适配 A7-4：compose 件在 sandbox/，仓库根裸 `docker compose ps` 只报
-    # "no configuration file provided"——空 stdout 会被读成「容器干净」（假绿）。
-    repo_root = Path(__file__).resolve().parents[2]
-    ps = subprocess.run(
-        ["docker", "compose", "-f", str(repo_root / "sandbox" / "docker-compose.yml"),
-         "ps", "-q"],
-        cwd=str(repo_root), capture_output=True, text=True, timeout=120, check=False)
-    assert ps.returncode == 0, ps.stderr[-400:]
-    assert [ln for ln in ps.stdout.splitlines() if ln.strip()] == [], "容器残留"
-    smi = subprocess.run(
-        ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
-        capture_output=True, text=True, timeout=60, check=False)
-    used = [int(x) for x in smi.stdout.replace(",", " ").split() if x.isdigit()]
-    assert used and max(used) <= analysis.GPU_LIMIT_MIB, f"显存残留 {used} MiB"
-    # 看门狗残留：本 Task 的包装进程不许还在（p281-pilot）
-    pg = subprocess.run(["pgrep", "-af", "run_watched.*p281-pilot"],
-                        capture_output=True, text=True, check=False)
-    assert pg.stdout.strip() == "", f"看门狗残留：{pg.stdout}"
+    # 车道开关走 `_live_root()`（无 env 即 skip）；默认两排除套不碰 docker/nvidia-smi
+    _live_root()
+    ps, smi, pgrep = _closeout_probes()
+    _check_clean_closeout(ps, smi, pgrep)
 
 
 # ---------------------------------------------------------------------------
