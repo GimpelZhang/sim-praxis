@@ -861,7 +861,16 @@ CALL_CACHE_ALLOWLIST = {
     # `_repro` 容器形态、`backfill_contract` 接线四段（含 docstring/注释，净 +67 行）
     # 全在构造点之前，纯位移（898→965）；构造表达式 `CallReplay(base / "call_cache")`
     # 逐字未改，0 新增 CallReplay 落点、0 新增网关调用路径（干跑走的是同一构造点）。
-    ("orchestrator/benchmark/phase281/trial_harness.py", 965),
+    # Phase 2.8.1 T7b（P281-7b，A7-8/A7-10）：`run_trial(batch_id=…)` 票号贯通
+    # （`_ensure_approval` 分支 + docstring，+9 行，A7-8 `b2d9f52`）与
+    # `_build_runspec(batch_id=)` / `TrialBudget(batch_id=)` / 两处
+    # `telemetry.observed(..., batch_id=)`（+10 行，A7-10 `c6bfa9c`）全在构造点
+    # 之前，纯位移（965→984，+19 行）；构造表达式 `CallReplay(base / "call_cache")`
+    # 逐字未改，0 新增 CallReplay 落点、0 新增网关调用路径。
+    # **教训（本行踩到）**：这两次提交都没同步改本表，冷跑套
+    # `test_s10_call_cache_landing_sites_enumerated` 红（差集恰是 965 vs 984）。
+    # 改 `trial_harness.py` 任何构造点之前的行都必须同步这张表。
+    ("orchestrator/benchmark/phase281/trial_harness.py", 984),
 }
 
 

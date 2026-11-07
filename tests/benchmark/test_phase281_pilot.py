@@ -29,6 +29,8 @@ import pytest
 from orchestrator.benchmark.phase281 import analysis, constants, paths
 from orchestrator.common import runtime_paths as rp
 from orchestrator.gateway import quota_ledger as ql
+# L4（2026-11-07 评审）：活产物车道的开关**取单一源**，不自抄字面量。
+from tests.kb_support import ENV_FLAG as KB_INTEGRATION_FLAG
 
 #: §11.3 的三票（一 task 一票，各 20，合计 60 = 6 Trial × 10）
 PILOT_BATCHES = {1: "P281-B1-1", 2: "P281-B1-2", 3: "P281-B1-3"}
@@ -37,7 +39,15 @@ PILOT_TOTAL = 60
 LEDGER_PHASE = 281
 STAGE = "coding_debug"
 STRICT_Z = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
-LIVE_GATE = "SIMPRAXIS_KB_INTEGRATION"
+#: 活产物车道的开关：**直接取** ``tests/kb_support.ENV_FLAG``（L4）。
+#: 旧版自抄 ``"SIMPRAXIS_KB_INTEGRATION"``——旗标改名时本车道会**静默失效**
+#: （永远 skip = 永远绿），那正是 L4 要堵的假绿。不直接调
+#: ``require_kb_integration()``：它另要求 KB 内容层在仓，而本 Phase 的活产物在
+#: ``/mnt/artifacts/simpraxis/phase281``，与 KB 仓无依赖——多一条前置会把
+#: 「产物在、KB 不在」读成 skip，那是放水。
+LIVE_GATE = KB_INTEGRATION_FLAG
+#: §11.3 任务票的形状（``P281-B1-1`` / ``P281-B1b-2``）：A7-11 的窗判据用。
+TASK_TICKET = re.compile(r"^(?P<prefix>P281-B1b?)-\d+$")
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +92,35 @@ def _call_rows(ledger_path: Path) -> "list[dict]":
     return [r for r in ql.read_lines(ledger_path)
             if isinstance(r.get("seq"), int) and not isinstance(r.get("seq"), bool)
             and r.get("event") == "call"]
+
+
+def _task_ticket_batches(calls: "list[dict]") -> "list[str] | None":
+    """本轮计费窗（**锁内适配 A7-11**，与 A7-9 的分析器口径同一条）。
+
+    账本是 append-only 单文件：首轮的 34 行不会消失。§11.6 的活产物车道按
+    「一份 Pilot 账」写（≤60 呼、逐 Task ≤20），在重跑批之后直接读全账本会把
+    两轮相加（63 > 60、task1 22 > 20）判成越帽——那是**口径错误**，不是越帽。
+
+    判定不靠任何产物自述：看账本**最后一行**挂的 `batch_id`。
+    形如 ``<prefix>-<task_no>``（§11.3 的任务票）⇒ 本轮 = 同前缀三张票；
+    形如 ``<trial_id>``（首轮口径）或空账本 ⇒ ``None``，即全账本。
+    """
+    if not calls:
+        return None
+    m = TASK_TICKET.match(str(calls[-1].get("batch_id") or ""))
+    if not m:
+        return None
+    return [f"{m.group(1)}-{n}" for n in (1, 2, 3)]
+
+
+def _round_calls(ledger_path: Path) -> "tuple[list[dict], list[dict], list[str] | None]":
+    """``(全账本 call 行, 本轮 call 行, 本轮批次列表)``。"""
+    calls = _call_rows(ledger_path)
+    window = _task_ticket_batches(calls)
+    if window is None:
+        return calls, calls, None
+    keep = set(window)
+    return calls, [r for r in calls if r.get("batch_id") in keep], window
 
 
 def _write_trial(root: Path, task_id: str, arm_id: str, rep: int, *,
@@ -551,9 +590,9 @@ def test_ac_p281_7_01_approval_mapping_live():
     """
     root = _live_root()
     rows = ql.read_lines(_live_ledger())
-    calls = _call_rows(_live_ledger())
-    per_task = {}
-    for r in calls:
+    all_calls, calls, window = _round_calls(_live_ledger())
+    # 映射面是**全账本**性质：每一行（首轮 + 重跑批）的批准件都得真的在
+    for r in all_calls:
         ref = r.get("approval_ref")
         assert ref, f"seq {r.get('seq')} 没有 approval_ref"
         path = root / ref
@@ -562,11 +601,17 @@ def test_ac_p281_7_01_approval_mapping_live():
         assert doc.get("batch_id") == r.get("batch_id"), (doc.get("batch_id"), r)
         assert doc.get("approved") == r.get("batch_approved"), (doc, r)
         assert isinstance(doc.get("approved"), int) and not isinstance(doc.get("approved"), bool)
+    # A7-11：帽是**逐轮**的（每轮三张任务票各 20）⇒ 按本轮窗计
+    per_task = {}
+    for r in calls:
         per_task[r.get("task")] = per_task.get(r.get("task"), 0) + 1
     assert sum(per_task.values()) == len(calls)
     for task_no, used in per_task.items():
-        assert used <= PILOT_APPROVED_PER_TASK, (task_no, used)
-    assert len([r for r in rows if r.get("event") == "call"]) == len(calls)
+        assert used <= PILOT_APPROVED_PER_TASK, (task_no, used, window)
+    assert len(calls) <= PILOT_TOTAL, (len(calls), window)
+    # 全账本另受 Phase 硬帽约束（180，独立字面量），两轮相加也不许越
+    assert len(all_calls) <= constants.HARD_CAP, len(all_calls)
+    assert len([r for r in rows if r.get("event") == "call"]) == len(all_calls)
 
 
 def test_a7_7_gateway_single_attempt():
@@ -693,10 +738,15 @@ def test_ac_p281_7_01_approval_present_live():
 def test_ac_p281_7_03_ledger_shape_live():
     rows = ql.read_lines(_live_ledger())
     ql.validate_ledger_rows(rows, allow_events=("selfcheck",))
-    calls = _call_rows(_live_ledger())
-    assert len(calls) <= PILOT_TOTAL, f"Pilot 实呼 {len(calls)} > 60（STOP-12）"
+    # A7-11：≤60 是**逐轮**（§11.5 的 Pilot 帽），按本轮窗计；seq 连续性对全账本。
+    all_calls, calls, window = _round_calls(_live_ledger())
+    assert len(calls) <= PILOT_TOTAL, f"本轮实呼 {len(calls)} > 60（STOP-12，窗={window}）"
+    assert len(all_calls) <= constants.HARD_CAP, len(all_calls)
     snap = analysis.ledger_snapshot(_live_ledger())
     assert snap["gaps"] == [], f"seq 断号：{snap['gaps']}（STOP-09）"
+    if window is not None:
+        seqs = [int(r["seq"]) for r in calls]
+        assert sorted(seqs) == list(range(min(seqs), max(seqs) + 1)), (window, seqs)
 
 
 @pytest.mark.kb_integration
@@ -712,29 +762,49 @@ def test_ac_p281_7_04_all_terminal_live():
 @pytest.mark.kb_integration
 def test_ac_p281_7_05_per_trial_cap_live():
     root = _live_root()
-    calls = _call_rows(_live_ledger())
+    # A7-11：`observed.calls` 是「该 Trial **最后一次运行**的计费身份」下的行数。
+    # 两种身份都必须在场且只能二选一，不许用「任一相等即过」的或门糊过去：
+    #   * 本轮跑过（窗内有行）⇒ 必须等于**窗内**该 thread 的行数（A7-10 的语义）；
+    #   * 本轮没跑（窗内 0 行、`finished_at` 早于窗首行）⇒ 必须等于它首轮身份
+    #     （`batch_id == trial_id`）的行数 —— 那是 A7-10 修复前的记账口径，
+    #     旧产物**不回溯重算**（改了就是伪造观测）。
+    all_calls, calls, window = _round_calls(_live_ledger())
+    window_start = min((str(r.get("ts_iso") or "") for r in calls), default="")
     for row in analysis.collect_trials(root):
         trial = json.loads((Path(row["trial_dir"]) / "trial.json").read_text(encoding="utf-8"))
         observed = int((trial.get("observed") or {}).get("calls") or 0)
-        assert observed <= constants.CALL_CAP_PER_TRIAL, f"{row['trial_id']} 超单 Trial 帽"
-        mine = [r for r in calls if r.get("thread_id") == row["trial_id"]]
-        assert len(mine) == observed, (
-            f"{row['trial_id']}：observed.calls={observed} 与账本 "
-            f"thread_id 行数 {len(mine)} 不等")
-        assert trial.get("used_calls") == observed, row["trial_id"]
+        tid = str(row["trial_id"])
+        assert observed <= constants.CALL_CAP_PER_TRIAL, f"{tid} 超单 Trial 帽"
+        assert trial.get("used_calls") == observed, tid
+        mine = [r for r in calls if r.get("thread_id") == tid]
+        if mine:
+            assert len(mine) == observed, (
+                f"{tid}：observed.calls={observed} 与窗内 thread 行数 {len(mine)} 不等"
+                f"（窗={window}）")
+            continue
+        if observed == 0:
+            continue                      # 没自报花钱 ⇒ 无钱可对
+        assert str(trial.get("finished_at") or "") < window_start, (
+            f"{tid}：本轮（窗首 {window_start}）跑过却没有一行账——票号没贯通或窗选错")
+        legacy = [r for r in all_calls if r.get("thread_id") == tid
+                  and r.get("batch_id") == tid]
+        assert len(legacy) == observed, (
+            f"{tid}：本轮未跑，observed.calls={observed} 与首轮身份"
+            f"（batch_id==trial_id）行数 {len(legacy)} 不等")
 
 
 @pytest.mark.kb_integration
 def test_ac_p281_7_06_task_cap_live():
     root = _live_root()
-    calls = _call_rows(_live_ledger())
+    all_calls, calls, window = _round_calls(_live_ledger())
     per_task = {}
     for task_id in constants.TASK_IDS:
         no = constants.TASK_NO_BY_ID[task_id]
         per_task[task_id] = sum(1 for r in calls
                                 if r.get("task") == no)
-        assert per_task[task_id] <= PILOT_APPROVED_PER_TASK, (task_id, per_task)
-    assert sum(per_task.values()) == len(calls) <= PILOT_TOTAL
+        assert per_task[task_id] <= PILOT_APPROVED_PER_TASK, (task_id, per_task, window)
+    assert sum(per_task.values()) == len(calls) <= PILOT_TOTAL, window
+    assert len(all_calls) <= constants.HARD_CAP, len(all_calls)
 
 
 @pytest.mark.kb_integration
@@ -760,6 +830,36 @@ def test_ac_p281_7_08_rule_reproducible_live():
     doc = json.loads((root / "analysis" / "pilot_report.json").read_text(encoding="utf-8"))
     recomputed, reasons = analysis.decide_go_no_go(doc["per_trial"])
     assert recomputed == doc["go_no_go"], (recomputed, reasons, doc["reasons"])
+
+
+@pytest.mark.kb_integration
+def test_m8_live_verdicts_match_evaluator_files():
+    """M8（2026-11-07 评审）：判决面必须**逐 Trial 与评测器产物对账**。
+
+    ``pilot_report.json`` 的 ``verdicts`` / ``per_trial[].verdict`` 只是
+    ``build_pilot_report`` 从 `<root>/evaluator_results/<task>_<arm>_rep<k>.json`
+    抄来的**自述**。只断言「6 个键都在」（旧活产物用例的全部口径）等于信报告；
+    报告与评测器一旦错位（评测器后补跑、手改报告、串任务/臂），判决面照旧绿。
+    本用例**不信报告**：独立再读那 6 份评测器产物，逐 Trial 比 verdict、比路径。
+    """
+    root = _live_root()
+    doc = json.loads((root / "analysis" / "pilot_report.json").read_text(encoding="utf-8"))
+    rows = doc["per_trial"]
+    assert len(rows) == 6, len(rows)
+    assert set(doc["verdicts"]) == {str(r["trial_id"]) for r in rows}
+    for row in rows:
+        tid = str(row["trial_id"])
+        path = analysis.evaluator_result_path(
+            root, row["task_id"], row["arm_id"], int(row["rep"]))
+        assert path.is_file(), f"{tid} 缺评测器产物 {path}"
+        assert str(row["evaluator_path"]) == str(path), (tid, row["evaluator_path"], path)
+        # 直接读件（不用 analysis.read_json 的「坏件→None」宽容口径）
+        evaluation = json.loads(path.read_text(encoding="utf-8"))
+        assert doc["verdicts"][tid] == evaluation.get("verdict"), (
+            f"{tid}：报告 verdicts={doc['verdicts'][tid]!r} 与 {path.name} "
+            f"verdict={evaluation.get('verdict')!r} 不一致")
+        assert row.get("verdict") == evaluation.get("verdict"), (
+            f"{tid}：per_trial.verdict={row.get('verdict')!r} 与 {path.name} 不一致")
 
 
 @pytest.mark.kb_integration
@@ -1028,3 +1128,55 @@ def test_m2_m3_m7_driver_review_guards():
 
     # M7：冻结臂序给出的 Trial 数必须恰好 6，少一个就拒跑
     assert '[ "$planned" -ne 6 ]' in body
+
+
+# ---------------------------------------------------------------------------
+# A7-11：活产物车道的**逐轮**口径（2026-11-07 重跑批之后）
+# ---------------------------------------------------------------------------
+
+def _ticket_ledger(path: Path) -> None:
+    """两轮的真实形状：首轮 ``batch_id == trial_id``，重跑批 ``P281-B1b-<task>``。"""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"seq": 1, "event": "call", "ok": True, "ts_iso": "2026-11-07T06:00:00Z",
+         "batch_id": "mujoco_contact_push_v1__agentic_v1__rep0", "task": 1,
+         "thread_id": "mujoco_contact_push_v1__agentic_v1__rep0"},
+        {"seq": 2, "event": "call", "ok": True, "ts_iso": "2026-11-07T09:10:00Z",
+         "batch_id": "P281-B1b-1", "task": 1,
+         "thread_id": "mujoco_contact_push_v1__agentic_v1__rep0"},
+        {"seq": 3, "event": "call", "ok": True, "ts_iso": "2026-11-07T09:10:01Z",
+         "batch_id": "P281-B1b-2", "task": 2,
+         "thread_id": "libero_env_adapter_v1__agentic_v1__rep0"},
+    ]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_a7_11_round_window_uses_last_row_batch(tmp_path):
+    """窗判据只看账本**最后一行**的批次名，不读任何产物自述。"""
+    p = tmp_path / "quota" / "ledger.jsonl"
+    _ticket_ledger(p)
+    all_calls, calls, window = _round_calls(p)
+    assert len(all_calls) == 3
+    assert window == ["P281-B1b-1", "P281-B1b-2", "P281-B1b-3"]
+    assert [r["seq"] for r in calls] == [2, 3]        # 窗内两行
+
+
+def test_a7_11_round_window_none_for_first_round_shape(tmp_path):
+    """首轮口径（`batch_id == trial_id`）⇒ 窗 = ``None``（全账本），语义不变。"""
+    p = tmp_path / "quota" / "ledger.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"seq": 1, "event": "call", "ok": True,
+                             "ts_iso": "2026-11-07T06:00:00Z",
+                             "batch_id": "icy_ground_dr_v1__legacy_v1__rep0",
+                             "thread_id": "icy_ground_dr_v1__legacy_v1__rep0"}) + "\n",
+                 encoding="utf-8")
+    all_calls, calls, window = _round_calls(p)
+    assert window is None
+    assert calls == all_calls and len(calls) == 1
+
+
+def test_a7_11_trial_id_is_not_mistaken_for_a_task_ticket():
+    """`trial_id` 形如 `task__arm__rep0`，绝不能匹配成 `P281-B1b-<n>` 票。"""
+    assert TASK_TICKET.match("P281-B1-1")
+    assert TASK_TICKET.match("P281-B1b-3")
+    assert TASK_TICKET.match("mujoco_contact_push_v1__agentic_v1__rep0") is None
