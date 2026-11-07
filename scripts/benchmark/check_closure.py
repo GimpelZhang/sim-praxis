@@ -67,6 +67,14 @@ AUTHORIZED_PUSH_HEADS = (
     # 经人工 STOP 门推送至 origin/main，远端基线由此前移。不加这一项，
     # 本阶段第一笔提交之后 test_inv_i10_no_push 会**按设计**恒红（计划 F13）。
     "82a142710127367b0a771d818192321b53e2e951",
+    # *锁内适配*（Phase 2.8.1 P281-9，2026-11-07 推送窗口）：用户在 P281-7
+    # 复核四项裁决里逐字指示「四：推」，T7 评审修复批 16 提交
+    # （``82a1427..065231b``）经人工 STOP 门推送至 origin/main，远端再次前移。
+    # 计划 §16.2 / L2603 把「``AUTHORIZED_PUSH_HEADS`` 追加一个经门推送头（附
+    # 推送窗口注释）」明确列为允许的追加项，是同 ``5895fe0``/``82a1427`` 的先例。
+    # 不加这一项，P281-9 的第一笔提交之后 ``test_inv_i10_no_push`` 与
+    # ``P281-0 AC-01 F2``（origin/main 精确集合）都会按设计恒红。
+    "065231bfdab2a37d70bbf7d9516e3c92e43d78a1",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")

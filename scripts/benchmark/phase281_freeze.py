@@ -113,6 +113,14 @@ _VOLATILE_BY_ARTIFACT = {
         # Task 起恒 rc=1。HEAD 只许**前进**这一条真正的判据由
         # `test_ac_p281_0_01`（merge-base --is-ancestor）承担，不靠这里。
         "head",
+        # *锁内适配*（Phase 2.8.1 P281-9，2026-11-07 推送窗口）：``origin_main``
+        # 开工时点记的是 ``82a1427``（2026-11-06 窗口落点）。用户在 P281-7 复核
+        # 裁决里逐字指示「四：推」，T7 评审修复批已推送至 origin/main（``065231b``），
+        # 这一键必然逐字不等。与同处 ``head`` 的处理**同一条理由**：开工快照是
+        # 历史事实，留档即可；「origin/main 只许沿人工推送窗口前进」这条真判据由
+        # ``test_ac_p281_0_01`` 承担（它按 ``AUTHORIZED_PUSH_HEADS`` 精确集合放行，
+        # 集合外仍红），不靠这里。
+        "origin_main",
         "status_short_branch", "status_porcelain", "status_porcelain_raw",
         "status_porcelain_excluded", "status_porcelain_excluded_count",
         "ahead", "diff_stat",

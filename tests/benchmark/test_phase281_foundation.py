@@ -104,6 +104,33 @@ def _mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+#: F2 的放行集合 = 基线 ∪ ``check_closure.AUTHORIZED_PUSH_HEADS``（精确集合，
+#: 与 P281-0 修 F13 时同一份名单，不另立字面量）。
+def _origin_allowlist() -> "tuple[str, ...]":
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "benchmark"))
+    import check_closure  # noqa: PLC0415
+
+    return tuple(dict.fromkeys((BASELINE_HEAD,) + tuple(
+        check_closure.AUTHORIZED_PUSH_HEADS)))
+
+
+def _origin_problems(origin: str, *, allow: "tuple[str, ...] | None" = None,
+                     base: str = BASELINE_HEAD) -> "list[str]":
+    """F2 的判据本体（纯函数，便于负例对照）。
+
+    ① 必须是 40 hex；② 必须落在放行集合里；③ 基线必须是它的祖先（只许前进）。
+    """
+    allow = _origin_allowlist() if allow is None else tuple(allow)
+    problems: "list[str]" = []
+    if len(origin) != 40 or any(c not in "0123456789abcdef" for c in origin):
+        problems.append(f"origin/main 非 40 hex：{origin!r}")
+    if origin not in allow:
+        problems.append(f"origin/main {origin} 不在放行集合（基线∪已登记推送头）里")
+    if _git("merge-base", "--is-ancestor", base, origin).returncode != 0:
+        problems.append(f"基线 {base} 不是 origin/main {origin} 的祖先（历史被改写？）")
+    return problems
+
+
 @pytest.fixture()
 def p281_roots(tmp_path, monkeypatch):
     """六根全部指 tmp（conftest 只接管 phase2；这里补全其余五根）。"""
@@ -124,9 +151,20 @@ def p281_roots(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_ac_p281_0_01_repo_matches_baseline():
+    # F2：``origin/main`` 只许停在「基线」或**经人工 STOP 门记录在案**的推送头
+    # 上，且基线必须是它的祖先（只许前进，不许改写已推历史）。
+    #
+    # *锁内适配*（2026-11-07 推送窗口）：F2 的原文是「本阶段不推送，故它不许
+    # 移动」。用户在 P281-7 复核四项裁决里逐字指示「四：推」，T7 评审修复批
+    # 16 提交（``82a1427..065231b``）已随人工 STOP 门推送到 origin/main——
+    # 前提被**有据地**打破，而不是漂移。放行机制与 P281-0 自己修 F13 时用的
+    # 是同一份精确集合（``check_closure.AUTHORIZED_PUSH_HEADS``，计划 §16.2
+    # 允许的追加项），集合外的 sha 仍判红（见下方负例）。
     origin = _git("rev-parse", "origin/main").stdout.strip()
-    # F2：origin/main 逐字等于基线（本阶段不推送，故它不许移动）。
-    assert origin == BASELINE_HEAD, f"origin/main 已偏离基线：{origin}"
+    assert _origin_problems(origin) == [], _origin_problems(origin)
+    # 负例（不放水对照）：集合外的 sha 与「往回退到基线之前」都必须判红。
+    assert _origin_problems("0" * 40) != []
+    assert _origin_problems("4b5d134a447b2069b050887d63f3ddd4e687f123") != []
 
     head = _git("rev-parse", "HEAD").stdout.strip()
     # F1：HEAD 是基线本身（提交前）或它的后代（提交后）——已推历史永不改写。
