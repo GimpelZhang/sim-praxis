@@ -49,6 +49,8 @@ HOLD_BLOCKED_INFRA = 2
 TERMINAL_STATUSES = ("FINISHED", "CAP_HIT", "BLOCKED_INFRA", "CRASHED")
 #: 探针判据：显存上限（硬规则 5）
 GPU_LIMIT_MIB = 200
+#: G281-2 子进程上限（register --verify 只做本地文件哈希，正常 < 5s）
+REGISTER_TIMEOUT_S = 120
 
 TRIAL_JSON = "trial.json"
 
@@ -243,14 +245,60 @@ def env_probe() -> "dict[str, Any]":
     return out
 
 
+def register_verify(*, lock: "str | Path | None" = None) -> "dict[str, Any]":
+    """跑 ``phase281_register.py --verify``（G281-2 的数据源；0 付费、只读）。
+
+    只在 CLI 显式 ``--verify-register`` 时调用——与 :func:`env_probe` 同一条纪律：
+    汇总函数保持纯函数，单测不必依赖仓内 LOCK 的当前状态。
+
+    逐条纪律（§12.2：「G281-1..5 是机判门……可复算、不留给判断空间」）：
+
+    * 闸判据是**子进程 rc == 0**（register CLI 的既有裁判：有问题 rc=2 且 stderr
+      逐条打印 ``[verify] PROBLEM …``），不看 stdout 自述；
+    * 跑不起来（解释器缺失/超时/脚本不在场）一律 ``ok=None`` + ``error``，
+      **不**当通过——「没看见」不是「没问题」（同 A7-4 的 compose rc 口径）；
+    * ``--lock`` 缺省交给 register 自己（与用户批准 LOCK ``f36695ec`` 同一根）。
+    """
+    import subprocess
+
+    cmd = [sys.executable, "-I",
+           str(REPO_ROOT / "scripts" / "benchmark" / "phase281_register.py"),
+           "--verify"]
+    if lock is not None:
+        cmd += ["--lock", str(lock)]
+    out: "dict[str, Any]" = {"cmd": cmd}
+    try:
+        proc = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True,
+                              text=True, timeout=REGISTER_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        out.update({"ok": None, "rc": None, "problems": [],
+                    "error": f"{type(exc).__name__}: {exc}"})
+        return out
+    problems = [ln.strip() for ln in proc.stderr.splitlines() if "PROBLEM" in ln]
+    out.update({"ok": proc.returncode == 0, "rc": proc.returncode,
+                "problems": problems,
+                "stdout_tail": proc.stdout.strip()[-400:]})
+    return out
+
+
 def five_gates(*, go_no_go: str, stop_open: Sequence[str], ledger: Mapping[str, Any],
-               env: "Mapping[str, Any] | None") -> dict:
+               env: "Mapping[str, Any] | None",
+               register: "Mapping[str, Any] | None" = None) -> dict:
     """G281-1..5 的快照（``ok`` 为 ``None`` 表示「本次未探测」，不冒充通过）。"""
     calls = int(ledger["summary"].get("call_rows") or 0)
+    if register is None:
+        g281_2 = {"ok": None, "detail": "未探测（CLI 加 --verify-register 才有值）"}
+    elif register.get("ok") is None:
+        g281_2 = {"ok": None, "rc": register.get("rc"),
+                  "detail": f"跑不起来：{register.get('error')}"}
+    else:
+        g281_2 = {"ok": register.get("ok") is True,
+                  "rc": register.get("rc"),
+                  "problems": list(register.get("problems") or []),
+                  "detail": f"register --verify rc={register.get('rc')}"}
     gates: "dict[str, Any]" = {
         "g281_1": {"ok": go_no_go == "GO", "detail": f"go_no_go={go_no_go}"},
-        "g281_2": {"ok": None, "detail": "LOCK --verify 由 phase281_register.py 判，"
-                                        "本快照不代判"},
+        "g281_2": g281_2,
         "g281_3": {"ok": calls <= PILOT_CALL_CAP and _seq_contiguous(ledger["seqs"]),
                    "detail": f"calls={calls}<= {PILOT_CALL_CAP}, "
                              f"seq_contiguous={_seq_contiguous(ledger['seqs'])}"},
@@ -281,6 +329,7 @@ def _now_iso() -> str:
 
 def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
                        env: "Mapping[str, Any] | None" = None,
+                       register: "Mapping[str, Any] | None" = None,
                        now: "str | None" = None) -> dict:
     """产出 ``pilot_report.json`` 的完整文档（字段集**恰为** :data:`REPORT_FIELDS`）。"""
     from orchestrator.benchmark.phase281 import paths
@@ -325,7 +374,7 @@ def build_pilot_report(root: Path, *, rep: int = PILOT_REP,
         "reasons": reasons,
         "stop_open": stop_open,
         "five_gates": five_gates(go_no_go=go_no_go, stop_open=stop_open,
-                                 ledger=ledger, env=env),
+                                 ledger=ledger, env=env, register=register),
     }
     assert frozenset(report) == REPORT_FIELDS, sorted(report)
     return report
@@ -357,6 +406,10 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--rep", type=int, default=PILOT_REP)
     ap.add_argument("--probe-env", action="store_true",
                     help="同时探测容器/显存（G281-5 / STOP-16 的数据源）")
+    ap.add_argument("--verify-register", action="store_true",
+                    help="同时跑 phase281_register.py --verify（G281-2 的数据源）")
+    ap.add_argument("--lock", default=None,
+                    help="--verify-register 的 LOCK 路径（缺省交给 register 自己）")
     return ap
 
 
@@ -366,7 +419,8 @@ def main(argv: "Iterable[str] | None" = None) -> int:
 
     root = Path(args.root) if args.root else paths.phase281_root()
     env = env_probe() if args.probe_env else None
-    report = build_pilot_report(root, rep=int(args.rep), env=env)
+    register = (register_verify(lock=args.lock) if args.verify_register else None)
+    report = build_pilot_report(root, rep=int(args.rep), env=env, register=register)
     target = write_report(report, Path(args.out))
     print(json.dumps({"out": str(target), "go_no_go": report["go_no_go"],
                       "reasons": report["reasons"],

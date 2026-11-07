@@ -330,6 +330,50 @@ def test_ac_p281_7_07_stop_open_detects(tmp_path):
     assert rep["five_gates"]["g281_4"]["ok"] is False
 
 
+def test_ac_p281_7_07_g281_2_is_a_machine_gate(tmp_path):
+    """G281-2 是 §12.2 的**机判门**：探测到就出布尔值，未探测才是 null。
+
+    「未探测 ⇒ null」不是放水，是为了让合成腿不必依赖仓内 LOCK 的当前状态；
+    但**探测到 rc!=0 必须 ok=False**——否则 LOCK 被改动会静默通过。
+    """
+    _fill_all(tmp_path)
+    # 未探测：null（且不许冒充通过）
+    rep = analysis.build_pilot_report(tmp_path, now="2026-11-07T00:00:00Z")
+    assert rep["five_gates"]["g281_2"]["ok"] is None
+    # 通过
+    rep = analysis.build_pilot_report(
+        tmp_path, now="2026-11-07T00:00:00Z",
+        register={"ok": True, "rc": 0, "problems": []})
+    assert rep["five_gates"]["g281_2"]["ok"] is True
+    # 不通过：rc=2 + problems 必须传进报告
+    rep = analysis.build_pilot_report(
+        tmp_path, now="2026-11-07T00:00:00Z",
+        register={"ok": False, "rc": 2, "problems": ["[verify] PROBLEM LOCK 不在场"]})
+    assert rep["five_gates"]["g281_2"]["ok"] is False
+    assert rep["five_gates"]["g281_2"]["rc"] == 2
+    assert rep["five_gates"]["g281_2"]["problems"]
+    # 跑不起来：null（不是 True，也不是 False 的谎）
+    rep = analysis.build_pilot_report(
+        tmp_path, now="2026-11-07T00:00:00Z",
+        register={"ok": None, "rc": None, "problems": [],
+                  "error": "FileNotFoundError: python"})
+    assert rep["five_gates"]["g281_2"]["ok"] is None
+
+
+def test_ac_p281_7_07_register_verify_real(tmp_path):
+    """真调一次 register --verify（0 付费）并断言它给出了布尔结论。
+
+    不给 LOCK 路径时由 register 自己解析（与用户批准的 LOCK 同一根）；这里只
+    要求「能跑且有 rc」，不写死 0——通过与否由活产物用例对**生产 LOCK**判。
+    """
+    got = analysis.register_verify()
+    assert got["ok"] is not None, got
+    assert isinstance(got["rc"], int)
+    assert got["ok"] is (got["rc"] == 0)
+    # 探针必须是只读的：再跑一次结果不变（幂等）
+    assert analysis.register_verify()["rc"] == got["rc"]
+
+
 def test_driver_script_is_thin_and_checks_prereqs():
     """驱动器是薄壳：只调已冻结的入口，不自写判据；缺前置件即拒。"""
     script = Path(__file__).resolve().parents[2] / "scripts" / "benchmark" / "phase281_pilot_driver.sh"
@@ -344,6 +388,8 @@ def test_driver_script_is_thin_and_checks_prereqs():
     # 必须真的调这两个入口（否则「跑过」是空转）
     assert "phase281_run_trial.py" in body and "phase281_evaluate.py" in body
     assert "phase281.analysis" in body
+    # G281-2 由分析器实跑登记（§12.2 的机判门，不许留 null 给读者猜）
+    assert "--verify-register" in body
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +474,9 @@ def test_ac_p281_7_07_pilot_report_live():
     assert isinstance(doc["stop_open"], list)
     assert STRICT_Z.match(doc["generated_at"]), doc["generated_at"]
     assert len(doc["per_trial"]) == 6
+    # G281-2 是机判门（§12.2）：活报告必须**有布尔值**，不能是 null
+    g2 = (doc.get("five_gates") or {}).get("g281_2") or {}
+    assert g2.get("ok") is True, f"G281-2 未通过或未探测：{g2}"
 
 
 @pytest.mark.kb_integration

@@ -99,9 +99,12 @@ for td in "$ROOT"/runs/*/*/rep"$REP"/; do
 done
 
 # --- 5) Pilot 分析 + go/no-go（0 付费；§11.5 规则，可复算） --------------------
+# `--verify-register` 让 G281-2（LOCK --verify rc==0）由分析器实跑一次登记进
+# pilot_report.five_gates，而不是留 null 让读者去猜（§12.2 把它列为**机判门**）。
 log "分析：pilot_report.json"
 "$PY" -m orchestrator.benchmark.phase281.analysis --stage pilot \
-  --root "$ROOT" --out "$ROOT/analysis/pilot_report.json" --probe-env
+  --root "$ROOT" --out "$ROOT/analysis/pilot_report.json" \
+  --probe-env --verify-register
 
 # --- 6) 收尾：容器清干净、显存回基线（硬规则 5） ------------------------------
 # 锁内适配 A7-4：本仓 compose 件在 sandbox/docker-compose.yml，仓库根 `docker compose`
