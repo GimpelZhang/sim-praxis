@@ -78,6 +78,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--probe-run-form", action="store_true",
                     help="只跑运行形态探针并写 analysis/run_form_probe.json")
     ap.add_argument("--json", action="store_true", help="以 JSON 打印终态")
+    ap.add_argument("--batch", default=None,
+                    help="计费批量身份（计划 §11.3 的任务票，如 P281-B1b-1）；"
+                         "缺省按 trial_id 记（首轮口径）")
     return ap
 
 
@@ -151,8 +154,13 @@ def _gateway(ledger: Any) -> Any:
 
 
 def run(*, task_id: str, arm_id: str, rep: int, root: Path,
-        dry_run: bool, gateway=None, ledger=None, **kwargs) -> trial_harness.TrialOutcome:
-    """调流水线跑一个 Trial（本函数可被测试直接调用，不起 CLI 解析）。"""
+        dry_run: bool, gateway=None, ledger=None, batch_id=None,
+        **kwargs) -> trial_harness.TrialOutcome:
+    """调流水线跑一个 Trial（本函数可被测试直接调用，不起 CLI 解析）。
+
+    ``batch_id``：计费批量身份。缺省 ``None`` ⇒ harness 用 ``trial_id``（P281-7
+    首轮口径）；传任务票（``P281-B1b-<n>``）⇒ 按计划 §11.3 记（锁内适配 A7-8）。
+    """
     _guard_paid(dry_run)
     spec = candidate_birth.load_task(task_id)
     if not dry_run and (gateway is None or ledger is None):
@@ -164,7 +172,8 @@ def run(*, task_id: str, arm_id: str, rep: int, root: Path,
                                    root=Path(root), gateway=gateway,
                                    ledger=ledger if ledger is not None
                                    else paths.ledger_path(),
-                                   dry_run=bool(dry_run), **kwargs)
+                                   dry_run=bool(dry_run),
+                                   batch_id=batch_id, **kwargs)
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -185,7 +194,8 @@ def main(argv: "list[str] | None" = None) -> int:
         if not args.arm:
             raise CliError("缺 --arm：真实运行与干跑都必须指定实验臂（--probe-run-form 除外）")
         outcome = run(task_id=args.task, arm_id=args.arm, rep=args.rep,
-                      root=root, dry_run=bool(args.dry_run))
+                      root=root, dry_run=bool(args.dry_run),
+                      batch_id=args.batch)
     except CliError as exc:
         print(f"[phase281-run-trial] {exc}", file=sys.stderr)
         return 2

@@ -22,8 +22,15 @@
 set -euo pipefail
 
 ROOT="${1:-}"
+# 第二个参数：计费批量身份前缀。
+#   trial_id  —— 缺省，首轮（2026-11-07 run）的实际口径：逐 Trial 批准件
+#                `<trial_id>.json`，`batch_id = trial_id`（偏差 D3，登记在案）。
+#   P281-B1b  —— 重跑批：按计划 §11.3 的任务票记，`batch_id = <prefix>-<task_no>`。
+# 传前缀时脚本会**先检查该前缀的三张任务票在场**（「先写再跑」），不代写。
+BATCH_PREFIX="${2:-trial_id}"
 if [ -z "$ROOT" ]; then
-  echo "用法: $0 <data-root>   （例: /mnt/artifacts/simpraxis/phase281）" >&2
+  echo "用法: $0 <data-root> [batch-prefix]" >&2
+  echo "  例: $0 /mnt/artifacts/simpraxis/phase281 P281-B1b" >&2
   exit 2
 fi
 
@@ -44,12 +51,18 @@ if [ "${SIMPRAXIS_ALLOW_PAID:-}" != "1" ]; then
   log "拒绝开跑：真实 Trial 会经网关计费，请显式 SIMPRAXIS_ALLOW_PAID=1"
   exit 3
 fi
-# 前置断言：三张任务票必须在场（§11.3 原案）。**注意 D3**：当前链路的计费批量身份是
-# 逐 Trial 的（`trial_harness._ensure_approval` 自写 `<trial_id>.json`，`batch_id=trial_id`），
-# 这三张票在账本里 `batch_used=0`、不约束任何一次调用——所以这里是「按计划验件」，
-# 不是「有它就放行预算」；逐 Trial 10 呼帽由 CapGuardGateway 强制。
+# 前置断言：任务票必须在场。`trial_id` 前缀时按 §11.3 原案查 `P281-B1-{1,2,3}`
+# **注意 D3**：首轮链路的计费批量身份是逐 Trial 的（`trial_harness._ensure_approval`
+# 自写 `<trial_id>.json`，`batch_id=trial_id`），这三张票在账本里 `batch_used=0`、
+# 不约束任何一次调用——所以这里是「按计划验件」，不是「有它就放行预算」；逐 Trial
+# 10 呼帽由 CapGuardGateway 强制。重跑批传前缀（如 P281-B1b）时，票**真的**是闸。
+if [ "$BATCH_PREFIX" = "trial_id" ]; then
+  TICKET_PREFIX=P281-B1
+else
+  TICKET_PREFIX="$BATCH_PREFIX"
+fi
 for task_no in 1 2 3; do
-  approval="$ROOT/quota/approvals/P281-B1-$task_no.json"
+  approval="$ROOT/quota/approvals/$TICKET_PREFIX-$task_no.json"
   if [ ! -f "$approval" ]; then
     log "拒绝开跑：缺批准件 $approval（§11.3「先写再跑」，不给先跑后补留口子）"
     exit 3
@@ -72,7 +85,8 @@ for spec in "${TASKS[@]}"; do
 done
 
 # --- 3) 按 trial_order.json 顺序跑 6 个 Trial --------------------------------
-for spec in "${TASKS[@]}"; do
+for task_no in 1 2 3; do
+  spec="${TASKS[$((task_no - 1))]}"
   key="$spec|rep$REP"
   arms="$("$PY" -c 'import json,sys; d=json.load(open(sys.argv[1])); print(" ".join(d[sys.argv[2]]))' \
             "$ORDER" "$key")"
@@ -82,8 +96,14 @@ for spec in "${TASKS[@]}"; do
   fi
   for arm in $arms; do
     log "Trial $spec / $arm / rep$REP"
-    "$PY" -I scripts/benchmark/phase281_run_trial.py \
-      --task "$spec" --arm "$arm" --rep "$REP" --root "$ROOT" --json
+    if [ "$BATCH_PREFIX" = "trial_id" ]; then
+      "$PY" -I scripts/benchmark/phase281_run_trial.py \
+        --task "$spec" --arm "$arm" --rep "$REP" --root "$ROOT" --json
+    else
+      "$PY" -I scripts/benchmark/phase281_run_trial.py \
+        --task "$spec" --arm "$arm" --rep "$REP" --root "$ROOT" --json \
+        --batch "$TICKET_PREFIX-$task_no"
+    fi
   done
 done
 

@@ -842,6 +842,7 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
               assets_dir: "Path | None" = None,
               runner: Callable[..., Any] = subprocess.run,
               birth_runner: "Callable[..., dict] | None" = None,
+              batch_id: "str | None" = None,
               ) -> TrialOutcome:
     """跑一个 Trial。**七步顺序即纪律**（计划 §8.5.6）。"""
     from . import paths as paths_mod
@@ -857,6 +858,11 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
         raise sandbox.SandboxError(
             f"未登记的任务：{task_id!r}（{constants.TASK_IDS}）")
     trial_id = constants.trial_id(task_id, arm.arm_id, rep)
+    #: 计费批量身份（硬规则 2）。缺省 = ``trial_id``（P281-7 首轮的实际口径）；
+    #: 显式传入时按计划 §11.3 的任务票记（``P281-B1-<n>`` / ``P281-B1b-<n>``），
+    #: 锁内适配 A7-8：D3 把「批量身份与 §11.3 不一致」登记为偏差，本参数是
+    #: 重跑批次把它对齐到计划口径的最小实现——不传则行为与首轮逐字相同。
+    bill_batch = str(batch_id) if batch_id else trial_id
     root = Path(root)
     base = root / "runs" / task_id / arm.arm_id / f"rep{rep}"
 
@@ -887,6 +893,9 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
         "seed": {"pair_index": pair_index(rep), "hex": seed_hex, "int": seed},
         "arm": arm.to_json(),
         "config_digest": arm_adapter.arm_config_digest(arm),
+        "billing": {"batch_id": bill_batch,
+                    "batch_source": "task_ticket" if bill_batch != trial_id
+                                    else "trial_id"},
         "problems": [],
         "created_at": _now(),
     }
@@ -1023,7 +1032,7 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
              if dry_run else gateway)
     guarded = telemetry.CapGuardGateway(inner, budget)
     if not dry_run:
-        _ensure_approval(ledger, trial_id=trial_id, arm=arm)
+        _ensure_approval(ledger, trial_id=trial_id, arm=arm, batch_id=bill_batch)
 
     watch = BirthWatch(workdir / _entry_rel(spec))
     ctx = TrialContext(
@@ -1042,7 +1051,7 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
     engine_result: dict = {}
     try:
         with billing_context(task=constants.TASK_NO_BY_ID[task_id],
-                             batch_id=trial_id, thread_id=trial_id):
+                             batch_id=bill_batch, thread_id=trial_id):
             engine_result = dict(engine_runner(arm, ctx) or {})
         status = "FINISHED"
     except BaseException as exc:                     # noqa: BLE001 - 终态映射
@@ -1203,21 +1212,27 @@ def _invocation(spec: Any, *, seed: int) -> "tuple[list[str], str, dict]":
 
 
 def _ensure_approval(ledger: Any, *, trial_id: str,
-                     arm: arm_adapter.ArmSpec) -> None:
-    """批次凭据（硬规则 2：逐批落 ``quota/approvals/``）。已存在则不重开。"""
+                     arm: arm_adapter.ArmSpec,
+                     batch_id: "str | None" = None) -> None:
+    """批次凭据（硬规则 2：逐批落 ``quota/approvals/``）。已存在则不重开。
+
+    ``batch_id`` 缺省取 ``trial_id``（首轮口径）；显式传入时按该票写/查——
+    「先写再跑」不变：票若已由人预先写好（旧票或新开票），这里**只检查不覆盖**。
+    """
     from orchestrator.gateway.quota_ledger import write_approval
 
     ns = getattr(ledger, "ns", None)
     if ns is None:
         return
-    target = Path(ns.approvals_dir_fn()) / f"{trial_id}.json"
+    batch = str(batch_id) if batch_id else trial_id
+    target = Path(ns.approvals_dir_fn()) / f"{batch}.json"
     if target.exists():
         return
     task_no = int(constants.TASK_NO_BY_ID[trial_id.split("__")[0]])
-    write_approval(batch_id=trial_id, task=task_no, stage="coding_debug",
+    write_approval(batch_id=batch, task=task_no, stage="coding_debug",
                    approved=arm.call_cap, beyond_normal=False,
                    note=(f"Phase 2.8.1 Trial {trial_id}：臂 {arm.arm_id}，"
-                         f"帽 {arm.call_cap} 呼（自批，硬规则 2）"),
+                         f"帽 {arm.call_cap} 呼（自批，硬规则 2；批 {batch}）"),
                    namespace=ns)
 
 

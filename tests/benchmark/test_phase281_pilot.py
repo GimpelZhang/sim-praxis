@@ -439,6 +439,66 @@ def test_driver_script_is_thin_and_checks_prereqs():
     assert "phase281.analysis" in body
     # G281-2 由分析器实跑登记（§12.2 的机判门，不许留 null 给读者猜）
     assert "--verify-register" in body
+    # A7-8：重跑批按 §11.3 的任务票计费，驱动器必须把前缀传给 CLI
+    assert "--batch" in body and '"$TICKET_PREFIX-$task_no"' in body
+
+
+# ---------------------------------------------------------------------------
+# A7-8：计费批量身份（D3 对齐 —— trial_id ⇄ 任务票）
+# ---------------------------------------------------------------------------
+
+def test_a7_8_ensure_approval_honors_batch_id(p281_roots):
+    """票名跟着 ``batch_id`` 走；**已预写的票不覆盖**（先写再跑，不自签自跑）。
+
+    D3 的实质是「账本的批量身份与 §11.3 的任务票不一致」。A7-8 给
+    ``run_trial`` 加了可选 ``batch_id``：不传 = 首轮口径（``<trial_id>.json``），
+    传了就按票记。本用例把两条分支都钉成回归项。
+    """
+    from orchestrator.benchmark.phase281 import arm_adapter, constants, trial_harness
+
+    ledger = ql.QuotaLedger.phase281()
+    arm = arm_adapter.ARMS["agentic_v1"]
+    tid = constants.trial_id("mujoco_contact_push_v1", "agentic_v1", 0)
+    approvals = Path(ledger.ns.approvals_dir_fn())
+
+    # 分支一（首轮口径）：按 trial_id 落件，帽 = 该臂的 call_cap
+    trial_harness._ensure_approval(ledger, trial_id=tid, arm=arm)
+    doc = json.loads((approvals / f"{tid}.json").read_text(encoding="utf-8"))
+    assert doc["batch_id"] == tid and doc["approved"] == arm.call_cap
+
+    # 分支二（重跑口径）：按任务票落件；票已由人预写 → 一个字节都不许改
+    ql.write_approval(batch_id="P281-B1b-1", task=1, stage=STAGE,
+                      approved=PILOT_APPROVED_PER_TASK, beyond_normal=False,
+                      note="A7-8 正对照", namespace=ledger.ns)
+    pre = (approvals / "P281-B1b-1.json").read_bytes()
+    trial_harness._ensure_approval(ledger, trial_id=tid, arm=arm,
+                                   batch_id="P281-B1b-1")
+    assert (approvals / "P281-B1b-1.json").read_bytes() == pre, \
+        "已预写批准件被 harness 覆盖了（等于自签自跑）"
+    assert json.loads(pre)["approved"] == PILOT_APPROVED_PER_TASK
+
+
+def test_a7_8_run_trial_bills_via_bill_batch():
+    """结构事实：`run_trial` 的 `billing_context(...)` 用 `bill_batch`，不是硬写 trial_id。
+
+    这是 A7-8 的另一半——`_ensure_approval` 写了哪张票，账本就该挂到哪张票上；
+    两者若各写各的，会重新制造 D3（票写了但账本没引用）。用 AST 而不是跑完整
+    Trial，是因为后者要起沙盒；本用例只钉「账本批量身份取自同一个变量」。
+    """
+    import ast
+
+    src = (Path(__file__).resolve().parents[2]
+           / "orchestrator" / "benchmark" / "phase281" / "trial_harness.py")
+    tree = ast.parse(src.read_text(encoding="utf-8"))
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call)
+             and ((isinstance(n.func, ast.Name) and n.func.id == "billing_context")
+                  or (isinstance(n.func, ast.Attribute)
+                      and n.func.attr == "billing_context"))]
+    assert len(calls) == 1, f"billing_context 调用点应恰 1 处，实得 {len(calls)}"
+    kw = {k.arg: k.value for k in calls[0].keywords if k.arg}
+    assert isinstance(kw.get("batch_id"), ast.Name) and kw["batch_id"].id == "bill_batch"
+    assert isinstance(kw.get("thread_id"), ast.Name) and kw["thread_id"].id == "trial_id"
 
 
 # ---------------------------------------------------------------------------
