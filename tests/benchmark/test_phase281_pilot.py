@@ -374,6 +374,55 @@ def test_ac_p281_7_07_register_verify_real(tmp_path):
     assert analysis.register_verify()["rc"] == got["rc"]
 
 
+@pytest.mark.kb_integration
+def test_ac_p281_7_01_approval_mapping_live():
+    """账本每一行的批准件必须**真的在**且数额相符（A7-6 的审计面）。
+
+    Pilot 实际使用的是**逐 Trial 批准件**（`<trial_id>.json`，`approved=10`），
+    而不是 §11.3 写的三张 `P281-B1-*`（逐 Task 各 20，写了但账本没有一行引用）。
+    这条用例把「账本行 → 批准件」的映射钉死：以后换回逐 Task 票据时它照样成立，
+    但**没有批准件的账本行**会立刻红。
+    """
+    root = _live_root()
+    rows = ql.read_lines(_live_ledger())
+    calls = _call_rows(_live_ledger())
+    per_task = {}
+    for r in calls:
+        ref = r.get("approval_ref")
+        assert ref, f"seq {r.get('seq')} 没有 approval_ref"
+        path = root / ref
+        assert path.is_file(), f"seq {r.get('seq')} 指向不存在的批准件 {path}"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        assert doc.get("batch_id") == r.get("batch_id"), (doc.get("batch_id"), r)
+        assert doc.get("approved") == r.get("batch_approved"), (doc, r)
+        assert isinstance(doc.get("approved"), int) and not isinstance(doc.get("approved"), bool)
+        per_task[r.get("task")] = per_task.get(r.get("task"), 0) + 1
+    assert sum(per_task.values()) == len(calls)
+    for task_no, used in per_task.items():
+        assert used <= PILOT_APPROVED_PER_TASK, (task_no, used)
+    assert len([r for r in rows if r.get("event") == "call"]) == len(calls)
+
+
+def test_a7_7_gateway_single_attempt():
+    """§11.3 钉 `max_attempts=1`：真实运行的网关必须一一对应供应侧请求。
+
+    D4 登记：Pilot 曾用缺省 5（4 条空回答行各内部发了 5 次），账本只记逻辑调用；
+    本用例把「一次逻辑调用 = 一次供应侧请求」钉成回归项（A7-7）。
+    """
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "benchmark" / "phase281_run_trial.py"
+    spec = importlib.util.spec_from_file_location("_p281_run_trial_probe", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    class _FakeLedger:
+        ns = None
+
+    gw = mod._gateway(_FakeLedger())
+    assert gw.max_attempts == 1, f"§11.3 要求 max_attempts=1，实得 {gw.max_attempts}"
+
+
 def test_driver_script_is_thin_and_checks_prereqs():
     """驱动器是薄壳：只调已冻结的入口，不自写判据；缺前置件即拒。"""
     script = Path(__file__).resolve().parents[2] / "scripts" / "benchmark" / "phase281_pilot_driver.sh"

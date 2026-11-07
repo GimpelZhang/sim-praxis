@@ -44,6 +44,10 @@ if [ "${SIMPRAXIS_ALLOW_PAID:-}" != "1" ]; then
   log "拒绝开跑：真实 Trial 会经网关计费，请显式 SIMPRAXIS_ALLOW_PAID=1"
   exit 3
 fi
+# 前置断言：三张任务票必须在场（§11.3 原案）。**注意 D3**：当前链路的计费批量身份是
+# 逐 Trial 的（`trial_harness._ensure_approval` 自写 `<trial_id>.json`，`batch_id=trial_id`），
+# 这三张票在账本里 `batch_used=0`、不约束任何一次调用——所以这里是「按计划验件」，
+# 不是「有它就放行预算」；逐 Trial 10 呼帽由 CapGuardGateway 强制。
 for task_no in 1 2 3; do
   approval="$ROOT/quota/approvals/P281-B1-$task_no.json"
   if [ ! -f "$approval" ]; then

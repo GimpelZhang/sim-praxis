@@ -35,6 +35,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Any
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -136,6 +137,19 @@ def run_probe(*, task_id: str, root: Path, runner=None) -> dict:
     return doc
 
 
+def _gateway(ledger: Any) -> Any:
+    """真实运行的网关：**计划 §11.3 钉 ``max_attempts=1``**（一次逻辑调用一次供应侧请求）。
+
+    锁内适配 A7-7：本 Task 之前这里用 ``ModelGateway`` 的缺省 ``max_attempts=5``，
+    与 §11.3 那一行不符（Pilot 已按 5 跑过，见 P281-7 Complete 的 D4 登记：账本 34 行
+    是**逻辑调用**数，不bound供应侧请求数——4 条 ``EmptyResponseError`` 各在内部发了
+    5 次）。此处按计划改回 1：逻辑调用与供应侧请求一一对应，账本才兜得住预算。
+    """
+    from orchestrator.gateway.router import ModelGateway
+
+    return ModelGateway(ledger=ledger, max_attempts=1)
+
+
 def run(*, task_id: str, arm_id: str, rep: int, root: Path,
         dry_run: bool, gateway=None, ledger=None, **kwargs) -> trial_harness.TrialOutcome:
     """调流水线跑一个 Trial（本函数可被测试直接调用，不起 CLI 解析）。"""
@@ -143,10 +157,9 @@ def run(*, task_id: str, arm_id: str, rep: int, root: Path,
     spec = candidate_birth.load_task(task_id)
     if not dry_run and (gateway is None or ledger is None):
         from orchestrator.gateway.quota_ledger import QuotaLedger
-        from orchestrator.gateway.router import ModelGateway
 
         ledger = ledger if ledger is not None else QuotaLedger.phase281()
-        gateway = gateway if gateway is not None else ModelGateway(ledger=ledger)
+        gateway = gateway if gateway is not None else _gateway(ledger)
     return trial_harness.run_trial(spec=spec, arm_id=arm_id, rep=int(rep),
                                    root=Path(root), gateway=gateway,
                                    ledger=ledger if ledger is not None
