@@ -618,15 +618,508 @@ def write_report(report: Mapping[str, Any], out: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# P281-9：终局分析（18 个预注册 Trial → H1–H5 三态判决）
+# ---------------------------------------------------------------------------
+
+FINAL_REPORT_SCHEMA = "simpraxis.phase281.final_report.v1"
+#: 确认性阶段的重复编号（§13.3.2：rep 1、rep 2 才进判决；rep 0 是 Pilot）
+CONFIRMATORY_REPS = tuple(range(constants.REPS_PILOT, constants.REPS_TOTAL))
+#: 预注册 Trial 总数（3 任务 × 2 臂 × 3 重复 = 18）——**不由实际件数推出**
+PRE_REGISTERED_TRIALS = (len(constants.TASK_IDS) * len(constants.ARMS)
+                         * constants.REPS_TOTAL)
+
+#: 语义车道（用户 2026-11-07 裁决：开启；复核人 BigG / BigC）
+SEMANTIC_LANE = "enabled"
+SEMANTIC_LANE_REVIEWERS = ("BigG", "BigC")
+
+#: 终局报告字段集（AC-P281-9-01/02 的契约；多一个少一个都算漂移）
+FINAL_REPORT_FIELDS = frozenset({
+    "schema", "experiment_id", "phase", "go_no_go", "go_no_go_reasons",
+    "pre_registered_trials", "trial_counts", "trials", "hypotheses",
+    "semantic_lane", "semantic_lane_reviewers", "semantic_scores",
+    "ledger", "tables_baseline", "limitations", "disclaimer", "sources",
+})
+
+
+def _parse_ts(value: Any) -> "datetime | None":
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+
+
+def _wallclock_s(trial: Mapping[str, Any]) -> "int | None":
+    start, end = _parse_ts(trial.get("created_at")), _parse_ts(trial.get("finished_at"))
+    if start is None or end is None:
+        return None
+    return max(0, int((end - start).total_seconds()))
+
+
+def _tokens(trial: Mapping[str, Any]) -> "tuple[int, int]":
+    observed = trial.get("observed")
+    if not isinstance(observed, Mapping):
+        return 0, 0
+    return (int(observed.get("tokens_in") or 0), int(observed.get("tokens_out") or 0))
+
+
+def collect_phase_trials(root: Path) -> "list[dict[str, Any]]":
+    """18 个预注册 Trial 全表（缺件的也占一行，**不静默丢**）。
+
+    每行是 §13.3.1 的五元组＋定位字段。``birth_level`` 是**投影**：
+    harness 的出生闸只记二值（``BORN`` / ``NOT_BORN``，见
+    ``trial_harness`` 步骤④），所以 ``BORN`` ⇒ ``B4``（闸门要求跑通到底层），
+    ``NOT_BORN`` ⇒ ``None``（具体停在哪一层由 ``birth.reason`` 另行给出，
+    不在本表臆造）。§13.3.1 只用它区分「跑起来了但没达标」与「任务没跑起来」，
+    这一投影足以回答，且不会把没记录的信息编出来。
+    """
+    rows: "list[dict[str, Any]]" = []
+    for rep in range(constants.REPS_TOTAL):
+        for row in collect_trials(Path(root), rep=rep):
+            rows.append(_five_tuple(Path(root), row))
+    return rows
+
+
+def _five_tuple(root: Path, row: Mapping[str, Any]) -> dict[str, Any]:
+    from orchestrator.benchmark.phase281 import verdict as v
+
+    trial_json = read_json(Path(str(row["trial_dir"])) / TRIAL_JSON) or {}
+    birth_status = row.get("birth_status")
+    birth_level = ("B4" if str(birth_status or "") == "BORN" else None)
+    trial_verdict = str(row.get("verdict") or "")
+    present = bool(row.get("present"))
+    observed = trial_json.get("observed") if isinstance(
+        trial_json.get("observed"), Mapping) else {}
+    tokens_in, tokens_out = _tokens(trial_json)
+    return {
+        "trial_id": row["trial_id"],
+        "task_id": row["task_id"],
+        "arm_id": row["arm_id"],
+        "rep": int(row["rep"]),
+        "phase": "pilot" if int(row["rep"]) == PILOT_REP else "confirmatory",
+        "present": present,
+        "status": row.get("status"),
+        "birth_status": birth_status,
+        "birth_level": birth_level,
+        "first_birth_round": v.first_birth_round(
+            birth_status, observed.get("first_birth_round") if observed else None),
+        "verdict": trial_verdict if present else None,
+        "failure_class": (v.classify_failure(trial_verdict, birth_level)
+                          if present and trial_verdict in v.TRIAL_VERDICTS else None),
+        "used_calls": row.get("used_calls"),
+        "observed_calls": row.get("observed_calls"),
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "wallclock_s": _wallclock_s(trial_json) if present else None,
+        "trial_dir": row["trial_dir"],
+        "evaluator_path": row["evaluator_path"],
+    }
+
+
+def _ledger_tokens_by_trial(root: Path) -> "dict[str, dict[str, int]]":
+    """按 ``thread_id``（= ``trial_id``）汇总账本 tokens（H5 的唯一口径）。
+
+    读整本账、只取 ``event == "call"`` 且 ``seq`` 为整数的行；``selfcheck``
+    开账行不计。缺账本按 0 处理（终局分析不是记账证明，缺账由 judge 判红）。
+    """
+    out: "dict[str, dict[str, int]]" = {}
+    path = Path(root) / "quota" / "ledger.jsonl"
+    if not path.is_file():
+        return out
+    from orchestrator.gateway.quota_ledger import read_lines
+
+    for row in read_lines(path):
+        if row.get("event") != "call" or not isinstance(row.get("seq"), int):
+            continue
+        tid = str(row.get("thread_id") or "")
+        cell = out.setdefault(tid, {"calls": 0, "tokens_in": 0, "tokens_out": 0})
+        cell["calls"] += 1
+        cell["tokens_in"] += int(row.get("tokens_in") or 0)
+        cell["tokens_out"] += int(row.get("tokens_out") or 0)
+    return out
+
+
+def _counts(rows: "Sequence[Mapping[str, Any]]", task_id: str, arm_id: str) -> int:
+    return sum(1 for r in rows
+               if r["task_id"] == task_id and r["arm_id"] == arm_id
+               and r.get("verdict") == "PASS")
+
+
+def _rounds(rows: "Sequence[Mapping[str, Any]]", task_id: str | None,
+            arm_id: str) -> "list[int | None]":
+    return [r.get("first_birth_round") for r in rows
+            if r["arm_id"] == arm_id and (task_id is None or r["task_id"] == task_id)]
+
+
+def _token_median(rows: "Sequence[Mapping[str, Any]]", arm_id: str,
+                  ledger_tokens: Mapping[str, Mapping[str, int]]) -> float:
+    values = []
+    for r in rows:
+        if r["arm_id"] != arm_id:
+            continue
+        cell = ledger_tokens.get(str(r["trial_id"]))
+        if cell is None:
+            continue
+        values.append(float(cell["tokens_in"] + cell["tokens_out"]))
+    if not values:
+        return 0.0
+    values.sort()
+    mid = (len(values) - 1) // 2
+    return values[mid]
+
+
+def evaluate_hypotheses(rows: "Sequence[Mapping[str, Any]]",
+                        ledger_tokens: Mapping[str, Mapping[str, int]],
+                        *, semantic_lane: str = SEMANTIC_LANE,
+                        semantic_present: bool = False) -> "dict[str, dict]":
+    """§13.3.2 的机械判决：**只吃确认性 12 个 Trial**（Pilot rep0 不算）。
+
+    数据不全时的诚实处理（**不是**给结论找台阶）：
+
+    * 一个确认性 Trial 都没有 ⇒ 五个假设全判 ``INCONCLUSIVE`` +
+      ``reason_code="CONFIRMATORY_NOT_RUN"``——0 个样本没有任何方向，
+      与「n=12 打平」必须区分开，否则读者会把「没跑」读成「跑了说不清」；
+    * 有但不齐（1..11） ⇒ ``INCONCLUSIVE`` + ``CONFIRMATORY_INCOMPLETE``。
+
+    只有 12 个全在场，才逐假设调用 :mod:`verdict` 的纯函数。
+    """
+    confirmatory = [r for r in rows if r.get("phase") == "confirmatory" and r["present"]]
+    expected = (len(constants.TASK_IDS) * len(constants.ARMS)
+                * constants.REPS_CONFIRMATORY)
+    if len(confirmatory) != expected:
+        code = ("CONFIRMATORY_NOT_RUN" if not confirmatory
+                else "CONFIRMATORY_INCOMPLETE")
+        reason = (f"确认性阶段未启动：{expected} 个预注册 Trial 中在场 "
+                  f"{len(confirmatory)} 个（Pilot 判决 HOLD，§11.5 规则 2 封存）")
+        return {h: verdict_absent(h, reason=reason, code=code)
+                for h in ("H1", "H2", "H3", "H4", "H5")}
+
+    from orchestrator.benchmark.phase281 import verdict as v
+
+    short = {t["task_id"]: t["short"] for t in constants.TASK_ORDER}
+    by_short = {s: tid for tid, s in short.items()}
+
+    h1 = v.decide_h1(_counts(confirmatory, by_short["L1"], "agentic_v1"),
+                     _counts(confirmatory, by_short["L1"], "legacy_v1"))
+    h2 = v.decide_h2(v.median_rounds(_rounds(confirmatory, None, "agentic_v1")),
+                     v.median_rounds(_rounds(confirmatory, None, "legacy_v1")))
+    def _d(short_name: str) -> int:
+        tid = by_short[short_name]
+        return (_counts(confirmatory, tid, "agentic_v1")
+                - _counts(confirmatory, tid, "legacy_v1"))
+    h3 = v.decide_h3(_d("M1"), _d("L1"))
+    # R1 的结构分：评测器目前只给 verdict，没有连续分；用 PASS=1/其它=0 的
+    # 指示函数代替会把「结构分」偷换成「通过率」——故这里如实记**结构分缺席**
+    # （structure_present=False），H4 因此一律落 INCONCLUSIVE。
+    # 锁内适配：旧写法把缺分写成 0.0 vs 0.0，在 decide_h4 里会变成「不劣」从而
+    # 骗出 CAPABILITY_DEMONSTRATED；缺分与 0 分不是一回事。
+    h4 = v.decide_h4(structure_worse_reps=(), structure_agentic_median=0.0,
+                     structure_legacy_median=0.0, structure_present=False,
+                     semantic_lane=semantic_lane,
+                     semantic_present=bool(semantic_present))
+    h5 = v.decide_h5(_token_median(confirmatory, "agentic_v1", ledger_tokens),
+                     _token_median(confirmatory, "legacy_v1", ledger_tokens))
+    return {h["id"]: h for h in (h1, h2, h3, h4, h5)}
+
+
+def verdict_absent(hypothesis_id: str, *, reason: str, code: str) -> dict:
+    """确认性未发生时的统一判决件（唯一出口，避免两处写法分叉）。"""
+    from orchestrator.benchmark.phase281 import verdict as v
+
+    if code not in ("CONFIRMATORY_NOT_RUN", "CONFIRMATORY_INCOMPLETE"):
+        raise ValueError(f"未知的确认性缺席码：{code!r}")
+    doc = v.confirmatory_absent(hypothesis_id, reason=reason)
+    doc["reason_code"] = code
+    return doc
+
+
+#: 用户 2026-11-07 裁决「一：选 A」的逐字登记（引擎帽 ⇄ ``CAP_HIT`` 缺口）
+ENGINE_CAP_GAP_LIMITATION = (
+    "引擎帽与 CAP_HIT 的缺口（用户 2026-11-07 裁决选 A：维持现状，不改预注册）："
+    "计划 §11.5 规则 3 只认 status == \"CAP_HIT\"。本轮三个 agentic Trial 的引擎自述"
+    "终态均为 FINISHED（problems 为空），真实触帽事实只在 engine.reason 里"
+    "（[agentic:round_cap] ×2、[agentic:token_cap] ×1）。按用户裁决，规则 3 仍只认"
+    "字面 CAP_HIT，该缺口在本报告中如实登记，不改 §11.5、不改预注册，留待"
+    "P281-9 之外的后续裁决。"
+)
+
+
+def _limitations(rows: "Sequence[Mapping[str, Any]]", *, go_no_go: str,
+                 go_reasons: "Sequence[str]", ledger: Mapping[str, Any],
+                 semantic_lane: str = SEMANTIC_LANE,
+                 semantic_lane_reviewers: "Sequence[str]" = SEMANTIC_LANE_REVIEWERS,
+                 semantic_present: bool = False) -> "list[str]":
+    present = [r for r in rows if r["present"]]
+    not_run = [r["trial_id"] for r in rows if not r["present"]]
+    confirmatory_present = sum(1 for r in rows
+                               if r.get("phase") == "confirmatory" and r["present"])
+    crashed = [r["trial_id"] for r in present if r.get("status") == "CRASHED"]
+    inval = [r["trial_id"] for r in present if r.get("verdict") == "INVALID_ARTIFACT"]
+    if semantic_lane == "disabled":
+        # AC-P281-9-02 的 disabled 分支要求这一句**逐字**在场：
+        # 「R1 仅得结构性结论」。语义车道不开，R1 的语义维就没有数据面。
+        semantic_line = ("语义车道：用户裁决**不开启**（semantic_lane=disabled）。"
+                         "因此 R1 仅得结构性结论，语义维度不做任何主张；"
+                         "H4 在语义车道关闭时不得给强结论（§13.3.2）。")
+    else:
+        semantic_line = ("语义车道：按用户裁决开启，复核人 "
+                         + "、".join(semantic_lane_reviewers)
+                         + ("。" if semantic_present else
+                            "。但确认性阶段未启动，R1 没有可供盲评的输出，"
+                            "故**无任何盲评分**；本报告不产出语义维度的结论。"))
+    items = [
+        ENGINE_CAP_GAP_LIMITATION,
+        ((f"确认性阶段（12 个预注册 Trial：rep1/rep2）**未启动**。Pilot 机判为 "
+          f"{go_no_go}（理由：{'；'.join(go_reasons) or '无'}），按计划 §11.5 的预注册"
+          f"规则，确认性阶段不得在 HOLD 下开跑；未跑的 Trial 原样登记为 not_run，"
+          f"不补造、不外推。合计 {len(present)}/18 个 Trial 有数据。")
+         if not confirmatory_present else
+         (f"确认性阶段在场 {confirmatory_present}/12 个预注册 Trial；"
+          f"Pilot 机判为 {go_no_go}。判决只吃确认性 12 个，Pilot rep0 不进判决。")),
+        ((f"样本量：每格只有 Pilot 的 1 个重复有数据（n=1），确认性 2 个重复缺席，"
+          f"因此本报告不产出任何假设的成立或推翻结论，只登记事实与限制。")
+         if not confirmatory_present else
+         (f"样本量：每格 n={constants.REPS_TOTAL}（Pilot 1 + 确认性 2），"
+          f"不足以做统计检验；本报告只给效应量估计与可行性证据。")),
+        ("引擎侧失败（供货方空回答）："
+         + (f"{len(crashed)} 个 Trial 以 CRASHED 收尾（{', '.join(crashed)}），"
+            "原因是 coding_debug 阶段连续收到 HTTP 200 空回答（EmptyResponseError）。"
+            if crashed else "本轮无 CRASHED 收尾的 Trial。")
+         + " 硬规则 1：未改模型、未换端点。"),
+        (f"INVALID_ARTIFACT 的 Trial {len(inval)} 个（{', '.join(inval)}）："
+         "引擎侧未出生（NOT_BORN）或自述与观测不符，评测器按预注册判为无效产物；"
+         "这类结果既不能读成「能力不足」，也不能读成「能力达标」。"),
+        ("max_attempts 偏差（P281-7 首轮）：计划 §11.3 钉 1，实际代码使用网关缺省 5，"
+         "故账本里的呼数是**逻辑调用**数，供应侧 HTTP 次数更多。该偏差已在后续批次"
+         "修复（显式 max_attempts=1），本轮已发生的部分如实登记、不追补。"),
+        (f"账本合计 {int(ledger.get('calls') or 0)} 次实呼（含 Pilot 三轮尝试），"
+         f"硬帽 {constants.HARD_CAP} 未触；确认性阶段的 "
+         f"{constants.CONFIRMATORY_BUDGET} 呼预算未被使用。"),
+        semantic_line,
+        ("出生等级是投影而非实测：harness 的出生闸只记录 BORN / NOT_BORN 二值，"
+         "本报告据 BORN ⇒ B4、NOT_BORN ⇒ 未达 B4 投影；具体停在哪一层由 "
+         "trial.json 的 birth.reason 给出，本报告不臆造层级。"),
+    ]
+    return items
+
+
+def build_final_report(root: Path, *,
+                       semantic_lane: str = SEMANTIC_LANE,
+                       semantic_lane_reviewers: "Sequence[str]" = SEMANTIC_LANE_REVIEWERS,
+                       semantic_present: bool = False) -> dict:
+    """产出 ``final_report.json``（18 Trial 全表 + H1–H5 + 限制）。
+
+    **确定性**：本函数不写任何钟表时间、不读环境变量、遍历顺序全部由
+    ``constants`` 与 ``sorted`` 决定 ⇒ 同一输入重跑逐字节相同（AC-P281-9-03）。
+    来源以 sha256 记录（``sources``），比时间戳更能回答「这份报告读的是哪份输入」。
+    """
+    from orchestrator.benchmark.phase281 import verdict as v
+
+    root = Path(root)
+    rows = collect_phase_trials(root)
+    ledger_tokens = _ledger_tokens_by_trial(root)
+    ledger_path = root / "quota" / "ledger.jsonl"
+    if not ledger_path.is_file():
+        raise LedgerMissingError(f"数据根缺账本：{ledger_path}（终局分析不引外账）")
+    ledger = ledger_snapshot(ledger_path)
+
+    pilot_rows = [r for r in rows if r["phase"] == "pilot"]
+    go_no_go, go_reasons = decide_go_no_go(pilot_rows)
+
+    hypotheses = evaluate_hypotheses(rows, ledger_tokens,
+                                     semantic_lane=semantic_lane,
+                                     semantic_present=semantic_present)
+    for hid, doc in hypotheses.items():
+        v.assert_partition(hid, doc["state"])
+
+    tables = read_json(root / "intake" / "table_counts.json")
+    pilot_report = root / "analysis" / "pilot_report.json"
+    sources = {
+        "pilot_report_sha256": (_sha256_file(pilot_report)
+                                if pilot_report.is_file() else None),
+        "ledger_sha256": _sha256_file(ledger_path),
+        "table_counts_sha256": (_sha256_file(root / "intake" / "table_counts.json")
+                                if (root / "intake" / "table_counts.json").is_file()
+                                else None),
+    }
+
+    report = {
+        "schema": FINAL_REPORT_SCHEMA,
+        "experiment_id": constants.EXPERIMENT_ID,
+        "phase": constants.PHASE_NAME,
+        "go_no_go": go_no_go,
+        "go_no_go_reasons": list(go_reasons),
+        "pre_registered_trials": PRE_REGISTERED_TRIALS,
+        "trial_counts": {
+            "pre_registered": PRE_REGISTERED_TRIALS,
+            "present": sum(1 for r in rows if r["present"]),
+            "not_run": sum(1 for r in rows if not r["present"]),
+            "pilot_present": sum(1 for r in pilot_rows if r["present"]),
+            "confirmatory_present": sum(1 for r in rows
+                                        if r["phase"] == "confirmatory" and r["present"]),
+        },
+        "trials": rows,
+        "hypotheses": hypotheses,
+        "semantic_lane": semantic_lane,
+        "semantic_lane_reviewers": list(semantic_lane_reviewers),
+        "semantic_scores": {
+            "present": bool(semantic_present),
+            "reviewers": list(semantic_lane_reviewers),
+            "reason": ("确认性阶段未启动，R1 无可盲评输出，故无盲评分"
+                       if not semantic_present else "已采集"),
+        },
+        "ledger": {
+            "path": str(ledger_path),
+            "calls": int(ledger["summary"].get("call_rows") or 0),
+            "calls_ok": ledger["summary"].get("calls_ok"),
+            "by_task": ledger["summary"].get("calls_by_task"),
+            "by_stage": ledger["summary"].get("calls_by_stage"),
+            "seq_first": ledger["summary"].get("seq_first"),
+            "seq_last": ledger["summary"].get("seq_last"),
+            "batches": ledger.get("batches"),
+            "gaps": ledger.get("gaps"),
+            "validation_error": ledger.get("validation_error"),
+        },
+        "tables_baseline": (tables.get("tables") if isinstance(tables, Mapping) else None),
+        "limitations": _limitations(rows, go_no_go=go_no_go, go_reasons=go_reasons,
+                                    ledger={"calls": int(ledger["summary"].get("call_rows") or 0)},
+                                    semantic_lane=semantic_lane,
+                                    semantic_lane_reviewers=semantic_lane_reviewers,
+                                    semantic_present=bool(semantic_present)),
+        "disclaimer": {"text": v.SAMPLE_SIZE_DISCLAIMER,
+                       "sha256": v.disclaimer_sha256()},
+        "sources": sources,
+    }
+    if frozenset(report) != FINAL_REPORT_FIELDS:
+        raise RuntimeError(f"final_report 字段集漂移：多/少 "
+                           f"{sorted(frozenset(report) ^ FINAL_REPORT_FIELDS)}")
+    return report
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with Path(path).open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fmt_opt(value: Any) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value)
+
+
+def render_report_markdown(report: Mapping[str, Any]) -> str:
+    """把 ``final_report.json`` 渲染成可读报告（**禁用措辞扫描的对象**）。
+
+    首页是三行固定声明（§18.3 逐字），紧接着登记该声明块的 sha256；
+    其余全文不得出现 §18.2 的任何字面——本函数不写解释性套话，
+    免得套话自己踩词。
+    """
+    from orchestrator.benchmark.phase281 import verdict as v
+
+    disc = str(report.get("disclaimer", {}).get("text") or v.SAMPLE_SIZE_DISCLAIMER)
+    disc_sha = str(report.get("disclaimer", {}).get("sha256") or v.disclaimer_sha256())
+    counts = report.get("trial_counts") or {}
+    lines: "list[str]" = [
+        "# Phase 2.8.1 最终报告（Roadmap Phase 1）",
+        "",
+        disc,
+        "",
+        f"> 首页声明块 sha256：`{disc_sha}`（AC-P281-9-07 登记；扫描时按此 sha256 整块剔除）",
+        "",
+        "## 1. 结论",
+        "",
+        f"- go/no-go 机判：**{report.get('go_no_go')}**（预注册规则 §11.5，机械产出）",
+        f"- 预注册 Trial：{counts.get('pre_registered')} 个；在场 "
+        f"{counts.get('present')} 个；未跑 {counts.get('not_run')} 个",
+        f"- 确认性阶段：在场 {counts.get('confirmatory_present')} 个 ⇒ "
+        + ("未启动" if not counts.get("confirmatory_present") else "部分在场"),
+        "",
+        "机判理由：",
+        "",
+    ]
+    for reason in report.get("go_no_go_reasons") or []:
+        lines.append(f"- {reason}")
+    lines += ["", "## 2. 假设判决（只吃确认性 12 个 Trial）", "",
+              "| 假设 | 判决 | 事由码 |", "|---|---|---|"]
+    for hid in ("H1", "H2", "H3", "H4", "H5"):
+        doc = (report.get("hypotheses") or {}).get(hid) or {}
+        lines.append(f"| {hid} | {doc.get('state')} | `{doc.get('reason_code')}` |")
+    lines += [
+        "",
+        "三态取值：`CAPABILITY_DEMONSTRATED` / `NOT_ESTABLISHED` / `INCONCLUSIVE`。"
+        "本报告的五条判决全部由 `verdict.py` 的纯函数产出；`INCONCLUSIVE` 的事由码为 "
+        "`CONFIRMATORY_NOT_RUN` 时表示**确认性阶段没有运行**，不表示「跑了但分不清」。",
+        "",
+        "## 3. 逐 Trial 五元组",
+        "",
+        "| trial | 阶段 | 在场 | 判决 | 失败类 | 呼数 | 出生 | 首出生执行序 | 墙钟(s) |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for row in report.get("trials") or []:
+        lines.append(
+            "| {trial_id} | {phase} | {present} | {verdict} | {failure_class} | "
+            "{used_calls} | {birth_level} | {first_birth_round} | {wallclock_s} |".format(
+                trial_id=row.get("trial_id"), phase=row.get("phase"),
+                present=_fmt_opt(row.get("present")),
+                verdict=_fmt_opt(row.get("verdict")),
+                failure_class=_fmt_opt(row.get("failure_class")),
+                used_calls=_fmt_opt(row.get("used_calls")),
+                birth_level=_fmt_opt(row.get("birth_level")),
+                first_birth_round=_fmt_opt(row.get("first_birth_round")),
+                wallclock_s=_fmt_opt(row.get("wallclock_s"))))
+    ledger = report.get("ledger") or {}
+    lines += [
+        "",
+        "## 4. 账本",
+        "",
+        f"- 实呼行数：{ledger.get('calls')}（`ok` {ledger.get('calls_ok')}）",
+        f"- seq 区间：{ledger.get('seq_first')} … {ledger.get('seq_last')}；"
+        f"断号：{ledger.get('gaps') or '无'}",
+        f"- by_task：{ledger.get('by_task')}",
+        f"- by_stage：{ledger.get('by_stage')}",
+        f"- 批次：{ledger.get('batches')}",
+        "",
+        "## 5. 语义车道",
+        "",
+        f"- 状态：**{report.get('semantic_lane')}**（用户 2026-11-07 裁决）",
+        f"- 复核人：{'、'.join(report.get('semantic_lane_reviewers') or []) or '无'}",
+        f"- 盲评分：{_fmt_opt((report.get('semantic_scores') or {}).get('present'))}；"
+        f"{(report.get('semantic_scores') or {}).get('reason')}",
+        "",
+        "## 6. 限制（逐条，不得删减）",
+        "",
+    ]
+    for item in report.get("limitations") or []:
+        lines.append(f"- {item}")
+    lines += [
+        "",
+        "## 7. 来源（sha256）",
+        "",
+    ]
+    for key in sorted(report.get("sources") or {}):
+        lines.append(f"- `{key}`：{_fmt_opt((report.get('sources') or {}).get(key))}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def _parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="phase281_analysis",
-        description="Phase 2.8.1 分析（pilot：go/no-go 机判；0 付费）")
-    ap.add_argument("--stage", choices=("pilot",), required=True,
-                    help="分析阶段（本 Task 只有 pilot）")
+        description="Phase 2.8.1 分析（pilot：go/no-go 机判；final：18 Trial 判决；"
+                    "0 付费）")
+    ap.add_argument("--stage", choices=("pilot", "final"), required=True,
+                    help="分析阶段：pilot（go/no-go）/ final（H1–H5 三态判决）")
     ap.add_argument("--out", required=True, help="输出 JSON 路径")
     ap.add_argument("--root", default=None, help="数据根（缺省 paths.phase281_root()）")
     ap.add_argument("--rep", type=int, default=PILOT_REP)
@@ -643,6 +1136,9 @@ def _parser() -> argparse.ArgumentParser:
     ap.add_argument("--accounting-out", default=None,
                     help="§11.9 记账证明的落盘路径（M2；不给则不写）。"
                          "与 --out 的 8 字段契约分开，互不覆盖")
+    ap.add_argument("--report-out", default=None,
+                    help="--stage final 的可读报告路径（Markdown；不给则不写）。"
+                         "§18.2 禁用措辞扫描的对象就是这份文本")
     return ap
 
 
@@ -660,6 +1156,9 @@ def main(argv: "Iterable[str] | None" = None) -> int:
     from orchestrator.benchmark.phase281 import paths
 
     root = Path(args.root) if args.root else paths.phase281_root()
+    if args.stage == "final":
+        return _main_final(args, root)
+
     env = env_probe() if args.probe_env else None
     register = (register_verify(lock=args.lock) if args.verify_register else None)
     batches = _parse_batches(args.batches)
@@ -677,6 +1176,29 @@ def main(argv: "Iterable[str] | None" = None) -> int:
                       "accounting_out": acct_path},
                      ensure_ascii=False, indent=2, sort_keys=True))
     return 0 if report["go_no_go"] in ("GO", "HOLD") else 1
+
+
+def _main_final(args: argparse.Namespace, root: Path) -> int:
+    """``--stage final``：写 ``final_report.json``（可选同时写可读报告）。"""
+    from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+
+    report = build_final_report(root)
+    target = write_report(report, Path(args.out))
+    report_path = None
+    if args.report_out:
+        text = render_report_markdown(report)
+        report_path = Path(args.report_out)
+        ensure_private_dir(report_path.parent)
+        atomic_write_text(report_path, text, mode=0o600)
+    print(json.dumps({"out": str(target), "report_out":
+                      (str(report_path) if report_path else None),
+                      "go_no_go": report["go_no_go"],
+                      "trial_counts": report["trial_counts"],
+                      "hypotheses": {k: v["state"]
+                                     for k, v in report["hypotheses"].items()},
+                      "disclaimer_sha256": report["disclaimer"]["sha256"]},
+                     ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI
