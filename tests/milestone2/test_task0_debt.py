@@ -857,7 +857,11 @@ CALL_CACHE_ALLOWLIST = {
     # `phase1_root()/.call_cache` 会让跨 Trial 缓存命中（STOP-10）。
     # 故本落点由 CALL_CACHE_ARG_FORMS 单独钉形态（见下），其余六处的
     # 「必须落在 Phase 1 封存目录」断言不变。
-    ("orchestrator/benchmark/phase281/trial_harness.py", 898),
+    # Phase 2.8.1 T6（P281-6，计划 §10）：`_DryRunGateway` 罐头自证、`_deliver_birth`、
+    # `_repro` 容器形态、`backfill_contract` 接线四段（含 docstring/注释，净 +67 行）
+    # 全在构造点之前，纯位移（898→965）；构造表达式 `CallReplay(base / "call_cache")`
+    # 逐字未改，0 新增 CallReplay 落点、0 新增网关调用路径（干跑走的是同一构造点）。
+    ("orchestrator/benchmark/phase281/trial_harness.py", 965),
 }
 
 

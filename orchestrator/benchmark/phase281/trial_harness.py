@@ -246,6 +246,23 @@ class _DryRunGateway:
         raise AttributeError(f"干跑网关没有 {name!r}")
 
 
+#: 罐头网关的自证标记（与 ``phase281.dryrun.CannedGateway.guard_of`` 同一字符串）。
+#: 干跑时**只**替换网关（计划 §10.3），而「换成哪一只」允许调用方显式注入——
+#: 干跑的意义就是让罐头候选走完整条流水线。判定依据写在对象自己身上，不靠调用方
+#: 一句 `dry_run=True` 的旁证：不认「我是罐头」的对象一律换成 ``_DryRunGateway``。
+CANNED_GUARD = "phase281._CannedGateway"
+
+
+def _is_canned_gateway(gateway: Any) -> bool:
+    return (str(getattr(gateway, "guard_of", "")) == CANNED_GUARD
+            and getattr(gateway, "canned", False) is True)
+
+
+#: 兄弟容器内的解释器路径。``build_docker_create_argv`` 把宿主 venv
+#: （``/mnt/venvs/simpraxis``）挂在 ``/opt/venv``，故容器内只有这个路径可用。
+CONTAINER_PYTHON = "/opt/venv/bin/python"
+
+
 # ---------------------------------------------------------------------------
 # 小工具
 # ---------------------------------------------------------------------------
@@ -580,6 +597,44 @@ def _collect_delivered(spec: Any, *, workdir: Path, delivered: Path,
     return written
 
 
+def _deliver_birth(base: Path, *, birth: "Mapping | None") -> "list[str]":
+    """把出生件按**产物**冻进 ``delivered/birth/functional_birth.json``。
+
+    L1 的结构判据（``scoring.libero_facts``）读的就是这个路径上的**产物**件，
+    不是评测器自留的 ``birth.json``（``references.py`` 模块头已写明同一件事：
+    漏搬会让 L1 满屏 ``B1=None``）。容器出生验证产出的是 v1 件（``birth_status``
+    + 五层 ``levels``），本函数只把**验证器自己写的那一份**逐字节复制过去；
+    宿主任务的 v2 件语义不同，不伪装成 v1，故 ``schema != "v1"`` 一律不搬。
+
+    这是运行器代写件（``task_prompt.HARNESS_OUTPUTS`` 之一），不是候选产物：
+    让候选写它等于让被告写笔录；这里搬的是父进程出生判定的原始记录。
+    """
+    if not birth or str(birth.get("schema") or "") != "v1":
+        return []
+    src = Path(base) / "birth.json"
+    if src.is_symlink() or not src.is_file():
+        return []
+    dst = Path(base) / "delivered" / "birth" / "functional_birth.json"
+    ensure_private_dir(dst.parent)
+    if dst.exists():
+        dst.unlink()
+    shutil.copyfile(src, dst)
+    os.chmod(dst, 0o600)
+    return [dst.relative_to(Path(base)).as_posix()]
+
+
+def _delivered_json(base: Path, name: str) -> dict:
+    """读 ``delivered/<name>`` 的 JSON 对象；缺失/非对象一律空 dict。"""
+    path = Path(base) / "delivered" / name
+    if path.is_symlink() or not path.is_file():
+        return {}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return dict(doc) if isinstance(doc, Mapping) else {}
+
+
 def _mirror_inputs(input_dir: Path, workdir: Path) -> None:
     """宿主任务的 ``input/`` 镜像进工作根（容器形态由 ``/work`` 挂载提供同一份）。
 
@@ -609,18 +664,30 @@ def _repro(spec: Any, *, workdir: Path, logs: Path, delivered: Path,
     if str(getattr(spec, "task_id", "")) != "mujoco_contact_push_v1":
         return []
     runner = sandbox_obj.subprocess_runner()
+    container = str(getattr(sandbox_obj, "form", "")) == "sibling_container"
     out_rels: "list[str]" = []
     for label, run_seed in (("same_seed", int(seed)),
                             ("cross_seed", int(seed) + 1)):
         target = ensure_private_dir(Path(logs) / "repro" / label)
         _copy_workdir(Path(workdir), target)
         argv = [str(item) for item in cmd]
+        if container:
+            # 锁内适配（P281-6）：``cmd`` 是**宿主**调用形状（argv[0] 是宿主 venv
+            # 解释器，例如 /mnt/venvs/simpraxis/bin/python）。兄弟容器把同一份 venv
+            # 挂在 /opt/venv、宿主路径在里面不存在；PATH 也**不能**用宿主的，否则
+            # 容器里的 python3 被指到一个不存在的目录。不修这一处，agentic 臂的
+            # M1 永远拿不到复现件，复现维度恒 0——那是把部署形态缺陷读成能力不足。
+            from orchestrator.agentic.tools.run import _CONTAINER_ENV
+
+            argv[0] = CONTAINER_PYTHON
+            env_extra = {"PATH": _CONTAINER_ENV["PATH"]}
+        else:
+            env_extra = {"PATH": os.environ.get("PATH", "")}
         for index, token in enumerate(argv):
             if token == "--seed" and index + 1 < len(argv):
                 argv[index + 1] = str(run_seed)
         try:
-            runner(argv, target, float(timeout_s),
-                   {"PATH": os.environ.get("PATH", "")})
+            runner(argv, target, float(timeout_s), env_extra)
         except (OSError, subprocess.SubprocessError):
             continue
         for name in ("metrics.json", "telemetry.jsonl"):
@@ -949,8 +1016,12 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
 
     budget = telemetry.TrialBudget(cap=arm.call_cap, ledger=ledger,
                                    trial_id=trial_id)
-    guarded = telemetry.CapGuardGateway(
-        _DryRunGateway() if dry_run else gateway, budget)
+    # 锁内适配（计划 §10.3「dry_run=True 时只替换 gateway」）：干跑默认换
+    # ``_DryRunGateway``（空补丁 ⇒ NOT_BORN），但外部显式传入且**自证**身份的
+    # 罐头网关例外——那不是放松判定，是把「只替换网关」这条唯一允许的差异做实。
+    inner = ((gateway if _is_canned_gateway(gateway) else _DryRunGateway())
+             if dry_run else gateway)
+    guarded = telemetry.CapGuardGateway(inner, budget)
     if not dry_run:
         _ensure_approval(ledger, trial_id=trial_id, arm=arm)
 
@@ -989,6 +1060,18 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
     state["trace_files"] = _copy_trace(workdir, base / "trace")
     delivered_rels = _collect_delivered(spec, workdir=workdir,
                                         delivered=base / "delivered")
+    # 运行后回填契约段：候选的 env_probe.json 只有在跑完之后才可能存在
+    # （``task_prompt.HARNESS_OUTPUTS`` 的注释即本阶段语义）。不回填，L1 的
+    # ``contract_match`` 恒 False、契约维度永远拿不到满分——见
+    # ``RuntimeAttestation.backfill_contract`` 的 docstring。
+    backfill = candidate_runtime.RuntimeAttestation.backfill_contract(
+        base, probe=_delivered_json(base, "env_probe.json"))
+    if backfill.get("updated"):
+        fingerprint_sha = str(backfill["fingerprint_sha256"])
+        state["runtime"]["fingerprint_sha256"] = fingerprint_sha
+        state["runtime"]["contract_backfill"] = {
+            "source": backfill.get("source"),
+            "before": backfill.get("before"), "after": fingerprint_sha}
     if (workdir / _entry_rel(spec)).is_file():
         delivered_rels += _repro(
             spec, workdir=workdir, logs=base / "logs",
@@ -1034,7 +1117,11 @@ def run_trial(*, spec: Any, arm_id: str, rep: int, root: Path,
     telemetry.write_summary(base, observed)
     observed = telemetry.observed(base, ledger, trial_id=trial_id)
     observed["birth_probe"] = _birth_probe(birth, watch)
-    return _close(status, manifest_rels=sorted(set(delivered_rels)))
+    # 出生件必须在出生判定之后才在盘上（post 出生是本函数最后一次判定点），
+    # 故交付放在这里而不是与 ``_collect_delivered`` 同批。
+    birth_rels = _deliver_birth(base, birth=birth)
+    return _close(status,
+                  manifest_rels=sorted(set(delivered_rels + birth_rels)))
 
 
 def _birth_probe(birth: "Mapping | None", watch: BirthWatch) -> dict:

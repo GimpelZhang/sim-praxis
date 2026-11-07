@@ -134,6 +134,95 @@ class RuntimeAttestation:
                           f" 非 {ATTESTATION_SCHEMA}"}])
         return doc
 
+    # -- 运行后回填契约段（锁内适配，P281-6） ---------------------------------
+    @staticmethod
+    def backfill_contract(trial_dir: "str | Path", *,
+                          probe: Mapping) -> dict:
+        """把**候选探针**实测的观测/动作契约回填进已冻结指纹的 ``simulator`` 段。
+
+        为什么必须在运行**之后**补：``capture_and_build`` 在候选启动前采集，
+        那时 ``env_probe.json`` 还不存在，``_simulator_segment`` 只能把两段契约
+        留成 ``None``（它没有 ``simulator=`` 入口）。而 ``task_prompt`` 的
+        ``HARNESS_OUTPUTS`` 注释写的就是本阶段的语义——「L1 的动作/观测契约取自
+        候选的 ``env_probe.json``」。不回填，``scoring.libero_facts`` 的
+        ``contract_match`` 恒为 ``False``（「无可对契约」），0.2 权重的契约维度
+        永远拿不到满分：L1 结构上不可能 PASS，H1 会变成空假设。
+
+        这是**自洽检查**而不是真值检查（与 Phase 2.8.0 的参考运行同语义）：比的是
+        「候选自报的探针」与「候选自报的运行身份」是否一致。指纹的环境身份段
+        （container / python / mount / config / repository）一个字节都不动——动的
+        只有 ``simulator.observation_contract`` / ``action_contract`` 两个空位，
+        且回填后**重新封印**（``fingerprint_sha256`` 重算），并同步
+        ``runtime_attestation.json`` 的副本，留下 before/after 与来源。
+        ``written_at`` 不刷新：采集时点仍然早于候选启动（AC-P281-2-13 的时序不破）。
+
+        探针不可用（缺键、类型不符）⇒ 原样返回、不改文件：候选自己没给出可用契约，
+        就让它照实留 ``False``，不许评测侧替它编一个。
+        """
+        directory = Path(trial_dir)
+        delivered = directory / "delivered"
+        fp_path = delivered / rf.FINGERPRINT_NAME
+        if fp_path.is_symlink() or not fp_path.is_file():
+            return {"updated": False, "reason": "fingerprint_absent"}
+        doc = json.loads(fp_path.read_text(encoding="utf-8"))
+        try:
+            rf.validate_fingerprint(doc)
+        except rf.FingerprintError as exc:
+            return {"updated": False, "reason": "fingerprint_invalid",
+                    "detail": str(exc)}
+
+        keys = probe.get("observation_keys") if isinstance(probe, Mapping) else None
+        dim = probe.get("action_dim") if isinstance(probe, Mapping) else None
+        keys_ok = isinstance(keys, (list, tuple)) and len(keys) > 0
+        dim_ok = (isinstance(dim, int) and not isinstance(dim, bool) and dim > 0)
+
+        segment = dict(doc.get("simulator") or {})
+        changed = False
+        if keys_ok:
+            obs = dict(segment.get("observation_contract") or {})
+            if obs.get("keys") is None:
+                obs = {"keys": [str(key) for key in keys],
+                       "dtype": obs.get("dtype"),
+                       "shape": list(obs.get("shape") or [])}
+                segment["observation_contract"] = obs
+                changed = True
+        if dim_ok:
+            act = dict(segment.get("action_contract") or {})
+            if act.get("dim") is None:
+                act = {"space": act.get("space") or "Box", "dim": int(dim),
+                       "low": list(act.get("low") or []),
+                       "high": list(act.get("high") or [])}
+                segment["action_contract"] = act
+                changed = True
+        if not changed:
+            return {"updated": False, "reason": "no_contract_in_probe"}
+
+        before = str(doc.get("fingerprint_sha256") or "")
+        doc["simulator"] = segment
+        doc["fingerprint_sha256"] = rf.fingerprint_sha256(doc)
+        rf.validate_fingerprint(doc)
+        atomic_write_text(fp_path, ts.canonical_json(doc) + "\n", 0o600)
+        atomic_write_text(delivered / rf.SHA256_NAME,
+                          f"{doc['fingerprint_sha256']}  {rf.FINGERPRINT_NAME}\n",
+                          0o600)
+
+        att_path = directory / ATTESTATION_NAME
+        if att_path.is_file() and not att_path.is_symlink():
+            attestation = json.loads(att_path.read_text(encoding="utf-8"))
+            attestation["fingerprint"] = doc
+            attestation["fingerprint_sha256"] = doc["fingerprint_sha256"]
+            attestation["contract_backfill"] = {
+                "source": "env_probe.json",
+                "before": before,
+                "after": doc["fingerprint_sha256"],
+                "at": P.now_wall(),
+            }
+            atomic_write_text(att_path, json.dumps(
+                attestation, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                0o600)
+        return {"updated": True, "source": "env_probe.json", "before": before,
+                "fingerprint_sha256": doc["fingerprint_sha256"]}
+
     # -- 比对 ---------------------------------------------------------------
     @staticmethod
     def check(spec: ts.TaskSpec, attestation: Mapping) -> "list[dict]":
