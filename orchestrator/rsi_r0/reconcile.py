@@ -11,18 +11,26 @@
 * 每个整数 seq 必须恰有**一条** attempt 记录与之对应（``SETTLED_OK``/``SETTLED_FAIL``
   或 ``UNKNOWN_SENT``，后者保留 seq 属于未核销而不是漂移）；
 * 每条带整数 seq 的 attempt 必须能在账本里找到同一 seq；
-* ``event="preflight_blocked"`` 的账本行（seq=null）必须对应一条
-  ``BLOCKED_PREFLIGHT`` attempt（可证实未发网），反向亦然；
+* ``event="preflight_blocked"`` 的账本行（seq=null）必须与一条 ``BLOCKED_PREFLIGHT``
+  attempt 逐 ``(stage, task, batch_id)`` 配对（只比个数会把"A 批被拦、B 批记账"
+  当成对得上）；
+* 同一整数 seq 出现两条 attempt 即漂移（``duplicate_seq``；旧版 ``setdefault``
+  静默丢弃第二条，seq 复用检不出来）；
 * 每条 attempt 必须有同名预留文件；多余的预留文件也算漂移；
-* 存在 ``UNKNOWN_SENT`` 即 ``ok=False``（有未核销的发网事实）。
+* 存在 ``UNKNOWN_SENT`` 即 ``ok=False``（有未核销的发网事实）；
+* 报表里记过的整数 seq（``report_seqs``：协议/开发/验证三份报告各自写下
+  ``requests.ledger_seqs``）必须能在账本里找到——这条是**防抹账**：旧版把账本、
+  attempts、预留三份一起删掉时对账返回真（"未开跑"与"抹掉证据"不可区分），
+  而报告里的 seq 是第四份独立痕迹。
 
-``ok`` 只在**没有任何一处漂移**时为真；空账空账本（未开跑）为真。
+``ok`` 只在**没有任何一处漂移**时为真；空账空账本（从未开跑、也没有任何报告）
+为真——这一点如实写在这里，不假装三份全删也能检出。
 """
 from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations
 from orchestrator.rsi_r0.contracts import AttemptState
@@ -47,8 +55,13 @@ def _ledger_rows(path: Path) -> list[dict[str, Any]]:
 
 
 def reconcile(*, ledger_path: Path, journal: AttemptJournal,
-              reservations: BudgetReservations | None = None) -> dict[str, Any]:
-    """逐 request 对账；返回值可直接进产物（G-P 条件与收尾报告共用）。"""
+              reservations: BudgetReservations | None = None,
+              report_seqs: Sequence[tuple[str, Sequence[int]]] = ()) -> dict[str, Any]:
+    """逐 request 对账；返回值可直接进产物（G-P 条件与收尾报告共用）。
+
+    ``report_seqs`` 是「第四份痕迹」：三份权威文件都可能被删，报告里的
+    ``requests.ledger_seqs`` 不会跟着消失（它已经写进 protocol/ 下的成品件）。
+    """
     ledger = _ledger_rows(ledger_path)
     call_seqs: dict[int, dict[str, Any]] = {}
     blocked_rows: list[dict[str, Any]] = []
@@ -61,25 +74,38 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
 
     latest = journal.latest_by_request()
     attempt_seqs: dict[int, str] = {}
+    duplicate_seqs: list[dict[str, Any]] = []
     unknown: list[str] = []
-    blocked_attempts: list[str] = []
+    blocked_attempts: list[dict[str, Any]] = []
     uncounted: list[dict[str, Any]] = []
+
+    def _claim(seq: int, rid: str) -> None:
+        if seq in attempt_seqs:
+            duplicate_seqs.append({"seq": seq, "request_ids": [attempt_seqs[seq], rid]})
+            return
+        attempt_seqs[seq] = rid
+
     for rid, row in sorted(latest.items()):
         state = row.get("state")
         seq = row.get("seq")
         if state == AttemptState.UNKNOWN_SENT.value:
             unknown.append(rid)
         if state == AttemptState.BLOCKED_PREFLIGHT.value:
-            blocked_attempts.append(rid)
+            # attempts.jsonl 的列名是 ``task_id``，账本里叫 ``task``（评审 N-2）：
+            # 不归一化会让"同一个 (stage, task, batch)"永远配不上，稳定误报漂移。
+            task = row.get("task", row.get("task_id"))
+            blocked_attempts.append({"request_id": rid, "stage": row.get("stage"),
+                                     "task": task,
+                                     "batch_id": row.get("batch_id")})
             if isinstance(seq, int):
-                attempt_seqs.setdefault(seq, rid)
+                _claim(seq, rid)
             continue
         if state not in _CONSUMED_STATES:
             # PREPARED/SENT 还没走完：属于进行中或崩溃未恢复，不算漂移，单独挂牌。
             uncounted.append({"request_id": rid, "state": state})
             continue
         if isinstance(seq, int):
-            attempt_seqs.setdefault(seq, rid)
+            _claim(seq, rid)
         else:
             # 已结算却没有 seq：只有 BLOCKED_PREFLIGHT 允许，其它一律算漂移。
             uncounted.append({"request_id": rid, "state": state, "why": "settled_without_seq"})
@@ -93,21 +119,44 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
     missing_reservations = sorted(set(latest) - reservation_ids)
     orphan_reservations = sorted(reservation_ids - set(latest))
 
-    blocked_mismatch = (len(blocked_rows) != len(blocked_attempts)) if (blocked_rows or blocked_attempts) else False
+    # blocked 行逐 (stage, task, batch_id) 配对：只比个数会漏掉"A 批被拦、B 批记账"。
+    def _blocked_key(row: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+        return (row.get("stage"), row.get("task"), row.get("batch_id"))
+
+    want = sorted((str(k) for k in map(_blocked_key, blocked_rows)))
+    got = sorted((str(k) for k in map(_blocked_key, blocked_attempts)))
+    blocked_mismatch: Any = False
+    if want != got:
+        blocked_mismatch = {"ledger_only": _multiset_minus(want, got),
+                            "attempts_only": _multiset_minus(got, want)}
+
+    reported: dict[int, str] = {}
+    missing_reported: list[dict[str, Any]] = []
+    for source, seqs in report_seqs:
+        for seq in seqs:
+            if not isinstance(seq, int):
+                continue
+            if seq not in call_seqs:
+                missing_reported.append({"source": source, "seq": seq})
+            reported.setdefault(seq, source)
 
     drift = {
         "ledger_seq_without_attempt": missing_attempts,
         "attempt_seq_without_ledger": missing_ledger,
+        "duplicate_seq": duplicate_seqs,
         "attempt_without_reservation": missing_reservations,
         "reservation_without_attempt": orphan_reservations,
         "unknown_sent": unknown,
         "uncounted_attempts": uncounted,
         "blocked_preflight_mismatch": blocked_mismatch,
+        "report_seq_without_ledger": missing_reported,
     }
     ok = not any(drift.values())
     return {
         "schema": REPORT_SCHEMA,
         "ok": ok,
+        "files_present": {"ledger": ledger_path.exists(),
+                          "attempts": journal.path.exists() if journal.path else None},
         "ledger": {"calls": len(call_seqs), "preflight_blocked": len(blocked_rows),
                    "seqs": sorted(call_seqs)},
         "attempts": {"records": len(latest), "with_seq": len(attempt_seqs),
@@ -116,16 +165,31 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
                                     if r.get("state") in _CONSUMED_STATES)},
         "reservations": {"present": reservations is not None,
                          "count": len(reservation_ids)},
+        "reports": {"sources": [s for s, _ in report_seqs],
+                    "seqs": sorted(reported)},
         "drift": drift,
         "why": "" if ok else "对账存在漂移：" + ", ".join(
             k for k, v in drift.items() if v),
     }
 
 
+def _multiset_minus(left: Sequence[str], right: Sequence[str]) -> list[str]:
+    """``left - right`` 的多重集差（元素是 repr 过的键，便于直接进 JSON）。"""
+    rest = list(right)
+    out: list[str] = []
+    for item in left:
+        if item in rest:
+            rest.remove(item)
+        else:
+            out.append(item)
+    return out
+
+
 def reconcile_campaign(ledger_path: Path, journal: AttemptJournal,
-                       reservations: BudgetReservations | None = None
+                       reservations: BudgetReservations | None = None,
+                       report_seqs: Sequence[tuple[str, Sequence[int]]] = ()
                        ) -> tuple[bool, dict[str, Any]]:
     """``(ok, detail)`` 便捷包装，给门事实与收尾共用。"""
     detail = reconcile(ledger_path=ledger_path, journal=journal,
-                       reservations=reservations)
+                       reservations=reservations, report_seqs=report_seqs)
     return bool(detail.get("ok")), detail

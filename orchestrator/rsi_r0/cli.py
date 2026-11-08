@@ -35,7 +35,12 @@ from orchestrator.rsi_r0.contracts import (
     pick_primary_verdict,
     sha256_of,
 )
-from orchestrator.rsi_r0.runner import PaidPathNotArmed, R0Runner, RunnerError
+from orchestrator.rsi_r0.runner import (
+    PaidPathNotArmed,
+    R0Runner,
+    RunnerError,
+    write_artifact_with_history,
+)
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -194,12 +199,17 @@ def cmd_approve(args: argparse.Namespace) -> int:
                           namespace=ql.RSI_R0_NAMESPACE)
         ticket_created = True
 
-    body = gates.approval_body(
-        batch_id=batch, task_cap=args.requests, hard_cap=ql.RSI_R0_HARD_CAP,
-        currency="USD", usd_ceiling=args.usd_ceiling,
-        approved_by=args.approved_by,
-        approved_at_utc=(args.approved_at or _utc_now()),
-        scope=args.scope)
+    try:
+        body = gates.approval_body(
+            batch_id=batch, task_cap=args.requests, hard_cap=ql.RSI_R0_HARD_CAP,
+            currency="USD", usd_ceiling=args.usd_ceiling,
+            approved_by=args.approved_by,
+            # 评审 N-8：写侧归一成严格 Z——读侧只接受严格 Z，两边只有一种可比形态。
+            approved_at_utc=gates.normalize_utc_strict(args.approved_at or _utc_now()),
+            scope=args.scope)
+    except gates.ApprovalError as exc:
+        _emit({"command": "approve", "error": str(exc)})
+        return EXIT_REFUSED
     try:
         written = gates.write_approval(runner.gate_approval_path(batch), body)
     except gates.ApprovalError as exc:
@@ -455,9 +465,10 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     }
     report["report_sha256"] = sha256_of(report)
     out = closeout / "closeout_zero_paid.json"
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                   encoding="utf-8")
-    _emit({"command": "closeout", "report": report, "path": str(out)})
+    # 评审 N-6：结案件可反复覆盖 ⇒ 每次内容变化都进只增历史（含被覆盖的旧哈希）。
+    hist = write_artifact_with_history(out, report, closeout / "closeout_history.jsonl")
+    _emit({"command": "closeout", "report": report, "path": str(out),
+           "history": hist})
     return EXIT_OK
 
 

@@ -30,6 +30,7 @@ from orchestrator.rsi_r0.contracts import (  # noqa: E402
     CONTRACT_SCHEMA,
     answer_schema,
     canonical_json,
+    private_write,
     sha256_of,
 )
 from orchestrator.rsi_r0.instances import PLANS, assert_frozen_table  # noqa: E402
@@ -45,9 +46,9 @@ PRIVATE_KEYS = ("fault", "expected", "expected_direction", "equivalence_bound",
 
 def _write_yaml(path: Path, payload: dict) -> None:
     ensure_private_dir(path.parent)
-    path.write_text(
-        yaml.safe_dump(payload, allow_unicode=True, sort_keys=True, width=4096),
-        encoding="utf-8")
+    private_write(
+        path,
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=True, width=4096))
 
 
 def public_task(plan) -> dict:
@@ -92,9 +93,9 @@ def main() -> int:
         task = public_task(plan)
         path = tasks_root / plan.instance_id / "task.yaml"
         _write_yaml(path, task)
-        (private / f"{plan.instance_id}.json").write_text(
-            json.dumps(plan.private, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8")
+        private_write(private / f"{plan.instance_id}.json",
+                      json.dumps(plan.private, ensure_ascii=False, indent=2,
+                                 sort_keys=True) + "\n")
         entries.append({
             "instance_id": plan.instance_id,
             "family": plan.family.value,
@@ -117,8 +118,8 @@ def main() -> int:
                  "私有真值只落数据层 private/instances/，不进仓库。"),
     }
     out = protocol / "t2_tasks_lock.json"
-    out.write_text(json.dumps(lock, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                   encoding="utf-8")
+    private_write(out, json.dumps(lock, ensure_ascii=False, indent=2,
+                                  sort_keys=True) + "\n")
 
     # 内容层 manifest：公开包逐文件 sha256，并在同一遍里做泄漏自检。
     # AC13 要求"公开包在模型调用前锁定"，锁的对象必须逐文件，不能只锁一份汇总哈希。
@@ -141,9 +142,9 @@ def main() -> int:
         "tasks_set_sha256": lock["tasks_set_sha256"],
     }
     manifest["manifest_sha256"] = sha256_of([manifest_files, lock["tasks_set_sha256"]])
-    (protocol / "t2_public_manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8")
+    private_write(protocol / "t2_public_manifest.json",
+                  json.dumps(manifest, ensure_ascii=False, indent=2,
+                             sort_keys=True) + "\n")
     if leaks:
         print(json.dumps({"ok": False, "leaks": leaks}, ensure_ascii=False))
         return 1

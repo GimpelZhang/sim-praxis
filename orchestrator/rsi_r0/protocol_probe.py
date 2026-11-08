@@ -410,7 +410,15 @@ class ProtocolProbe:
 
         评审 MAJOR-4：旧版只有 dry-run 加锁，真实付费路径不加——并发时账行归属
         会错位。这里把锁移到付费路径本身。
+
+        评审 MAJOR-3 残留：一次 campaign 只允许跑一次协议批次这条，原先只在 CLI
+        层。直接调 API 的人可以再发 6 次付费请求（报告由 CLI 在 run 之外写，所以
+        报告存在性拦不住）。守卫放进 run 本身，任何入口都绕不过去。
         """
+        if report_path().exists():
+            raise ProbeError(
+                f"协议报告已存在：一次 campaign 只允许一次协议批次，拒绝再发"
+                f"（{report_path()}）")
         with campaign_lock(rp.rsi_r0_quota_dir()):
             return self._run_locked()
 

@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from orchestrator.rsi_r0.contracts import sha256_of  # noqa: E402
+from orchestrator.rsi_r0.contracts import private_write, sha256_of  # noqa: E402
 from orchestrator.rsi_r0.faults import apply_fault  # noqa: E402
 from orchestrator.rsi_r0.image_pin import IMAGE_REF  # noqa: E402
 from orchestrator.rsi_r0.instances import plan_for  # noqa: E402
@@ -188,8 +188,8 @@ def main() -> int:
     protocol = ensure_private_dir(rsi_r0_protocol_dir())
     out = Path(args.out) if args.out else protocol / "t2_convergence.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                   encoding="utf-8")
+    private_write(out, json.dumps(report, ensure_ascii=False, indent=2,
+                                  sort_keys=True) + "\n")
     print(json.dumps({"ok": report["passed"], "out": str(out),
                       "validity": validity}, ensure_ascii=False, indent=1))
     return 0 if report["passed"] else 1

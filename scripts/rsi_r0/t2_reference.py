@@ -29,7 +29,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from orchestrator.rsi_r0.contracts import sha256_of  # noqa: E402
+from orchestrator.rsi_r0.contracts import private_write, sha256_of  # noqa: E402
 from orchestrator.rsi_r0.faults import apply_fault  # noqa: E402
 from orchestrator.rsi_r0.image_pin import IMAGE_REF, DIGEST, verify as verify_image  # noqa: E402
 from orchestrator.rsi_r0.instances import PLANS, assert_frozen_table  # noqa: E402
@@ -246,8 +246,8 @@ def main() -> int:
     results["golden_sha256"] = sha256_of({k: v for k, v in results.items()
                                           if k != "golden_sha256"})
     out = protocol / "t2_golden.json"
-    out.write_text(json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                   encoding="utf-8")
+    private_write(out, json.dumps(results, ensure_ascii=False, indent=2,
+                                  sort_keys=True) + "\n")
     (protocol / "t2_image.json").write_text(
         json.dumps({"schema": "rsi_r0.image.v1", "image_ref": IMAGE_REF,
                     "digest": DIGEST, **image_facts,

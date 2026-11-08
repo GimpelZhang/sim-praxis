@@ -183,14 +183,14 @@ def test_ac_t0_2_selfcheck_row(tmp_path):
         assert (tmp_path / "r0root" / "r0test" / "quota" / "ledger.jsonl").exists()
     # 开账行占 seq=1 后，生产账的下一条实呼必须从 seq=2 起。
     # 锁内适配（RSI-R0 T1）：rsi_r0 路径依赖 campaign env 才能解析，patch 退出后
-    # 环境已还原；campaign 未设（裸跑单测常态）时解析必抛，故改断「环境已还原」，
-    # 有 campaign 时再断「生产路径不等于 tmp 路径」——仍是反向断言，非放水。
+    # 环境已还原。评审 N-9：旧版 else 分支的第一个 disjunct 恒真（变量本就未设），
+    # 反向断言形同虚设；现在裸跑分支只断「tmp 根没有残留」，真路径反向覆盖由
+    # p27_roots 里设了 campaign 的显式用例承担。
     if os.environ.get("SIMPRAXIS_RSI_R0_CAMPAIGN"):
         assert rp.rsi_r0_ledger_path() != (
             tmp_path / "r0root" / "r0test" / "quota" / "ledger.jsonl")
     else:
-        assert "SIMPRAXIS_RSI_R0_ROOT" not in os.environ or \
-            os.environ["SIMPRAXIS_RSI_R0_ROOT"] != str(tmp_path / "r0root")
+        assert os.environ.get("SIMPRAXIS_RSI_R0_ROOT") != str(tmp_path / "r0root")
 
     # (b) 生产根：开账 selfcheck 行（占 seq=1、不计实呼、永不删除）。
     prod = rp.phase27_ledger_path()

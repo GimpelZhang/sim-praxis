@@ -106,8 +106,20 @@ def contract_ok(doc: dict[str, Any] | None) -> tuple[bool, str]:
     if doc.get("requests_total_cap") != REQUESTS_TOTAL_CAP:
         return False, f"请求总量帽不是 {REQUESTS_TOTAL_CAP}"
     # 评审 MINOR-2：只验自哈希等于"自洽"，把单价写成 0.0001 再重算自哈希照样过。
-    # 这里按合同自己的字段**重算算术**，不信任任何预先写死的金额。
+    # 这里按合同自己的字段**重算算术**，不信任任何预先写死的金额；并且把合同里的
+    # 单价/token 帽与模块常量对账——「保守上界」是常量承诺的属性，手改合同字段
+    # 就不能再自称上界。
     try:
+        if int(doc["input_tokens_cap"]) != INPUT_TOKENS_CAP:
+            return False, (f"输入帽 {doc['input_tokens_cap']} != 规划值 {INPUT_TOKENS_CAP}")
+        if int(doc["output_tokens_cap"]) != OUTPUT_TOKENS_CAP:
+            return False, (f"输出帽 {doc['output_tokens_cap']} != 规划值 {OUTPUT_TOKENS_CAP}")
+        if float(doc["price_per_1m_input_usd"]) < float(PRICE_PER_1M_INPUT_USD):
+            return False, (f"输入单价 {doc['price_per_1m_input_usd']} 低于保守上界 "
+                           f"{PRICE_PER_1M_INPUT_USD}：不再是上界")
+        if float(doc["price_per_1m_output_usd"]) < float(PRICE_PER_1M_OUTPUT_USD):
+            return False, (f"输出单价 {doc['price_per_1m_output_usd']} 低于保守上界 "
+                           f"{PRICE_PER_1M_OUTPUT_USD}：不再是上界")
         recomputed_per = (float(doc["input_tokens_cap"]) / 1e6
                           * float(doc["price_per_1m_input_usd"])
                           + float(doc["output_tokens_cap"]) / 1e6

@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 #: 合同 schema 版本。任何字段语义变化都必须升这个号（判决件与包都记录它）。
@@ -422,6 +424,12 @@ def sha256_of(obj: Any) -> str:
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def private_write(path: Path, text: str) -> None:
+    """写 campaign 产物并落 0600（评审 N-4：脚本侧曾写出 0664 的尾巴）。"""
+    path.write_text(text, encoding="utf-8")
+    os.chmod(path, 0o600)
 
 
 # ---------------------------------------------------------------- 研究判据枚举

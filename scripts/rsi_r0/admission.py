@@ -6,7 +6,9 @@
 - ``admission.json``        —— 仓库/环境/磁盘/隔离准入事实（AC01/02/03/04）
 - ``baseline_manifest.json`` —— 旧六本账与旧状态的只读清单（AC05 的「原内容哈希不变」基线）
 - ``budget.json``           —— §6.1 请求信封 + §6.2 资源帽（机器可核的常量表）
-- ``gates.json``            —— G0/G-M/G-P/G-V 四门状态与未决项
+- ``admission_gates.json``  —— T0 时点的手写门清单（G0/G-M/G-P/G-V）与未决项；
+  与 ``cli gates`` 现算的 ``gates.json`` **分文件**（评审 N-5：两个写者同一路径，
+  新 campaign 上按 ``state["G-P"]["state"]`` 读的消费者会 KeyError）
 
 **只读**：全部检查只读仓库与数据根；只有在全部检查通过后才在 campaign 根下建
 私目录族（0700）。任何一项失败即抛 :class:`AdmissionError`，不建目录、不写件。
@@ -377,7 +379,8 @@ def run_admission(campaign_id: str, env_rc: int, data_root: str | None = None) -
     # 评审 MAJOR-2 的根因之一：本函数会把**手写** gates.json 写进已经开跑的
     # campaign，把 `cli gates` 现算出来的那份盖掉。campaign id 不可复用，已有
     # 产物一律拒覆盖——另开新 id，别改已冻结的实验。
-    for name in ("admission.json", "baseline_manifest.json", "gates.json"):
+    for name in ("admission.json", "baseline_manifest.json", "gates.json",
+                 "admission_gates.json"):
         existing = campaign / "protocol" / name
         if existing.exists():
             raise AdmissionError(
@@ -427,7 +430,9 @@ def run_admission(campaign_id: str, env_rc: int, data_root: str | None = None) -
     write_json(campaign / "protocol" / "admission.json", admission)
     write_json(campaign / "protocol" / "baseline_manifest.json", baseline)
     write_json(campaign / "protocol" / "budget.json", budget)
-    write_json(campaign / "protocol" / "gates.json", build_gates(env_rc))
+    # 评审 N-5：T0 这份是**手写**清单，结构与 runner.gates_state() 的机算件不同，
+    # 不再占用 gates.json（那是 `cli gates` 的产物路径，单一写者）。
+    write_json(campaign / "protocol" / "admission_gates.json", build_gates(env_rc))
     return {"campaign_root": str(campaign), "admission": admission}
 
 
@@ -445,7 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     croot = out["campaign_root"]
     print(f"[rsi_r0.admission] OK campaign_root={croot}")
-    for name in ("admission", "baseline_manifest", "budget", "gates"):
+    for name in ("admission", "baseline_manifest", "budget", "admission_gates"):
         print(f"  wrote protocol/{name}.json")
     return 0
 

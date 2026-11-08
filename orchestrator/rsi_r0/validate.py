@@ -19,7 +19,7 @@ from typing import Any, Callable, Mapping, Sequence
 from orchestrator.common import runtime_paths as rp
 from orchestrator.rsi_r0 import develop as dev
 from orchestrator.rsi_r0.attempts import campaign_lock
-from orchestrator.rsi_r0.contracts import sha256_of
+from orchestrator.rsi_r0.contracts import private_write, sha256_of
 
 REPORT_SCHEMA = "rsi_r0.validation_report.v1"
 
@@ -59,6 +59,14 @@ def _run_validation_locked(runner: Any, gateway: Any, *,
                            clock: Callable[[], str] | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     halted: str | None = None
+    # 评审 N-1：G-V 必须在**第一个请求之前**成立，且不能只靠 CLI 那一层。
+    # 每条 trial 的 preconditions 也按 role 查 G-V（双保险），这里先在批级拦一次，
+    # 这样直接调 API 的人拿到的是一句明确的 ValidationError，而不是逐 slot 的
+    # DevelopmentError 串。
+    try:
+        runner.require_gate("G-V", batch_id=plan[0][2])
+    except Exception as exc:  # noqa: BLE001
+        raise ValidationError(f"G-V 不成立，拒绝发出任何验证请求：{exc}") from exc
     for family_key, instance_id, batch_id, task_id in plan:
         if halted is not None:
             rows.append({"family": family_key, "instance_id": instance_id,
@@ -131,6 +139,6 @@ def write_report(report: Mapping[str, Any], path=None) -> Any:
 
     target = Path(path) if path else (rp.rsi_r0_protocol_dir() / "validation_report.json")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                      encoding="utf-8")
+    private_write(target, json.dumps(report, ensure_ascii=False, indent=2,
+                                     sort_keys=True) + "\n")
     return target

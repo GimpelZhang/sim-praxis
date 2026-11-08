@@ -34,6 +34,7 @@ from orchestrator.rsi_r0.contracts import (  # noqa: E402
     Layer,
     LayerStatus,
     RESEARCH_CRITERIA,
+    private_write,
     sha256_of,
 )
 from orchestrator.rsi_r0.controls import (  # noqa: E402
@@ -350,8 +351,8 @@ def main() -> int:
                                          if k != "report_sha256"})
     out = protocol / ("t3_controls_offline.json" if args.offline
                       else "t3_controls_report.json")
-    out.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
-                   + "\n", encoding="utf-8")
+    private_write(out, json.dumps(report, ensure_ascii=False, indent=2,
+                                  sort_keys=True) + "\n")
     print(json.dumps({"ok": ok, "report": str(out),
                       "report_sha256": report["report_sha256"],
                       "positives": f"{positives['passed']}/{positives['total']}",

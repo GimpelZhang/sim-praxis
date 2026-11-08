@@ -13,9 +13,11 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from datetime import timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from orchestrator.common.clock import parse_ts_iso_lenient, parse_ts_iso_strict
 from orchestrator.rsi_r0.contracts import sha256_of
 from orchestrator.rsi_r0.attempts import _utc_now
 
@@ -149,6 +151,19 @@ def write_approval(path: Path, body: Mapping[str, Any]) -> dict[str, Any]:
     return {"path": str(path), "sha256": digest, "created": True}
 
 
+def normalize_utc_strict(value: str) -> str:
+    """把 Z / ±HHMM / ±HH:MM 统一成严格 ``YYYY-MM-DDTHH:MM:SSZ``（写侧归一）。
+
+    读侧（:func:`read_approval`）只接受严格 Z 形态；写侧把用户可能给的宽松形态
+    先折算到 UTC 同一瞬时，两边就只有一个可比形态，不会出现"字面大于是假的未来"。
+    """
+    try:
+        dt = parse_ts_iso_lenient(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ApprovalError(f"时间串无法解析：{value!r}（{exc}）") from exc
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def read_approval(path: Path) -> dict[str, Any]:
     if not path.exists():
         raise ApprovalError(f"批准件不存在：{path}")
@@ -158,7 +173,15 @@ def read_approval(path: Path) -> dict[str, Any]:
     body = {k: v for k, v in doc.items() if k != "approval_sha256"}
     if sha256_of(body) != doc.get("approval_sha256"):
         raise ApprovalError("批准件自哈希不符（被改过）")
-    if doc.get("approved_at_utc", "") > _utc_now():
+    # 评审 N-8：原版拿字符串比大小——对固定宽度 ``YYYY-MM-DDTHH:MM:SSZ`` 才成立；
+    # 传 ``+08:00`` / 无后缀 / 带毫秒时结果无意义（真未来件会被放行，正常件会被
+    # 误判）。一律先严格解析成带动画的 UTC 时间点再比，解析失败即拒。
+    raw_ts = doc.get("approved_at_utc", "")
+    try:
+        approved_at = parse_ts_iso_strict(str(raw_ts))
+    except (TypeError, ValueError) as exc:
+        raise ApprovalError(f"批准件时间无法严格解析：{raw_ts!r}（{exc}）") from exc
+    if approved_at > parse_ts_iso_strict(_utc_now()):
         raise ApprovalError("批准件时间在未来（时钟异常或伪造）")
     return doc
 

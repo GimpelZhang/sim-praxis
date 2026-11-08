@@ -23,7 +23,7 @@ from orchestrator.gateway import quota_ledger as ql
 from orchestrator.gateway.quota_ledger import billing_context
 from orchestrator.rsi_r0 import budget_contract
 from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations, campaign_lock
-from orchestrator.rsi_r0.contracts import ResourceCaps, sha256_of
+from orchestrator.rsi_r0.contracts import ResourceCaps, private_write, sha256_of
 from orchestrator.rsi_r0.evaluator import EvaluationInput, evaluate
 from orchestrator.rsi_r0.faults import apply_fault
 from orchestrator.rsi_r0.image_pin import IMAGE_REF
@@ -204,7 +204,16 @@ class DevelopmentTrial:
         ok, why = budget_contract.contract_ok(self.contract)
         if not ok:
             raise DevelopmentError(f"BLOCKED_COST：{why}")
-        gate = self.runner.require_gate("G-P", batch_id=self.batch_id)
+        # 评审 N-1（阻断项）：AC27 要的是「开发没过门就一个 POST 都不许发到验证」。
+        # 旧版这里无条件查 G-P，于是 role="validation" 的试验只凭 G-P 成立就能发满
+        # 6 slot × 24 = 144 次——G-V 只在 CLI 一层，直接调用 API 就绕过去了。
+        # 按角色选门：验证试验查 G-V（G-V 的第一条就是 gate_p_passed，含批准件与
+        # 本批票据的校验），开发试验查 G-P。
+        gate_name = "G-V" if self.role == "validation" else "G-P"
+        try:
+            gate = self.runner.require_gate(gate_name, batch_id=self.batch_id)
+        except Exception as exc:  # noqa: BLE001 —— 统一成本模块自己的错误类型
+            raise DevelopmentError(f"{gate_name} 不成立：{exc}") from exc
         try:
             ticket = ql.load_approval(self.batch_id, rp.rsi_r0_approvals_dir())
         except Exception as exc:  # noqa: BLE001
@@ -514,6 +523,6 @@ def gate_v_facts(report: Mapping[str, Any]) -> dict[str, bool]:
 def write_report(report: Mapping[str, Any], path: Path | None = None) -> Path:
     target = path or (rp.rsi_r0_protocol_dir() / "development_report.json")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-                      encoding="utf-8")
+    private_write(target, json.dumps(report, ensure_ascii=False, indent=2,
+                                     sort_keys=True) + "\n")
     return target

@@ -16,7 +16,26 @@ from tests.test_rsi_r0_develop import (PRIVATE, TASK, FakeGateway, FakeSession,
                                        _factory)
 
 
-def _arm(campaign, monkeypatch):
+def _dev_report() -> dict:
+    """形状合法的开发报告：三族终态 + E/D L4 PASS、R L5 PASS（G-V 的判定面）。"""
+    from orchestrator.rsi_r0.contracts import sha256_of
+
+    report = {
+        "schema": "rsi_r0.development_report.v1",
+        "families": [
+            {"family": "E", "state": "SUBMITTED",
+             "evaluation": {"layers": {"L4": {"status": "PASS"}}}},
+            {"family": "D", "state": "SUBMITTED",
+             "evaluation": {"layers": {"L4": {"status": "PASS"}}}},
+            {"family": "R", "state": "SUBMITTED",
+             "evaluation": {"layers": {"L5": {"status": "PASS"}}}},
+        ],
+    }
+    report["report_sha256"] = sha256_of(report)
+    return report
+
+
+def _arm(campaign, monkeypatch, *, gate_v: bool = True):
     from orchestrator.gateway import quota_ledger as ql
     from tests.test_rsi_r0_protocol import _arm as arm_protocol
 
@@ -29,6 +48,11 @@ def _arm(campaign, monkeypatch):
             batch_id=batch, task_cap=val.VALIDATION_CAP, hard_cap=ql.RSI_R0_HARD_CAP,
             currency="USD", usd_ceiling=100.0, approved_by="user",
             approved_at_utc="2026-11-08T00:00:00Z", scope="validation"))
+    # 评审 N-1：验证批次现在必须先在**开发**侧成立（AC27 的 G-V）。夹具就给一份
+    # 形状合法的开发报告并冻结验证快照；gate_v=False 时不写，专门用来做负控。
+    if gate_v:
+        dv.write_report(_dev_report())
+        runner.write_validation_snapshot()
     monkeypatch.setattr(dv, "load_task", lambda _id: TASK)
     monkeypatch.setattr(dv, "load_private", lambda _id: PRIVATE)
     monkeypatch.setattr(dv, "build_scene", lambda _t, _p: "<mujoco/>")
@@ -93,3 +117,40 @@ def test_report_keeps_every_assigned_slot(campaign, monkeypatch):
     assert report["halted"] is None
     steps = report["totals"]["requests_used"]
     assert steps == 6, steps        # 每 slot 恰好一次交卷请求
+
+
+# ---------------------------------------------------------------------------
+# AC27 的负控（评审 N-1）：G-V 不能只在 CLI 一层
+# ---------------------------------------------------------------------------
+def test_run_validation_refuses_before_the_first_request_without_gate_v(campaign, monkeypatch):
+    """开发没过门 ⇒ 一个验证请求都不许发（哪怕是直接调 API）。"""
+    runner = _arm(campaign, monkeypatch, gate_v=False)
+    submit = json.dumps({"action": "submit", "family": "E", "run_id": "run_000",
+                         "claim": {"distance": 0.0, "final_speed": 0.0}})
+    gateway = FakeGateway([submit] * 6)
+    with pytest.raises(val.ValidationError, match="G-V"):
+        val.run_validation(runner, gateway, session_factory=_factory(),
+                           clock=lambda: "2026-11-08T00:00:00Z")
+    assert gateway.rows == 0, f"G-V 不成立却已经发了 {gateway.rows} 次请求"
+
+
+def test_validation_trial_preconditions_check_gate_v_not_gate_p(campaign, monkeypatch):
+    """同一台机器按 role 选门：验证试验不能只凭 G-P 就发网。"""
+    runner = _arm(campaign, monkeypatch, gate_v=False)
+    # G-P 在这个夹具里是真（协议夹具已把六条都做实），G-V 缺开发报告与快照。
+    runner.require_gate("G-P", batch_id="R0-V-E1")
+    trial = dv.DevelopmentTrial(
+        runner, FakeGateway([]), "E", instance_id="E-v1", batch_id="R0-V-E1",
+        role="validation", task_id=2, request_cap=val.VALIDATION_CAP, checkpoints=())
+    with pytest.raises(dv.DevelopmentError, match="G-V"):
+        trial.preconditions()
+
+
+def test_development_trial_still_checks_gate_p(campaign, monkeypatch):
+    """角色分叉的另一半：开发试验的门名没有被连带改掉。"""
+    runner = _arm(campaign, monkeypatch, gate_v=False)
+    trial = dv.DevelopmentTrial(
+        runner, FakeGateway([]), "E", instance_id="E-dev", batch_id="R0-V-E1",
+        role="development", task_id=1, request_cap=24, checkpoints=())
+    pre = trial.preconditions()
+    assert pre["gate"]["gate"] == "G-P", pre["gate"]

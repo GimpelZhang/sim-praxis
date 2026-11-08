@@ -32,6 +32,7 @@ from orchestrator.rsi_r0 import budget_contract, gates, seals
 from orchestrator.rsi_r0.attempts import (
     AttemptJournal,
     BudgetReservations,
+    _append_jsonl,
     _atomic_write_json,
     _utc_now,
     campaign_lock,
@@ -140,6 +141,33 @@ def actor_record(name: str, *, source: str = "cli",
 def new_session_id(trial_id: str) -> str:
     """每次 trial 一个新会话 id（AC22：新会话隔离，不复用上次上下文）。"""
     return sha256_of({"trial_id": trial_id, "nonce": os.urandom(16).hex()})[:32]
+
+
+def write_artifact_with_history(path: Path, payload: Mapping[str, Any],
+                                history: Path) -> dict[str, Any]:
+    """写「最新件」，并把每个**不同版本**的哈希追加进只增日志（评审 N-6）。
+
+    dry-run 报告与零付费结案件原先都是 ``write_text`` 覆盖——先跑出
+    INVALID_INSTRUMENT、修好后再覆盖成干净件，审计上就只剩最后一份。现在最新件
+    仍是那个固定文件名（下游读取路径不变），但每次内容变化都会在历史里留一行
+    （时间/新哈希/被覆盖的旧哈希/主判），覆盖不等于抹除。
+    """
+    digest = str(payload.get("report_sha256") or sha256_of(payload))
+    previous: str | None = None
+    if path.exists():
+        try:
+            previous = sha256_of(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            previous = "unreadable"
+    _atomic_write_json(path, payload)
+    line = {"written_at_utc": _utc_now(), "artifact": path.name,
+            "sha256": digest, "previous_sha256": previous,
+            "changed": previous != digest,
+            "primary_verdict": payload.get("primary_verdict"),
+            "verdict": payload.get("verdict"),
+            "posts": payload.get("posts")}
+    _append_jsonl(history, line)
+    return line
 
 
 # ---------------------------------------------------------------- 组合根
@@ -475,14 +503,63 @@ class R0Runner:
         data = json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
         path = self.review_path()
         if path.exists():
-            if path.read_text(encoding="utf-8") != data:
+            # 同内容幂等：``created_at_utc`` 与随之变化的 ``review_sha256`` 不算内容，
+            # 否则同一份评审件在下一秒重写就会被当成「异内容」误拒（评审 N-3）。
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                existing = None
+            volatile = ("created_at_utc", "review_sha256")
+
+            def _stable(d: Mapping[str, Any]) -> dict[str, Any]:
+                return {k: v for k, v in d.items() if k not in volatile}
+
+            if existing is None or _stable(existing) != _stable(doc):
                 raise RunnerError(f"评审件已存在且内容不同，拒绝覆盖：{path}")
-            return json.loads(data)
+            return existing
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(data)
         return json.loads(data)
+
+    def reported_ledger_seqs(self) -> list[tuple[str, list[int]]]:
+        """从已落盘的成品报告里取回它们各自记录过的账本 seq（第四份痕迹）。
+
+        评审 N-2：账本/attempts/预留**三份一起删**时对账曾返回真（"未开跑"与
+        "抹掉证据"不可区分）。报告是被写一次即锁的成品件，里面的
+        ``requests.ledger_seqs`` 不会跟着被删，所以把它当独立来源再核一遍。
+        """
+        proto = rp.rsi_r0_protocol_dir()
+        out: list[tuple[str, list[int]]] = []
+        for name, sources in (
+            ("protocol", ("protocol_probe_report.json",)),
+            ("development", ("development_report.json",)),
+            ("validation", ("validation_report.json",)),
+        ):
+            seqs: list[int] = []
+            for fname in sources:
+                path = proto / fname
+                if not path.exists():
+                    continue
+                try:
+                    doc = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                req = doc.get("requests") or {}
+                seqs.extend(s for s in (req.get("ledger_seqs") or ())
+                            if isinstance(s, int))
+                # 开发报告的每族、验证报告的每个 slot 各自也记着 ledger_seqs。
+                for key in ("families", "slots"):
+                    for entry in doc.get(key) or ():
+                        seqs.extend(s for s in (entry.get("ledger_seqs") or ())
+                                    if isinstance(s, int))
+                        seqs.extend(s for s in ((entry.get("requests") or {})
+                                                .get("ledger_seqs") or ())
+                                    if isinstance(s, int))
+            if seqs:
+                out.append((name, sorted(set(seqs))))
+        return out
 
     def reconciled(self) -> tuple[bool, dict[str, Any]]:
         """AC31：账本/attempts/预留三方逐 request 对账（评审 MAJOR-5）。"""
@@ -492,7 +569,8 @@ class R0Runner:
                                  BudgetReservations(self.caps, rp.rsi_r0_reservations_dir()))
         journal.recover()
         return reconcile_mod.reconcile_campaign(
-            rp.rsi_r0_ledger_path(), journal, journal.reservations)
+            rp.rsi_r0_ledger_path(), journal, journal.reservations,
+            report_seqs=self.reported_ledger_seqs())
 
     def lock_status(self) -> tuple[bool, dict[str, Any]]:
         try:
@@ -710,7 +788,9 @@ class R0Runner:
         }
         report["report_sha256"] = sha256_of(report)
         out = rp.rsi_r0_closeout_dir() / "dryrun_report.json"
-        _atomic_write_json(out, report)
+        # 评审 N-6：T4 报告也是可覆盖件——每次内容变化都留一行历史，覆盖≠抹除。
+        write_artifact_with_history(out, report,
+                                    out.parent / "dryrun_history.jsonl")
         return report
 
     def _dry_plan(self) -> list[tuple[str, Sequence[str], str]]:
@@ -811,6 +891,12 @@ class R0Runner:
         for dotted, rel in {
             "scripts.rsi_r0.admission": ("scripts", "rsi_r0", "admission.py"),
             "scripts.rsi_r0.t3_controls": ("scripts", "rsi_r0", "t3_controls.py"),
+            # 评审 N-7：T2 的三个生成脚本以前不在锁内，改脚本而产物不变时
+            # `lock --verify` 看不见（尤其 t2_golden.json 既不入锁也不被门读取，
+            # 它却是 T2 参考基线）。三个脚本一律入锁。
+            "scripts.rsi_r0.t2_build": ("scripts", "rsi_r0", "t2_build.py"),
+            "scripts.rsi_r0.t2_convergence": ("scripts", "rsi_r0", "t2_convergence.py"),
+            "scripts.rsi_r0.t2_reference": ("scripts", "rsi_r0", "t2_reference.py"),
         }.items():
             p = here.parent.parent.joinpath(*rel)
             code[dotted] = sha256_of(p.read_text(encoding="utf-8")) if p.exists() else None
@@ -945,6 +1031,13 @@ class R0Runner:
             raise RunnerError(
                 f"已有 {len(sent)} 条发网 attempt，禁止取代快照锁"
                 "（那是改实验，不是修锁；须另开 campaign）")
+        # 评审 MAJOR-5 残留：只看 attempts 不够——删掉 attempts.jsonl 就能让上面的
+        # 守卫空转（账本里明明有付费 call 行）。取代锁前必须跑三方对账，任何漂移都拒。
+        recon_ok, recon = self.reconciled()
+        if not recon_ok:
+            raise RunnerError(
+                f"账本/attempts/预留对账存在漂移，禁止取代快照锁：{recon.get('why')}"
+                "（取代 LOCK 只允许在「确实还没花过钱」时进行）")
         old = json.loads(path.read_text(encoding="utf-8"))
         old_sha = str(old.get("lock_sha256") or "")
         archive = path.parent / f"t4_lock.superseded.{old_sha[:8] or 'nosha'}.json"
@@ -973,7 +1066,9 @@ class R0Runner:
                          if old_code[k] != new_code[k])
         line.update({"code_keys_added": added, "code_keys_removed": removed,
                      "code_keys_changed": changed,
-                     "code_diff_generated_by": "R0Runner.supersede_lock"})
+                     "code_diff_generated_by": "R0Runner.supersede_lock",
+                     "reconcile_ok_at_supersede": recon_ok,
+                     "ledger_seqs_at_supersede": (recon.get("ledger") or {}).get("seqs")})
         line["reason"] = (f"{reason.strip()}；[机生成] code 键 "
                           f"+{added} ~{changed} -{removed}")
         hist = path.parent / "lock_history.jsonl"
