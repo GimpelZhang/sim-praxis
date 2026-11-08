@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from orchestrator.common import runtime_paths as rp
-from orchestrator.rsi_r0 import gates
+from orchestrator.rsi_r0 import budget_contract, gates, seals
 from orchestrator.rsi_r0.attempts import (
     AttemptJournal,
     BudgetReservations,
@@ -267,31 +267,129 @@ class R0Runner:
         return facts
 
     # ---- 门 ----
-    def gate_facts(self, gate: str, *, batch_id: str = "R0-P") -> dict[str, bool]:
-        approval = rp.rsi_r0_approvals_dir() / f"{batch_id}.json"
+    #
+    # 每条门事实都必须来自**产物**，不能来自「调用者说已经批准了」的环境变量：
+    # 环境变量谁都能 export，批准件有自哈希与写一次锁，基线清单有逐件 sha256。
+    #   model_ids_approved     → protocol/model_approval.json 的 stage_models_sha256
+    #                            与当前 stage_models.yaml 逐字节相等（模型一改即失效）
+    #   cost_upper_bound_known → protocol/pricing_contract.json 通过 contract_ok，且
+    #                            本批批准件的 usd_ceiling 不低于最坏总量
+    #   seals_verified         → 用 protocol/baseline_manifest.json 现算旧资产哈希
+    def model_approval_path(self) -> Path:
+        return rp.rsi_r0_protocol_dir() / "model_approval.json"
+
+    def gate_approval_path(self, batch_id: str) -> Path:
+        return rp.rsi_r0_protocol_dir() / "approvals" / f"{batch_id}.json"
+
+    def stage_models_path(self) -> Path:
+        return Path(__file__).resolve().parent.parent / "gateway" / "stage_models.yaml"
+
+    def current_stage_models(self) -> dict[str, Any]:
+        import yaml
+        doc = yaml.safe_load(self.stage_models_path().read_text(encoding="utf-8")) or {}
+        return {k: (v or {}).get("model_id")
+                for k, v in (doc.get("stage_models") or {}).items()}
+
+    def model_ids_approved(self) -> tuple[bool, dict[str, Any]]:
+        """模型 ID 批准事实：**批准件记录的配置哈希 == 当前配置哈希**（硬规则 1 机判）。"""
+        p = self.model_approval_path()
+        detail: dict[str, Any] = {"artifact": str(p), "artifact_present": p.exists()}
+        if not p.exists():
+            return False, {**detail, "why": "缺 model_approval.json（模型 ID 未登记批准）"}
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, {**detail, "why": f"批准件不可解析：{exc}"}
+        body = {k: v for k, v in doc.items() if k != "approval_sha256"}
+        detail["artifact_sha256"] = doc.get("approval_sha256")
+        if sha256_of(body) != doc.get("approval_sha256"):
+            return False, {**detail, "why": "批准件自哈希不符（被改过）"}
+        cfg = self.stage_models_path()
+        if not cfg.exists():
+            return False, {**detail, "why": f"配置不存在：{cfg}"}
+        now_hash = sha256_of(cfg.read_text(encoding="utf-8"))
+        detail["stage_models_now_sha256"] = now_hash
+        detail["stage_models_approved_sha256"] = doc.get("stage_models_sha256")
+        if now_hash != doc.get("stage_models_sha256"):
+            return False, {**detail,
+                           "why": "stage_models.yaml 已改（模型变更须重新请示用户）"}
+        approved = doc.get("stage_models") or {}
+        now_models = self.current_stage_models()
+        detail["stage_models_now"] = now_models
+        mismatch = {k: {"approved": approved.get(k), "now": v}
+                    for k, v in now_models.items() if approved.get(k) != v}
+        if mismatch or set(approved) != set(now_models):
+            return False, {**detail, "why": "模型 ID 与批准件不一致",
+                           "mismatch": mismatch}
+        if not str(doc.get("basis") or "").strip():
+            return False, {**detail, "why": "批准件缺 basis（用户逐字裁决出处）"}
+        return True, detail
+
+    def baseline_manifest_path(self) -> Path:
+        return rp.rsi_r0_protocol_dir() / "baseline_manifest.json"
+
+    def seals_verified(self) -> tuple[bool, dict[str, Any]]:
+        verdict = seals.verify_baseline(self.baseline_manifest_path())
+        return bool(verdict.get("ok")), verdict
+
+    def lock_status(self) -> tuple[bool, dict[str, Any]]:
+        try:
+            verdict = self.verify_lock()
+        except RunnerError as exc:
+            return False, {"why": str(exc)}
+        return bool(verdict.get("ok")), verdict
+
+    def gate_facts(self, gate: str, *, batch_id: str = "R0-P") -> dict[str, Any]:
+        # 门侧批准件与账本侧批次票是**两个文件**：前者回答「这一批被授权了多少，
+        # 币种与美元帽是什么」（写一次即锁），后者是账本 preflight 认的计费凭据。
+        # 二者同批号、同 approved 数，但绝不共用一个文件名（否则互相覆盖）。
+        approval = self.gate_approval_path(batch_id)
+        approval_ok = gates.approval_ok(approval, batch_id=batch_id)
+        approval_doc: dict[str, Any] = {}
+        if approval_ok:
+            try:
+                approval_doc = gates.read_approval(approval)
+            except gates.ApprovalError:
+                approval_ok = False
         pre = self.preflight()
-        journal = AttemptJournal(rp.rsi_r0_attempts_path())
-        facts = {
-            "budget_contract_approved": approval.exists(),
-            "model_ids_approved": bool(os.environ.get("SIMPRAXIS_MODEL_IDS_APPROVED")),
-            "cost_upper_bound_known": bool(os.environ.get("SIMPRAXIS_COST_UPPER_BOUND_USD")),
-            "namespace_isolated": pre["ledger_outside_old_roots"],
-            "seals_verified": bool(os.environ.get("SIMPRAXIS_SEALS_VERIFIED")),
-            "approval_artifact": gates.approval_ok(approval, batch_id=batch_id),
-            "no_unknown_attempts": pre["no_unknown_attempts"],
-            "criteria_frozen": pre.get("criteria_matches_now", False),
-            "lock_present": (rp.rsi_r0_protocol_dir() / "t4_lock.json").exists(),
-            "gate_m_passed": gates.evaluate_gate("G-M", {
-                "budget_contract_approved": approval.exists(),
-                "model_ids_approved": bool(os.environ.get("SIMPRAXIS_MODEL_IDS_APPROVED")),
-                "cost_upper_bound_known": bool(
-                    os.environ.get("SIMPRAXIS_COST_UPPER_BOUND_USD")),
-                "namespace_isolated": pre["ledger_outside_old_roots"],
-                "seals_verified": bool(os.environ.get("SIMPRAXIS_SEALS_VERIFIED")),
-            })["passed"],
+        model_ok, model_detail = self.model_ids_approved()
+        contract = budget_contract.read_contract(
+            rp.rsi_r0_protocol_dir() / "pricing_contract.json")
+        contract_ok, contract_why = budget_contract.contract_ok(contract)
+        worst_total = float((contract or {}).get("worst_case_total_usd") or 0.0)
+        ceiling_ok = (worst_total > 0.0
+                      and float(approval_doc.get("usd_ceiling") or 0.0) >= worst_total)
+        seals_ok, seal_detail = self.seals_verified()
+        lock_ok, lock_detail = self.lock_status()
+
+        gm_facts = {
+            "budget_contract_approved": approval_ok,
+            "model_ids_approved": model_ok,
+            "cost_upper_bound_known": contract_ok and ceiling_ok,
+            "namespace_isolated": bool(pre.get("ledger_outside_old_roots")
+                                       and pre.get("ledger_namespace_ok")),
+            "seals_verified": seals_ok,
+        }
+        facts: dict[str, Any] = {
+            **gm_facts,
+            "gate_m_passed": gates.evaluate_gate("G-M", gm_facts)["passed"],
+            "approval_artifact": approval_ok,
+            "no_unknown_attempts": bool(pre.get("no_unknown_attempts")),
+            "criteria_frozen": bool(pre.get("criteria_matches_now")),
+            "lock_present": lock_ok,
+            "detail": {
+                "batch_id": batch_id,
+                "approval": {"path": str(approval), "ok": approval_ok,
+                             "usd_ceiling": approval_doc.get("usd_ceiling")},
+                "model_approval": model_detail,
+                "pricing_contract": {"ok": contract_ok, "why": contract_why,
+                                     "worst_case_total_usd": worst_total,
+                                     "ceiling_covered_by_approval": ceiling_ok},
+                "seals": seal_detail,
+                "lock": lock_detail,
+            },
         }
         facts["gate_p_passed"] = gates.evaluate_gate("G-P", facts)["passed"]
-        del journal
         return facts
 
     def require_gate(self, gate: str, *, batch_id: str = "R0-P") -> dict[str, Any]:
@@ -419,13 +517,16 @@ class R0Runner:
         code = {}
         for name in ("contracts", "instances", "scenes", "trusted", "service",
                      "evaluator", "controls", "attempts", "gates", "runner",
-                     "reference_analysis", "faults", "image_pin"):
+                     "reference_analysis", "faults", "image_pin",
+                     "budget_contract", "protocol_probe", "probe_tool", "seals"):
             p = here / f"{name}.py"
             code[name] = sha256_of(p.read_text(encoding="utf-8"))
         protocol = rp.rsi_r0_protocol_dir()
         tasks_lock = protocol / "t2_tasks_lock.json"
         criteria = protocol / "t3_criteria.json"
-        stage_models = Path(__file__).resolve().parents[2] / "stage_models.yaml"
+        stage_models = here.parent / "gateway" / "stage_models.yaml"   # 唯一配置点
+        from orchestrator.rsi_r0 import protocol_probe
+        contract = budget_contract.read_contract(protocol / "pricing_contract.json")
         return {
             "schema": "rsi_r0.lock.v1",
             "campaign": str(self.root),
@@ -439,6 +540,12 @@ class R0Runner:
             "criteria_hash": (json.loads(criteria.read_text(encoding="utf-8"))
                               .get("criteria_hash") if criteria.exists() else None),
             "criteria_now": ctl.criteria_hash(PLANS),
+            # §3.1：文本协议本体（工具解析/上下文/重试/错误回传策略）也是实验定义，
+            # 协议一改就不是同一个实验，因此与代码/判据同级进 LOCK。
+            "protocol_spec_sha256": protocol_probe.protocol_spec_hash(),
+            "protocol_spec": dict(protocol_probe.PROTOCOL_SPEC),
+            # §6.2：资源与报价合同进 LOCK——不许开场后再悄悄改单价/帽。
+            "pricing_contract_sha256": (contract or {}).get("contract_sha256"),
             "gates": {g: gates.gate_definition_hash(g) for g in ("G-M", "G-P", "G-V")},
             "task_caps": {k.value: v for k, v in TASK_ID_FAMILY.items()},
             "slot_request_cap": SLOT_REQUEST_CAP,
@@ -485,17 +592,99 @@ class R0Runner:
                       for k in now if old.get(k) != now.get(k)})
         return {"ok": not drift, "drift": drift, "lock_sha256": old.get("lock_sha256")}
 
-    # ---- 付费入口（T5 起接线；现在只做门与拒绝） ----
+    # ---- 模型批准登记（硬规则 1 的产物化） ----
+    def write_model_approval(self, *, decided_at_utc: str, basis: str,
+                             approved_by: str = "user") -> dict[str, Any]:
+        """把「用户已逐字裁决这三阶段模型」落成可机判产物（写一次即锁）。
+
+        这不是授权模型变更的快捷方式：它记录的是**当前配置哈希**；日后任何改
+        ``stage_models.yaml`` 的举动都会让 ``model_ids_approved`` 立刻变假，必须
+        重新请示用户。``decided_at_utc`` 由调用方显式给出（裁决实际发生的时间），
+        这样重复调用逐字节幂等。
+        """
+        if len(basis.strip()) < 20:
+            raise RunnerError("basis 太短：请逐字记录用户裁决出处（≥20 字）")
+        cfg = self.stage_models_path()
+        if not cfg.exists():
+            raise RunnerError(f"配置不存在：{cfg}")
+        body = {
+            "schema": "rsi_r0.model_approval.v1",
+            "approved_by": approved_by,
+            "decided_at_utc": decided_at_utc,
+            "stage_models_sha256": sha256_of(cfg.read_text(encoding="utf-8")),
+            "stage_models": self.current_stage_models(),
+            "basis": basis.strip(),
+            "note": ("硬规则 1：模型变更须停止→清点→用户批准；本件只记录既有裁决，"
+                     "不构成任何变更许可。"),
+        }
+        body["approval_sha256"] = sha256_of(body)
+        data = json.dumps(body, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        path = self.model_approval_path()
+        if path.exists():
+            if path.read_text(encoding="utf-8") != data:
+                raise RunnerError(f"模型批准件已存在且内容不同，拒绝覆盖：{path}")
+            return json.loads(data)
+        os.makedirs(path.parent, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        return json.loads(data)
+
+    def supersede_lock(self, reason: str) -> dict[str, Any]:
+        """显式取代旧 LOCK：只在**尚无任何发网 attempt**时允许，旧件不删。
+
+        旧件归档为 ``t4_lock.superseded.<sha8>.json`` 并追加 ``lock_history.jsonl``
+        一行（时间/旧哈希/理由/新哈希）。理由 <20 字拒绝——取代 LOCK 等于改实验
+        定义，留痕必须够读。已有发网 attempt 还取代 Lock 就不是修锁而是改实验，
+        一律拒（那种事只能另开 campaign）。
+        """
+        if len((reason or "").strip()) < 20:
+            raise RunnerError("取代理由太短：请写清为何旧 LOCK 需被取代（≥20 字）")
+        path = self.lock_path()
+        if not path.exists():
+            raise RunnerError(f"没有可取代的快照锁：{path}")
+        journal = AttemptJournal(rp.rsi_r0_attempts_path())
+        sent = [r for r in journal.latest_by_request().values()
+                if int(r.get("attempts_http") or 0) > 0]
+        if sent:
+            raise RunnerError(
+                f"已有 {len(sent)} 条发网 attempt，禁止取代快照锁"
+                "（那是改实验，不是修锁；须另开 campaign）")
+        old = json.loads(path.read_text(encoding="utf-8"))
+        old_sha = str(old.get("lock_sha256") or "")
+        archive = path.parent / f"t4_lock.superseded.{old_sha[:8] or 'nosha'}.json"
+        if archive.exists():
+            raise RunnerError(f"归档件已存在，拒绝二次归档：{archive}")
+        _atomic_write_json(archive, old)
+        path.unlink()
+        try:
+            new = self.write_lock()
+        except Exception:
+            # 新锁写不出来就把旧锁放回去：宁可保留旧件，也不留无锁窗口。
+            _atomic_write_json(path, old)
+            raise
+        line = {"superseded_at_utc": self.clock(), "old_lock_sha256": old_sha,
+                "old_created_at_utc": old.get("created_at_utc"),
+                "archive": archive.name, "reason": reason.strip(),
+                "new_lock_sha256": new["lock_sha256"]}
+        hist = path.parent / "lock_history.jsonl"
+        with open(hist, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return {"superseded": old_sha, "archive": str(archive),
+                "new_lock_sha256": new["lock_sha256"], "reason": reason.strip()}
+
+    # ---- 付费入口 ----
     def run_paid_slot(self, spec: TrialSpec) -> dict[str, Any]:
         if spec.cache_policy != "disabled":
             raise RunnerError("正式试次禁用缓存（AC22）")
         if not os.environ.get("SIMPRAXIS_ALLOW_PAID"):
             raise PaidPathNotArmed("SIMPRAXIS_ALLOW_PAID 未设置：付费入口拒开")
         self.require_gate("G-P", batch_id=spec.batch_id)
-        if self.gateway is None:
-            raise PaidPathNotArmed(
-                "付费入口在 T5 接线：本阶段只交付门与拒绝路径（不静默空转）")
-        raise PaidPathNotArmed("T5 才发网：T4 不实现真实请求构造")
+        raise PaidPathNotArmed(
+            "R0-P 的真实发网走 ProtocolProbe（至多 6 次、无重试、逐请求记账）；"
+            "本方法只保留门与拒绝路径，不做第二条发网通路")
 
 
 # ---------------------------------------------------------------- mock 模型

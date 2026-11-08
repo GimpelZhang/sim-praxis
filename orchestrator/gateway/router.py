@@ -54,6 +54,7 @@ Task3（§1.5/§6.3）：构造传 ledger= 时 call/call_visual 统一 preflight
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 from contextlib import contextmanager
@@ -817,7 +818,8 @@ class ModelGateway:
     def call(self, stage: str, messages: list[dict[str, Any]], *,
              max_tokens: int = 512, temperature: float = 0.2,
              timeout: int = 120,
-             thinking: "dict | None" = None
+             thinking: "dict | None" = None,
+             capture: "dict[str, Any] | None" = None
              ) -> tuple[str, "tuple[int | None, int | None]"]:
         """文本阶段统一入口（macro_ideation / coding_debug），返回 (text, (in_tok, out_tok))。
 
@@ -863,7 +865,7 @@ class ModelGateway:
                 stage=stage, model_id=model_id, token=token, base_url=base_url,
                 completion=completion, messages=messages,
                 max_tokens=max_tokens, temperature=temperature, timeout=timeout,
-                thinking=thinking)
+                thinking=thinking, capture=capture)
         except Exception as exc:  # noqa: BLE001 —— 越过 preflight 的任何出口恰好一行 ok=false
             if self._billing is not None:
                 self._billing.record(
@@ -911,7 +913,8 @@ class ModelGateway:
     def _chat_loop(self, *, stage: str, model_id: str, token: str, base_url: str,
                    completion: Callable[..., Any], messages: list[dict[str, Any]],
                    max_tokens: int, temperature: float, timeout: int,
-                   thinking: "dict | None" = None
+                   thinking: "dict | None" = None,
+                   capture: "dict[str, Any] | None" = None
                    ) -> tuple[str, "tuple[int | None, int | None, int | None, int | None]"]:
         """call() 的退避/熔断重试循环（不含计费；内部重试多少次都只算一次逻辑调用）。"""
         attempt = 0
@@ -963,6 +966,23 @@ class ModelGateway:
                             stage, model_id, getattr(resp, "model", "?"), in_tok, out_tok,
                             cache_read, cache_create)
                 _clear_stale_pause_state(state_path=self._pause_state_path)
+                if capture is not None:
+                    # RSI-R0 T5（AC25）：只读观测面——终止类型、供应侧模型名、
+                    # 本次逻辑调用实际 HTTP 尝试次数（内部退避重试不新增 seq）。
+                    choices = getattr(resp, "choices", None) or []
+                    finish = getattr(choices[0], "finish_reason", None) if choices else None
+                    capture.update({
+                        "stop_reason": finish,
+                        "provider_model": getattr(resp, "model", None),
+                        "provider_request_id": getattr(resp, "id", None),
+                        "attempts_http": attempt + 1,
+                        "content_bytes": len(content.encode("utf-8")),
+                        "body_sha256": hashlib.sha256(
+                            content.encode("utf-8")).hexdigest(),
+                        "usage": {"in": in_tok, "out": out_tok,
+                                  "cache_read": cache_read,
+                                  "cache_create": cache_create},
+                    })
                 return content, (in_tok, out_tok, cache_read, cache_create)
             except RateLimitError as exc:
                 if _is_quota_error(exc):

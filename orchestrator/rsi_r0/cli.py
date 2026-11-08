@@ -6,7 +6,10 @@
     controls   → 21 负控 + 6 mutation + 判据冻结核对（零容器、零模型）
     dry-run    → mock 模型零付费端到端（POST 恒 0，可中断可恢复）
     lock       → 写一次即锁的完整快照；--verify 只校验不回填
-    protocol   → G-P 门后的六次协议探针（T5 起接线；现在只到门）
+    pricing    → 资源与报价合同（最坏成本上界，零付费）
+    approve    → 批次批准（账本票 + 门侧批准件，写一次即锁）
+    model-approval → 模型 ID 批准登记（硬规则 1 产物化）
+    protocol   → G-P 门后的六次协议探针（T5，真实发网）
     develop    → G-P 门后的三族开发轨迹（T6）
     validate   → G-V 门后的六条验证轨迹（T7）
     closeout   → 对账与结案件（零付费）
@@ -25,7 +28,7 @@ from typing import Any, Sequence
 
 from orchestrator.common import runtime_paths as rp
 from orchestrator.rsi_r0 import gates
-from orchestrator.rsi_r0.attempts import AttemptJournal
+from orchestrator.rsi_r0.attempts import AttemptJournal, _utc_now
 from orchestrator.rsi_r0.contracts import (
     CalibrationVerdict,
     pick_primary_verdict,
@@ -105,6 +108,11 @@ def cmd_lock(args: argparse.Namespace) -> int:
         verdict = runner.verify_lock()
         _emit({"command": "lock", "verify": verdict})
         return EXIT_OK if verdict["ok"] else EXIT_REFUSED
+    if args.supersede_reason:
+        out = runner.supersede_lock(args.supersede_reason)
+        _emit({"command": "lock", "superseded": out,
+               "verify": runner.verify_lock()})
+        return EXIT_OK
     snap = runner.write_lock()
     _emit({"command": "lock", "lock_sha256": snap["lock_sha256"],
            "path": str(runner.lock_path()),
@@ -125,12 +133,134 @@ def _paid(cmd: str, args: argparse.Namespace, gate: str) -> int:
     except (gates.GateRefused, RunnerError) as exc:
         _emit({"command": cmd, "refused": str(exc), "gate": gate})
         return EXIT_REFUSED
-    _emit({"command": cmd, "gate": verdict, "note": "T5 起接线（T4 只交付门与拒绝路径）"})
-    return EXIT_REFUSED
+    _emit({"command": cmd, "gate": verdict, "note": "已过门；由具体子命令继续执行"})
+    return EXIT_OK
+
+
+def cmd_pricing(args: argparse.Namespace) -> int:
+    """资源与报价合同（零付费、纯算术）：--write 落盘，否则只报现状。"""
+    from orchestrator.rsi_r0 import budget_contract
+
+    runner = _runner(args)
+    runner.ensure_campaign()
+    path = rp.rsi_r0_protocol_dir() / "pricing_contract.json"
+    if args.write:
+        doc = budget_contract.write_contract(path)
+        written = True
+    else:
+        doc = budget_contract.read_contract(path)
+        written = False
+    ok, why = budget_contract.contract_ok(doc)
+    _emit({"command": "pricing", "written": written, "ok": ok, "why": why,
+           "path": str(path), "contract": doc})
+    return EXIT_OK if ok else EXIT_REFUSED
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    """批次批准：账本侧批次票 + 门侧写一次即锁批准件（两处必须一致）。"""
+    from orchestrator.gateway import quota_ledger as ql
+
+    runner = _runner(args)
+    runner.ensure_campaign()
+    batch = args.batch
+    task = args.task
+    stage = args.stage
+    if args.requests > ql.RSI_R0_TASK_CAPS.get(task, 0):
+        _emit({"command": "approve",
+               "error": f"task {task} 的任务帽是 {ql.RSI_R0_TASK_CAPS.get(task, 0)}，"
+                        f"不能批 {args.requests} 次"})
+        return EXIT_REFUSED
+    approvals = rp.rsi_r0_approvals_dir()
+    ticket_path = approvals / f"{batch}.json"
+    if ticket_path.exists():
+        try:
+            existing = ql.load_approval(batch, approvals)
+        except Exception as exc:  # noqa: BLE001 —— 旧票坏了就是拒
+            _emit({"command": "approve", "error": f"已存在的批次票不可用：{exc}"})
+            return EXIT_REFUSED
+        same = (int(existing.get("approved") or 0) == args.requests
+                and existing.get("task") == task
+                and existing.get("stage") == stage)
+        if not same:
+            _emit({"command": "approve",
+                   "error": f"批次票已存在且不同，拒绝覆盖：{ticket_path}"})
+            return EXIT_REFUSED
+        ticket_created = False
+    else:
+        ql.write_approval(batch_id=batch, task=task, stage=stage,
+                          approved=args.requests, beyond_normal=False,
+                          note=args.note or f"RSI-R0 {batch} 批次批准",
+                          namespace=ql.RSI_R0_NAMESPACE)
+        ticket_created = True
+
+    body = gates.approval_body(
+        batch_id=batch, task_cap=args.requests, hard_cap=ql.RSI_R0_HARD_CAP,
+        currency="USD", usd_ceiling=args.usd_ceiling,
+        approved_by=args.approved_by,
+        approved_at_utc=(args.approved_at or _utc_now()),
+        scope=args.scope)
+    try:
+        written = gates.write_approval(runner.gate_approval_path(batch), body)
+    except gates.ApprovalError as exc:
+        _emit({"command": "approve", "error": str(exc)})
+        return EXIT_REFUSED
+    _emit({"command": "approve", "batch": batch, "task": task, "stage": stage,
+           "requests": args.requests, "usd_ceiling": args.usd_ceiling,
+           "ticket_created": ticket_created, "artifact": written,
+           "path": str(runner.gate_approval_path(batch))})
+    return EXIT_OK
+
+
+def cmd_model_approval(args: argparse.Namespace) -> int:
+    """模型 ID 批准登记（硬规则 1 的产物化；只记录既有用户裁决）。"""
+    runner = _runner(args)
+    runner.ensure_campaign()
+    try:
+        doc = runner.write_model_approval(decided_at_utc=args.decided_at,
+                                          basis=args.basis,
+                                          approved_by=args.approved_by)
+    except RunnerError as exc:
+        _emit({"command": "model-approval", "error": str(exc)})
+        return EXIT_REFUSED
+    ok, detail = runner.model_ids_approved()
+    _emit({"command": "model-approval", "ok": ok, "detail": detail,
+           "stage_models": doc.get("stage_models"),
+           "stage_models_sha256": doc.get("stage_models_sha256")})
+    return EXIT_OK if ok else EXIT_REFUSED
 
 
 def cmd_protocol(args: argparse.Namespace) -> int:
-    return _paid("protocol", args, "G-P")
+    """六次协议探针（AC25）：G-P 门后真实发网，至多 6 次、无重试、逐请求记账。"""
+    from orchestrator.rsi_r0 import protocol_probe as pp
+
+    runner = _runner(args)
+    runner.ensure_campaign()
+    if not os.environ.get("SIMPRAXIS_ALLOW_PAID"):
+        _emit({"command": "protocol", "refused": "SIMPRAXIS_ALLOW_PAID 未设置",
+               "gate": "G-P"})
+        return EXIT_REFUSED
+    try:
+        gate = runner.require_gate("G-P", batch_id=args.batch)
+    except (gates.GateRefused, RunnerError) as exc:
+        _emit({"command": "protocol", "refused": str(exc), "gate": "G-P"})
+        return EXIT_REFUSED
+
+    from orchestrator.gateway.quota_ledger import QuotaLedger
+    from orchestrator.gateway.router import ModelGateway
+
+    gateway = ModelGateway(ledger=QuotaLedger.rsi_r0(), max_attempts=1,
+                           pause_state_path=rp.rsi_r0_gateway_state_path())
+    try:
+        report = pp.ProtocolProbe(runner, gateway).run()
+    except pp.ProbeError as exc:
+        _emit({"command": "protocol", "refused": str(exc), "gate": "G-P"})
+        return EXIT_REFUSED
+    out = pp.write_report(report)
+    _emit({"command": "protocol", "gate": gate["gate"], "verdict": report["verdict"],
+           "blocked_reason": report["blocked_reason"],
+           "requests": report["requests"], "model": report["model"],
+           "report": str(out), "report_sha256": report["report_sha256"]})
+    return EXIT_OK if report["verdict"] == "PROTOCOL_OK" else EXIT_REFUSED
 
 
 def cmd_develop(args: argparse.Namespace) -> int:
@@ -157,6 +287,7 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     lock = _json(protocol / "t4_lock.json")
     controls = _json(protocol / "t4_controls_latest.json")
     dryrun = _json(closeout / "dryrun_report.json")
+    probe = _json(protocol / "protocol_probe_report.json")
     journal = AttemptJournal(rp.rsi_r0_attempts_path())
     latest = journal.latest_by_request()
     posts = sum(int(r.get("attempts_http") or 0) for r in latest.values())
@@ -175,6 +306,10 @@ def cmd_closeout(args: argparse.Namespace) -> int:
         missing.append("dryrun_report.json(posts=0)")
     if posts:
         candidates.append(CalibrationVerdict.INVALID_INSTRUMENT)
+    if probe is None:
+        missing.append("protocol_probe_report.json")
+    elif probe.get("verdict") != "PROTOCOL_OK":
+        candidates.append(CalibrationVerdict.PROTOCOL_BLOCKED)
     if missing:
         candidates.append(CalibrationVerdict.ABORTED_INCOMPLETE)
     if not candidates:
@@ -192,9 +327,15 @@ def cmd_closeout(args: argparse.Namespace) -> int:
         "controls": ({k: controls[k] for k in ("negatives", "mutations")}
                      if controls else None),
         "dryrun_posts": (dryrun or {}).get("posts"),
+        "protocol": ({"verdict": probe.get("verdict"),
+                      "requests_used": (probe.get("requests") or {}).get("used"),
+                      "report_sha256": probe.get("report_sha256")}
+                     if probe else None),
         "attempts": {"requests": len(latest), "http_posts": posts},
-        "evidence_scope": "zero_paid_only",
-        "not_run": ["protocol(six)", "development(three)", "validation(six)"],
+        "evidence_scope": "zero_paid_only" if not posts else "paid",
+        "not_run": (["development(three)", "validation(six)"]
+                    if probe and probe.get("verdict") == "PROTOCOL_OK"
+                    else ["protocol(six)", "development(three)", "validation(six)"]),
     }
     report["report_sha256"] = sha256_of(report)
     out = closeout / "closeout_zero_paid.json"
@@ -233,7 +374,35 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("lock", help="写一次即锁的快照；--verify 只校验")
     _common(p)
     p.add_argument("--verify", action="store_true")
+    p.add_argument("--supersede-reason", default=None,
+                   help="显式取代旧 LOCK（≥20 字理由；旧件归档不删；有发网 attempt 即拒）")
     p.set_defaults(func=cmd_lock)
+
+    p = sub.add_parser("pricing", help="资源与报价合同（零付费；--write 落盘）")
+    _common(p)
+    p.add_argument("--write", action="store_true")
+    p.set_defaults(func=cmd_pricing)
+
+    p = sub.add_parser("approve", help="批次批准（账本票 + 门侧写一次即锁批准件）")
+    _common(p)
+    p.add_argument("--batch", required=True)
+    p.add_argument("--task", type=int, required=True)
+    p.add_argument("--stage", default="coding_debug")
+    p.add_argument("--requests", type=int, required=True)
+    p.add_argument("--usd-ceiling", type=float, default=100.0)
+    p.add_argument("--approved-by", default="user")
+    p.add_argument("--approved-at", default=None,
+                   help="裁决时间（缺省=现在，UTC Z）")
+    p.add_argument("--scope", default="protocol")
+    p.add_argument("--note", default=None)
+    p.set_defaults(func=cmd_approve)
+
+    p = sub.add_parser("model-approval", help="模型 ID 批准登记（硬规则 1 产物化）")
+    _common(p)
+    p.add_argument("--decided-at", required=True, help="用户裁决时间（UTC Z）")
+    p.add_argument("--basis", required=True, help="用户逐字裁决出处（≥20 字）")
+    p.add_argument("--approved-by", default="user")
+    p.set_defaults(func=cmd_model_approval)
 
     for name, fn, helptext in (
         ("protocol", cmd_protocol, "六次协议探针（G-P 后；SIMPRAXIS_ALLOW_PAID=1）"),
