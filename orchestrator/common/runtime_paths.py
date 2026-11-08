@@ -57,6 +57,8 @@ _PHASE25_ENV = "SIMPRAXIS_PHASE25_ROOT"
 _PHASE26_ENV = "SIMPRAXIS_PHASE26_ROOT"
 _PHASE27_ENV = "SIMPRAXIS_PHASE27_ROOT"
 _PHASE281_ENV = "SIMPRAXIS_PHASE281_ROOT"
+_RSI_R0_ROOT_ENV = "SIMPRAXIS_RSI_R0_ROOT"          # R0 家族根（campaign 的父目录）
+_RSI_R0_CAMPAIGN_ENV = "SIMPRAXIS_RSI_R0_CAMPAIGN"  # R0 campaign id（写路径必填）
 
 
 class SealedLedgerError(PermissionError):
@@ -425,6 +427,8 @@ def sealed_ledger_paths() -> frozenset[Path]:
     D0-3：改缺省会让 Phase 2.6 既有断言红，故调用方显式传参）。
     Phase 2.8.1（D0-2，2026-11-06）：phase27 随 2.7 收束一并封存，本集扩为**五份**；
     任何写入一律走 phase281_ledger_path()（缺省目标同样不动，理由同上）。
+    RSI-R0（T1，2026-11-08）：phase281 随 2.8.1 按 HOLD 结案一并封存，本集扩为**六份**；
+    任何写入一律走 rsi_r0_ledger_path()（R0 新账，见下）。
     """
     return frozenset({
         phase1_ledger_path().resolve(strict=False),
@@ -432,6 +436,7 @@ def sealed_ledger_paths() -> frozenset[Path]:
         phase25_ledger_path().resolve(strict=False),
         phase26_ledger_path().resolve(strict=False),
         phase27_ledger_path().resolve(strict=False),
+        phase281_ledger_path().resolve(strict=False),
     })
 
 
@@ -463,3 +468,116 @@ def open_ledger_append(path: "str | Path | None" = None):
         # 权限收敛失败不阻塞追加（目录已 0700 私有权限）；与既有 _append_line 口径一致。
         pass
     return fh
+
+
+# ---- RSI-R0 路径族（T1，2026-11-08；计划 §5.1/§5.3） ----
+#
+# R0 以 **campaign** 为单位而非按期号一次一封：同一家族根下可有多个 campaign，
+# 每个 campaign 自带 protocol/private/quota/gateway_state/runs/closeout 六族。
+# 因此路径解析比历史四期多一层 ``SIMPRAXIS_RSI_R0_CAMPAIGN``：家族根由
+# ``SIMPRAXIS_RSI_R0_ROOT``（缺省 ``$DATA_ROOT/rsi_r0``）给出，campaign 名由
+# 环境变量给出；未设置时任何写路径函数直接 fail-closed，绝不回退到别人的
+# campaign 里（AC03/AC05）。
+
+class RsiR0CampaignUnsetError(RuntimeError):
+    """未指定 R0 campaign 就解析写路径——fail-closed，不回退到任何缺省 campaign。"""
+
+
+def _validate_campaign_id(campaign_id: str) -> str:
+    """campaign id 只允许安全字符（它会成为目录名；拒绝路径穿越）。"""
+    cid = str(campaign_id)
+    if not cid or cid in (".", "..") or "/" in cid or "\\" in cid:
+        raise RsiR0CampaignUnsetError(f"非法 R0 campaign id：{cid!r}")
+    # ASCII 白名单（不是 str.isalnum：后者对 'é' 也返回 True，会放过非 ASCII 目录名）。
+    if not all(ch.isascii() and (ch.isalnum() or ch in "-_.") for ch in cid):
+        raise RsiR0CampaignUnsetError(f"R0 campaign id 含不安全字符：{cid!r}")
+    return cid
+
+
+def rsi_r0_root() -> Path:
+    """R0 家族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_r0``。"""
+    root = os.environ.get(_RSI_R0_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_r0"
+
+
+def rsi_r0_campaign_id() -> str:
+    cid = os.environ.get(_RSI_R0_CAMPAIGN_ENV, "")
+    if not cid:
+        raise RsiR0CampaignUnsetError(
+            f"{_RSI_R0_CAMPAIGN_ENV} 未设置：R0 写路径必须显式指定 campaign")
+    return _validate_campaign_id(cid)
+
+
+def rsi_r0_campaign_root() -> Path:
+    return rsi_r0_root() / rsi_r0_campaign_id()
+
+
+def rsi_r0_runs_root() -> Path:
+    return rsi_r0_campaign_root() / "runs"
+
+
+def rsi_r0_quota_dir() -> Path:
+    return ensure_private_dir(rsi_r0_campaign_root() / "quota")
+
+
+def rsi_r0_ledger_path() -> Path:
+    return rsi_r0_quota_dir() / "ledger.jsonl"
+
+
+def rsi_r0_counters_path() -> Path:
+    return rsi_r0_quota_dir() / "counters.json"
+
+
+def rsi_r0_approvals_dir() -> Path:
+    return ensure_private_dir(rsi_r0_quota_dir() / "approvals")
+
+
+def rsi_r0_reservations_dir() -> Path:
+    """资源预留根（计划 §5.3：预留与结算分账，靠 request_id 关联）。"""
+    return ensure_private_dir(rsi_r0_quota_dir() / "resource_reservations")
+
+
+def rsi_r0_attempts_path() -> Path:
+    """发网事实日志（每次逻辑调用一行 pre/post；与 ledger 分权）。"""
+    return rsi_r0_quota_dir() / "attempts.jsonl"
+
+
+def rsi_r0_gateway_state_dir() -> Path:
+    # R0 熔断/暂停态随本 campaign 隔离，绝不读写全局 SIMPRAXIS_GATEWAY_STATE。
+    return ensure_private_dir(rsi_r0_campaign_root() / "gateway_state")
+
+
+def rsi_r0_gateway_state_path() -> Path:
+    return rsi_r0_gateway_state_dir() / "quota_pause.json"
+
+
+def rsi_r0_private_dir() -> Path:
+    return ensure_private_dir(rsi_r0_campaign_root() / "private")
+
+
+def rsi_r0_protocol_dir() -> Path:
+    return ensure_private_dir(rsi_r0_campaign_root() / "protocol")
+
+
+def rsi_r0_closeout_dir() -> Path:
+    return ensure_private_dir(rsi_r0_campaign_root() / "closeout")
+
+
+def assert_rsi_r0_roots_isolated() -> None:
+    """R0 campaign 根与六份封存根（phase1/2/2.5/2.6/2.7/2.8.1）两两互异且互不嵌套。
+
+    与 phase281 同一判定实现（``_assert_roots_isolated``），在任何 mkdir/写系统
+    调用之前 fail-fast：R0 的 approvals/、gateway_state/、runs/、attempts.jsonl
+    若与封存根嵌套，会直接污染旧资产台账（AC03/AC05）。
+    """
+    campaign = rsi_r0_campaign_root().resolve(strict=False)
+    seals = (phase1_root(), phase2_root(), phase25_root(), phase26_root(),
+             phase27_root(), phase281_root())
+    _assert_roots_isolated(
+        rsi_r0_campaign_root(), seals,
+        label=_RSI_R0_CAMPAIGN_ENV,
+        message=("R0 campaign 根必须与 Phase 1/2/2.5/2.6/2.7/2.8.1 封存根互异且"
+                 f"互不嵌套（解析后）：campaign={campaign} "
+                 f"sealed={[str(p.resolve(strict=False)) for p in seals]}"))

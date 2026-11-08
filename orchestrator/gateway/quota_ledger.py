@@ -92,6 +92,13 @@ from orchestrator.common.runtime_paths import (
     phase2_counters_path,
     phase2_ledger_path,
     phase2_quota_dir,
+    assert_rsi_r0_roots_isolated,  # RSI-R0：七根互异互斥 fail-fast
+    rsi_r0_approvals_dir,
+    rsi_r0_counters_path,
+    rsi_r0_gateway_state_dir,
+    rsi_r0_gateway_state_path,
+    rsi_r0_ledger_path,
+    rsi_r0_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -576,6 +583,21 @@ PHASE281_HARD_CAP = 180
 # 与 PHASE25/26/27_NORMAL_BUDGET 同语义，取与硬帽同值（不复用任务帽合计）。
 PHASE281_NORMAL_BUDGET = PHASE281_HARD_CAP
 
+# ---- RSI-R0：独立新账（T1，2026-11-08；照 PHASE281 复制，不泛化；六账绝不并表）----
+# 期号取 **2900** 而非复用 281（计划 §5.2：新兼容标识，T0 扫描确认与 2/25/26/27/281
+# 无冲突后锁定）。它是内部整数标识，对外公开名称是 ``rsi_r0``。
+LEDGER_RSI_R0 = 2900
+# 任务编号（计划 §7 T0「定义任务ID（协议0、E1、D2、R3）」）：
+#   0 = protocol（T5 协议六次）  1 = E 族  2 = D 族  3 = R 族
+# 每族帽 = 开发 24 + 验证 2×24 = 72（E/D/R 三族各 72），协议 6，合计恰 222。
+RSI_R0_TASK_CAPS = types.MappingProxyType({0: 6, 1: 72, 2: 72, 3: 72})
+# 硬帽按**独立字面量**写（同 PHASE26/27/281 先例：硬帽不是任务帽合计，任一处
+# 单方面改动都不该悄悄让另一处跟着变）。222 = 6 + 72×3。
+RSI_R0_HARD_CAP = 222
+# 条件换供重验（≤4 请求）**不**计入本硬帽：它是另一批批准件（计划 §6.1 末两行，
+# 总上限 226 含它）。把它压进 222 会让重验悄悄吃掉正式校准额度。
+RSI_R0_NORMAL_BUDGET = RSI_R0_HARD_CAP
+
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
 # 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
 # 模板 scripts/milestone2/quota_pause_schema_v2.template.json）的书面签收并
@@ -658,17 +680,17 @@ class _LedgerNamespace:
         phase2 早已结案（历史 455 行），2.7 起不会再有 phase2 写入者。
         """
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
-                              LEDGER_PHASE281)
+                              LEDGER_PHASE281, LEDGER_RSI_R0)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
-                              LEDGER_PHASE281)
+                              LEDGER_PHASE281, LEDGER_RSI_R0)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
-                              LEDGER_PHASE281)
+                              LEDGER_PHASE281, LEDGER_RSI_R0)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -737,6 +759,21 @@ PHASE281_NAMESPACE = _LedgerNamespace(
 )
 
 
+
+RSI_R0_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_R0,
+    quota_dir_fn=rsi_r0_quota_dir,
+    ledger_path_fn=rsi_r0_ledger_path,
+    counters_path_fn=rsi_r0_counters_path,
+    approvals_dir_fn=rsi_r0_approvals_dir,
+    pause_dir_fn=rsi_r0_gateway_state_dir,
+    pause_path_fn=rsi_r0_gateway_state_path,
+    task_caps=RSI_R0_TASK_CAPS,
+    hard_cap=RSI_R0_HARD_CAP,
+    normal_budget=RSI_R0_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -756,6 +793,14 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_phase27_roots_isolated()
     elif ns.phase == LEDGER_PHASE281:
         assert_phase281_roots_isolated()
+    elif ns.phase == LEDGER_RSI_R0:
+        assert_rsi_r0_roots_isolated()
+    elif ns.phase == LEDGER_PHASE:
+        # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
+        # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
+        return
+    else:
+        raise RuntimeError(f"未知 ledger 期号 {ns.phase}：无根隔离实现，拒绝构造")
 
 
 class _FileLock:
@@ -978,8 +1023,17 @@ class QuotaLedger:
 
     @classmethod
     def phase281(cls) -> "QuotaLedger":
-        """Phase 2.8.1 账（当前唯一可写账；五本旧账已封存只读）。"""
+        """Phase 2.8.1 账（2026-11-08 起已封存；写打开由封存守卫拒绝）。"""
         return cls(PHASE281_NAMESPACE)
+
+    @classmethod
+    def rsi_r0(cls) -> "QuotaLedger":
+        """RSI-R0 账（当前唯一可写账；六本旧账已封存只读）。
+
+        campaign 由 ``SIMPRAXIS_RSI_R0_CAMPAIGN`` 选定，未设置即 fail-closed
+        （``RsiR0CampaignUnsetError``），绝不回退到别人的 campaign 账。
+        """
+        return cls(RSI_R0_NAMESPACE)
 
     # ---- 命名空间内寻址（所有 IO 经 ns 间接，函数每次调用读 env） ----
 

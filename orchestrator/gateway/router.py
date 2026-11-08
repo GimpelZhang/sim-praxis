@@ -373,7 +373,12 @@ def _epoch_utc_iso_z(epoch: float) -> str:
         "%Y-%m-%dT%H:%M:%SZ")
 
 
-def _write_pause_state(stage: str, reason: str, wait_sec: int) -> dict:
+def _write_pause_state(stage: str, reason: str, wait_sec: int, *,
+                       state_path: "Path | None" = None) -> dict:
+    """写熔断态。``state_path`` 缺省走全局 $SIMPRAXIS_GATEWAY_STATE；RSI-R0
+    组合根显式传本 campaign 的 gateway_state/quota_pause.json（锁内适配
+    （RSI-R0 §6.3）：暂停态随账套隔离——同机旧阶段的陈旧熔断不得拦住 R0，
+    R0 的熔断也不得污染旧阶段）。"""
     now = time.time()
     state = {
         "status": "PAUSED_WAITING_QUOTA",
@@ -386,20 +391,21 @@ def _write_pause_state(stage: str, reason: str, wait_sec: int) -> dict:
     }
     # G-7：0600 tmp+replace（先 fchmod 后 replace，杜绝 umask 权限窗口），
     # tmp 名带 pid+随机串，并发写者不互踩固定 .json.tmp。
-    ensure_private_dir(_state_dir())
-    atomic_write_text(_state_path(),
-                      json.dumps(state, ensure_ascii=False, indent=2))
+    target = state_path if state_path is not None else _state_path()
+    ensure_private_dir(target.parent)
+    atomic_write_text(target, json.dumps(state, ensure_ascii=False, indent=2))
     return state
 
 
-def _clear_stale_pause_state() -> None:
+def _clear_stale_pause_state(*, state_path: "Path | None" = None) -> None:
     # G-14：损坏件不许借「过期清理」之名被自动删除；只有确实过期的正常态才清除。
+    target = state_path if state_path is not None else _state_path()
     try:
-        paused = is_paused()
+        paused = is_paused(state_path=target)
     except PauseStateCorruptError:
         return
-    if paused is None and _state_path().exists():
-        _state_path().unlink(missing_ok=True)
+    if paused is None and target.exists():
+        target.unlink(missing_ok=True)
 
 
 _QUOTA_RE = re.compile(
@@ -658,13 +664,17 @@ class ModelGateway:
                  sleep: Callable[[float], None] = time.sleep,
                  transport: Callable[..., Any] | None = None,
                  raw_transport: Callable[..., Any] | None = None,
-                 ledger: Any = None, *, unguarded: bool = False):
+                 ledger: Any = None, *, unguarded: bool = False,
+                 pause_state_path: "Path | None" = None):
         self.stage_models_path = Path(stage_models_path)
         self.max_attempts = max_attempts
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.max_total_wait = max_total_wait
         self.quota_pause_sec = quota_pause_sec
+        # RSI-R0：暂停态跟随账套（缺省 None = 历史全局路径，行为不变）。
+        self._pause_state_path = (Path(pause_state_path)
+                                  if pause_state_path is not None else None)
         self._sleep = sleep
         # 测试注入点：transport=litellm.completion 替身；raw_transport=requests.post 替身
         self._transport = transport
@@ -774,7 +784,7 @@ class ModelGateway:
         """preflight 之前的暂停态早检查（两条入口共用）：命中/损坏均先补 seq=null
         blocked 审计行（G-10/G-14），GatewayPausedError/PauseStateCorruptError 照抛。"""
         try:
-            paused = is_paused(stage)
+            paused = is_paused(stage, state_path=self._pause_state_path)
         except PauseStateCorruptError:
             self._record_early_blocked(stage, "pause_state_corrupt：熔断状态文件损坏，人工核查")
             raise
@@ -952,22 +962,26 @@ class ModelGateway:
                             "cache_read=%s cache_create=%s",
                             stage, model_id, getattr(resp, "model", "?"), in_tok, out_tok,
                             cache_read, cache_create)
-                _clear_stale_pause_state()
+                _clear_stale_pause_state(state_path=self._pause_state_path)
                 return content, (in_tok, out_tok, cache_read, cache_create)
             except RateLimitError as exc:
                 if _is_quota_error(exc):
-                    state = _write_pause_state(stage, _error_text(exc), self.quota_pause_sec)
+                    state = _write_pause_state(stage, _error_text(exc),
+                                               self.quota_pause_sec,
+                                               state_path=self._pause_state_path)
                     logger.warning("配额类限流，进入长熔断：%s", state["resume_at_iso"])
                     raise GatewayPausedError(state) from exc
                 if attempt + 1 >= self.max_attempts:
-                    state = _write_pause_state(stage, "429 退避预算耗尽，转长熔断", 600)
+                    state = _write_pause_state(stage, "429 退避预算耗尽，转长熔断", 600,
+                                               state_path=self._pause_state_path)
                     raise GatewayPausedError(state) from exc
                 wait = _retry_after_sec(exc)
                 if wait is None:
                     wait = min(self.max_backoff,
                                self.base_backoff * (2 ** attempt)) + random.uniform(0, 0.5)
                 if wait_total + wait > self.max_total_wait:
-                    state = _write_pause_state(stage, "429 等待预算超限，转长熔断", 600)
+                    state = _write_pause_state(stage, "429 等待预算超限，转长熔断", 600,
+                                               state_path=self._pause_state_path)
                     raise GatewayPausedError(state) from exc
                 logger.warning("瞬时限流 stage=%s 第 %d 次，%.1fs 后重试",
                                stage, attempt + 1, wait)
@@ -1155,17 +1169,20 @@ class ModelGateway:
             if status == 429:
                 # m9：信封 type/code 优先（rate_limit_exceeded 即使文案含 quota 也按瞬时限流）
                 if _is_quota_http(body, text):
-                    state = _write_pause_state(stage, text, self.quota_pause_sec)
+                    state = _write_pause_state(stage, text, self.quota_pause_sec,
+                                               state_path=self._pause_state_path)
                     raise GatewayPausedError(state)
                 if attempt + 1 >= self.max_attempts:
-                    state = _write_pause_state(stage, "429 退避预算耗尽，转长熔断", 600)
+                    state = _write_pause_state(stage, "429 退避预算耗尽，转长熔断", 600,
+                                               state_path=self._pause_state_path)
                     raise GatewayPausedError(state)
                 wait = _retry_after_from_headers(getattr(resp, "headers", None))
                 if wait is None:
                     wait = min(self.max_backoff,
                                self.base_backoff * (2 ** attempt)) + random.uniform(0, 0.5)
                 if wait_total + wait > self.max_total_wait:
-                    state = _write_pause_state(stage, "429 等待预算超限，转长熔断", 600)
+                    state = _write_pause_state(stage, "429 等待预算超限，转长熔断", 600,
+                                               state_path=self._pause_state_path)
                     raise GatewayPausedError(state)
                 logger.warning("瞬时限流(HTTP) stage=%s 第 %d 次，%.1fs 后重试",
                                stage, attempt + 1, wait)
@@ -1322,7 +1339,7 @@ class ModelGateway:
             else:
                 self._billing.record(stage, ok=False, model=model_id, err=err)
         if accepted:
-            _clear_stale_pause_state()
+            _clear_stale_pause_state(state_path=self._pause_state_path)
         # 证据要带原始响应体，但与网关同口径过一遍 redact（响应体理论上不回显
         # 认证头；此为密钥正则单一源的双保险），redact 失败不丢其余字段。
         try:
