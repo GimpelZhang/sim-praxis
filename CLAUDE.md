@@ -270,7 +270,10 @@ CLI 接线攢批74 task8_fluid execute_stage1 合同桩仍在 orchestrator.graph
 Task7 已收官**——计划内 Phase 2 余项全部有终态（完成或诚实负结果）。Phase 3
 各项（未经用户指示勿启动）：RL/VLA 训练、World Judge 实现、RSI Level 3 元 prompt
 自演进、实跑四 tour、SAPIEN/Bullet/传感器光学噪声矩阵缺口、Q2 光学模型参数标定
-（计划 L693 登记 Phase 3 backlog）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
+（计划 L693 登记 Phase 3 backlog）、**Phase 2.8.1 能力对比重设计**（2026-11-08 用户裁决
+C：`legacy/agentic` 对照判无效——两臂同时在地板 + 四维混淆 + 63+120>180 预算死结，
+2.8.1 按 `HOLD` 封存、只出「可用性」结论，条件 A 出生阈值校准 + 条件 B 同引擎消融族
+一并移入 Phase 3，见 `~/文档/Phase_2.8.1_Plan_Complete.md` 末节「结案」）；LOW 尾债（Task7 critic 5 条、Task9 r1/r2/r3 共 11 条、
 t3 1 条、run7c key-collapse 覆写 created_at、54b27b59 同类覆写；ingest_solutions CLI
 `--expect-learnings` 必填已由 Task 6（攢批119）落地关闭，不再列尾债）
 明细见 `~/文档/Phase_2_Plan_Complete.md` §5。
