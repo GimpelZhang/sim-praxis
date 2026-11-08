@@ -229,3 +229,21 @@ def test_development_trial_takes_the_task_id_from_the_family(campaign, monkeypat
     assert dv.DevelopmentTrial(runner, FakeGateway([]), "E").task_id == 1
     assert dv.DevelopmentTrial(runner, FakeGateway([]), "D").task_id == 2
     assert dv.DevelopmentTrial(runner, FakeGateway([]), "R").task_id == 3
+
+
+def test_request_plan_never_exceeds_the_ticket_remaining(campaign, monkeypatch):
+    """票据是跨进程累计的：已占行必须先扣，否则重跑会撞批次熔断写 pause 件。"""
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    runner = _arm(campaign, monkeypatch)
+    batch = dv.DEV_BATCHES["E"]
+    rows = [{"seq": 1, "event": "call", "ok": True, "batch_id": batch, "task": 1},
+            {"seq": None, "event": "preflight_blocked", "ok": False,
+             "batch_id": batch, "task": 1},
+            {"seq": 2, "event": "call", "ok": True, "batch_id": "R0-OTHER", "task": 1}]
+    monkeypatch.setattr(dv.ql, "read_lines", lambda _path=None: list(rows))
+    trial = dv.DevelopmentTrial(runner, FakeGateway([]), "E")
+    facts = trial.preconditions()
+    assert facts["batch_used"] == 2              # 只数本批（含 blocked 占位行）
+    assert trial.request_cap == dv.DEV_CAP - 2
+
+

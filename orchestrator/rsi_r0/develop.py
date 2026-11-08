@@ -233,7 +233,21 @@ class DevelopmentTrial:
         if int(ticket.get("approved") or 0) > self.request_cap:
             raise DevelopmentError(
                 f"票据批准量 {ticket.get('approved')} 超过本族帽 {self.request_cap}")
+        # T6 重跑实测（2026-11-08）：本批票据是**跨进程累计**的，而 request_cap 是
+        # 单进程计划量。E 首跑已用 1 行、D/R 各有 1 行 preflight_blocked（占批次），
+        # 若重跑仍按 24 规划，第 24 次就会撞上 quota_ledger 的
+        # `batch_budget_reached` 熔断（写 pause 件、要 resume 票）。计划量必须取
+        # 「票据批准量 − 本批已占行」与族帽的较小者。
+        used = sum(1 for r in ql.read_lines(rp.rsi_r0_ledger_path())
+                   if str(r.get("batch_id")) == self.batch_id)
+        remaining = int(ticket.get("approved") or 0) - used
+        if remaining <= 0:
+            raise DevelopmentError(
+                f"批次 {self.batch_id} 已用 {used} 行，票据批准 "
+                f"{ticket.get('approved')} 行已耗尽（不许超票发网）")
+        self.request_cap = min(self.request_cap, remaining)
         return {"gate": gate, "ticket": ticket,
+                "batch_used": used, "request_cap": self.request_cap,
                 "pricing_contract_sha256": self.contract.get("contract_sha256")}
 
     # ---- 单请求 ----
