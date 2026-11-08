@@ -503,3 +503,52 @@ def summarize_metric(results: Sequence[TrialResult]) -> dict[str, Any]:
     out["note"] = ("n=2/族（验证）与 n=1/族（开发）只支持可行性判断；"
                    "固定设计样本，不得推断总体成功率；不报告 p 值或置信区间。")
     return out
+
+
+# ---------------------------------------------------------------- 候选交卷格式
+#
+# 交卷**只允许引用宿主记录的 run_id**：候选不能自己报一串数字，评测器一律拿
+# run_id 回宿主事件日志取原始序列再复算（AC19「只有重放而无原实验事件必拒」）。
+
+ANSWER_SCHEMAS: Mapping[Family, dict[str, Any]] = {
+    Family.E: {
+        "required": ["family", "run_id", "claim"],
+        "shape": {
+            "family": "E",
+            "run_id": "<宿主返回的 run_id>",
+            "claim": {"distance": "<m>", "final_speed": "<m/s>"},
+        },
+        "note": "claim 必须与宿主对该 run_id 的复算一致（1e-6 内），不采信候选自算。",
+    },
+    Family.D: {
+        "required": ["family", "run_ids", "hypothesis"],
+        "shape": {
+            "family": "D",
+            "run_ids": ["<至少 4 个探测 run_id：两档力 × 两个方向>"],
+            "hypothesis": {"kind": "scene_tilt|friction_scale|force_scale",
+                           "scale": "<幅度>"},
+        },
+        "note": "种类与幅度由维护侧独立分类器从这些 run_id 复算，候选只declare 假设。",
+    },
+    Family.R: {
+        "required": ["family", "run_ids", "verdict", "effect", "criteria", "scope"],
+        "shape": {
+            "family": "R",
+            "run_ids": ["<两个阻尼水平 × 两个初态，各 ≥1 个 run_id>"],
+            "verdict": "SUPPORTED|REFUTED|INCONCLUSIVE",
+            "effect": "<相对效应量>",
+            "criteria": {c: "<证据说明>" for c in RESEARCH_CRITERIA},
+            "scope": "<结论适用边界：无接触/有限步长/…>",
+        },
+        "note": ("八项判据必须逐项给出证据（C1–C8）；INCONCLUSIVE 另需 "
+                 "diagnostics 列出事前诊断覆盖。"),
+    },
+}
+
+
+def answer_schema(family: Family) -> dict[str, Any]:
+    """公开任务书里的交卷格式（唯一真值；任务包与评测器都从这里取）。"""
+    schema = ANSWER_SCHEMAS[family]
+    return {"required": list(schema["required"]),
+            "shape": dict(schema["shape"]),
+            "note": schema["note"]}

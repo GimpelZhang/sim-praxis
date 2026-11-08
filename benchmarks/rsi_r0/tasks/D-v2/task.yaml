@@ -1,0 +1,55 @@
+answer:
+  note: 种类与幅度由维护侧独立分类器从这些 run_id 复算，候选只declare 假设。
+  required:
+  - family
+  - run_ids
+  - hypothesis
+  shape:
+    family: D
+    hypothesis:
+      kind: scene_tilt|friction_scale|force_scale
+      scale: <幅度>
+    run_ids:
+    - <至少 4 个探测 run_id：两档力 × 两个方向>
+contract_schema: rsi_r0.contracts.v1
+family: D
+goal:
+  description: 诊断：本实例的故障种类与幅度均不公开
+  note: 提出假设：scene_tilt / friction_scale / force_scale 三者之一，并给出幅度估计。
+  target:
+  - 0.6
+  - 0.0
+  type: reach_and_settle
+instance_id: D-v2
+interface:
+  keys:
+  - kp
+  - kd
+  - max_force
+  kind: push_control
+  limits:
+    kd:
+    - 0.0
+    - 500.0
+    kp:
+    - 0.0
+    - 5000.0
+    max_force:
+    - 0.0
+    - 500.0
+order_index: 5
+role: validation
+rules:
+- 只能通过可信服务的有界数值接口发起实验；不得提交代码/路径/命令。
+- 禁止访问私有数据、评测器、其他实例工作区与历史对话。
+- 每实例最多 24 次模型请求；不因未用完预算而转移额度。
+scene_params:
+  box_half: 0.05
+  box_mass: 1.0
+  friction: 0.25
+  timestep: 0.0005
+scene_xml_sha256: bb7be7b4361d95ed8142d000251ae122abc2e86717cf66a29571a3609b8a6034
+schema: rsi_r0.task.v1
+steps_max: 3000
+task_id: 2
+template: push

@@ -1,0 +1,61 @@
+answer:
+  note: 八项判据必须逐项给出证据（C1–C8）；INCONCLUSIVE 另需 diagnostics 列出事前诊断覆盖。
+  required:
+  - family
+  - run_ids
+  - verdict
+  - effect
+  - criteria
+  - scope
+  shape:
+    criteria:
+      C1_preregistered_plan: <证据说明>
+      C2_two_levels_two_configs: <证据说明>
+      C3_trusted_series: <证据说明>
+      C4_units_and_controls: <证据说明>
+      C5_independent_analysis: <证据说明>
+      C6_conclusion_boundary: <证据说明>
+      C7_scope_statement: <证据说明>
+      C8_inconclusive_discipline: <证据说明>
+    effect: <相对效应量>
+    family: R
+    run_ids:
+    - <两个阻尼水平 × 两个初态，各 ≥1 个 run_id>
+    scope: <结论适用边界：无接触/有限步长/…>
+    verdict: SUPPORTED|REFUTED|INCONCLUSIVE
+contract_schema: rsi_r0.contracts.v1
+family: R
+goal:
+  description: 研究问题：增大关节阻尼是否缩短单摆的沉降时间（标定用）。
+  groups: 两个初始角（自选，|a| ≤ 3.2 rad）
+  intervention: 两个自选阻尼水平（由维护侧注入到场景的 damping 属性）
+  min_steps: 50
+  type: controlled_experiment
+instance_id: R-dev
+interface:
+  keys:
+  - initial_angle
+  kind: free_run
+  limits:
+    initial_angle:
+    - -3.2
+    - 3.2
+    steps:
+    - 50
+    - 2000
+order_index: 6
+role: development
+rules:
+- 只能通过可信服务的有界数值接口发起实验；不得提交代码/路径/命令。
+- 禁止访问私有数据、评测器、其他实例工作区与历史对话。
+- 每实例最多 24 次模型请求；不因未用完预算而转移额度。
+scene_params:
+  damping: 0.05
+  pendulum_length: 0.5
+  pendulum_mass: 0.5
+  timestep: 0.002
+scene_xml_sha256: 722095d8a9b27094b52868e87931b9313c060cf18cfcd6b93e8a86652958e3ea
+schema: rsi_r0.task.v1
+steps_max: 2000
+task_id: 3
+template: pendulum
