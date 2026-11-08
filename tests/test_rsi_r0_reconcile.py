@@ -332,6 +332,49 @@ def test_protocol_report_is_written_while_still_holding_the_lock(campaign, monke
         pp.ProtocolProbe(runner, _SilentGateway()).run()
 
 
+# ---------------------------------------------------------------- 坏行与原子写
+def test_corrupt_ledger_line_is_reported_as_drift_not_a_traceback(tmp_path):
+    """第三份评审 LOW-3：坏行必须以漂移形式回报，而不是让门抛出 JSONDecodeError。"""
+    ledger, journal, reservations = _world(tmp_path)
+    _settled(journal, seq=1)
+    _ledger_call(ledger, 1)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write("{this is not json\n")
+    report = rc.reconcile(ledger_path=ledger, journal=journal, reservations=reservations)
+    assert report["ok"] is False
+    corrupt = report["drift"]["corrupt_records"]
+    assert corrupt and corrupt[0]["source"] == "ledger" and corrupt[0]["line"] == 2
+
+
+def test_private_write_is_atomic_and_0600(tmp_path):
+    """第三份评审 LOW-4：先 0600 建临时件再 replace，不留半截文件与临时件。"""
+    from orchestrator.rsi_r0.contracts import private_write
+
+    target = tmp_path / "artifact.json"
+    private_write(target, "hello")
+    assert (target.stat().st_mode & 0o777) == 0o600
+    assert not list(tmp_path.glob(".*tmp*"))
+    private_write(target, "world")                       # 覆盖也是原子换名
+    assert target.read_text(encoding="utf-8") == "world"
+
+
+def test_tampered_review_hash_is_not_reused(campaign):
+    """第三份评审 LOW-6：幂等分支也要自哈希核验。"""
+    runner = rn.R0Runner(campaign)
+    runner.ensure_campaign()
+    runner.write_lock()
+    kw = dict(verdict="APPROVE", reviewer_lane="lane-x", reviewed_commit="deadbeef",
+              findings={"major": 0, "critical": 0},
+              basis="第三份评审：全量读 diff，结论 APPROVE（单测）。")
+    runner.write_independent_review(**kw)
+    path = runner.review_path()
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["review_sha256"] = "0" * 64                      # 只动自哈希（volatile 字段）
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    with pytest.raises(rn.RunnerError, match="自哈希"):
+        runner.write_independent_review(**kw)
+
+
 # ---------------------------------------------------------------- cli gates / review
 def test_cli_gates_computes_the_three_gates_and_refuses_when_unresolved(campaign):
     from orchestrator.rsi_r0.cli import EXIT_REFUSED, main as cli_main

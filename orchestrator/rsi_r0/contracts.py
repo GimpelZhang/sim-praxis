@@ -427,9 +427,26 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def private_write(path: Path, text: str) -> None:
-    """写 campaign 产物并落 0600（评审 N-4：脚本侧曾写出 0664 的尾巴）。"""
-    path.write_text(text, encoding="utf-8")
-    os.chmod(path, 0o600)
+    """原子写 campaign 产物并落 0600（N-4 权限；第三份评审 LOW-4 原子性）。
+
+    旧版 ``write_text`` 再 ``chmod``：进程死在两步之间会留下半截文件，且写入瞬间
+    可能是 0644。现在先在同目录建 0600 的临时件，fsync 后 ``os.replace`` 换名——
+    读者要么看到旧版、要么看到完整新版，权限从第一字节起就是 0600。
+    """
+    tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------- 研究判据枚举

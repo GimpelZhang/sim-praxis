@@ -522,6 +522,11 @@ class R0Runner:
 
             if existing is None or _stable(existing) != _stable(doc):
                 raise RunnerError(f"评审件已存在且内容不同，拒绝覆盖：{path}")
+            # 幂等分支也做一次自哈希核对（第三份评审 LOW-6）：磁盘上的旧件若被
+            # 手改成「内容一致但哈希不实」，不能原样返还当成有效评审件。
+            body = {k: v for k, v in existing.items() if k != "review_sha256"}
+            if existing.get("review_sha256") != sha256_of(body):
+                raise RunnerError(f"评审件自哈希不符，拒绝复用：{path}")
             return existing
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -906,6 +911,10 @@ class R0Runner:
         }.items():
             p = here.parent.parent.joinpath(*rel)
             code[dotted] = sha256_of(p.read_text(encoding="utf-8")) if p.exists() else None
+        # 明确排除（第三份评审 LOW-5，这是选择不是遗漏）：
+        # `scripts/rsi_r0/probes/probe_render.py` 是运维侧 GPU/EGL 探针，不进候选
+        # 容器、不被任何门读取、仓库内无引用；把它钉进锁只会在换机器时制造假漂移。
+        # 一旦它开始影响证据（例如探针结果进 gate_facts），必须改为入锁。
         protocol = rp.rsi_r0_protocol_dir()
         tasks_lock = protocol / "t2_tasks_lock.json"
         criteria = protocol / "t3_criteria.json"

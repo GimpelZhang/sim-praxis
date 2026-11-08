@@ -44,14 +44,24 @@ _CONSUMED_STATES = frozenset({
 })
 
 
-def _ledger_rows(path: Path) -> list[dict[str, Any]]:
+def _ledger_rows(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """读账本；坏行**不抛**，作为 ``corrupt_records`` 漂移上报（第三份评审 LOW-3）。
+
+    对账的契约是「永远返回一份报告」：坏行若以 ``JSONDecodeError`` 冒到
+    ``gate_facts``，调用方拿到的是 traceback 而不是可读的门失败理由。
+    """
     if not path.exists():
-        return []
+        return [], []
     out: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
+    corrupt: list[dict[str, Any]] = []
+    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
             out.append(json.loads(line))
-    return out
+        except json.JSONDecodeError as exc:
+            corrupt.append({"source": "ledger", "line": index, "why": str(exc)})
+    return out, corrupt
 
 
 def reconcile(*, ledger_path: Path, journal: AttemptJournal,
@@ -62,7 +72,7 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
     ``report_seqs`` 是「第四份痕迹」：三份权威文件都可能被删，报告里的
     ``requests.ledger_seqs`` 不会跟着消失（它已经写进 protocol/ 下的成品件）。
     """
-    ledger = _ledger_rows(ledger_path)
+    ledger, corrupt = _ledger_rows(ledger_path)
     call_seqs: dict[int, dict[str, Any]] = {}
     blocked_rows: list[dict[str, Any]] = []
     for row in ledger:
@@ -72,7 +82,12 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
         elif seq is None and row.get("event") == "preflight_blocked":
             blocked_rows.append(row)
 
-    latest = journal.latest_by_request()
+    try:
+        latest = journal.latest_by_request()
+    except (json.JSONDecodeError, KeyError, UnicodeDecodeError) as exc:
+        # attempts 侧坏行同理：记成漂移，别让对账以异常形式失败。
+        corrupt.append({"source": "attempts", "line": None, "why": str(exc)})
+        latest = {}
     attempt_seqs: dict[int, str] = {}
     claimed_rows: dict[int, Mapping[str, Any]] = {}
     duplicate_seqs: list[dict[str, Any]] = []
@@ -171,6 +186,7 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
         "attempt_seq_without_ledger": missing_ledger,
         "duplicate_seq": duplicate_seqs,
         "call_identity_mismatch": identity_bad,
+        "corrupt_records": corrupt,
         "attempt_without_reservation": missing_reservations,
         "reservation_without_attempt": orphan_reservations,
         "unknown_sent": unknown,
@@ -184,6 +200,7 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
         "ok": ok,
         "files_present": {"ledger": ledger_path.exists(),
                           "attempts": journal.path.exists() if journal.path else None},
+        "identity_unverified_seqs": identity_unverified,
         "ledger": {"calls": len(call_seqs), "preflight_blocked": len(blocked_rows),
                    "seqs": sorted(call_seqs)},
         "attempts": {"records": len(latest), "with_seq": len(attempt_seqs),
