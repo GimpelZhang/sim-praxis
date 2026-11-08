@@ -158,7 +158,9 @@ def write_artifact_with_history(path: Path, payload: Mapping[str, Any],
     def _body_digest(doc: Mapping[str, Any]) -> str:
         return sha256_of({k: v for k, v in doc.items() if k != "report_sha256"})
 
-    digest = str(payload.get("report_sha256") or _body_digest(payload))
+    # 一律按正文重算，**不采信** payload 自报的 ``report_sha256``（第三份评审增量
+    # 复核意见 ii）：自报值若与正文不符，历史行就会记下一个谁都没验证过的哈希。
+    digest = _body_digest(payload)
     previous: str | None = None
     if path.exists():
         try:

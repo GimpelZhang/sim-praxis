@@ -304,6 +304,34 @@ def test_history_line_hash_matches_the_previous_line(tmp_path):
     assert last["changed"] is False, "同内容重写不该报成覆盖"
 
 
+def test_one_sided_identity_fields_are_reported_as_unverified(tmp_path):
+    """第三份评审增量意见 i：一边有值、另一边 null，该字段不得静默退出比较。"""
+    ledger, journal, reservations = _world(tmp_path)
+    _settled(journal, seq=1, batch=BATCH, task=1)
+    with open(ledger, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"seq": 1, "event": "call", "ok": True,
+                             "ts_iso": "2026-11-08T00:00:00Z"}) + "\n")
+    report = rc.reconcile(ledger_path=ledger, journal=journal,
+                          reservations=reservations)
+    assert report["ok"] is True             # 核不了 ≠ 漂移，但也 ≠ 核过
+    assert report["identity_unverified_seqs"] == [1]
+
+
+def test_history_digest_ignores_a_self_reported_hash(tmp_path):
+    """第三份评审增量意见 ii：自报 ``report_sha256`` 与正文不符时按正文重算。"""
+    target = tmp_path / "artifact.json"
+    history = tmp_path / "history.jsonl"
+    payload = {"verdict": "APPROVE", "report_sha256": "f" * 64}
+    line = rn.write_artifact_with_history(target, payload, history)
+    body = {k: v for k, v in payload.items() if k != "report_sha256"}
+    from orchestrator.rsi_r0.contracts import sha256_of
+
+    assert line["sha256"] == sha256_of(body)
+    assert line["sha256"] != "f" * 64
+    again = rn.write_artifact_with_history(target, payload, history)
+    assert again["changed"] is False        # 同正文重写不算覆盖
+
+
 def test_protocol_report_is_written_while_still_holding_the_lock(campaign, monkeypatch):
     """第三份评审 LOW-1：报告若在锁外写，锁释放到落盘之间有「再发一批」的窗口。"""
     from orchestrator.rsi_r0.cli import EXIT_OK, main as cli_main

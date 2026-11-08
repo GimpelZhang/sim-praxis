@@ -164,11 +164,15 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
         # "核过且一致"不是一回事。
         pairs = [(str(l), str(a)) for l, a in zip(ledger_key, attempt_key)
                  if l is not None and a is not None]
+        one_sided = any((l is None) != (a is None)
+                        for l, a in zip(ledger_key, attempt_key))
         if any(l != a for l, a in pairs):
             identity_bad.append({"seq": seq,
                                  "ledger": [str(x) for x in ledger_key],
                                  "attempts": [str(x) for x in attempt_key]})
-        elif not pairs:
+        elif not pairs or one_sided:
+            # 一边有值、另一边 null 也算"核不了"（第三份评审增量复核意见 i）：
+            # 抹掉某个字段不能让该字段静默退出比较。
             identity_unverified.append(seq)
 
     reported: dict[int, str] = {}
