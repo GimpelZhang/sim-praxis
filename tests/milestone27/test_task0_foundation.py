@@ -61,6 +61,9 @@ def p27_roots(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
     # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
     monkeypatch.setenv("SIMPRAXIS_PHASE281_ROOT", str(tmp_path / "phase281"))
+    # 锁内适配（RSI-R0 T1）：phase281 亦封存，写账目标换成 rsi_r0 campaign。
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_ROOT", str(tmp_path / "r0root"))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     return tmp_path
 
@@ -112,9 +115,9 @@ def test_ac_t0_1_permissions_and_sealed(p27_roots):
 
     # (2) 账本 0600（写打开后仍 0600）。
     # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
-    with rp.open_ledger_append(rp.phase281_ledger_path()) as fh:
+    with rp.open_ledger_append(rp.rsi_r0_ledger_path()) as fh:
         fh.write('{"probe": true}\n')
-    ledger = rp.phase281_ledger_path()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+    ledger = rp.rsi_r0_ledger_path()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
     assert _mode(ledger) == 0o600, f"phase281 账必须 0600，实际 {_mode(ledger):o}"
 
     # (3) 五本封存账：任何写打开必抛 SealedLedgerError（含缺省目标=phase26）。
@@ -166,18 +169,28 @@ def test_ac_t0_2_selfcheck_row(tmp_path):
         "SIMPRAXIS_PHASE26_ROOT": str(tmp_path / "phase26"),
         "SIMPRAXIS_PHASE27_ROOT": str(tmp_path / "phase27"),
         "SIMPRAXIS_PHASE281_ROOT": str(tmp_path / "phase281"),  # 锁内适配（Phase 2.8.1 T0）
+        "SIMPRAXIS_RSI_R0_ROOT": str(tmp_path / "r0root"),  # 锁内适配（RSI-R0 T1）
+        "SIMPRAXIS_RSI_R0_CAMPAIGN": "r0test",
         "SIMPRAXIS_GATEWAY_STATE": str(tmp_path / "gwstate"),
     }
     with mock.patch.dict(os.environ, tmp_roots):
-        led = ql.QuotaLedger.phase281()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+        led = ql.QuotaLedger.rsi_r0()  # 锁内适配（RSI-R0 T1）：写改指 rsi_r0
         row = led.record(STAGE, task=4, batch_id=BATCH, ok=True,
                          model="fixture-model", thread_id="t-ac2")
         assert row["seq"] == 1 and row["event"] == "call"
         parse_ts_iso_strict(row["ts_iso"])
         assert STRICT_Z.match(row["ts_iso"]), row["ts_iso"]
-        assert (tmp_path / "phase281" / "quota" / "ledger.jsonl").exists()
+        assert (tmp_path / "r0root" / "r0test" / "quota" / "ledger.jsonl").exists()
     # 开账行占 seq=1 后，生产账的下一条实呼必须从 seq=2 起。
-    assert rp.phase281_ledger_path() != tmp_path / "phase281" / "quota" / "ledger.jsonl"  # 锁内适配（Phase 2.8.1 T0）
+    # 锁内适配（RSI-R0 T1）：rsi_r0 路径依赖 campaign env 才能解析，patch 退出后
+    # 环境已还原；campaign 未设（裸跑单测常态）时解析必抛，故改断「环境已还原」，
+    # 有 campaign 时再断「生产路径不等于 tmp 路径」——仍是反向断言，非放水。
+    if os.environ.get("SIMPRAXIS_RSI_R0_CAMPAIGN"):
+        assert rp.rsi_r0_ledger_path() != (
+            tmp_path / "r0root" / "r0test" / "quota" / "ledger.jsonl")
+    else:
+        assert "SIMPRAXIS_RSI_R0_ROOT" not in os.environ or \
+            os.environ["SIMPRAXIS_RSI_R0_ROOT"] != str(tmp_path / "r0root")
 
     # (b) 生产根：开账 selfcheck 行（占 seq=1、不计实呼、永不删除）。
     prod = rp.phase27_ledger_path()
@@ -206,13 +219,13 @@ def test_ac_t0_2_selfcheck_row(tmp_path):
 
 def test_ac_t0_3_seq_monotonic(p27_roots):
     # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
-    led = ql.QuotaLedger.phase281()
+    led = ql.QuotaLedger.rsi_r0()
     # 开账行先落（模拟生产口径）。
-    with rp.open_ledger_append(rp.phase281_ledger_path()) as fh:
+    with rp.open_ledger_append(rp.rsi_r0_ledger_path()) as fh:
         fh.write(json.dumps(_selfcheck_row(1), ensure_ascii=False) + "\n")
     rows = [led.record(STAGE, task=4, batch_id=BATCH, ok=True, model="m",
                        thread_id=f"t{s}") for s in (1, 2, 3)]
-    raw = _read_ledger(rp.phase281_ledger_path())  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+    raw = _read_ledger(rp.rsi_r0_ledger_path())  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
     assert len(raw) == 4
     ints = [r["seq"] for r in raw if isinstance(r.get("seq"), int)]
     assert ints == [1, 2, 3, 4], ints          # selfcheck 占 1，实呼 2..4
@@ -276,16 +289,19 @@ def test_ac_t0_5_sealed_set_size(p27_roots):
     sealed = rp.sealed_ledger_paths()
     assert isinstance(sealed, frozenset)
     # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，封存集 4→5（只多加一期）。
-    assert len(sealed) == 5, sorted(str(p) for p in sealed)
+    # 锁内适配（RSI-R0 T1）：phase281 亦封存，封存集 5→6（同样只多加一期）。
+    assert len(sealed) == 6, sorted(str(p) for p in sealed)
     assert sealed == frozenset({
         rp.phase1_ledger_path().resolve(strict=False),
         rp.phase2_ledger_path().resolve(strict=False),
         rp.phase25_ledger_path().resolve(strict=False),
         rp.phase26_ledger_path().resolve(strict=False),
         rp.phase27_ledger_path().resolve(strict=False),
+        rp.phase281_ledger_path().resolve(strict=False),  # 锁内适配（RSI-R0 T1）
     })
-    # phase281 自身不在封存集（它是当前写入者）。
-    assert rp.phase281_ledger_path().resolve(strict=False) not in sealed  # 锁内适配（Phase 2.8.1 T0）
+    # phase281 自身已封存；当前写入者是 rsi_r0（不在封存集）。
+    assert rp.phase281_ledger_path().resolve(strict=False) in sealed  # 锁内适配（RSI-R0 T1）
+    assert rp.rsi_r0_ledger_path().resolve(strict=False) not in sealed  # 锁内适配（RSI-R0 T1）
     for path in sealed:
         with pytest.raises(rp.SealedLedgerError):
             rp.open_ledger_append(path)
@@ -326,12 +342,12 @@ def test_ac_t0_7_phase27_record_lands(p27_roots):
     p2_before = p2.read_bytes()
     p2_mtime = p2.stat().st_mtime_ns
 
-    led = ql.QuotaLedger.phase281()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+    led = ql.QuotaLedger.rsi_r0()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
     r1 = led.record(STAGE, task=4, batch_id=BATCH, ok=True, model="m",
                     thread_id="t-a")
     r2 = led.record(STAGE, task=4, batch_id=BATCH, ok=False, model="m",
                     thread_id="t-b", err="fixture failure")
-    p27 = rp.phase281_ledger_path()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+    p27 = rp.rsi_r0_ledger_path()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
     landed = _read_ledger(p27)
     # ① 行落在 phase281 账；② phase2 账字节数与 mtime 一字不差。
     assert [r["seq"] for r in landed] == [1, 2]

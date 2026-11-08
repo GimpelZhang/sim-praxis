@@ -50,6 +50,9 @@ def p26_roots(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
     # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
     monkeypatch.setenv("SIMPRAXIS_PHASE281_ROOT", str(tmp_path / "phase281"))
+    # 锁内适配（RSI-R0 T1）：phase281 亦封存，写账目标换成 rsi_r0 campaign。
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_ROOT", str(tmp_path / "r0root"))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     return tmp_path
 
@@ -108,10 +111,12 @@ def test_ac_t0_1_dir_modes_seals_watchdog_and_seq_provider(p26_roots):
     # 读取器绝不读到 phase27 刚写的那一行。
     # 锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281。
     # Phase 2.8.1 T3（P281-3，计划 §7.2/C5，AC-P281-3-05）：缺省读取器随活跃账
-    # 换期 phase27 → phase281，故本行改为 ``== 1``——缺省读取器盯的就是 phase281，
-    # 读得到上面刚写的那一行；封存四期仍恒 ``None``（不跨账串读）。
+    # 换期 phase27 → phase281。
+    # 锁内适配（RSI-R0 T1）：缺省读取器再随活跃账换期 phase281 → rsi_r0，故本行
+    # 仍为 ``== 1``——缺省读取器盯的就是 rsi_r0，读得到上面刚写的那一行；封存
+    # 五期（含 phase281）仍恒 ``None``（不跨账串读）。
     from orchestrator.agentic.wiring import build_seq_provider  # noqa: PLC0415
-    led281 = ql.QuotaLedger.phase281()
+    led281 = ql.QuotaLedger.rsi_r0()
     led27 = ql.QuotaLedger.phase27()          # 只借命名空间解析路径，不写
     led26 = ql.QuotaLedger.phase26()          # 只借命名空间解析路径，不写
     led25 = ql.QuotaLedger.phase25()          # 只借命名空间解析路径，不写
@@ -123,7 +128,7 @@ def test_ac_t0_1_dir_modes_seals_watchdog_and_seq_provider(p26_roots):
         # 锁内适配 L-8：缺省读取器随活跃账换期（否则实呼写在活跃账、读取器盯封存
         # 的上一期 ⇒ 恒 None，trace 的 seq=null 语义「全缓存命中」会把每一次真实
         # 付费调用记成缓存命中）。P281-3 起缺省即 phase281（当前唯一可写账）。
-        assert build_seq_provider()() == 1               # 缺省：phase281（读得到）
+        assert build_seq_provider()() == 1               # 缺省：rsi_r0（读得到，RSI-R0 T1 换期）
         assert build_seq_provider(ledger=led27)() is None  # 封存 phase27：读不到
         assert build_seq_provider(ledger=led26)() is None  # 封存 phase26：读不到
         assert build_seq_provider(ledger=led25)() is None  # 封存 phase25：读不到
@@ -165,21 +170,31 @@ def test_ac_t0_2_new_ledger_first_seq_one_strict_z(tmp_path):
         "SIMPRAXIS_PHASE26_ROOT": str(tmp_path / "phase26"),
         "SIMPRAXIS_PHASE27_ROOT": str(tmp_path / "phase27"),
         "SIMPRAXIS_PHASE281_ROOT": str(tmp_path / "phase281"),
+        "SIMPRAXIS_RSI_R0_ROOT": str(tmp_path / "r0root"),
+        "SIMPRAXIS_RSI_R0_CAMPAIGN": "r0test",
         "SIMPRAXIS_GATEWAY_STATE": str(tmp_path / "gwstate"),
     }
     with mock.patch.dict(os.environ, tmp_roots):
-        led = ql.QuotaLedger.phase281()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+        led = ql.QuotaLedger.rsi_r0()  # 锁内适配（RSI-R0 T1）：写改指 rsi_r0
         row = led.record(STAGE, task=4, batch_id=BATCH, ok=True,
                          model="fixture-model", thread_id="t-ac2")
         assert row["seq"] == 1 and row["event"] == "call"
         parse_ts_iso_strict(row["ts_iso"])
         assert STRICT_Z.match(row["ts_iso"]), row["ts_iso"]
-        assert (tmp_path / "phase281" / "quota" / "ledger.jsonl").exists()
+        assert (tmp_path / "r0root" / "r0test" / "quota" / "ledger.jsonl").exists()
         # 封存的 phase26 账在同一 tmp 根下不得被写（反向断言，非放水）。
         with pytest.raises(rp.SealedLedgerError):
             rp.open_ledger_append(rp.phase26_ledger_path())
     # 开账行占 seq=1 后，生产账的下一条实呼必须从 seq=2 起（连续性不被顶掉）。
-    assert rp.phase281_ledger_path() != tmp_path / "phase281" / "quota" / "ledger.jsonl"  # 锁内适配（Phase 2.8.1 T0）
+    # 锁内适配（RSI-R0 T1）：rsi_r0 路径依赖 campaign env 才能解析，patch 退出后
+    # 环境已还原；campaign 未设（裸跑单测常态）时解析必抛，故改断「环境已还原」，
+    # 有 campaign 时再断「生产路径不等于 tmp 路径」——仍是反向断言，非放水。
+    if os.environ.get("SIMPRAXIS_RSI_R0_CAMPAIGN"):
+        assert rp.rsi_r0_ledger_path() != (
+            tmp_path / "r0root" / "r0test" / "quota" / "ledger.jsonl")
+    else:
+        assert "SIMPRAXIS_RSI_R0_ROOT" not in os.environ or \
+            os.environ["SIMPRAXIS_RSI_R0_ROOT"] != str(tmp_path / "r0root")
 
     # (b) 生产根：开账 selfcheck 行（占 seq=1、不计实呼、永不删除）。
     #     锁内适配（Phase 2.7 Task0，D0-2）：phase26 已封存，本测试不得再「补写」

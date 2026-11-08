@@ -32,6 +32,7 @@ import orchestrator.agentic.wiring as W
 import orchestrator.gateway.router as R
 from orchestrator.agentic.loop import AgenticOutcome
 from orchestrator.common.callcache import CallReplay
+from orchestrator.common import runtime_paths as rp  # 锁内适配（RSI-R0 T1）
 from orchestrator.gateway import quota_ledger as ql
 from orchestrator.gateway.quota_ledger import QuotaLedger, billing_context
 
@@ -40,6 +41,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: P281-2 的提交（不可变父提交）。AC-10 拿它当「本 Task 之前」的基线：
 #: ``quota_ledger.py`` 在本 Task 里不许动一个字节。
 P281_2_HEAD = "a8011672ad8016fe838977e5ebc2a3451e5e4898"
+#: Phase 2.8.1 结案提交（不可变；AC-10 区间右端，见下）。
+P281_SEAL_HEAD = "7766342"
 
 STAGE = "coding_debug"
 BATCH = "P281-T3-FIXTURE"
@@ -66,9 +69,12 @@ def roots(tmp_path, monkeypatch):
                       ("SIMPRAXIS_PHASE26_ROOT", "phase26"),
                       ("SIMPRAXIS_PHASE27_ROOT", "phase27"),
                       ("SIMPRAXIS_PHASE281_ROOT", "phase281"),
+                      # 锁内适配（RSI-R0 T1）：活跃写账换成 rsi_r0 campaign。
+                      ("SIMPRAXIS_RSI_R0_ROOT", "r0root"),
                       ("SIMPRAXIS_GATEWAY_STATE", "gwstate"),
                       ("SIMPRAXIS_RUN_DIR", "runs")):
         monkeypatch.setenv(env, str(tmp_path / name))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")  # 锁内适配（RSI-R0 T1）
     monkeypatch.setenv("SIMPRAXIS_LLM_TOKEN", "wiring-test-key-redacted-0001")
     monkeypatch.setenv("SIMPRAXIS_LLM_BASE_URL",
                        "https://ark.cn-beijing.volces.com/api/coding")
@@ -119,11 +125,11 @@ def _write_map(path: Path) -> None:
 def _approve(approved: int = 8) -> None:
     ql.write_approval(batch_id=BATCH, task=1, stage=STAGE, approved=approved,
                       beyond_normal=False, note="P281-3 fixture（零付费单测）",
-                      namespace=ql.PHASE281_NAMESPACE)
+                      namespace=ql.RSI_R0_NAMESPACE)  # 锁内适配（RSI-R0 T1）
 
 
 def _ledger_rows() -> "list[dict]":
-    path = ql.phase281_ledger_path()
+    path = rp.rsi_r0_ledger_path()  # 锁内适配（RSI-R0 T1）
     if not path.is_file():
         return []
     return [json.loads(line) for line in
@@ -235,26 +241,31 @@ def test_ac_p281_3_04_ledger_threaded(roots, tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------------------
 # AC-P281-3-05：build_seq_provider() 缺省回退 phase281
+# 锁内适配（RSI-R0 T1）：phase281 已随 2.8.1 HOLD 结案封存，缺省账再换期到
+# rsi_r0（同一条「读取器必须盯活跃账」的教训，第四次换期）；断言形态不变：
+# 源码里必须是当前活跃账的构造函数，且旧期不得出现。
 # ---------------------------------------------------------------------------
 
 def test_ac_p281_3_05_seq_default_phase281(roots):
     src = inspect.getsource(W.build_seq_provider)
-    assert "QuotaLedger.phase281()" in src, src
+    assert "QuotaLedger.rsi_r0()" in src, src
+    assert "QuotaLedger.phase281()" not in src, src
     assert "QuotaLedger.phase27()" not in src, src
 
     # 行为：无 billing 上下文 ⇒ None（零 IO 的既有语义）
     assert W.build_seq_provider()() is None
 
     _approve()
-    led = QuotaLedger.phase281()
+    led = QuotaLedger.rsi_r0()
     with billing_context(task=1, batch_id=BATCH, thread_id="thr-t3"):
         rec = led.record(STAGE, task=1, batch_id=BATCH, ok=True,
                          model="fixture-model", thread_id="thr-t3")
         assert rec["seq"] == 1
-        # 缺省读取器盯的就是 phase281 账：读得到这一行
+        # 缺省读取器盯的就是 rsi_r0 账：读得到这一行（RSI-R0 T1 换期）
         assert W.build_seq_provider()() == 1
         # 显式别的期读不到（证明 -05 的前提成立：这是换期的效果而非巧合）
         assert W.build_seq_provider(ledger=QuotaLedger.phase27())() is None
+        assert W.build_seq_provider(ledger=QuotaLedger.phase281())() is None
     # 上下文退出后回到 None
     assert W.build_seq_provider()() is None
 
@@ -292,7 +303,7 @@ def test_ac_p281_3_08_single_attempt(roots, tmp_path):
     calls: list = []
     gw = R.ModelGateway(stage_models_path=map_path,
                         transport=_five_hundred(calls), max_attempts=1,
-                        sleep=lambda s: None, ledger=QuotaLedger.phase281())
+                        sleep=lambda s: None, ledger=QuotaLedger.rsi_r0())
     with billing_context(task=1, batch_id=BATCH, thread_id="thr-t3"):
         with pytest.raises(R.GatewayError):
             gw.call(STAGE, TEXT_MSG, max_tokens=64)
@@ -309,7 +320,7 @@ def test_ac_p281_3_09_failed_call_still_recorded(roots, tmp_path):
     calls: list = []
     gw = R.ModelGateway(stage_models_path=map_path,
                         transport=_five_hundred(calls), max_attempts=1,
-                        sleep=lambda s: None, ledger=QuotaLedger.phase281())
+                        sleep=lambda s: None, ledger=QuotaLedger.rsi_r0())
     with billing_context(task=1, batch_id=BATCH, thread_id="thr-t3"):
         for _ in range(2):
             with pytest.raises(R.GatewayError):
@@ -344,10 +355,15 @@ def test_ac_p281_3_10_billing_context_untouched(roots, tmp_path):
     fields = tuple(ql.BillingContext.__dataclass_fields__)
     assert fields == ("task", "batch_id", "thread_id", "evidence"), fields
 
-    # quota_ledger.py 相对 P281-2 零改动
+    # quota_ledger.py 相对 P281-2 零改动。
+    # 锁内适配（RSI-R0 T1）：区间右端由「活工作树」钉成**不可变提交**
+    # ``P281_SEAL_HEAD``（2.8.1 结案提交 7766342 = R0 分支的父提交）。原写法拿
+    # 工作树比，R0 按计划给 quota_ledger.py 加 rsi_r0 命名空间后这条历史断言
+    # 就会误红；钉死端点后强度不变（仍是「本 Task 前后零改动」），且不再被
+    # 后续阶段的合法改动影响。
     diff = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "diff", "--name-only", P281_2_HEAD, "--",
-         "orchestrator/gateway/quota_ledger.py"],
+        ["git", "-C", str(REPO_ROOT), "diff", "--name-only", P281_2_HEAD,
+         P281_SEAL_HEAD, "--", "orchestrator/gateway/quota_ledger.py"],
         text=True, capture_output=True, check=False)
     assert diff.returncode == 0, diff.stderr
     assert diff.stdout.strip() == "", diff.stdout

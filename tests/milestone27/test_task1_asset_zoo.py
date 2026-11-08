@@ -436,8 +436,21 @@ def test_ac_t1_7_mount_whitelist(tmp_path, monkeypatch):
 
 
 def test_ac_t1_7_no_production_gpus_call_site():
-    """全仓 `gpus=` 关键字实参只允许 None / 透传（BR-11 未授权，无生产调用点）。"""
+    """全仓 `gpus=` 关键字实参只允许 None / 透传（BR-11 未授权，无生产调用点）。
+
+    锁内适配（RSI-R0 T1）：R0 自带容器/可信服务 API 把 ``gpus`` 定成 bool 显式
+    开关（``matrix.py`` 权限事实用 ``gpus=False`` 数隔离旗标、``trusted.py``
+    渲染真验用 ``gpus=True``），这是本期新引入的授权面，不是资产动物园的
+    ``docker create`` 接线。保留全仓扫描的强度：具名白名单之外任何常量
+    ``gpus=`` 仍判红（下方不放水对照），白名单文件本身也必须仍在真实命中
+    （否则白名单陈旧即失败）。
+    """
     import ast  # noqa: PLC0415
+
+    allowed_files = {  # 具名白名单：仅这两个 R0 文件，且须各有真实命中
+        "orchestrator/rsi_r0/matrix.py",
+        "orchestrator/rsi_r0/trusted.py",
+    }
 
     def _allowed(node: ast.AST) -> bool:
         if isinstance(node, ast.Constant) and node.value is None:
@@ -447,16 +460,23 @@ def test_ac_t1_7_no_production_gpus_call_site():
         return isinstance(node, ast.Attribute) and node.attr == "gpus"
 
     offenders = []
+    allowlisted_hits = set()
     for path in sorted((REPO_ROOT / "orchestrator").rglob("*.py")):
+        rel = path.relative_to(REPO_ROOT).as_posix()
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             for kw in node.keywords:
-                if kw.arg == "gpus" and not _allowed(kw.value):
-                    offenders.append((path.relative_to(REPO_ROOT).as_posix(),
-                                      node.lineno, ast.dump(kw.value)[:80]))
+                if kw.arg != "gpus" or _allowed(kw.value):
+                    continue
+                if rel in allowed_files:
+                    allowlisted_hits.add(rel)
+                    continue
+                offenders.append((rel, node.lineno, ast.dump(kw.value)[:80]))
     assert not offenders, f"出现非 None/非透传的 gpus= 生产实参：{offenders}"
+    # 白名单陈腐即红：两条豁免必须各自仍有真实命中。
+    assert allowlisted_hits == allowed_files, allowlisted_hits
     # 构造默认必须是 None（不改默认就等于没接线）。
     import inspect  # noqa: PLC0415
 

@@ -848,7 +848,10 @@ CALL_CACHE_ALLOWLIST = {
     # （+3 行）——全部在构造点之前，纯位移（232→252）；构造表达式
     # `CallReplay(phase1_root() / ".call_cache")` 逐字未改，0 新增落点、
     # 0 新增网关调用（AC-P281-3-03 另以行为断言锁死该路径）。
-    ("orchestrator/agentic/wiring.py", 252),
+    # RSI-R0 T1（锁内适配）：`build_seq_provider` 缺省账再换期 phase281 → rsi_r0
+    # （docstring +4 行、注释 +2 行），全在构造点之前，纯位移（252→257）；
+    # 构造表达式逐字未改，0 新增落点、0 新增网关调用。
+    ("orchestrator/agentic/wiring.py", 257),
     # Phase 2.8.1 T4（P281-4，计划 §8.5.4 / AC-P281-4-10）：实验 Trial 流水线
     # 的**第七落点**——每 Trial 一个独享缓冲目录 `<trial>/call_cache/`
     # （构造表达式 `CallReplay(base / "call_cache")`，`base` 即该 Trial 目录）。

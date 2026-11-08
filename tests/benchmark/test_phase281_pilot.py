@@ -63,8 +63,11 @@ def p281_roots(tmp_path, monkeypatch):
                       ("SIMPRAXIS_PHASE26_ROOT", "phase26"),
                       ("SIMPRAXIS_PHASE27_ROOT", "phase27"),
                       ("SIMPRAXIS_PHASE281_ROOT", "phase281"),
+                      # 锁内适配（RSI-R0 T1）：活跃写账换成 rsi_r0 campaign。
+                      ("SIMPRAXIS_RSI_R0_ROOT", "r0root"),
                       ("SIMPRAXIS_GATEWAY_STATE", "gwstate")):
         monkeypatch.setenv(env, str(tmp_path / name))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")  # 锁内适配（RSI-R0 T1）
     monkeypatch.delenv("SIMPRAXIS_BENCHMARK_ROOT", raising=False)
     return tmp_path
 
@@ -306,7 +309,7 @@ def test_ac_p281_7_02_preflight_blocks(p281_roots):
         calls.append("transport")
         raise AssertionError(f"preflight 放行了未批准批次：{kwargs}")
 
-    ledger = ql.QuotaLedger.phase281()
+    ledger = ql.QuotaLedger.rsi_r0()  # 锁内适配（RSI-R0 T1）：phase281 已封存
     gw = ModelGateway(ledger=ledger, transport=boom, max_attempts=1)
     with pytest.raises(ql.GatewayPausedError) as ei:
         with ql.billing_context(task=1, batch_id=PILOT_BATCHES[1], thread_id="t-p7"):
@@ -315,7 +318,7 @@ def test_ac_p281_7_02_preflight_blocks(p281_roots):
     assert calls == [], "无批准件时仍然触网了"
 
     # seq=null 的 preflight_blocked 审计行必须落盘（占批次、不占 seq）
-    rows = ql.read_lines(rp.phase281_ledger_path())
+    rows = ql.read_lines(rp.rsi_r0_ledger_path())  # 锁内适配（RSI-R0 T1）
     blocked = [r for r in rows if r.get("event") == "preflight_blocked"]
     assert len(blocked) == 1, rows
     assert blocked[0]["seq"] is None
@@ -325,7 +328,7 @@ def test_ac_p281_7_02_preflight_blocks(p281_roots):
     ql.write_approval(batch_id=PILOT_BATCHES[1], task=1, stage=STAGE,
                       approved=PILOT_APPROVED_PER_TASK, beyond_normal=False,
                       note="P281-7 正对照",
-                      namespace=ql.QuotaLedger.phase281().ns)
+                      namespace=ql.QuotaLedger.rsi_r0().ns)  # 锁内适配（RSI-R0 T1）
     ok = ledger.preflight(STAGE, task=1, batch_id=PILOT_BATCHES[1])
     assert ok["batch_approved"] == PILOT_APPROVED_PER_TASK
     # 2.5 起的签收口径：null-seq 的 preflight_blocked **占批次**（uses_batch_occupancy），
@@ -338,15 +341,15 @@ def test_ac_p281_7_02_preflight_blocks(p281_roots):
 # ---------------------------------------------------------------------------
 
 def test_ac_p281_7_03_ledger_shape(p281_roots):
-    ledger = ql.QuotaLedger.phase281()
+    ledger = ql.QuotaLedger.rsi_r0()  # 锁内适配（RSI-R0 T1）：phase281 已封存
     for i in range(1, 4):
         row = ledger.record(STAGE, task=1, batch_id=PILOT_BATCHES[1], ok=(i != 3),
                             model="fixture-model", thread_id=f"t-{i}",
                             err=None if i != 3 else "synthetic-fail")
         assert row["seq"] == i
-    rows = ql.read_lines(rp.phase281_ledger_path())
+    rows = ql.read_lines(rp.rsi_r0_ledger_path())  # 锁内适配（RSI-R0 T1）
     ql.validate_ledger_rows(rows)          # seq 必须恰为 1..n，ts 严格 Z
-    snap = analysis.ledger_snapshot(rp.phase281_ledger_path())
+    snap = analysis.ledger_snapshot(rp.rsi_r0_ledger_path())  # 锁内适配（RSI-R0 T1）
     assert snap["summary"]["call_rows"] == 3
     assert snap["gaps"] == []
     assert analysis._seq_contiguous(snap["seqs"]) is True

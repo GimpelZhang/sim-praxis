@@ -140,8 +140,11 @@ def p281_roots(tmp_path, monkeypatch):
                       ("SIMPRAXIS_PHASE26_ROOT", "phase26"),
                       ("SIMPRAXIS_PHASE27_ROOT", "phase27"),
                       ("SIMPRAXIS_PHASE281_ROOT", "phase281"),
+                      # 锁内适配（RSI-R0 T1）：活跃写账换成 rsi_r0 campaign。
+                      ("SIMPRAXIS_RSI_R0_ROOT", "r0root"),
                       ("SIMPRAXIS_GATEWAY_STATE", "gwstate")):
         monkeypatch.setenv(env, str(tmp_path / name))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")  # 锁内适配（RSI-R0 T1）
     monkeypatch.delenv("SIMPRAXIS_BENCHMARK_ROOT", raising=False)
     return tmp_path
 
@@ -209,7 +212,11 @@ def test_ac_p281_0_02_push_anchor_registered():
 # AC-P281-0-03 / 04：封存集 4→5 与唯一可写账
 # ---------------------------------------------------------------------------
 
-def test_ac_p281_0_03_sealed_set_has_five(p281_roots):
+def test_ac_p281_0_03_sealed_set_has_six(p281_roots):
+    """锁内适配（RSI-R0 T1）：phase281 随 2.8.1 HOLD 结案进入封存集，5 → 6。
+
+    判据形态不变（精确 ``==``，不是 ``⊆``）；新增的第六本正是本期封存的那本。
+    """
     sealed = rp.sealed_ledger_paths()
     expected = frozenset({
         rp.phase1_ledger_path().resolve(strict=False),
@@ -217,25 +224,32 @@ def test_ac_p281_0_03_sealed_set_has_five(p281_roots):
         rp.phase25_ledger_path().resolve(strict=False),
         rp.phase26_ledger_path().resolve(strict=False),
         rp.phase27_ledger_path().resolve(strict=False),
+        rp.phase281_ledger_path().resolve(strict=False),
     })
-    assert len(sealed) == 5, f"封存集长度应为 5，实得 {len(sealed)}"
-    assert sealed == expected, "封存集不是精确的五本账路径（判据是 ==，不是 ⊆）"
+    assert len(sealed) == 6, f"封存集长度应为 6，实得 {len(sealed)}"
+    assert sealed == expected, "封存集不是精确的六本账路径（判据是 ==，不是 ⊆）"
+    # 当前写入者自身不得被误封（否则新账根本写不进去）。
+    assert rp.rsi_r0_ledger_path().resolve(strict=False) not in sealed
 
 
 def test_ac_p281_0_04_phase281_writable_others_raise(p281_roots):
+    # 锁内适配（RSI-R0 T1）：唯一可写账由 phase281 换成 rsi_r0（phase281 已封存）。
     sealed = rp.sealed_ledger_paths()
-    writable = rp.phase281_ledger_path().resolve(strict=False)
-    assert writable not in sealed, "唯一可写账（phase281）不得在封存集内"
+    writable = rp.rsi_r0_ledger_path().resolve(strict=False)
+    assert writable not in sealed, "唯一可写账（rsi_r0）不得在封存集内"
     for path in sorted(sealed):
         with pytest.raises(rp.SealedLedgerError):
             rp.open_ledger_append(path)
+    # phase281 本身现在也必须拒写。
+    with pytest.raises(rp.SealedLedgerError):
+        rp.open_ledger_append(rp.phase281_ledger_path())
     # 缺省目标仍是 phase26（D0-3 不改缺省）：因 phase26 已封存，缺省调用必抛。
     with pytest.raises(rp.SealedLedgerError):
         rp.open_ledger_append()
-    # phase281 可写，且 0 字节不写即关也不报错（负例表最后一条）。
-    with rp.open_ledger_append(rp.phase281_ledger_path()):
+    # rsi_r0 可写，且 0 字节不写即关也不报错（负例表最后一条）。
+    with rp.open_ledger_append(rp.rsi_r0_ledger_path()):
         pass
-    ledger = rp.phase281_ledger_path()
+    ledger = rp.rsi_r0_ledger_path()
     assert ledger.exists() and ledger.stat().st_size == 0
     assert _mode(ledger) == 0o600
 
@@ -269,16 +283,19 @@ def test_ac_p281_0_05_budget_constants():
 # ---------------------------------------------------------------------------
 
 def test_ac_p281_0_06_phase281_record_lands(p281_roots):
+    # 锁内适配（RSI-R0 T1）：phase281 已封存，落行改验当前活跃账 rsi_r0；
+    # 「生产根一字节未多」的反向断言仍盯被顶替的 phase281 生产账（纯路径，无需
+    # campaign env 解析，且在封存后本就不可写——不变式更强而非更弱）。
     prod = Path(rp.DEFAULT_DATA_ROOT) / "phase281" / "quota" / "ledger.jsonl"
     before = (prod.stat().st_size if prod.exists() else 0)
-    led = ql.QuotaLedger.phase281()
+    led = ql.QuotaLedger.rsi_r0()
     row = led.record(STAGE, task=1, batch_id=BATCH, ok=True,
                      model="fixture-model", thread_id="t-p281-1")
     assert row["seq"] == 1 and row["event"] == "call"
     assert STRICT_Z.match(row["ts_iso"]), row["ts_iso"]
     from orchestrator.common.clock import parse_ts_iso_strict  # noqa: PLC0415
     parse_ts_iso_strict(row["ts_iso"])
-    tmp_ledger = p281_roots / "phase281" / "quota" / "ledger.jsonl"
+    tmp_ledger = (p281_roots / "r0root" / "r0test" / "quota" / "ledger.jsonl")
     assert tmp_ledger.exists(), "账未落 tmp 根"
     rows = [json.loads(x) for x in tmp_ledger.read_text(encoding="utf-8").splitlines()
             if x.strip()]
@@ -544,21 +561,24 @@ def test_ac_p281_0_13_benchmark_root_env_rejected(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_ac_p281_0_16_ledger_cli_registered(p281_roots, capsys, monkeypatch):
-    assert ql._namespace_for_cli(281) is ql.PHASE281_NAMESPACE, \
-        "_namespace_for_cli(281) 未路由到 phase281（会写进旧期目录）"
+    # 锁内适配（RSI-R0 T1）：phase281 已封存，CLI 端到端改验当前活跃期 2900
+    # （rsi_r0）；判据形态不变——CLI 路由、批准件形态、selfcheck 放行、status 字段。
+    assert ql._namespace_for_cli(ql.LEDGER_RSI_R0) is ql.RSI_R0_NAMESPACE, \
+        "CLI 未路由到 rsi_r0（会写进旧期目录）"
 
     # approve 落 tmp 根：approvals/<batch>.json。
-    rc = ql.main(["--ledger-phase", "281", "approve", "--batch-id", BATCH,
-                  "--task", "1", "--stage", STAGE, "--approved", "1",
-                  "--note", "fixture（AC-16，零付费）"])
+    rc = ql.main(["--ledger-phase", str(ql.LEDGER_RSI_R0), "approve",
+                  "--batch-id", BATCH, "--task", "1", "--stage", STAGE,
+                  "--approved", "1", "--note", "fixture（AC-16，零付费）"])
     assert rc == 0
-    approval = (p281_roots / "phase281" / "quota" / "approvals" / f"{BATCH}.json")
-    assert approval.is_file(), f"批准件未落 phase281：{approval}"
+    approval = (p281_roots / "r0root" / "r0test" / "quota" / "approvals"
+                / f"{BATCH}.json")
+    assert approval.is_file(), f"批准件未落 rsi_r0：{approval}"
     assert _mode(approval) == 0o600
     capsys.readouterr()                       # 清掉 approve 的输出
 
     # 开账 selfcheck 行：严格机判放行 selfcheck，status 不报问题。
-    ledger = p281_roots / "phase281" / "quota" / "ledger.jsonl"
+    ledger = p281_roots / "r0root" / "r0test" / "quota" / "ledger.jsonl"
     from orchestrator.gateway.quota_ledger import _now_iso  # noqa: PLC0415
 
     selfcheck = {"ts_iso": _now_iso(), "event": "selfcheck", "seq": 1,
@@ -586,19 +606,20 @@ def test_ac_p281_0_16_ledger_cli_registered(p281_roots, capsys, monkeypatch):
         return real_add(self, *names, **kwargs)
 
     monkeypatch.setattr(argparse.ArgumentParser, "add_argument", _spy_add)
-    assert ql.main(["--ledger-phase", "281", "status"]) == 0
+    assert ql.main(["--ledger-phase", str(ql.LEDGER_RSI_R0), "status"]) == 0
     monkeypatch.undo()
 
     choices = seen["choices"]
-    # 旧四个期号逐字仍在（用 (281,) 替换会让旧期 CLI 全废）。
-    for old in (2, 25, 26, 27):
+    # 旧期号逐字仍在（换掉任一期号都会让该期 CLI 全废）。
+    for old in (2, 25, 26, 27, 281):
         assert old in choices, f"--ledger-phase 丢了旧期号 {old}"
-    assert 281 in choices
+    assert ql.LEDGER_RSI_R0 in choices
 
     out = json.loads(capsys.readouterr().out)
-    assert out["ledger_phase"] == 281
+    assert out["ledger_phase"] == ql.LEDGER_RSI_R0
     assert Path(out["ledger_path"]) == ledger
-    assert out["hard_cap"] == 180 and out["task_caps"] == {"1": 60, "2": 60, "3": 60}
+    assert out["hard_cap"] == ql.RSI_R0_HARD_CAP
+    assert out["task_caps"] == {str(k): v for k, v in ql.RSI_R0_TASK_CAPS.items()}
     assert out["paused"] in (False, None) or isinstance(out["paused"], dict)
 
 

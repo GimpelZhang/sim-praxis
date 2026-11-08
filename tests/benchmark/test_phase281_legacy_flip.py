@@ -28,6 +28,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: P281-0 的不可变基线提交（2026-11-06 推送窗口后的 origin/main）。
 BASELINE_COMMIT = "82a142710127367b0a771d818192321b53e2e951"
+#: 本阶段（Phase 2.8.1）结案提交 = 上述代换落地后的**不可变右端**。
+#: 锁内适配（RSI-R0 T1）：本文件判的是「2.8.1 把封存环从 phase27 换成
+#: phase281」这件**历史事实**。原来右端是活工作树，R0 按计划把同一批测试再
+#: 换期到 rsi_r0 后，added 行里自然不再出现 phase281 的字样 —— 这不是历史
+#: 被推翻，而是判据被后续阶段的合法改动污染。钉死右端后强度不变（仍是
+#: 「基线 → 2.8.1 结案」的逐行 diff），且不再被任何后续阶段影响。
+#: 严禁改回活工作树（同 memory:snapshot-test-baseline-no-live-head）。
+P281_SEAL_COMMIT = "7766342"
 
 #: §16.3 的五件历史测试（只改断言文本/期望值，不删测试）
 FLIPPED_FILES = (
@@ -40,9 +48,10 @@ FLIPPED_FILES = (
 
 
 def _diff_lines(path: str) -> "tuple[list[str], list[str]]":
-    """``git diff --unified=0 BASELINE -- <path>`` 的 (added, removed) 行。"""
+    """``git diff --unified=0 BASELINE..P281_SEAL`` 的 (added, removed) 行。"""
     out = subprocess.run(
-        ["git", "diff", "--unified=0", BASELINE_COMMIT, "--", path],
+        ["git", "diff", "--unified=0", BASELINE_COMMIT, P281_SEAL_COMMIT,
+         "--", path],
         cwd=REPO_ROOT, text=True, capture_output=True, check=True).stdout
     added = [ln[1:] for ln in out.splitlines()
              if ln.startswith("+") and not ln.startswith("+++")]

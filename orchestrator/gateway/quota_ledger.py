@@ -1649,27 +1649,30 @@ def _namespace_for_cli(phase: int) -> _LedgerNamespace:
         return PHASE27_NAMESPACE
     if phase == LEDGER_PHASE281:
         return PHASE281_NAMESPACE
+    if phase == LEDGER_RSI_R0:  # RSI-R0：2900 命名空间（campaign 由 env 选定）
+        return RSI_R0_NAMESPACE
     return PHASE2_NAMESPACE
 
 
 def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(
-        description="配额账本（批准凭据/恢复/计数；Phase 1/2/2.5/2.6/2.7 账已封存；"
-                    "--ledger-phase 281 走 Phase 2.8.1 独立新账）")
-    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25/26/27 为各期独立账。
+        description="配额账本（批准凭据/恢复/计数；Phase 1/2/2.5/2.6/2.7/2.8.1 账已封存；"
+                    "--ledger-phase 2900 走 RSI-R0 独立新账）")
+    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25/26/27/281/2900 为各期独立账。
     p.add_argument("--ledger-phase", type=int, default=LEDGER_PHASE,
                    choices=(LEDGER_PHASE, LEDGER_PHASE25, LEDGER_PHASE26,
-                            LEDGER_PHASE27, LEDGER_PHASE281),
+                            LEDGER_PHASE27, LEDGER_PHASE281, LEDGER_RSI_R0),
                    help=("台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 "
                          "封存账，26=Phase 2.6 封存账，27=Phase 2.7 封存账，"
-                         "281=Phase 2.8.1 独立新账"))
+                         "281=Phase 2.8.1 封存账，2900=RSI-R0 独立新账"))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # Task0：--task choices 取各期 caps 并集仅为通过 argparse；写侧 write_approval
     # 再按 --ledger-phase 的本命名空间严格校验（task 9 在不同期 cap 不同，绝不并表）。
     all_tasks = sorted(set(PHASE1_TASK_CAPS) | set(PHASE2_TASK_CAPS)
                        | set(PHASE25_TASK_CAPS) | set(PHASE26_TASK_CAPS)
-                       | set(PHASE27_TASK_CAPS) | set(PHASE281_TASK_CAPS))
+                       | set(PHASE27_TASK_CAPS) | set(PHASE281_TASK_CAPS)
+                       | set(RSI_R0_TASK_CAPS))
     pa = sub.add_parser("approve", help="写入一批书面批准凭据（显式参数，无默认值）")
     pa.add_argument("--batch-id", required=True)
     pa.add_argument("--task", type=int, required=True, choices=all_tasks)
@@ -1715,7 +1718,7 @@ def main(argv: "list[str] | None" = None) -> int:
         rows, validate=ns.in_sealed_set_for_read(),
         allow_events=(("selfcheck",)
                       if ns.phase in (LEDGER_PHASE26, LEDGER_PHASE27,
-                                      LEDGER_PHASE281) else ()))
+                                      LEDGER_PHASE281, LEDGER_RSI_R0) else ()))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:

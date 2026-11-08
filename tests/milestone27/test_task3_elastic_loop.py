@@ -1077,6 +1077,7 @@ def p27_env(tmp_path, monkeypatch):
     """phase281 独立账命名空间 + 三阶段 stage_models（全假 ID，0 触网）。
 
     锁内适配（Phase 2.8.1 T0）：phase27 已封存，写改指 phase281（同一组不变量）。
+    锁内适配（RSI-R0 T1）：phase281 亦封存，写账目标换成 rsi_r0 campaign。
     """
     for key, name in (("SIMPRAXIS_PHASE1_ROOT", "phase1"),
                       ("SIMPRAXIS_PHASE2_ROOT", "phase2"),
@@ -1085,6 +1086,8 @@ def p27_env(tmp_path, monkeypatch):
                       ("SIMPRAXIS_PHASE27_ROOT", "phase27"),
                       ("SIMPRAXIS_PHASE281_ROOT", "phase281")):
         monkeypatch.setenv(key, str(tmp_path / name))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_ROOT", str(tmp_path / "r0root"))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     monkeypatch.setenv("SIMPRAXIS_LLM_TOKEN", "t3-fixture-key-redacted-0001")
     monkeypatch.setenv("SIMPRAXIS_LLM_BASE_URL",
@@ -1112,11 +1115,11 @@ def p27_env(tmp_path, monkeypatch):
 def _real_gateway(env, transport):
     return R.ModelGateway(stage_models_path=env["map"], sleep=lambda s: None,
                          raw_transport=transport,
-                         ledger=QuotaLedger.phase281())  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+                         ledger=QuotaLedger.rsi_r0())  # 锁内适配（RSI-R0 T1）：写改指 rsi_r0
 
 
 def _phase27_rows(tmp: Path) -> list[dict]:
-    path = tmp / "phase281" / "quota" / "ledger.jsonl"  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+    path = tmp / "r0root" / "r0test" / "quota" / "ledger.jsonl"  # 锁内适配（RSI-R0 T1）
     if not path.is_file():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8")
@@ -1134,7 +1137,7 @@ def test_ac_t3_10_visual_critic_accounting(p27_env, tmp_path):
     # {1:60, 2:60, 3:60}，故 task 4→1（本用例只验「一次 call_visual 一行账」）。
     ql.write_approval(batch_id=batch, task=1, stage=R.VISION_STAGE, approved=2,
                       beyond_normal=False, note="T3 AC-T3-10 零付费夹具",
-                      namespace=ql.PHASE281_NAMESPACE)
+                      namespace=ql.RSI_R0_NAMESPACE)
 
     visual_text = "壶口略高于杯沿，倾斜约 20 度即可倒出。" * 10  # 380 字符上下
     visual_text = visual_text[:380]

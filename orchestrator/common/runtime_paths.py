@@ -441,12 +441,12 @@ def sealed_ledger_paths() -> frozenset[Path]:
 
 
 def assert_not_sealed_ledger(path: "str | Path") -> Path:
-    """写打开前置守卫：目标解析到 Phase 1/2/2.5/2.6/2.7 封存账即抛 SealedLedgerError。"""
+    """写打开前置守卫：目标解析到任一封存账（Phase 1/2/2.5/2.6/2.7/2.8.1）即抛。"""
     p = Path(path)
     if p.resolve(strict=False) in sealed_ledger_paths():
         raise SealedLedgerError(
-            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5/2.6/2.7 封存账只读；"
-            "Phase 2.8.1 新写账必须走 phase281_ledger_path()）")
+            f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5/2.6/2.7/2.8.1 封存账只读；"
+            "RSI-R0 新写账必须走 rsi_r0_ledger_path()）")
     return p
 
 

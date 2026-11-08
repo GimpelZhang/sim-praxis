@@ -88,6 +88,10 @@ def build_seq_provider(
     Phase 2.8.1（T3，锁内适配，同一条教训的第三次换期）：缺省 phase27 →
     **phase281**。phase27 已封存，若继续盯它，本阶段的实呼同样会被记成
     缓存命中——这是同一腐化机理，不是新问题。
+
+    RSI-R0（T1，锁内适配，同一条教训的第四次换期）：缺省 phase281 →
+    **rsi_r0**。phase281 随 2.8.1 HOLD 结案进入封存集，若读取器继续盯它，
+    R0 的实呼会被一律记成缓存命中（seq=null）——同一机理，同一处置。
     """
     holder: dict[str, QuotaLedger] = {}
     explicit = ledger
@@ -100,7 +104,8 @@ def build_seq_provider(
             # 锁内适配（Phase 2.8.1 T3）：缺省随活跃账换期 phase27 → phase281。
             # 写死旧期会造成静默证据腐化（实呼写新账、读取器盯旧账 ⇒ 恒 None ⇒
             # 被记成「缓存命中」）——本 docstring 上方已记录同一教训。
-            holder["ledger"] = explicit or QuotaLedger.phase281()  # 只借命名空间解析账路径
+            # 锁内适配（RSI-R0 T1）：第四次换期 phase281 → rsi_r0（同上一条）。
+            holder["ledger"] = explicit or QuotaLedger.rsi_r0()  # 只借命名空间解析账路径
         ledger = holder["ledger"]
         rows = call_lines(read_lines(ledger.ns.ledger_path_fn()))
         same_identity = [

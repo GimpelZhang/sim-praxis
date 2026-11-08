@@ -688,12 +688,15 @@ def test_m5_build_seq_provider_reads_phase27_ledger_by_identity(
     monkeypatch.setenv("SIMPRAXIS_PHASE26_ROOT", str(tmp_path / "phase26"))
     monkeypatch.setenv("SIMPRAXIS_PHASE27_ROOT", str(tmp_path / "phase27"))
     monkeypatch.setenv("SIMPRAXIS_PHASE281_ROOT", str(tmp_path / "phase281"))  # 锁内适配（Phase 2.8.1 T0）
+    # 锁内适配（RSI-R0 T1）：phase281 已封存，写账目标换成 rsi_r0 campaign。
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_ROOT", str(tmp_path / "r0root"))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R0_CAMPAIGN", "r0test")
     monkeypatch.setenv("SIMPRAXIS_GATEWAY_STATE", str(tmp_path / "gwstate"))
     (tmp_path / "gwstate").mkdir(exist_ok=True)
     from orchestrator.agentic.wiring import build_seq_provider
     from orchestrator.gateway import quota_ledger as ql
 
-    ledger = ql.QuotaLedger.phase281()  # 锁内适配（Phase 2.8.1 T0）：写改指 phase281
+    ledger = ql.QuotaLedger.rsi_r0()  # 锁内适配（RSI-R0 T1）：写改指 rsi_r0
     provider = build_seq_provider(ledger=ledger)  # 锁内适配（Phase 2.8.1 T0）：显式绑本账
     assert provider() is None        # 无 billing 上下文：零 IO 直接 None
     with ql.billing_context(task=4, batch_id="b-m5", thread_id="thr-A"):
