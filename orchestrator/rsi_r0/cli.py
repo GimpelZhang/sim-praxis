@@ -11,6 +11,7 @@
     model-approval → 模型 ID 批准登记（硬规则 1 产物化）
     protocol   → G-P 门后的六次协议探针（T5，真实发网）
     develop    → G-P 门后的三族开发轨迹（T6）
+    snapshot   → 验证快照冻结（T6 交付，零付费）
     validate   → G-V 门后的六条验证轨迹（T7）
     closeout   → 对账与结案件（零付费）
 
@@ -263,12 +264,75 @@ def cmd_protocol(args: argparse.Namespace) -> int:
     return EXIT_OK if report["verdict"] == "PROTOCOL_OK" else EXIT_REFUSED
 
 
+def _gateway():
+    from orchestrator.gateway.quota_ledger import QuotaLedger
+    from orchestrator.gateway.router import ModelGateway
+
+    return ModelGateway(ledger=QuotaLedger.rsi_r0(), max_attempts=1,
+                        pause_state_path=rp.rsi_r0_gateway_state_path())
+
+
 def cmd_develop(args: argparse.Namespace) -> int:
-    return _paid("develop", args, "G-P")
+    """T6：三条开发校准轨迹（G-P 门后，每族至多 24 请求，无重试）。"""
+    from orchestrator.rsi_r0 import develop as dev
+
+    runner = _runner(args)
+    runner.ensure_campaign()
+    if not os.environ.get("SIMPRAXIS_ALLOW_PAID"):
+        _emit({"command": "develop", "refused": "SIMPRAXIS_ALLOW_PAID 未设置",
+               "gate": "G-P"})
+        return EXIT_REFUSED
+    try:
+        runner.require_gate("G-P", batch_id=dev.DEV_BATCHES["E"])
+    except (gates.GateRefused, RunnerError) as exc:
+        _emit({"command": "develop", "refused": str(exc), "gate": "G-P"})
+        return EXIT_REFUSED
+    families = tuple(args.families.split(",")) if args.families else ("E", "D", "R")
+    report = dev.run_development(runner, _gateway(), families)
+    out = dev.write_report(report)
+    _emit({"command": "develop", "families": [r.get("family") for r in report["families"]],
+           "states": {r["family"]: r.get("state") for r in report["families"]},
+           "requests": report["totals"]["requests_used"],
+           "tokens": report["totals"]["tokens"],
+           "report": str(out), "report_sha256": report["report_sha256"]})
+    ok = all(r.get("state") == "SUBMITTED" for r in report["families"])
+    return EXIT_OK if ok else EXIT_REFUSED
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    return _paid("validate", args, "G-V")
+    """T7：六条独立验证轨迹（G-V 门后，固定顺序，每 slot 至多 24 请求）。"""
+    from orchestrator.rsi_r0 import validate as val
+
+    runner = _runner(args)
+    runner.ensure_campaign()
+    if not os.environ.get("SIMPRAXIS_ALLOW_PAID"):
+        _emit({"command": "validate", "refused": "SIMPRAXIS_ALLOW_PAID 未设置",
+               "gate": "G-V"})
+        return EXIT_REFUSED
+    try:
+        runner.require_gate("G-V", batch_id=val.VALIDATION_PLAN[0][2])
+    except (gates.GateRefused, RunnerError) as exc:
+        _emit({"command": "validate", "refused": str(exc), "gate": "G-V"})
+        return EXIT_REFUSED
+    report = val.run_validation(runner, _gateway())
+    out = val.write_report(report)
+    _emit({"command": "validate", "states": {r["instance_id"]: r.get("state")
+                                             for r in report["slots"]},
+           "all_assigned": report["all_assigned"],
+           "requests": report["totals"]["requests_used"],
+           "report": str(out), "report_sha256": report["report_sha256"]})
+    return EXIT_OK if report["all_assigned"]["completed"] == report["all_assigned"]["assigned"] else EXIT_REFUSED
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    """T6 交付的验证快照（零付费）：代码/配置/任务/评测/镜像/判据 + 开发报告哈希。"""
+    runner = _runner(args)
+    runner.ensure_campaign()
+    snap = runner.write_validation_snapshot()
+    ok, detail = runner.validation_snapshot_status()
+    _emit({"command": "snapshot", "ok": ok, "detail": detail,
+           "snapshot_sha256": snap["snapshot_sha256"]})
+    return EXIT_OK if ok else EXIT_REFUSED
 
 
 def cmd_closeout(args: argparse.Namespace) -> int:
@@ -413,7 +477,14 @@ def build_parser() -> argparse.ArgumentParser:
         _common(p)
         p.add_argument("--batch", default="R0-P" if name == "protocol" else
                        ("R0-D-E" if name == "develop" else "R0-V-E1"))
+        if name == "develop":
+            p.add_argument("--families", default=None,
+                           help="只跑指定族（逗号分隔，调试用；缺省 E,D,R）")
         p.set_defaults(func=fn)
+
+    p = sub.add_parser("snapshot", help="验证快照冻结（T6 交付；零付费）")
+    _common(p)
+    p.set_defaults(func=cmd_snapshot)
 
     p = sub.add_parser("closeout", help="零付费结案件（缺件如实记 NOT_RUN）")
     _common(p)

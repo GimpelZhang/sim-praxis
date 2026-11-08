@@ -339,6 +339,55 @@ class R0Runner:
             return False, {"why": str(exc)}
         return bool(verdict.get("ok")), verdict
 
+    def validation_snapshot_path(self) -> Path:
+        return rp.rsi_r0_protocol_dir() / "validation_snapshot.json"
+
+    def write_validation_snapshot(self) -> dict[str, Any]:
+        """T6 交付的验证快照：代码/配置/任务/评测/镜像/判据 + 开发报告哈希。
+
+        写入后**不接受**后续变更：``validation_snapshot_status`` 每次重算当前
+        锁与报告哈希，任何一项对不上都算快照不成立（G-V 的 snapshot_frozen）。
+        """
+        report_path = rp.rsi_r0_protocol_dir() / "development_report.json"
+        report = (json.loads(report_path.read_text(encoding="utf-8"))
+                  if report_path.exists() else None)
+        snap = {
+            "schema": "rsi_r0.validation_snapshot.v1",
+            "created_at_utc": self.clock(),
+            "campaign": str(self.root),
+            "lock": self.lock_snapshot(),
+            "development_report_sha256": (report or {}).get("report_sha256"),
+            "development_report_present": report is not None,
+        }
+        snap["snapshot_sha256"] = sha256_of(
+            {k: v for k, v in snap.items() if k != "snapshot_sha256"})
+        out = self.validation_snapshot_path()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(out, snap)
+        return snap
+
+    def validation_snapshot_status(self) -> tuple[bool, dict[str, Any]]:
+        path = self.validation_snapshot_path()
+        if not path.exists():
+            return False, {"why": f"缺验证快照：{path}"}
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        now = self.lock_snapshot()
+        drift = [k for k in ("code_set_sha256", "code", "criteria_hash",
+                             "stage_models_sha256", "tasks_set_sha256", "gates",
+                             "pricing_contract_sha256", "image",
+                             "develop_protocol_sha256")
+                 if (doc.get("lock") or {}).get(k) != now.get(k)]
+        report_path = rp.rsi_r0_protocol_dir() / "development_report.json"
+        report_sha = (json.loads(report_path.read_text(encoding="utf-8"))
+                      .get("report_sha256")) if report_path.exists() else None
+        if doc.get("development_report_sha256") != report_sha:
+            drift.append("development_report_sha256")
+        if not report_sha:
+            return False, {"why": "开发报告缺失，快照无法与报告对上", "drift": drift}
+        return (not drift), {"why": "" if not drift else f"{len(drift)} 项漂移",
+                             "drift": drift, "path": str(path),
+                             "snapshot_sha256": doc.get("snapshot_sha256")}
+
     def gate_facts(self, gate: str, *, batch_id: str = "R0-P") -> dict[str, Any]:
         # 门侧批准件与账本侧批次票是**两个文件**：前者回答「这一批被授权了多少，
         # 币种与美元帽是什么」（写一次即锁），后者是账本 preflight 认的计费凭据。
@@ -390,6 +439,23 @@ class R0Runner:
             },
         }
         facts["gate_p_passed"] = gates.evaluate_gate("G-P", facts)["passed"]
+        if gate == "G-V":
+            # G-V 的三条非 G-P 条件全部由产物推：开发报告、开发门事实、验证快照。
+            from orchestrator.rsi_r0 import develop as develop_mod
+            report_path = rp.rsi_r0_protocol_dir() / "development_report.json"
+            report = (json.loads(report_path.read_text(encoding="utf-8"))
+                      if report_path.exists() else None)
+            dev_facts = (develop_mod.gate_v_facts(report) if report
+                         else {"development_report_present": False,
+                               "development_gate_met": False})
+            snap_ok, snap_detail = self.validation_snapshot_status()
+            facts.update({**dev_facts, "snapshot_frozen": snap_ok,
+                          "detail": {**facts.get("detail", {}),
+                                     "development_report": {
+                                         "path": str(report_path),
+                                         "present": report is not None,
+                                         "report_sha256": (report or {}).get("report_sha256")},
+                                     "validation_snapshot": snap_detail}})
         return facts
 
     def require_gate(self, gate: str, *, batch_id: str = "R0-P") -> dict[str, Any]:
@@ -511,6 +577,7 @@ class R0Runner:
         放在哈希之外单独记。
         """
         from orchestrator.rsi_r0 import controls as ctl
+        from orchestrator.rsi_r0 import develop as develop_mod
         from orchestrator.rsi_r0.instances import PLANS
 
         here = Path(__file__).resolve().parent
@@ -518,7 +585,8 @@ class R0Runner:
         for name in ("contracts", "instances", "scenes", "trusted", "service",
                      "evaluator", "controls", "attempts", "gates", "runner",
                      "reference_analysis", "faults", "image_pin",
-                     "budget_contract", "protocol_probe", "probe_tool", "seals"):
+                     "budget_contract", "protocol_probe", "probe_tool", "seals",
+                     "develop", "validate"):
             p = here / f"{name}.py"
             code[name] = sha256_of(p.read_text(encoding="utf-8"))
         protocol = rp.rsi_r0_protocol_dir()
@@ -544,6 +612,8 @@ class R0Runner:
             # 协议一改就不是同一个实验，因此与代码/判据同级进 LOCK。
             "protocol_spec_sha256": protocol_probe.protocol_spec_hash(),
             "protocol_spec": dict(protocol_probe.PROTOCOL_SPEC),
+            "develop_protocol_sha256": develop_mod.protocol_spec_hash(),
+            "develop_protocol": dict(develop_mod.PROTOCOL_SPEC),
             # §6.2：资源与报价合同进 LOCK——不许开场后再悄悄改单价/帽。
             "pricing_contract_sha256": (contract or {}).get("contract_sha256"),
             "gates": {g: gates.gate_definition_hash(g) for g in ("G-M", "G-P", "G-V")},
