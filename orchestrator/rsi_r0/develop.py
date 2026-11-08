@@ -41,7 +41,12 @@ STAGE = "coding_debug"
 DEV_CAP = 24
 CHECKPOINTS = (8, 16, 24)
 REQUEST_TIMEOUT_S = 180
-MAX_TOKENS = 1200
+#: 输出预算（不是实验判据，是仪器参数；报价合同 output_tokens_cap=8192 已按此价）。
+#: 2026-11-08 T6 重跑取证：E/D/R 三族都在**续轮**（第 2/3 次请求）撞 HTTP 200 空回答
+#: （EmptyResponseError，13–14s；成功轮 9–10s），与 gateway/router.py 攢批92 记录
+#: 的「思考把输出预算吃光、零正文」同签名；1200 是我自己拍的数，计划从未规定。
+#: 抬到合同上限 8192，使「撞帽」不再是候选；若仍在 8192 下空答，则不是帽的问题。
+MAX_TOKENS = 8192
 DEV_BATCHES: Mapping[str, str] = {"E": "R0-D-E", "D": "R0-D-D", "R": "R0-D-R"}
 DEV_ACTOR_NAME = "rsi_r0.develop"
 #: 仪器类失败标记：必须出现在 blocked_reason 里，T7 停批判定靠它（别只写进 journal）。
@@ -210,6 +215,13 @@ class DevelopmentTrial:
         self._tokens_out = 0
         self._seqs: list[int] = []
         self._human_interventions = 0
+        # 逐请求日志必须先挂在 self 上：``_request`` 抛 DevelopmentBlocked 时
+        # ``run()`` 还没走到构造行那一步，若日志只是局部变量，整条轨迹的现场
+        # （每个请求的动作类型/stop_reason/用量）就随异常一起丢了——BLOCKED 行
+        # 只剩一句 blocked_reason，事后根本分不清是"模型第一次就作答非法"还是
+        # "第二轮才空回答"（2026-11-08 T6 重跑实测踩到：三族全 BLOCKED，log 全空）。
+        self._log: list[dict[str, Any]] = []
+        self._checkpoints_seen: list[dict[str, Any]] = []
 
     # ---- 前置 ----
     def preconditions(self) -> dict[str, Any]:
@@ -329,9 +341,10 @@ class DevelopmentTrial:
         answer: dict[str, Any] | None = None
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": brief_prompt(task, remaining=self.request_cap)}]
-        checkpoints: list[dict[str, Any]] = []
+        # 与 self._log/self._checkpoints_seen 同一对象：中途抛异常时现场仍然可读。
+        checkpoints: list[dict[str, Any]] = self._checkpoints_seen
         blocked_reason: str | None = None
-        log: list[dict[str, Any]] = []
+        log: list[dict[str, Any]] = self._log
         started = time.time()
 
         for index in range(1, self.request_cap + 1):
@@ -339,7 +352,10 @@ class DevelopmentTrial:
             messages.append({"role": "assistant", "content": text})
             action = _parse_action(text)
             entry = {"index": index, "seq": meta["seq"], "usage": meta["usage"],
-                     "stop_reason": meta["stop_reason"], "action": None}
+                     "stop_reason": meta["stop_reason"], "action": None,
+                     # 现场取证：模型这一轮到底回的是什么形状（后一轮为空回答时，
+                     # 唯一能判断"是不是上一轮把上下文带歪了"的材料就是它）。
+                     "text_len": len(text), "text_head": text[:200]}
             if action is None:
                 entry["action"] = {"kind": "invalid_json"}
                 messages.append({"role": "user", "content": error_prompt("invalid_json")})
@@ -502,11 +518,16 @@ def _run_development_locked(runner: Any, gateway: Any, families: Sequence[str],
         try:
             rows.append(trial.run())
         except DevelopmentBlocked as exc:
-            rows.append({"family": key, "instance_id": f"{key}-dev",
+            # 现场照抄，不丢：BLOCKED 的轨迹同样要能回答"模型到底做了什么"。
+            rows.append({"family": key, "instance_id": getattr(trial, "instance_id", None)
+                         or f"{key}-dev",
                          "batch_id": DEV_BATCHES[key], "state": "BLOCKED",
                          "blocked_reason": str(exc), "requests_used": trial._used,
                          "ledger_seqs": list(trial._seqs), "evaluation": {},
-                         "first_failure_layer": None, "checkpoints": [], "log": []})
+                         "first_failure_layer": None,
+                         "tokens": {"in": trial._tokens_in, "out": trial._tokens_out},
+                         "checkpoints": list(trial._checkpoints_seen),
+                         "log": list(trial._log)})
     report = {
         "schema": REPORT_SCHEMA,
         "campaign": str(runner.root),
@@ -515,6 +536,8 @@ def _run_development_locked(runner: Any, gateway: Any, families: Sequence[str],
         "protocol_spec": dict(PROTOCOL_SPEC),
         "protocol_spec_sha256": protocol_spec_hash(),
         "model": {"stage": STAGE, "image": IMAGE_REF},
+        # 生成参数逐次入报告：抬帽/改超时这类仪器动作必须能被评审看见。
+        "generation": {"max_tokens": MAX_TOKENS, "request_timeout_s": REQUEST_TIMEOUT_S},
         "families": rows,
         "totals": {
             "requests_used": sum(int(r.get("requests_used") or 0) for r in rows),

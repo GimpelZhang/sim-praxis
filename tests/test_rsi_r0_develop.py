@@ -247,3 +247,38 @@ def test_request_plan_never_exceeds_the_ticket_remaining(campaign, monkeypatch):
     assert trial.request_cap == dv.DEV_CAP - 2
 
 
+
+
+class _RaisingGateway(FakeGateway):
+    """第 n 次调用抛指定异常：模拟提供方 HTTP200 空回答（无重试 ⇒ 直接终止本族）。"""
+
+    def __init__(self, replies: list[str], *, fail_at: int) -> None:
+        super().__init__(replies)
+        self.fail_at = fail_at
+
+    def call(self, *args, **kwargs):
+        if self.rows + 1 == self.fail_at:
+            self.rows += 1
+            raise RuntimeError("stage=coding_debug 连续 1 次 HTTP 200 空回答")
+        return super().call(*args, **kwargs)
+
+
+def test_blocked_row_keeps_the_per_request_log(campaign, monkeypatch):
+    """2026-11-08 实测缺陷：BLOCKED 行 log 恒空 ⇒ 事后分不清模型第几轮怎么作答。"""
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    runner = _arm(campaign, monkeypatch)
+    good = json.dumps({"action": "run_experiment",
+                       "params": {"kp": 100.0, "kd": 10.0, "max_force": 50.0,
+                                  "steps": 100}})
+    gateway = _RaisingGateway([good], fail_at=2)
+    monkeypatch.setattr(dv, "build_host_session", lambda _id: _factory()(_id))
+    report = dv._run_development_locked(
+        runner, gateway, ("E",), clock=lambda: "2026-11-08T00:00:00Z")
+    row = report["families"][0]
+    assert row["state"] == "BLOCKED"
+    assert row["requests_used"] == 1
+    # 第 1 轮的动作类型与终止原因必须留在现场里
+    assert row["log"] and row["log"][0]["index"] == 1
+    assert row["log"][0]["action"]["kind"] == "run_experiment"
+    assert row["log"][0]["stop_reason"] == "end_turn"
+    assert row["tokens"]["in"] == 100 and row["tokens"]["out"] == 50
