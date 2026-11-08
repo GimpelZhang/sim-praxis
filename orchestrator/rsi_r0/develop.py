@@ -23,7 +23,8 @@ from orchestrator.gateway import quota_ledger as ql
 from orchestrator.gateway.quota_ledger import billing_context
 from orchestrator.rsi_r0 import budget_contract
 from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations, campaign_lock
-from orchestrator.rsi_r0.contracts import ResourceCaps, private_write, sha256_of
+from orchestrator.rsi_r0.contracts import (ResourceCaps, instance_task_id,
+                                            private_write, sha256_of)
 from orchestrator.rsi_r0.evaluator import EvaluationInput, evaluate
 from orchestrator.rsi_r0.faults import apply_fault
 from orchestrator.rsi_r0.image_pin import IMAGE_REF
@@ -109,10 +110,18 @@ def build_host_session(instance_id: str) -> tuple[ExperimentSession, dict[str, A
         if fault["kind"] == "force_scale":
             host_fields = {"force_scale": float(fault["scale"])}
     kind = str(task["interface"]["kind"])
+    # 任务书公开 keys 只有增益类字段；target_x/target_y 是**题目**（goal.target），
+    # 由宿主注入为固定参数。T6 首跑实测（2026-11-08）：不注入时容器 push_control
+    # 以 rc=2 拒绝"缺 target_x"，整条轨迹被误判成仪器故障。
+    fixed: dict[str, float] = {}
+    if kind == "push_control":
+        target = list(task["goal"]["target"])
+        fixed = {"target_x": float(target[0]), "target_y": float(target[1])}
     session = ExperimentSession(
         kind=kind, image_digest=IMAGE_REF,
         scene_builder=lambda _params, _xml=scene_xml: _xml,
-        max_steps=int(task["steps_max"]), host_fields=host_fields or None)
+        max_steps=int(task["steps_max"]), host_fields=host_fields or None,
+        fixed_params=fixed or None)
     return session, task, scene_xml
 
 
@@ -169,7 +178,7 @@ class DevelopmentTrial:
                  instance_id: str | None = None,
                  batch_id: str | None = None,
                  role: str = "development",
-                 task_id: int = 1,
+                 task_id: int | None = None,
                  request_cap: int = DEV_CAP,
                  checkpoints: Sequence[int] = CHECKPOINTS,
                  journal: AttemptJournal | None = None,
@@ -182,7 +191,10 @@ class DevelopmentTrial:
         self.family_key = family_key
         self.instance_id = instance_id or f"{family_key}-dev"
         self.role = role
-        self.task_id = int(task_id)
+        # task 号必须按实例族取（D=2/R=3）：T6 首跑实测（2026-11-08）默认 1
+        # 与 D/R 批次票的 task 不符，被账本按 batch_approval_mismatch 挡下。
+        self.task_id = (int(task_id) if task_id is not None
+                        else instance_task_id(self.instance_id))
         self.request_cap = int(request_cap)
         self.checkpoints = tuple(int(c) for c in checkpoints)
         self.batch_id = batch_id or DEV_BATCHES[family_key]

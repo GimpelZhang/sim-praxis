@@ -177,3 +177,55 @@ def test_gate_v_facts_come_from_the_report(campaign, monkeypatch):
     facts = dv.gate_v_facts(report)
     assert facts["development_report_present"] is False      # 只有一族
     assert facts["development_gate_met"] is False            # 缺 D/R
+
+
+# ---------------------------------------------------------------------------
+# T6 首跑实跑暴露的两个接线缺陷（2026-11-08，0 重试已记账，修复后重跑）
+# ---------------------------------------------------------------------------
+def test_push_task_injects_the_task_book_target(campaign, monkeypatch):
+    """E/D 任务书公开 keys 只有增益；target 由宿主按 goal.target 注入。
+
+    不注入时容器 push_control 以 rc=2 拒绝"缺 target_x"，首跑因此把候选问题
+    误记成仪器故障。此处断言：候选只给增益也能构造合法会话；候选自送 target
+    会被任务书固定值覆盖（目标点是题目的一部分，不允许候选改）。
+    """
+    monkeypatch.setattr(dv, "load_task", lambda _id: TASK)
+    monkeypatch.setattr(dv, "load_private", lambda _id: PRIVATE)
+    monkeypatch.setattr(dv, "build_scene", lambda _t, _p: "<mujoco/>")
+    session, task, _scene = dv.build_host_session("E-dev")
+    clean = session.validate({"kp": 100.0, "kd": 10.0, "max_force": 50.0})
+    assert clean["target_x"] == pytest.approx(0.5)
+    assert clean["target_y"] == pytest.approx(0.0)
+    hijack = session.validate({"target_x": -5.0, "target_y": -5.0, "kp": 1.0})
+    assert hijack["target_x"] == pytest.approx(0.5)     # 候选改不动目标
+    assert hijack["target_y"] == pytest.approx(0.0)
+
+
+def test_service_rc2_is_a_candidate_error_not_an_instrument_failure(monkeypatch):
+    """service.py 的候选请求失败码恒为 2：必须回喂给候选，不得终止整条轨迹。"""
+    import subprocess
+    from orchestrator.rsi_r0 import trusted as tr
+
+    class _Proc:
+        def __init__(self, rc: int) -> None:
+            self.returncode = rc
+            self.stdout = ('RESULT_JSON {"schema": "rsi_r0.service.v1", "ok": false, '
+                           '"error": "字段 target_x 必须是数值"}\n')
+            self.stderr = ""
+
+    monkeypatch.setattr(tr.shutil, "which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr(tr.subprocess, "run", lambda *a, **kw: _Proc(2))
+    with pytest.raises(tr.CandidateRequestError):
+        tr.call_service({"kind": "push_control"}, image_digest=dv.IMAGE_REF)
+    monkeypatch.setattr(tr.subprocess, "run", lambda *a, **kw: _Proc(1))
+    with pytest.raises(tr.TrustedServiceError):
+        tr.call_service({"kind": "push_control"}, image_digest=dv.IMAGE_REF)
+
+
+def test_development_trial_takes_the_task_id_from_the_family(campaign, monkeypatch):
+    """D/R 的批次票 task=2/3；默认 task 1 会让账本按 batch_approval_mismatch 拒发。"""
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    runner = _arm(campaign, monkeypatch)
+    assert dv.DevelopmentTrial(runner, FakeGateway([]), "E").task_id == 1
+    assert dv.DevelopmentTrial(runner, FakeGateway([]), "D").task_id == 2
+    assert dv.DevelopmentTrial(runner, FakeGateway([]), "R").task_id == 3

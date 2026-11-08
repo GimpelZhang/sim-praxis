@@ -90,8 +90,14 @@ def call_service(request: Mapping[str, Any], *, image_digest: str, gpus: bool = 
         raise TrustedServiceError(f"可信服务超时 {timeout_s}s（run 作废，不重试）") from exc
     result = _parse_result(proc.stdout)
     if not result.get("ok"):
-        raise TrustedServiceError(
-            f"可信服务拒绝：{result.get('error')}（rc={proc.returncode}）")
+        msg = f"可信服务拒绝：{result.get('error')}（rc={proc.returncode}）"
+        if proc.returncode == 2:
+            # service.py 的候选请求失败码恒为 2（`_fail` 走 sys.exit(2)）。T6 首跑
+            # 实测（2026-11-08）：候选漏填 target_x 时容器 rc=2，旧版一律按
+            # TrustedServiceError 终止整条轨迹；而"候选提交不合法"属于可回喂的
+            # 候选问题（协议 error_feedback=class_only_once），不是仪器故障。
+            raise CandidateRequestError(msg)
+        raise TrustedServiceError(msg)
     if proc.returncode != 0:
         raise TrustedServiceError(f"可信服务 rc={proc.returncode} 但回报 ok=true，自相矛盾")
     return result
@@ -163,6 +169,7 @@ class ExperimentSession:
 
     def __init__(self, *, kind: str, image_digest: str, scene_builder,
                  max_steps: int, host_fields: Mapping[str, float] | None = None,
+                 fixed_params: Mapping[str, float] | None = None,
                  gpus: bool = False, timeout_s: int = DEFAULT_TIMEOUT_S):
         if kind not in CANDIDATE_PARAM_BOUNDS:
             raise CandidateRequestError(f"未知实验类型：{kind!r}")
@@ -174,6 +181,19 @@ class ExperimentSession:
         bad = HOST_ONLY_FIELDS & set(self._host_fields) - {"force_scale"}
         if bad:
             raise CandidateRequestError(f"宿主字段只能注入 force_scale，收到 {sorted(bad)}")
+        #: 任务书固定的实验参数（如目标点目标坐标）。T6 首跑实测（2026-11-08）：
+        #: E/D 任务书的公开 keys 只有 kp/kd/max_force，而 service 的 push_control
+        #: 要求 target_x/target_y——缺省值必须由宿主按任务书 goal.target 注入，
+        #: 否则每次候选实验都会被容器以 rc=2 拒绝。固定参数**覆盖**候选同名字段
+        #: （目标是题目的一部分，不允许候选自改），并随 params 进 calls 供评测器复算。
+        self._fixed_params = {str(k): float(v) for k, v in (fixed_params or {}).items()}
+        bounds = CANDIDATE_PARAM_BOUNDS[kind]
+        for key, value in self._fixed_params.items():
+            if key not in bounds:
+                raise CandidateRequestError(f"固定参数 {key!r} 不在 {kind} 的边界表里")
+            lo, hi = bounds[key]
+            if not (lo <= value <= hi):
+                raise CandidateRequestError(f"固定参数 {key}={value} 越界 [{lo}, {hi}]")
         self.gpus = gpus
         self.timeout_s = timeout_s
         self.calls: list[dict[str, Any]] = []
@@ -195,6 +215,9 @@ class ExperimentSession:
             if not (lo <= float(value) <= hi):
                 raise CandidateRequestError(f"{key}={value} 越界 [{lo}, {hi}]")
             out[key] = float(value)
+        # 任务书固定参数后置覆盖：候选不能改目标点（改了就换了题目），但固定值
+        # 必须进 params，评测器复算 target 方向时才有据可查。
+        out.update(self._fixed_params)
         if "steps" not in out:
             out["steps"] = float(self.max_steps)
         if out["steps"] != int(out["steps"]):
