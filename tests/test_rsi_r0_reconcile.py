@@ -514,3 +514,30 @@ def test_instrument_repair_refuses_a_non_code_experiment_field(bare_runner, monk
     with pytest.raises(rn.RunnerError, match="实验定义面"):
         bare_runner.supersede_lock("换镜像钉不是修仪器（单测理由要够长才不被长度挡）",
                                    instrument_repair=True)
+
+
+def test_instrument_repair_rechecks_the_written_lock_for_toctou(bare_runner, monkeypatch):
+    """校验用的是校验时刻的快照，落锁用的是随后再算的一份：不等价必须撤新锁放回旧锁。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    old_sha = json.loads(bare_runner.lock_path().read_text())["lock_sha256"]
+    real = rn.R0Runner.lock_snapshot
+    calls = {"n": 0}
+
+    def drifting(self):
+        snap = real(self)
+        calls["n"] += 1
+        # 第 1 次（校验）只有 develop 变；第 2 次（落锁）连 evaluator 也变了 —— 模拟
+        # 校验与落锁之间有人动了判据面。
+        code = {**snap["code"], "develop": "f" * 64}
+        if calls["n"] >= 2:
+            code["evaluator"] = "e" * 64
+        return {**snap, "code": code}
+
+    monkeypatch.setattr(rn.R0Runner, "lock_snapshot", drifting)
+    with pytest.raises(rn.RunnerError, match="实验定义面"):
+        bare_runner.supersede_lock("TOCTOU 复核：落锁前后快照必须等价（单测）",
+                                   instrument_repair=True)
+    now = json.loads(bare_runner.lock_path().read_text())
+    assert now["lock_sha256"] == old_sha        # 旧锁原封放回，没有留下被污染的新锁

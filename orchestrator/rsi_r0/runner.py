@@ -1118,6 +1118,16 @@ class R0Runner:
             # 新锁写不出来就把旧锁放回去：宁可保留旧件，也不留无锁窗口。
             _atomic_write_json(path, old)
             raise
+        if repair is not None:
+            # TOCTOU：判据面校验用的是校验那一刻的快照，真正落进文件的是 write_lock
+            # 随后自己算的那一份。两者之间若有人动过文件，写下的锁就不是被校验过的
+            # 那份（校验形同虚设）。落锁后立刻按同一函数复核，不等价就撤新锁、放回旧锁。
+            try:
+                self._instrument_repair_delta(old, new)
+            except RunnerError:
+                path.unlink(missing_ok=True)
+                _atomic_write_json(path, old)
+                raise
         line = {"superseded_at_utc": self.clock(), "old_lock_sha256": old_sha,
                 "old_created_at_utc": old.get("created_at_utc"),
                 "archive": archive.name, "reason": reason.strip(),
