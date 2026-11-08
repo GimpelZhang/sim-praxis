@@ -541,3 +541,29 @@ def test_instrument_repair_rechecks_the_written_lock_for_toctou(bare_runner, mon
                                    instrument_repair=True)
     now = json.loads(bare_runner.lock_path().read_text())
     assert now["lock_sha256"] == old_sha        # 旧锁原封放回，没有留下被污染的新锁
+
+
+def test_instrument_repair_archives_the_stale_independent_review(bare_runner, monkeypatch):
+    """评审件写一次即锁：不作废旧件，就永远没法为新代码集落评审（G-P 会卡死）。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    bare_runner.write_independent_review(
+        verdict="APPROVE", reviewer_lane="lane-x", reviewed_commit="deadbeef",
+        findings={"major": 0, "critical": 0},
+        basis="旧代码集上的独立评审（单测夹具）——换锁后必须作废归档。")
+    old_review = json.loads(bare_runner.review_path().read_text())
+    _bumped(monkeypatch, "develop")
+    out = bare_runner.supersede_lock(
+        "修仪器换锁会作废旧评审件，须归档后才能落新评审（单测）", instrument_repair=True)
+    assert out["new_lock_sha256"]
+    assert not bare_runner.review_path().exists()
+    archived = bare_runner.review_path().parent / (
+        f"independent_review.superseded.{old_review['review_sha256'][:8]}.json")
+    assert json.loads(archived.read_text())["review_sha256"] == old_review["review_sha256"]
+    # 归档后新评审件可写（内容不同不再被「已存在」挡住），且绑定新代码集。
+    fresh = bare_runner.write_independent_review(
+        verdict="APPROVE", reviewer_lane="lane-x", reviewed_commit="cafe1234",
+        findings={"major": 0, "critical": 0},
+        basis="新代码集上的独立评审（单测夹具）——旧件已归档，写新件不该被拦。")
+    assert fresh["reviewed_code_set_sha256"] == bare_runner.lock_snapshot()["code_set_sha256"]

@@ -1110,6 +1110,18 @@ class R0Runner:
         archive = path.parent / f"t4_lock.superseded.{old_sha[:8] or 'nosha'}.json"
         if archive.exists():
             raise RunnerError(f"归档件已存在，拒绝二次归档：{archive}")
+        # 仪器修复会作废旧代码集上的独立评审件；而评审件是「写一次即锁」的，不归档
+        # 它就永远没法为新代码集落一份新评审（G-P 的 independent_review 又必须绑当前
+        # code_set）。所以修复路径把旧评审件与旧锁一起归档，两份都留档不删。
+        review_doc = review_archive = None
+        review_path = self.review_path()
+        if repair is not None and review_path.exists():
+            review_doc = json.loads(review_path.read_text(encoding="utf-8"))
+            review_sha8 = str(review_doc.get("review_sha256") or "nosha")[:8]
+            review_archive = review_path.parent / (
+                f"independent_review.superseded.{review_sha8}.json")
+            if review_archive.exists():
+                raise RunnerError(f"旧评审件归档已存在，拒绝二次归档：{review_archive}")
         _atomic_write_json(archive, old)
         path.unlink()
         try:
@@ -1128,6 +1140,10 @@ class R0Runner:
                 path.unlink(missing_ok=True)
                 _atomic_write_json(path, old)
                 raise
+        if review_doc is not None:
+            # 新锁已落地才动旧评审件：先归档后删原件，不留"没锁也没评审"的窗口。
+            _atomic_write_json(review_archive, review_doc)
+            review_path.unlink()
         line = {"superseded_at_utc": self.clock(), "old_lock_sha256": old_sha,
                 "old_created_at_utc": old.get("created_at_utc"),
                 "archive": archive.name, "reason": reason.strip(),
@@ -1150,6 +1166,8 @@ class R0Runner:
                      # 判据面逐项未变的校验清单。手写理由只管"为什么"。
                      "instrument_repair": bool(repair),
                      "sent_attempts_at_supersede": len(sent),
+                     "archived_review": (review_archive.name
+                                         if review_archive is not None else None),
                      "frozen_fields_checked": (repair or {}).get("frozen_fields_checked")})
         line["reason"] = (f"{reason.strip()}；[机生成] code 键 "
                           f"+{added} ~{changed} -{removed}")
