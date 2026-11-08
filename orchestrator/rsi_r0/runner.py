@@ -1028,13 +1028,61 @@ class R0Runner:
             fh.write(data)
         return json.loads(data)
 
-    def supersede_lock(self, reason: str) -> dict[str, Any]:
-        """显式取代旧 LOCK：只在**尚无任何发网 attempt**时允许，旧件不删。
+    #: 「修仪器换锁」时**绝不许动**的模块：这几个文件决定"什么算成功"（评测器、
+    #: 判据、负控/变异矩阵、场景、任务书、故障、参考分析、容器服务、封存集、门定义、
+    #: 镜像钉）。计划 §「正参考失败 / 负控漏检 → INVALID_INSTRUMENT，停模型试次」
+    #: 的补救条目要求"修仪器、全控制重跑、新criteria锁"——即**修仪器允许换锁**，
+    #: 但判据面一旦花钱后被动过，那就不再是修仪器而是改实验（一律拒，只能另开
+    #: campaign）。宿主接线（develop/trusted/cli/runner/validate/…）不在冻结面内。
+    INSTRUMENT_REPAIR_FROZEN_FILES = frozenset({
+        "evaluator", "controls", "matrix", "scenes", "instances", "faults",
+        "reference_analysis", "service", "seals", "gates", "image_pin",
+    })
+
+    #: 除代码键外，快照里这些字段一变就不是同一个实验；仪器修复路径逐项冻结。
+    INSTRUMENT_REPAIR_FROZEN_FIELDS = (
+        "image", "criteria_hash", "criteria_now", "gates", "task_caps",
+        "slot_request_cap", "instances", "development_order", "validation_order",
+        "tasks_set_sha256", "stage_models_sha256", "pricing_contract_sha256",
+        "protocol_spec_sha256", "develop_protocol_sha256",
+    )
+
+    def _instrument_repair_delta(self, old: Mapping[str, Any],
+                                 snap: Mapping[str, Any]) -> dict[str, Any]:
+        """仪器修复换锁的硬校验：只允许宿主接线变，判据面与实验定义面逐项相等。"""
+        moved = [k for k in self.INSTRUMENT_REPAIR_FROZEN_FIELDS
+                 if old.get(k) != snap.get(k)]
+        old_code = old.get("code") or {}
+        new_code = snap.get("code") or {}
+        changed = sorted(k for k in set(old_code) & set(new_code)
+                         if old_code[k] != new_code[k])
+        added = sorted(set(new_code) - set(old_code))
+        removed = sorted(set(old_code) - set(new_code))
+        judgment = sorted(k for k in changed + added + removed
+                          if k in self.INSTRUMENT_REPAIR_FROZEN_FILES)
+        if moved or judgment or added or removed:
+            raise RunnerError(
+                "仪器修复换锁被拒：它在花钱之后动了实验定义面"
+                f"（字段差异={moved}；判据面模块={judgment}；"
+                f"新增键={added}；删除键={removed}）。这不是修仪器，只能另开 campaign")
+        return {"changed": changed, "frozen_fields_checked": list(
+            self.INSTRUMENT_REPAIR_FROZEN_FIELDS)}
+
+    def supersede_lock(self, reason: str, *,
+                       instrument_repair: bool = False) -> dict[str, Any]:
+        """显式取代旧 LOCK，旧件不删。
 
         旧件归档为 ``t4_lock.superseded.<sha8>.json`` 并追加 ``lock_history.jsonl``
         一行（时间/旧哈希/理由/新哈希）。理由 <20 字拒绝——取代 LOCK 等于改实验
-        定义，留痕必须够读。已有发网 attempt 还取代 Lock 就不是修锁而是改实验，
-        一律拒（那种事只能另开 campaign）。
+        定义，留痕必须够读。
+
+        默认只在**尚无任何发网 attempt**时允许。``instrument_repair=True`` 是计划
+        § 补救条目（"修仪器、全控制重跑、新criteria锁"）的显式通道：允许在已有发网
+        事实后重锁，但必须同时满足 :meth:`_instrument_repair_delta` 的硬校验（判据
+        面与实验定义面逐项相等，只有宿主接线可变），且审计行里由代码写明
+        ``instrument_repair``/``sent_attempts_at_supersede``/改动模块清单。绕过它
+        没有任何"静默"余地：换锁后 G-P 的 ``independent_review`` 会把独立评审绑定到
+        新的 code_set，任何后续付费调用前都要重新取得 APPROVE。
         """
         if len((reason or "").strip()) < 20:
             raise RunnerError("取代理由太短：请写清为何旧 LOCK 需被取代（≥20 字）")
@@ -1044,18 +1092,20 @@ class R0Runner:
         journal = AttemptJournal(rp.rsi_r0_attempts_path())
         sent = [r for r in journal.latest_by_request().values()
                 if int(r.get("attempts_http") or 0) > 0]
-        if sent:
+        if sent and not instrument_repair:
             raise RunnerError(
                 f"已有 {len(sent)} 条发网 attempt，禁止取代快照锁"
-                "（那是改实验，不是修锁；须另开 campaign）")
+                "（那是改实验，不是修锁；须另开 campaign 或走 --instrument-repair"
+                " 的仪器修复通道）")
         # 评审 MAJOR-5 残留：只看 attempts 不够——删掉 attempts.jsonl 就能让上面的
         # 守卫空转（账本里明明有付费 call 行）。取代锁前必须跑三方对账，任何漂移都拒。
         recon_ok, recon = self.reconciled()
         if not recon_ok:
             raise RunnerError(
                 f"账本/attempts/预留对账存在漂移，禁止取代快照锁：{recon.get('why')}"
-                "（取代 LOCK 只允许在「确实还没花过钱」时进行）")
+                "（三份权威互相矛盾时任何通道都不许换锁：先查清谁在说谎）")
         old = json.loads(path.read_text(encoding="utf-8"))
+        repair = self._instrument_repair_delta(old, self.lock_snapshot()) if sent else None
         old_sha = str(old.get("lock_sha256") or "")
         archive = path.parent / f"t4_lock.superseded.{old_sha[:8] or 'nosha'}.json"
         if archive.exists():
@@ -1085,7 +1135,12 @@ class R0Runner:
                      "code_keys_changed": changed,
                      "code_diff_generated_by": "R0Runner.supersede_lock",
                      "reconcile_ok_at_supersede": recon_ok,
-                     "ledger_seqs_at_supersede": (recon.get("ledger") or {}).get("seqs")})
+                     "ledger_seqs_at_supersede": (recon.get("ledger") or {}).get("seqs"),
+                     # 仪器修复通道的机器事实：谁在花钱之后换了锁、换了哪些模块、
+                     # 判据面逐项未变的校验清单。手写理由只管"为什么"。
+                     "instrument_repair": bool(repair),
+                     "sent_attempts_at_supersede": len(sent),
+                     "frozen_fields_checked": (repair or {}).get("frozen_fields_checked")})
         line["reason"] = (f"{reason.strip()}；[机生成] code 键 "
                           f"+{added} ~{changed} -{removed}")
         hist = path.parent / "lock_history.jsonl"

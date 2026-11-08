@@ -446,3 +446,71 @@ def campaign(tmp_path, monkeypatch):
     for var in ("SIMPRAXIS_RSI_R0_ROOT", "SIMPRAXIS_RSI_R0_CAMPAIGN",
                 "SIMPRAXIS_ALLOW_PAID"):
         monkeypatch.delenv(var, raising=False)
+
+
+# ---------------------------------------------------------------- 仪器修复换锁
+def _spend_one(runner) -> None:
+    """让 campaign 真的有 1 条发网 attempt + 1 条账本 call 行（对账干净）。"""
+    journal = AttemptJournal(
+        rp.rsi_r0_attempts_path(),
+        BudgetReservations(runner.caps, rp.rsi_r0_reservations_dir()))
+    _settled(journal, seq=1)
+    _ledger_call(runner.root / "quota" / "ledger.jsonl", 1)
+
+
+def _bumped(monkeypatch, module: str):
+    """把快照里某个模块的哈希改掉，模拟"宿主代码变了"。"""
+    real = rn.R0Runner.lock_snapshot
+
+    def fake(self):
+        snap = real(self)
+        return {**snap, "code": {**snap["code"], module: "f" * 64}}
+    monkeypatch.setattr(rn.R0Runner, "lock_snapshot", fake)
+
+
+def test_supersede_after_paid_calls_needs_the_instrument_repair_channel(
+        bare_runner, monkeypatch):
+    """计划 §「修仪器、全控制重跑、新criteria锁」：花钱后换锁只走显式通道。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _bumped(monkeypatch, "develop")
+    reason = "T6 首跑仪器接线缺陷修复（族 task 号与目标点注入），换锁后全控制重跑"
+    with pytest.raises(rn.RunnerError, match="instrument-repair"):
+        bare_runner.supersede_lock(reason)
+    out = bare_runner.supersede_lock(reason, instrument_repair=True)
+    assert out["new_lock_sha256"]
+    hist = [json.loads(x) for x in (bare_runner.root / "protocol" /
+                                    "lock_history.jsonl").read_text(
+                                        encoding="utf-8").splitlines()]
+    last = hist[-1]
+    assert last["instrument_repair"] is True
+    assert last["sent_attempts_at_supersede"] == 1
+    assert last["ledger_seqs_at_supersede"] == [1]
+    assert last["code_keys_changed"] == ["develop"]      # 由代码生成，不信手写
+    assert last["frozen_fields_checked"]
+
+
+def test_instrument_repair_refuses_a_judgment_surface_change(bare_runner, monkeypatch):
+    """改评测器/判据/门定义换锁 = 改实验，不是修仪器：一律拒。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _bumped(monkeypatch, "evaluator")
+    with pytest.raises(rn.RunnerError, match="实验定义面"):
+        bare_runner.supersede_lock(
+            "假装是仪器修复，实际改评测器让结果更好看（单测）", instrument_repair=True)
+    assert bare_runner.lock_path().exists()              # 旧锁原封不动
+
+
+def test_instrument_repair_refuses_a_non_code_experiment_field(bare_runner, monkeypatch):
+    """行情/镜钉/任务集等非代码字段同样冻结：改了就拒。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    real = rn.R0Runner.lock_snapshot
+    monkeypatch.setattr(rn.R0Runner, "lock_snapshot",
+                        lambda self: {**real(self), "image": "sha256:" + "0" * 64})
+    with pytest.raises(rn.RunnerError, match="实验定义面"):
+        bare_runner.supersede_lock("换镜像钉不是修仪器（单测理由要够长才不被长度挡）",
+                                   instrument_repair=True)
