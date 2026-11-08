@@ -1028,15 +1028,20 @@ class R0Runner:
             fh.write(data)
         return json.loads(data)
 
-    #: 「修仪器换锁」时**绝不许动**的模块：这几个文件决定"什么算成功"（评测器、
-    #: 判据、负控/变异矩阵、场景、任务书、故障、参考分析、容器服务、封存集、门定义、
-    #: 镜像钉）。计划 §「正参考失败 / 负控漏检 → INVALID_INSTRUMENT，停模型试次」
-    #: 的补救条目要求"修仪器、全控制重跑、新criteria锁"——即**修仪器允许换锁**，
-    #: 但判据面一旦花钱后被动过，那就不再是修仪器而是改实验（一律拒，只能另开
-    #: campaign）。宿主接线（develop/trusted/cli/runner/validate/…）不在冻结面内。
-    INSTRUMENT_REPAIR_FROZEN_FILES = frozenset({
-        "evaluator", "controls", "matrix", "scenes", "instances", "faults",
-        "reference_analysis", "service", "seals", "gates", "image_pin",
+    #: 「修仪器换锁」**只准改宿主接线**：这里列出的是接线模块，其余一律冻结。
+    #: 冻结面按"白名单求补集"算，而不是列举黑名单——黑名单漏一个键，通道就少一分
+    #: 约束，而漏掉的键往往是写黑名单时还没进 LOCK 的那些（第三份评审抓到的正是
+    #: 这类：`scripts.rsi_r0.*` 五个脚本明明被 `lock_snapshot()` 声明为实验定义，
+    #: 却不在冻结名单里，于是改 `t3_controls.py` 造一份 21/0 报告再换锁可以一路
+    #: 通行）。改成白名单后，**任何新入锁的键自动被冻结**，不必记得回来补名单。
+    #:
+    #: 计划 §「正参考失败 / 负控漏检 → INVALID_INSTRUMENT，停模型试次」的补救条目
+    #: 要求"修仪器、全控制重跑、新criteria锁"——即修仪器允许换锁，但判据面/事实面
+    #: 一旦花钱后被动过，那就不再是修仪器而是改实验（一律拒，只能另开 campaign）。
+    #: `runner` 必须在白名单里：换锁通道本身、门计算、对账都在它里面，冻结它就等于
+    #: 冻结补救通道；它由独立评审（G-P 的 independent_review）来管。
+    INSTRUMENT_REPAIR_WIRE_ONLY = frozenset({
+        "develop", "validate", "cli", "trusted", "runner",
     })
 
     #: 除代码键外，快照里这些字段一变就不是同一个实验；仪器修复路径逐项冻结。
@@ -1058,15 +1063,18 @@ class R0Runner:
                          if old_code[k] != new_code[k])
         added = sorted(set(new_code) - set(old_code))
         removed = sorted(set(old_code) - set(new_code))
-        judgment = sorted(k for k in changed + added + removed
-                          if k in self.INSTRUMENT_REPAIR_FROZEN_FILES)
+        judgment = sorted(k for k in changed
+                          if k not in self.INSTRUMENT_REPAIR_WIRE_ONLY)
         if moved or judgment or added or removed:
             raise RunnerError(
                 "仪器修复换锁被拒：它在花钱之后动了实验定义面"
                 f"（字段差异={moved}；判据面模块={judgment}；"
                 f"新增键={added}；删除键={removed}）。这不是修仪器，只能另开 campaign")
         return {"changed": changed, "frozen_fields_checked": list(
-            self.INSTRUMENT_REPAIR_FROZEN_FIELDS)}
+            self.INSTRUMENT_REPAIR_FROZEN_FIELDS),
+            # 冻结的代码键 = LOCK 里的全部键 − 接线白名单；由代码现算，手写不了。
+            "frozen_code_keys_checked": sorted(set(new_code)
+                                               - self.INSTRUMENT_REPAIR_WIRE_ONLY)}
 
     def supersede_lock(self, reason: str, *,
                        instrument_repair: bool = False) -> dict[str, Any]:
@@ -1117,11 +1125,33 @@ class R0Runner:
         review_path = self.review_path()
         if repair is not None and review_path.exists():
             review_doc = json.loads(review_path.read_text(encoding="utf-8"))
+            # 只归档**确实**绑在旧锁上的评审件：代码改完、换锁之前写下的评审件会带
+            # 新代码集却带旧锁哈希，它本可以留给新锁用，归档掉是白扔；而来源不明的
+            # 评审件归档进来，等于把它当成"曾经有效"的留档。两种都拒，让人去看。
+            if (review_doc.get("reviewed_code_set_sha256") != old.get("code_set_sha256")
+                    or review_doc.get("reviewed_lock_sha256") != old_sha):
+                raise RunnerError(
+                    "旧评审件没有绑定当前这把锁（reviewed_code_set/lock 与 LOCK 不符），"
+                    "拒绝在换锁时归档它——请先查清这份评审件是谁、绑的是什么")
+            body = {k: v for k, v in review_doc.items() if k != "review_sha256"}
+            if review_doc.get("review_sha256") != sha256_of(body):
+                raise RunnerError("旧评审件自哈希不符（被手改过？），拒绝归档")
             review_sha8 = str(review_doc.get("review_sha256") or "nosha")[:8]
             review_archive = review_path.parent / (
                 f"independent_review.superseded.{review_sha8}.json")
             if review_archive.exists():
                 raise RunnerError(f"旧评审件归档已存在，拒绝二次归档：{review_archive}")
+
+        def _rollback() -> None:
+            """全或无：撤掉本次写出的新锁与旧锁副本，把旧锁原样放回。
+
+            归档件只在**本次**创建（上面已做存在性预检），所以撤归档不会伤到别人的
+            留档；不撤的话，一次失败的换锁会永久占住归档名，重试只会撞「已存在」。
+            """
+            path.unlink(missing_ok=True)
+            _atomic_write_json(path, old)
+            archive.unlink(missing_ok=True)
+
         _atomic_write_json(archive, old)
         path.unlink()
         try:
@@ -1129,21 +1159,35 @@ class R0Runner:
         except Exception:
             # 新锁写不出来就把旧锁放回去：宁可保留旧件，也不留无锁窗口。
             _atomic_write_json(path, old)
+            archive.unlink(missing_ok=True)
             raise
         if repair is not None:
             # TOCTOU：判据面校验用的是校验那一刻的快照，真正落进文件的是 write_lock
             # 随后自己算的那一份。两者之间若有人动过文件，写下的锁就不是被校验过的
-            # 那份（校验形同虚设）。落锁后立刻按同一函数复核，不等价就撤新锁、放回旧锁。
+            # 那份（校验形同虚设）。落锁后**从磁盘读回**再按同一函数复核（第三份评审
+            # MINOR：只验内存里的 `new` 看不见落盘后发生的改写），不等价就撤新锁、
+            # 放回旧锁、撤归档件。
             try:
-                self._instrument_repair_delta(old, new)
+                on_disk = json.loads(path.read_text(encoding="utf-8"))
+                # 与 write_lock 同一口径：lock_sha256 是"去掉 created_at 与自身"的快照哈希。
+                if on_disk.get("lock_sha256") != sha256_of(
+                        {k: v for k, v in on_disk.items()
+                         if k not in ("created_at_utc", "lock_sha256")}):
+                    raise RunnerError("落盘的 LOCK 自哈希不符（写入与校验之间被动过）")
+                self._instrument_repair_delta(old, on_disk)
             except RunnerError:
-                path.unlink(missing_ok=True)
-                _atomic_write_json(path, old)
+                _rollback()
                 raise
         if review_doc is not None:
-            # 新锁已落地才动旧评审件：先归档后删原件，不留"没锁也没评审"的窗口。
-            _atomic_write_json(review_archive, review_doc)
-            review_path.unlink()
+            # 新锁已落地才动旧评审件。用 os.replace 同目录原子改名：写一份再删原件
+            # 的两步法若删失败会留下"原件还在、归档也在"，新评审仍然写不进来——正是
+            # 这个机制要消灭的死锁状态。
+            try:
+                os.replace(review_path, review_archive)
+            except OSError as exc:
+                _rollback()          # 归档失败即整体回滚，不留"新锁已生效"的半截状态
+                raise RunnerError(
+                    f"旧评审件归档失败（{exc}），已撤回新锁与旧锁副本：{review_archive}")
         line = {"superseded_at_utc": self.clock(), "old_lock_sha256": old_sha,
                 "old_created_at_utc": old.get("created_at_utc"),
                 "archive": archive.name, "reason": reason.strip(),
@@ -1168,7 +1212,9 @@ class R0Runner:
                      "sent_attempts_at_supersede": len(sent),
                      "archived_review": (review_archive.name
                                          if review_archive is not None else None),
-                     "frozen_fields_checked": (repair or {}).get("frozen_fields_checked")})
+                     "frozen_fields_checked": (repair or {}).get("frozen_fields_checked"),
+                     "frozen_code_keys_checked": (repair or {}).get(
+                         "frozen_code_keys_checked")})
         line["reason"] = (f"{reason.strip()}；[机生成] code 键 "
                           f"+{added} ~{changed} -{removed}")
         hist = path.parent / "lock_history.jsonl"

@@ -503,6 +503,58 @@ def test_instrument_repair_refuses_a_judgment_surface_change(bare_runner, monkey
     assert bare_runner.lock_path().exists()              # 旧锁原封不动
 
 
+def _mutated(monkeypatch, mutate):
+    """在快照的 code 字典上做任意改动（加键/删键/改非包内模块）。"""
+    real = rn.R0Runner.lock_snapshot
+
+    def fake(self):
+        snap = real(self)
+        code = dict(snap["code"])
+        mutate(code)
+        return {**snap, "code": code}
+    monkeypatch.setattr(rn.R0Runner, "lock_snapshot", fake)
+
+
+def test_instrument_repair_refuses_a_scripts_surface_change(bare_runner, monkeypatch):
+    """`scripts.rsi_r0.*` 产出的是门要读的产物：改它换锁 = 改实验，不是修仪器。
+
+    第三份评审的 BLOCKER：旧冻结名单只列举包内 11 个模块，五个脚本明明被
+    `lock_snapshot()` 声明为实验定义却不在名单里——改 `t3_controls.py` 造一份
+    21/0 报告再换锁可以一路通行。现在冻结面是「白名单求补集」，必须拒。
+    """
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _mutated(monkeypatch,
+             lambda code: code.__setitem__("scripts.rsi_r0.t3_controls", "f" * 64))
+    with pytest.raises(rn.RunnerError, match="实验定义面"):
+        bare_runner.supersede_lock("假装修仪器，实际改控制矩阵生成脚本（单测）",
+                                   instrument_repair=True)
+    assert bare_runner.lock_path().exists()
+
+
+def test_instrument_repair_refuses_an_added_code_key(bare_runner, monkeypatch):
+    """新增入锁键一律拒：新键不在白名单里，等于在花钱后拓展实验定义面。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _mutated(monkeypatch, lambda code: code.__setitem__("scripts.rsi_r0.t9_new", "f" * 64))
+    with pytest.raises(rn.RunnerError, match="新增键"):
+        bare_runner.supersede_lock("换锁时顺手把一个新脚本塞进 LOCK（单测）",
+                                   instrument_repair=True)
+
+
+def test_instrument_repair_refuses_a_removed_code_key(bare_runner, monkeypatch):
+    """删键同样拒：把判据/事实面模块从 LOCK 里摘掉，等于让它以后不再被校验。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _mutated(monkeypatch, lambda code: code.pop("gates", None))
+    with pytest.raises(rn.RunnerError, match="删除键"):
+        bare_runner.supersede_lock("换锁时把门定义从 LOCK 里摘掉（单测）",
+                                   instrument_repair=True)
+
+
 def test_instrument_repair_refuses_a_non_code_experiment_field(bare_runner, monkeypatch):
     """行情/镜钉/任务集等非代码字段同样冻结：改了就拒。"""
     bare_runner.ensure_campaign()
@@ -541,6 +593,34 @@ def test_instrument_repair_rechecks_the_written_lock_for_toctou(bare_runner, mon
                                    instrument_repair=True)
     now = json.loads(bare_runner.lock_path().read_text())
     assert now["lock_sha256"] == old_sha        # 旧锁原封放回，没有留下被污染的新锁
+    # 回滚要连旧锁副本一起撤：不然归档名被永久占住，重试只会撞「归档件已存在」。
+    assert not (bare_runner.lock_path().parent
+                / f"t4_lock.superseded.{old_sha[:8]}.json").exists()
+
+
+def test_instrument_repair_refuses_to_archive_a_review_bound_to_another_lock(
+        bare_runner, monkeypatch):
+    """只归档确实绑在旧锁上的评审件：来源不明的评审件归档进来 = 给它伪造历史。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    bare_runner.write_independent_review(
+        verdict="APPROVE", reviewer_lane="lane-x", reviewed_commit="deadbeef",
+        findings={"major": 0, "critical": 0},
+        basis="旧代码集上的独立评审（单测夹具）——故意把绑定改成另一把锁。")
+    path = bare_runner.review_path()
+    doc = json.loads(path.read_text())
+    doc["reviewed_lock_sha256"] = "0" * 64
+    doc["review_sha256"] = rn.sha256_of({k: v for k, v in doc.items()
+                                         if k != "review_sha256"})
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+    _bumped(monkeypatch, "develop")
+    with pytest.raises(rn.RunnerError, match="没有绑定当前这把锁"):
+        bare_runner.supersede_lock(
+            "换锁时试图归档一份绑在别的锁上的旧评审件，必须被拒（单测）",
+            instrument_repair=True)
+    assert path.exists()                                 # 评审件原封不动
 
 
 def test_instrument_repair_archives_the_stale_independent_review(bare_runner, monkeypatch):
