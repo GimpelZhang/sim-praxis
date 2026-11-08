@@ -152,17 +152,23 @@ def write_artifact_with_history(path: Path, payload: Mapping[str, Any],
     仍是那个固定文件名（下游读取路径不变），但每次内容变化都会在历史里留一行
     （时间/新哈希/被覆盖的旧哈希/主判），覆盖不等于抹除。
     """
-    digest = str(payload.get("report_sha256") or sha256_of(payload))
+    # 两个哈希必须同口径：调用方在**插入** ``report_sha256`` 之前算哈希（body 哈希），
+    # 若旧件却按整文档哈希算，``changed`` 会恒为 True、（旧件+1 行的 previous）永不等于
+    # 上一行的 sha256，历史行就不再能表达"这次到底变没变"（第三份评审 MINOR-1）。
+    def _body_digest(doc: Mapping[str, Any]) -> str:
+        return sha256_of({k: v for k, v in doc.items() if k != "report_sha256"})
+
+    digest = str(payload.get("report_sha256") or _body_digest(payload))
     previous: str | None = None
     if path.exists():
         try:
-            previous = sha256_of(json.loads(path.read_text(encoding="utf-8")))
+            previous = _body_digest(json.loads(path.read_text(encoding="utf-8")))
         except (OSError, json.JSONDecodeError):
             previous = "unreadable"
     _atomic_write_json(path, payload)
     line = {"written_at_utc": _utc_now(), "artifact": path.name,
             "sha256": digest, "previous_sha256": previous,
-            "changed": previous != digest,
+            "changed": previous is not None and previous != digest,
             "primary_verdict": payload.get("primary_verdict"),
             "verdict": payload.get("verdict"),
             "posts": payload.get("posts")}

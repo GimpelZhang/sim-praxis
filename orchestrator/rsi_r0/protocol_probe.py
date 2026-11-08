@@ -420,6 +420,13 @@ class ProtocolProbe:
                 f"协议报告已存在：一次 campaign 只允许一次协议批次，拒绝再发"
                 f"（{report_path()}）")
         with campaign_lock(rp.rsi_r0_quota_dir()):
+            # 锁内再查一次（第三份评审 LOW-1）：报告原先由 CLI 在 run 返回后才写，
+            # 锁释放到落报告之间有窗口，第二个进程可能看不到报告再发一批。现在
+            # 报告在 _run_locked 里（仍持锁时）落盘，锁内复查即无窗口。
+            if report_path().exists():
+                raise ProbeError(
+                    f"协议报告已存在：一次 campaign 只允许一次协议批次，拒绝再发"
+                    f"（{report_path()}）")
             return self._run_locked()
 
     def _run_locked(self) -> dict[str, Any]:
@@ -468,6 +475,9 @@ class ProtocolProbe:
             "trials": trials,
         }
         report["report_sha256"] = sha256_of(report)
+        # 持锁落盘（LOW-1）：报告存在性就是"这一批已经跑过"的唯一标志，必须在
+        # 释放锁之前变成真。CLI 之后的一次同内容写是幂等的，不会改字节。
+        write_report(report)
         return report
 
 

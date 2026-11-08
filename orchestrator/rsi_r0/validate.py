@@ -59,6 +59,8 @@ def _run_validation_locked(runner: Any, gateway: Any, *,
                            clock: Callable[[], str] | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     halted: str | None = None
+    if not plan:
+        raise ValidationError("验证计划为空：没有任何 slot，拒绝发网")
     # 评审 N-1：G-V 必须在**第一个请求之前**成立，且不能只靠 CLI 那一层。
     # 每条 trial 的 preconditions 也按 role 查 G-V（双保险），这里先在批级拦一次，
     # 这样直接调 API 的人拿到的是一句明确的 ValidationError，而不是逐 slot 的

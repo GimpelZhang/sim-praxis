@@ -79,6 +79,13 @@ def test_plan_is_fixed_order_and_six_slots():
     assert len(val.VALIDATION_PLAN) == 6
 
 
+def test_empty_plan_is_refused_with_a_clear_message(campaign, monkeypatch):
+    """第三份评审 LOW-2：空计划不该以 ``tuple index out of range`` 冒充门失败。"""
+    runner = _arm(campaign, monkeypatch)
+    with pytest.raises(val.ValidationError, match="计划为空"):
+        val.run_validation(runner, FakeGateway([]), plan=(), session_factory=_factory())
+
+
 def test_hidden_retry_stops_the_batch_and_cancels_the_rest(campaign, monkeypatch):
     runner = _arm(campaign, monkeypatch)
 

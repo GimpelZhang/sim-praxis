@@ -74,16 +74,19 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
 
     latest = journal.latest_by_request()
     attempt_seqs: dict[int, str] = {}
+    claimed_rows: dict[int, Mapping[str, Any]] = {}
     duplicate_seqs: list[dict[str, Any]] = []
     unknown: list[str] = []
     blocked_attempts: list[dict[str, Any]] = []
     uncounted: list[dict[str, Any]] = []
 
-    def _claim(seq: int, rid: str) -> None:
+    def _claim(seq: int, rid: str, row: Mapping[str, Any] | None = None) -> None:
         if seq in attempt_seqs:
             duplicate_seqs.append({"seq": seq, "request_ids": [attempt_seqs[seq], rid]})
             return
         attempt_seqs[seq] = rid
+        if row is not None:
+            claimed_rows[seq] = row
 
     for rid, row in sorted(latest.items()):
         state = row.get("state")
@@ -98,14 +101,14 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
                                      "task": task,
                                      "batch_id": row.get("batch_id")})
             if isinstance(seq, int):
-                _claim(seq, rid)
+                _claim(seq, rid, row)
             continue
         if state not in _CONSUMED_STATES:
             # PREPARED/SENT 还没走完：属于进行中或崩溃未恢复，不算漂移，单独挂牌。
             uncounted.append({"request_id": rid, "state": state})
             continue
         if isinstance(seq, int):
-            _claim(seq, rid)
+            _claim(seq, rid, row)
         else:
             # 已结算却没有 seq：只有 BLOCKED_PREFLIGHT 允许，其它一律算漂移。
             uncounted.append({"request_id": rid, "state": state, "why": "settled_without_seq"})
@@ -130,6 +133,29 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
         blocked_mismatch = {"ledger_only": _multiset_minus(want, got),
                             "attempts_only": _multiset_minus(got, want)}
 
+    # call 行只按 seq 与 attempt 对上还不够：账行的 (stage, task, batch) 与
+    # attempt 的身份不符，说明「A 批的账被算到 B 批头上」——只比 seq 会让它过。
+    # （第三份独立评审 2026-11-08 指出的未挂牌缺口。）
+    def _identity(row: Mapping[str, Any]) -> tuple[Any, Any, Any]:
+        task = row.get("task", row.get("task_id"))
+        return (row.get("stage"), task, row.get("batch_id"))
+
+    identity_bad: list[dict[str, Any]] = []
+    identity_unverified: list[int] = []
+    for seq in sorted(set(call_seqs) & set(claimed_rows)):
+        ledger_key, attempt_key = _identity(call_seqs[seq]), _identity(claimed_rows[seq])
+        # 逐字段比：只比**双方都有值**的字段。账行缺 stage/task/batch（合成夹具或
+        # 早期行）不能让对账变成假漂移；但整条都没值就单独挂牌——"核不了"与
+        # "核过且一致"不是一回事。
+        pairs = [(str(l), str(a)) for l, a in zip(ledger_key, attempt_key)
+                 if l is not None and a is not None]
+        if any(l != a for l, a in pairs):
+            identity_bad.append({"seq": seq,
+                                 "ledger": [str(x) for x in ledger_key],
+                                 "attempts": [str(x) for x in attempt_key]})
+        elif not pairs:
+            identity_unverified.append(seq)
+
     reported: dict[int, str] = {}
     missing_reported: list[dict[str, Any]] = []
     for source, seqs in report_seqs:
@@ -144,6 +170,7 @@ def reconcile(*, ledger_path: Path, journal: AttemptJournal,
         "ledger_seq_without_attempt": missing_attempts,
         "attempt_seq_without_ledger": missing_ledger,
         "duplicate_seq": duplicate_seqs,
+        "call_identity_mismatch": identity_bad,
         "attempt_without_reservation": missing_reservations,
         "reservation_without_attempt": orphan_reservations,
         "unknown_sent": unknown,

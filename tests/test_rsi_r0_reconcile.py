@@ -274,6 +274,64 @@ def test_new_row_prefers_this_batch_over_the_last_line(campaign):
     assert pp.ProtocolProbe._new_row(3) is None   # 本次没新行
 
 
+def test_call_row_with_the_wrong_identity_is_detected(tmp_path):
+    """第三份评审 MINOR-2：只按 seq 配对会放过「A 批的账算到 B 批头上」。"""
+    ledger, journal, reservations = _world(tmp_path)
+    _settled(journal, seq=1, batch=BATCH, task=1)
+    _ledger_call(ledger, 1, batch="R0-OTHER", task=9)      # 同一个 seq，身份不同
+    report = rc.reconcile(ledger_path=ledger, journal=journal,
+                          reservations=reservations)
+    assert report["ok"] is False
+    assert _drift(report) == {"call_identity_mismatch"}
+    assert report["drift"]["call_identity_mismatch"][0]["seq"] == 1
+
+
+def test_history_line_hash_matches_the_previous_line(tmp_path):
+    """第三份评审 MINOR-1：新旧哈希必须同口径，否则 ``changed`` 恒为真。"""
+    target = tmp_path / "artifact.json"
+    history = tmp_path / "history.jsonl"
+    payload = {"primary_verdict": "ABORTED_INCOMPLETE", "posts": None}
+    rn.write_artifact_with_history(target, payload, history)
+    payload2 = {**payload, "primary_verdict": "INVALID_INSTRUMENT"}
+    rn.write_artifact_with_history(target, payload2, history)
+    lines = [json.loads(x) for x in history.read_text(encoding="utf-8").splitlines()]
+    assert len(lines) == 2
+    assert lines[1]["previous_sha256"] == lines[0]["sha256"]   # 同口径可衔接
+    assert lines[0]["changed"] is False                        # 首写没有旧件
+    assert lines[1]["changed"] is True
+    rn.write_artifact_with_history(target, payload2, history)   # 同内容再写
+    last = json.loads(history.read_text(encoding="utf-8").splitlines()[-1])
+    assert last["changed"] is False, "同内容重写不该报成覆盖"
+
+
+def test_protocol_report_is_written_while_still_holding_the_lock(campaign, monkeypatch):
+    """第三份评审 LOW-1：报告若在锁外写，锁释放到落盘之间有「再发一批」的窗口。"""
+    from orchestrator.rsi_r0.cli import EXIT_OK, main as cli_main
+
+    rn.R0Runner(campaign).ensure_campaign()
+    runner = rn.R0Runner(campaign)
+    probe = pp.ProtocolProbe(runner, _SilentGateway())
+
+    def _row(trial_id: str) -> dict:
+        return {"trial_id": trial_id, "passed": True, "checks": {"ok": True},
+                "requests": [], "requests_used": 0}
+
+    monkeypatch.setattr(probe, "preconditions", lambda: {
+        "model_id": "fake-model", "gate": {"gate": "G-P"},
+        "ticket": {"batch_id": "R0-P", "task": 0, "stage": "coding_debug",
+                   "approved": 6, "created_at_iso": "2026-11-08T00:00:00Z"},
+        "pricing_contract_sha256": "0" * 64})
+    monkeypatch.setattr(probe, "trial_plain", _row)
+    monkeypatch.setattr(probe, "trial_tool", _row)
+    report = probe._run_locked()
+    on_disk = json.loads(pp.report_path().read_text(encoding="utf-8"))
+    assert on_disk["report_sha256"] == report["report_sha256"]   # 锁内已落盘
+    # CLI 的第二次同内容写是幂等的，且再跑一批被报告存在性挡住。
+    assert cli_main(["protocol", "--campaign", str(campaign)]) != EXIT_OK
+    with pytest.raises(pp.ProbeError, match="一次 campaign 只允许一次"):
+        pp.ProtocolProbe(runner, _SilentGateway()).run()
+
+
 # ---------------------------------------------------------------- cli gates / review
 def test_cli_gates_computes_the_three_gates_and_refuses_when_unresolved(campaign):
     from orchestrator.rsi_r0.cli import EXIT_REFUSED, main as cli_main
