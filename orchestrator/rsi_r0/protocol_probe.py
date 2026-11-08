@@ -38,7 +38,7 @@ from orchestrator.common import runtime_paths as rp
 from orchestrator.gateway import quota_ledger as ql
 from orchestrator.gateway.quota_ledger import billing_context
 from orchestrator.rsi_r0 import budget_contract
-from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations
+from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations, campaign_lock
 from orchestrator.rsi_r0.contracts import ResourceCaps, sha256_bytes, sha256_of
 from orchestrator.rsi_r0.image_pin import IMAGE_REF
 
@@ -166,6 +166,13 @@ def run_tool_in_container(*, work: Path, timeout_s: int = TOOL_TIMEOUT_S) -> dic
     """在候选沙盒（固定 digest 镜像、禁网、非 root、只读挂载）里执行一次 read_file。"""
     if shutil.which("docker") is None:
         raise ProbeBlocked("docker 不可用：工具动作必须在候选沙盒容器内执行")
+    # 评审 MINOR-6：镜像不在本地时 `docker run` 会**隐式拉取**——那是一次主机侧
+    # 出网，既不该发生在"禁网"的探针里，也会让"固定 digest 镜像"变成事后追认。
+    inspect = subprocess.run(["docker", "image", "inspect", IMAGE_REF],
+                             capture_output=True, text=True)
+    if inspect.returncode != 0:
+        raise ProbeBlocked(
+            f"镜像不在本地：{IMAGE_REF}（拒绝隐式拉取；请先按固定 digest 预置）")
     argv = _docker_argv(work)
     started = time.time()
     try:
@@ -205,6 +212,12 @@ class ProtocolProbe:
         ok, why = budget_contract.contract_ok(self.contract)
         if not ok:
             raise ProbeError(f"BLOCKED_COST：{why}（无最坏成本上界不许发网）")
+        # AC07「禁暗重试」不能只写在协议描述里：真正决定重试次数的是网关构造参数。
+        # 拿不到这个属性就无法证明没重试，一律按不成立处理（fail-closed）。
+        max_attempts = getattr(self.gateway, "max_attempts", None)
+        if max_attempts != 1:
+            raise ProbeError(
+                f"BLOCKED_RETRY：网关 max_attempts={max_attempts!r}，协议要求恰为 1")
         gate = self.runner.require_gate("G-P", batch_id=PROTOCOL_BATCH)   # 抛即拒
         try:
             ticket = ql.load_approval(PROTOCOL_BATCH, rp.rsi_r0_approvals_dir())
@@ -300,8 +313,20 @@ class ProtocolProbe:
 
     @staticmethod
     def _new_row(before: int) -> dict[str, Any] | None:
+        """本次请求新落的那一行账：优先按 batch_id 认，其次退回最后一行。
+
+        原先无条件取 ``rows[-1]``：同 campaign 两个执行器并发时，A 的失败可能读到
+        B 的成功行，把 B 的 seq 记成 A 的并按 ok 结账（评审 MAJOR-4）。现在
+        ①调用方全程持 campaign_lock，②仍按 batch_id 重新认行，双保险。
+        """
         rows = ql.read_lines(rp.rsi_r0_ledger_path())
-        return rows[-1] if len(rows) > before else None
+        fresh = rows[before:]
+        if not fresh:
+            return None
+        for row in reversed(fresh):
+            if row.get("batch_id") == PROTOCOL_BATCH:
+                return row
+        return fresh[-1]
 
     # ---- 四个试验 ----
     def trial_plain(self, trial_id: str) -> dict[str, Any]:
@@ -347,12 +372,19 @@ class ProtocolProbe:
             "executed_in_container": executed,
             "container_seen_sha256": payload.get("content_sha256"),
             "host_marker_sha256": host_marker_sha,
+            "hashes_equal": payload.get("content_sha256") == host_marker_sha,
             "content_matches_marker": executed and observed == marker,
             "recorded_at_utc": self.clock(),
         }
         if not event["content_matches_marker"]:
             raise ProbeBlocked(
                 f"{trial_id} 工具执行未读到本试验标记（executed={executed}）")
+        # 评审 MINOR-5：两个哈希原先只记录不比较，"宿主独立核对"实际只靠模型回显
+        # 与字符串比对。这里补上字节级核对：容器读到的字节必须与宿主写下的字节同哈希。
+        if not event["hashes_equal"]:
+            raise ProbeBlocked(
+                f"{trial_id} 容器读到字节与宿主标记不同哈希"
+                f"（container={event['container_seen_sha256']}, host={host_marker_sha}）")
 
         second = self._request(trial_id=trial_id, index=2,
                                prompt=marker_prompt(observed), max_tokens=ANSWER_MAX_TOKENS)
@@ -374,6 +406,15 @@ class ProtocolProbe:
 
     # ---- 全批 ----
     def run(self) -> dict[str, Any]:
+        """整批串行执行；全程持 campaign 锁（AC08：并发第二执行器被拒绝）。
+
+        评审 MAJOR-4：旧版只有 dry-run 加锁，真实付费路径不加——并发时账行归属
+        会错位。这里把锁移到付费路径本身。
+        """
+        with campaign_lock(rp.rsi_r0_quota_dir()):
+            return self._run_locked()
+
+    def _run_locked(self) -> dict[str, Any]:
         pre = self.preconditions()
         rows_before = len(ql.read_lines(rp.rsi_r0_ledger_path()))
         trials: list[dict[str, Any]] = []
@@ -430,8 +471,26 @@ def _trial_row(trial_id: str, checks: Mapping[str, bool],
 
 
 def write_report(report: Mapping[str, Any], path: Path | None = None) -> Path:
+    """协议报告**写一次**：同内容幂等，不同内容一律拒（AC25 不补抽到通过）。
+
+    评审 MAJOR-3：旧版直接 ``write_text`` 覆盖。失败一次 → 换一次 run 重抽 → 这次
+    过了就把上一次的失败报告盖掉，只剩账本里几行 seq 作证。现在报告存在即不可
+    改写，CLI 侧也在启动前直接拒第二次 run。
+    """
     target = path or (rp.rsi_r0_protocol_dir() / "protocol_probe_report.json")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
-                      + "\n", encoding="utf-8")
+    data = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    if target.exists():
+        if target.read_text(encoding="utf-8") == data:
+            return target
+        raise ProbeError(
+            f"协议报告已存在且内容不同，拒绝覆盖：{target}"
+            "（一次 campaign 只允许跑一次协议批次；失败即 PROTOCOL_BLOCKED）")
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(data)
     return target
+
+
+def report_path() -> Path:
+    return rp.rsi_r0_protocol_dir() / "protocol_probe_report.json"

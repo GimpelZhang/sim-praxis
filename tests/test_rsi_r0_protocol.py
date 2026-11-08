@@ -46,6 +46,10 @@ def _append_ledger(row: dict) -> None:
 class FakeGateway:
     """最小网关替身：只写账本行、回固定答案，不触网。"""
 
+    #: MAJOR-1 的代码面：协议把「禁暗重试」落成前置断言（真网关同款缺省 5，
+    #: CLI 构造点显式传 1），故替身必须如实声明 1——否则它模拟的就不是生产网关。
+    max_attempts = 1
+
     def __init__(self, *, attempts_http: int = 1, block: bool = False,
                  fail_on_call: int | None = None, answer_override=None):
         self.attempts_http = attempts_http
@@ -101,7 +105,9 @@ def fake_tool(*, work: Path) -> dict:
                         "content_sha256": sha256_bytes(data.encode("utf-8")), "bytes": len(data)}}
 
 
-def _arm(campaign, *, contract: bool = True, ticket: bool = True) -> rn.R0Runner:
+def _arm(campaign, *, contract: bool = True, ticket: bool = True,
+         review: bool = True, review_verdict: str = "APPROVE",
+         bind_review_to_current: bool = True) -> rn.R0Runner:
     """把 G-P 的每条条件都做成**真产物**（零网络零容器），用于流程测试。"""
     from orchestrator.rsi_r0.instances import PLANS
     from orchestrator.rsi_r0.matrix import freeze_criteria
@@ -131,12 +137,89 @@ def _arm(campaign, *, contract: bool = True, ticket: bool = True) -> rn.R0Runner
     (protocol / "baseline_manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
     runner.write_lock()
+    # MAJOR-2：G-P 还要 T3 控制矩阵报告、T4 零付费端到端报告、独立评审件——
+    # 三条**都从产物推**。夹具按生产形状写出这三件，门才有可能变绿。
+    _write_acceptance_artifacts(runner, review=review,
+                               review_verdict=review_verdict,
+                               bind_review_to_current=bind_review_to_current)
     if ticket:
         _write_ticket(campaign)
     gates.write_approval(runner.gate_approval_path("R0-P"), gates.approval_body(
         batch_id="R0-P", task_cap=6, hard_cap=222, currency="USD", usd_ceiling=100.0,
         approved_by="user", approved_at_utc="2026-11-08T00:00:00Z", scope="protocol"))
     return runner
+
+
+def _write_acceptance_artifacts(runner: rn.R0Runner, *, negatives: int = 21,
+                                mutations: int = 6, review: bool = True,
+                                review_verdict: str = "APPROVE",
+                                bind_review_to_current: bool = True) -> None:
+    """把 G-P 新增的三条验收事实（t3/t4/review）做成**真形状的产物**。
+
+    MAJOR-2 的判据是「门只能由产物变真」——所以单元测试也不能凭空把条件
+    置真，必须**写产物**。这里：
+
+    * t3：负控/mutation/criteria_hash 走**生产函数**（``matrix.run_negatives``
+      等，纯离线）；只有依赖容器的 positives/permissions 用固定夹具值，并在
+      文档里写明（unit fixture）。
+    * t4：13 个 slot 全 COMPLETED、posts=0、backend=mock——与生产 dry-run
+      报告同形状（真跑 dry-run 是 T4 的事，T5 只验门读得对不对）。
+    * review：走 ``runner.write_independent_review()`` 真入口，绑定当前 code 集。
+    """
+    from orchestrator.rsi_r0 import controls as ctl
+    from orchestrator.rsi_r0.instances import PLANS
+    from orchestrator.rsi_r0.matrix import run_mutations, run_negatives
+
+    neg = run_negatives()
+    mut = run_mutations()
+    report = {
+        "schema": "rsi_r0.t3_controls_report.v1",
+        "controls_schema": "unit-fixture",
+        "evaluator_version": "unit-fixture",
+        "criteria_hash": ctl.criteria_hash(PLANS),
+        "positives": {"total": 1, "passed": 1, "skipped": False,
+                      "items": [], "note": "unit fixture（容器类不在此跑）"},
+        "negatives": {"total": negatives, "passed": min(negatives, neg["total"]),
+                      "missed": list(neg["missed"])[:max(0, negatives - neg["total"])]},
+        "mutations": {"total": mutations, "killed": min(mutations, mut["killed"]),
+                      "survivors": list(mut["survivors"])[:max(0, mutations - mut["killed"])]},
+        "permissions": {"ok": True, "note": "unit fixture（容器类不在此跑）"},
+        "budget": {"model_calls": 0, "paid": 0},
+        "passed": True,
+    }
+    report["report_sha256"] = sha256_of(
+        {k: v for k, v in report.items() if k != "report_sha256"})
+    runner.controls_report_path().write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+    # 13 个实例 slot（不是 10 个批次）：门按 slot_id 集合核，夹具就按同一集合造。
+    dry = {"schema": "rsi_r0.dryrun_report.v1", "posts": 0, "paid_usd": 0.0,
+           "simulation_backend": "mock",
+           "slots": [{"batch_id": b, "slot_id": sid, "state": "COMPLETED"}
+                     for b, (slots_, _cap) in rn.BATCH_SLOTS.items()
+                     for sid in slots_]}
+    dry["report_sha256"] = sha256_of(
+        {k: v for k, v in dry.items() if k != "report_sha256"})
+    runner.dryrun_report_path().write_text(
+        json.dumps(dry, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+
+    if review:
+        runner.write_lock()   # 评审件绑 code 集；锁必须存在且是当前那份
+        runner.write_independent_review(
+            verdict=review_verdict, reviewer_lane="unit-fixture-lane",
+            reviewed_commit="0" * 40,
+            findings={"critical": 0, "major": 0, "minor": 0},
+            basis="T5 单元夹具：验证 G-P 的独立评审条件读产物而非读环境（非真人评审）")
+        if not bind_review_to_current:
+            p = runner.review_path()
+            doc = json.loads(p.read_text(encoding="utf-8"))
+            doc["reviewed_code_set_sha256"] = "f" * 64
+            doc["review_sha256"] = sha256_of(
+                {k: v for k, v in doc.items() if k != "review_sha256"})
+            p.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8")
 
 
 def _prepare(campaign, *, gateway=None, tool=None, armed: bool = True,
@@ -252,6 +335,30 @@ def test_missing_contract_is_not_a_protocol_result(campaign):
     runner, probe = _prepare(campaign, contract=False)
     with pytest.raises(pp.ProbeError, match="BLOCKED_COST"):
         probe.run()
+
+
+def test_non_single_attempt_gateway_is_a_hard_block(campaign):
+    """MAJOR-1：暗重试判定必须读**真网关构造参数**，拿不到/不等于 1 就拒发网。
+
+    生产网关 ``ModelGateway.__init__`` 的 ``max_attempts`` 缺省是 5；R0 的唯一
+    合法形态是 CLI 构造点显式传 1。替身不声明该属性时 ``getattr`` 得 None，
+    按 fail-closed 一律判 BLOCKED_RETRY——不允许"读不到就当没重试"。
+    """
+    class _NoAttempts:
+        """模拟没有 max_attempts 的网关（读不到就不能证明没重试）。"""
+        model_id = staticmethod(lambda stage: "fake-model-t5")
+
+    class _Retrying(FakeGateway):
+        max_attempts = 5
+
+    for idx, (gw, why) in enumerate(((_NoAttempts(), "None"), (_Retrying(), "5"))):
+        # 每种网关各用一个独立 campaign（评审件与锁都是写一次即锁的产物）。
+        runner, probe = _prepare(campaign.parent / f"case{idx}", gateway=gw)
+        with pytest.raises(pp.ProbeError, match="BLOCKED_RETRY") as ei:
+            probe.run()
+        assert why in str(ei.value), str(ei.value)
+        # 拒在发网之前：一次模型调用都没有，账本也没有整数 seq 行。
+        assert getattr(gw, "calls", []) == [], getattr(gw, "calls", [])
 
 
 def test_missing_ticket_is_not_a_protocol_result(campaign):
@@ -409,6 +516,130 @@ def test_gate_facts_come_from_artifacts_not_env(campaign, monkeypatch):
     assert {"budget_contract_approved", "model_ids_approved",
             "cost_upper_bound_known", "seals_verified"} <= set(facts["detail"]) | \
         set(gates.evaluate_gate("G-M", facts)["missing"])
+
+
+# ------------------------------------------- G-P 新增三条的负控（缺陷必须能被门看见）
+# 门的三条新条件如果只有正控，等于把「门读产物」写成了「门恒真」。这里逐条
+# 造一个坏产物，断言门**只**因为那一处变假（其余 facts 仍真），从而证明门读的
+# 是产物内容而不是文件存在性。
+
+def _case(campaign, name: str) -> Path:
+    """每个负控一份独立 campaign（评审件与锁都是写一次即锁的产物）。"""
+    return campaign.parent / name
+
+
+def _rewrite(path: Path, mutate) -> None:
+    """改产物并**重算自哈希**：这样失败只来自被改的那个判据，不是自哈希先炸。"""
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    mutate(doc)
+    doc["report_sha256"] = sha256_of(
+        {k: v for k, v in doc.items() if k != "report_sha256"})
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+
+
+def test_t3_gate_is_false_when_the_report_is_missing(campaign):
+    runner = _arm(_case(campaign, "t3_missing"))
+    runner.controls_report_path().unlink()
+    ok, detail = runner.t3_acceptance()
+    assert ok is False and detail["artifact_present"] is False
+    assert "缺 t3_controls_report.json" in detail["why"]
+
+
+def test_t3_gate_is_false_when_a_negative_control_is_missed(campaign):
+    runner = _arm(_case(campaign, "t3_partial"))
+    _rewrite(runner.controls_report_path(),
+             lambda d: d["negatives"].update(
+                 {"total": 21, "passed": 20, "missed": ["N-21"]}))
+    ok, detail = runner.t3_acceptance()
+    assert ok is False
+    assert detail["facts"]["negatives_complete"] is False
+    # 其余判据仍真 ⇒ 失败确实只来自负控缺口
+    assert [k for k, v in detail["facts"].items() if not v] == ["negatives_complete"]
+
+
+def test_t3_gate_is_false_when_a_mutation_survived(campaign):
+    runner = _arm(_case(campaign, "t3_survivor"))
+    _rewrite(runner.controls_report_path(),
+             lambda d: d["mutations"].update(
+                 {"total": 6, "killed": 5, "survivors": ["M-6"]}))
+    ok, detail = runner.t3_acceptance()
+    assert ok is False
+    assert detail["facts"]["mutations_killed"] is False
+
+
+def test_t3_gate_is_false_when_criteria_changed_after_the_report(campaign):
+    runner = _arm(_case(campaign, "t3_stale_criteria"))
+    _rewrite(runner.controls_report_path(),
+             lambda d: d.update({"criteria_hash": "0" * 64}))
+    ok, detail = runner.t3_acceptance()
+    assert ok is False
+    assert detail["facts"]["criteria_matches_now"] is False
+
+
+def test_t4_gate_is_false_when_any_slot_did_not_complete(campaign):
+    runner = _arm(_case(campaign, "t4_pending"))
+    _rewrite(runner.dryrun_report_path(),
+             lambda d: d["slots"][-1].update({"state": "PENDING"}))
+    ok, detail = runner.t4_acceptance()
+    assert ok is False
+    assert detail["facts"]["slots_all_completed"] is False
+
+
+def test_t4_gate_is_false_when_the_dryrun_reported_posts(campaign):
+    runner = _arm(_case(campaign, "t4_posted"))
+    _rewrite(runner.dryrun_report_path(), lambda d: d.update({"posts": 1}))
+    ok, detail = runner.t4_acceptance()
+    assert ok is False
+    assert detail["facts"]["posts_zero"] is False
+
+
+def test_t4_gate_counts_instance_slots_not_batches(campaign):
+    # 真 dry-run 报告是 13 个**实例 slot**（4 协议 + 9 个 E/D/R×dev/v1/v2），
+    # 批次只有 10 个。旧门拿 len(BATCH_SLOTS)=10 去比 13，真报告永远过不了门。
+    runner = _arm(_case(campaign, "t4_slot_dimension"))
+    ok, detail = runner.t4_acceptance()
+    assert ok is True, detail
+    assert detail["slots"] == {"total": 13, "completed": 13}
+    _rewrite(runner.dryrun_report_path(),
+             lambda d: d.update({"slots": d["slots"][:10]}))
+    ok, detail = runner.t4_acceptance()
+    assert ok is False and detail["facts"]["slots_all_completed"] is False
+
+
+def test_t4_gate_is_false_when_the_report_was_edited_without_rehash(campaign):
+    # 手工改内容不重算自哈希 ⇒ 篡改可被机判看见（不是"文件存在即通过"）。
+    runner = _arm(_case(campaign, "t4_tamper"))
+    p = runner.dryrun_report_path()
+    doc = json.loads(p.read_text(encoding="utf-8"))
+    doc["posts"] = 1
+    p.write_text(json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                 encoding="utf-8")
+    ok, detail = runner.t4_acceptance()
+    assert ok is False and detail["facts"]["report_self_hash"] is False
+
+
+def test_review_gate_is_false_when_the_review_is_missing(campaign):
+    runner = _arm(_case(campaign, "review_missing"), review=False)
+    ok, detail = runner.independent_review()
+    assert ok is False and detail["artifact_present"] is False
+
+
+def test_review_gate_is_false_when_the_verdict_is_not_approve(campaign):
+    runner = _arm(_case(campaign, "review_reject"), review_verdict="REJECT")
+    ok, detail = runner.independent_review()
+    assert ok is False
+    assert detail["facts"]["verdict_approve"] is False
+    assert [k for k, v in detail["facts"].items() if not v] == ["verdict_approve"]
+
+
+def test_review_gate_is_false_when_it_does_not_cover_the_current_code_set(campaign):
+    # 评审后代码再动过（这里是等价形态：评审件记的 code 集≠当前锁的 code 集）。
+    runner = _arm(_case(campaign, "review_stale"), bind_review_to_current=False)
+    ok, detail = runner.independent_review()
+    assert ok is False
+    assert detail["facts"]["bound_to_current_code"] is False
+    assert detail["reviewed_code_set_sha256"] != detail["current_code_set_sha256"]
 
 
 # ---------------------------------------------------------------- LOCK

@@ -105,4 +105,18 @@ def contract_ok(doc: dict[str, Any] | None) -> tuple[bool, str]:
         return False, (f"最坏总量 {total} 越过货币帽 {doc.get('usd_ceiling')}")
     if doc.get("requests_total_cap") != REQUESTS_TOTAL_CAP:
         return False, f"请求总量帽不是 {REQUESTS_TOTAL_CAP}"
+    # 评审 MINOR-2：只验自哈希等于"自洽"，把单价写成 0.0001 再重算自哈希照样过。
+    # 这里按合同自己的字段**重算算术**，不信任任何预先写死的金额。
+    try:
+        recomputed_per = (float(doc["input_tokens_cap"]) / 1e6
+                          * float(doc["price_per_1m_input_usd"])
+                          + float(doc["output_tokens_cap"]) / 1e6
+                          * float(doc["price_per_1m_output_usd"]))
+        recomputed_total = recomputed_per * int(doc["requests_total_cap"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return False, f"合同字段不足以重算最坏成本：{exc}"
+    if abs(recomputed_per - float(per)) > 1e-9:
+        return False, f"单请求最坏成本与算术不符：记 {per}，重算 {recomputed_per:.9f}"
+    if abs(recomputed_total - float(total)) > 1e-6:
+        return False, f"整批最坏成本与算术不符：记 {total}，重算 {recomputed_total:.9f}"
     return True, "ok"

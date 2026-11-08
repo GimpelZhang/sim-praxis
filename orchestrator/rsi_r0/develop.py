@@ -22,7 +22,7 @@ from orchestrator.common import runtime_paths as rp
 from orchestrator.gateway import quota_ledger as ql
 from orchestrator.gateway.quota_ledger import billing_context
 from orchestrator.rsi_r0 import budget_contract
-from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations
+from orchestrator.rsi_r0.attempts import AttemptJournal, BudgetReservations, campaign_lock
 from orchestrator.rsi_r0.contracts import ResourceCaps, sha256_of
 from orchestrator.rsi_r0.evaluator import EvaluationInput, evaluate
 from orchestrator.rsi_r0.faults import apply_fault
@@ -454,7 +454,13 @@ def _first_failure(evaluation: Mapping[str, Any]) -> dict[str, Any] | None:
 # ---------------------------------------------------------------- 批次入口
 def run_development(runner: Any, gateway: Any, families: Sequence[str] = ("E", "D", "R"),
                     *, clock: Callable[[], str] | None = None) -> dict[str, Any]:
-    """按 E→D→R 顺序跑三条开发轨迹（串行；中途失败不补测）。"""
+    """按 E→D→R 顺序跑三条开发轨迹（串行；全程持 campaign 锁，中途失败不补测）。"""
+    with campaign_lock(rp.rsi_r0_quota_dir()):
+        return _run_development_locked(runner, gateway, families, clock=clock)
+
+
+def _run_development_locked(runner: Any, gateway: Any, families: Sequence[str],
+                            *, clock: Callable[[], str] | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     for key in families:
         trial = DevelopmentTrial(runner, gateway, key, clock=clock)

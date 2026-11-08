@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from orchestrator.common import runtime_paths as rp
 from orchestrator.rsi_r0 import develop as dev
+from orchestrator.rsi_r0.attempts import campaign_lock
 from orchestrator.rsi_r0.contracts import sha256_of
 
 REPORT_SCHEMA = "rsi_r0.validation_report.v1"
@@ -42,7 +43,20 @@ def run_validation(runner: Any, gateway: Any, *,
                    plan: Sequence[tuple[str, str, str, int]] = VALIDATION_PLAN,
                    session_factory: Callable[..., Any] | None = None,
                    clock: Callable[[], str] | None = None) -> dict[str, Any]:
-    """按固定顺序跑六条验证轨迹；任一 slot 的**仪器类**失败即停批。"""
+    """按固定顺序跑六条验证轨迹；任一 slot 的**仪器类**失败即停批。
+
+    全程持 campaign 锁（与 T5/T6 同一口径）：验证批次也是付费路径，并发第二个
+    执行器会被直接拒绝，而不是靠"人不会同时跑"。
+    """
+    with campaign_lock(rp.rsi_r0_quota_dir()):
+        return _run_validation_locked(runner, gateway, plan=plan,
+                                      session_factory=session_factory, clock=clock)
+
+
+def _run_validation_locked(runner: Any, gateway: Any, *,
+                           plan: Sequence[tuple[str, str, str, int]],
+                           session_factory: Callable[..., Any] | None = None,
+                           clock: Callable[[], str] | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     halted: str | None = None
     for family_key, instance_id, batch_id, task_id in plan:

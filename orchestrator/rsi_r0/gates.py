@@ -51,6 +51,13 @@ GATE_P: tuple[GateCondition, ...] = (
     GateCondition("no_unknown_attempts", "发网事实账无 UNKNOWN_SENT 未核销", "AC09"),
     GateCondition("criteria_frozen", "T3 判据已冻结且当前定义与之相等", "AC20"),
     GateCondition("lock_present", "T4 快照锁存在且校验通过", "§10"),
+    # 以下四条在旧版门里缺位（评审 MAJOR-2/MAJOR-5）：检查表写着"T0–T4 验收 +
+    # 独立评审"，可执行门却只认"有个批准件 + 有个锁"。结果是没有跑过控制矩阵、
+    # 没有 dry-run、没人评审的 campaign 也能放行六次真实发网。
+    GateCondition("t3_acceptance", "T3 控制矩阵成品已跑齐（21 负控/6 mutation/权限全 ok）", "§T3"),
+    GateCondition("t4_acceptance", "T4 零付费端到端已成（POST=0 且 13 slot 全 COMPLETED）", "AC21–AC24"),
+    GateCondition("independent_review", "独立评审件存在且绑定的 code 集与当前锁相同、verdict=APPROVE", "§T3/§T6"),
+    GateCondition("ledger_attempts_reconciled", "账本/attempts/预留逐 request 对账无漂移", "AC31"),
 )
 
 #: G-V（验证准入）：开发没过门就一个 POST 都不许发到验证（AC27）。

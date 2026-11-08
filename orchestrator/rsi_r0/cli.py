@@ -240,6 +240,12 @@ def cmd_protocol(args: argparse.Namespace) -> int:
         _emit({"command": "protocol", "refused": "SIMPRAXIS_ALLOW_PAID 未设置",
                "gate": "G-P"})
         return EXIT_REFUSED
+    # 评审 MAJOR-3：一次 campaign 只允许跑一次协议批次。失败即 PROTOCOL_BLOCKED，
+    # 不许换一次 run 重抽那条失败的试验——旧版重跑会直接覆盖上一次的报告。
+    if pp.report_path().exists():
+        _emit({"command": "protocol", "refused": "协议报告已存在：一次 campaign 只允许一次",
+               "report": str(pp.report_path())})
+        return EXIT_REFUSED
     try:
         gate = runner.require_gate("G-P", batch_id=args.batch)
     except (gates.GateRefused, RunnerError) as exc:
@@ -335,6 +341,47 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     return EXIT_OK if ok else EXIT_REFUSED
 
 
+def cmd_gates(args: argparse.Namespace) -> int:
+    """把 gates.json 从「手写清单」换成「按门定义现算」。
+
+    评审 MAJOR-2：campaign 里那份手写 gates.json 写 G-P 需要「T0–T4 验收 + 独立评审」，
+    而可执行门只认五条——两套清单并存时总是宽松的那套生效。这里让两边同源。
+    """
+    runner = _runner(args)
+    runner.ensure_campaign()
+    state = runner.gates_state(write=True)
+    _emit({"command": "gates", "path": str(rp.rsi_r0_protocol_dir() / "gates.json"),
+           "states": {g: state[g]["state"] for g in ("G-M", "G-P", "G-V")},
+           "missing": {g: state[g]["missing"] for g in ("G-M", "G-P", "G-V")},
+           "unresolved": state["unresolved"]})
+    return EXIT_OK if not state["unresolved"] else EXIT_REFUSED
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    """独立评审件登记（写一次即锁；绑定当前 code 集，代码一改即失效）。"""
+    runner = _runner(args)
+    runner.ensure_campaign()
+    try:
+        findings = json.loads(args.findings)
+    except json.JSONDecodeError as exc:
+        _emit({"command": "review", "error": f"--findings 不是合法 JSON：{exc}"})
+        return EXIT_REFUSED
+    try:
+        doc = runner.write_independent_review(
+            verdict=args.verdict, reviewer_lane=args.lane,
+            reviewed_commit=args.reviewed_commit, findings=findings,
+            basis=args.basis)
+    except RunnerError as exc:
+        _emit({"command": "review", "error": str(exc)})
+        return EXIT_REFUSED
+    ok, detail = runner.independent_review()
+    _emit({"command": "review", "ok": ok, "detail": detail,
+           "review_sha256": doc.get("review_sha256"),
+           "verdict": doc.get("verdict"),
+           "reviewed_code_set_sha256": doc.get("reviewed_code_set_sha256")})
+    return EXIT_OK if ok else EXIT_REFUSED
+
+
 def cmd_closeout(args: argparse.Namespace) -> int:
     """零付费结案件：只汇总**已存在**的事实，缺件如实记 NOT_RUN。"""
     runner = _runner(args)
@@ -355,6 +402,7 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     journal = AttemptJournal(rp.rsi_r0_attempts_path())
     latest = journal.latest_by_request()
     posts = sum(int(r.get("attempts_http") or 0) for r in latest.values())
+    recon_ok, recon_detail = runner.reconciled()
 
     missing: list[str] = []
     candidates: list[CalibrationVerdict] = []
@@ -369,6 +417,9 @@ def cmd_closeout(args: argparse.Namespace) -> int:
     if dryrun is None or dryrun.get("posts") not in (0,):
         missing.append("dryrun_report.json(posts=0)")
     if posts:
+        candidates.append(CalibrationVerdict.INVALID_INSTRUMENT)
+    if latest and not recon_ok:
+        # AC31：三方对账有漂移就是仪器问题，不许当成能力结论。
         candidates.append(CalibrationVerdict.INVALID_INSTRUMENT)
     if probe is None:
         missing.append("protocol_probe_report.json")
@@ -396,6 +447,7 @@ def cmd_closeout(args: argparse.Namespace) -> int:
                       "report_sha256": probe.get("report_sha256")}
                      if probe else None),
         "attempts": {"requests": len(latest), "http_posts": posts},
+        "reconcile": recon_detail,
         "evidence_scope": "zero_paid_only" if not posts else "paid",
         "not_run": (["development(three)", "validation(six)"]
                     if probe and probe.get("verdict") == "PROTOCOL_OK"
@@ -485,6 +537,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("snapshot", help="验证快照冻结（T6 交付；零付费）")
     _common(p)
     p.set_defaults(func=cmd_snapshot)
+
+    p = sub.add_parser("gates", help="按可执行门定义现算并落 gates.json（零付费）")
+    _common(p)
+    p.set_defaults(func=cmd_gates)
+
+    p = sub.add_parser("review", help="独立评审件登记（G-P 的 independent_review）")
+    _common(p)
+    p.add_argument("--verdict", required=True, help="评审结论（APPROVE / REQUEST_CHANGES）")
+    p.add_argument("--lane", required=True, help="评审车道/agent 标识")
+    p.add_argument("--reviewed-commit", required=True, help="被评 commit sha")
+    p.add_argument("--findings", default="{}",
+                   help='JSON 计数，如 {"critical":0,"major":0,"minor":7}')
+    p.add_argument("--basis", required=True, help="评审范围与结论出处（≥20 字）")
+    p.set_defaults(func=cmd_review)
 
     p = sub.add_parser("closeout", help="零付费结案件（缺件如实记 NOT_RUN）")
     _common(p)

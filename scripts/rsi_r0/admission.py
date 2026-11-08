@@ -183,15 +183,25 @@ def collect_env_state(env_rc: int) -> dict[str, Any]:
 
 
 def collect_stage_models() -> dict[str, Any]:
-    """解析 stage_models.yaml 的 stage → model_id 映射与文件哈希（只记录，不路由）。"""
+    """解析 stage_models.yaml 的 stage → model_id 映射与文件哈希（只记录，不路由）。
+
+    评审 MINOR-3：同一份 ``stage_models.yaml`` 曾有两个口径——这里记**原始字节**
+    sha256，而 ``model_approval.json`` / ``t4_lock.json`` 记 ``sha256_of(text)``
+    （规范化 JSON 串的哈希）。两个键名都叫 sha256*、值却不同，人/机器对照必误判
+    漂移。现在统一为引擎侧的同一口径，并把口径写进键名。
+    """
     import yaml
 
+    from orchestrator.rsi_r0.contracts import sha256_of
+
     path = REPO_ROOT / "orchestrator" / "gateway" / "stage_models.yaml"
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
     stages = data.get("stage_models", {}) or {}
     return {
         "path": str(path.relative_to(REPO_ROOT)),
-        "sha256": sha256_file(path),
+        # 与 runner.lock_snapshot()/model_approval 同口径：sha256(canonical_json(text))
+        "sha256_of_text": sha256_of(text),
         "schema_version": (data.get("meta") or {}).get("schema_version"),
         "endpoint": (data.get("meta") or {}).get("endpoint"),
         "base_url_env": (data.get("meta") or {}).get("base_url_env"),
@@ -364,6 +374,15 @@ def build_gates(env_rc: int) -> dict[str, Any]:
 
 def run_admission(campaign_id: str, env_rc: int, data_root: str | None = None) -> dict[str, Any]:
     campaign = campaign_root(campaign_id, data_root)
+    # 评审 MAJOR-2 的根因之一：本函数会把**手写** gates.json 写进已经开跑的
+    # campaign，把 `cli gates` 现算出来的那份盖掉。campaign id 不可复用，已有
+    # 产物一律拒覆盖——另开新 id，别改已冻结的实验。
+    for name in ("admission.json", "baseline_manifest.json", "gates.json"):
+        existing = campaign / "protocol" / name
+        if existing.exists():
+            raise AdmissionError(
+                f"campaign 已有 protocol/{name}：campaign id 不可复用，"
+                "拒绝覆盖已冻结产物（如需重开请换新 id）")
     isolation = assert_roots_isolated(campaign)
     ns = scan_namespace_conflicts()
     repo = collect_repo_state()

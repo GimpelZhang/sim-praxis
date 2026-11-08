@@ -332,6 +332,168 @@ class R0Runner:
         verdict = seals.verify_baseline(self.baseline_manifest_path())
         return bool(verdict.get("ok")), verdict
 
+    # ---- T3/T4 验收与独立评审：G-P 的产物条件（评审 MAJOR-2） ----
+    #
+    # 旧版 G-P 只认"有个批准件 + 有个锁"。campaign 自己的 gates.json 却写着
+    # 「T0–T4 验收 / 独立评审」。两边不一致时能变绿的就是可执行的那一边——
+    # 于是没跑控制矩阵、没做 dry-run、没人评审也能放行六次真实发网。以下三个
+    # 事实只从**产物**推，缺件/自哈希不符/哈希对不上当前定义一律为假。
+    def controls_report_path(self) -> Path:
+        return rp.rsi_r0_protocol_dir() / "t3_controls_report.json"
+
+    def dryrun_report_path(self) -> Path:
+        return rp.rsi_r0_closeout_dir() / "dryrun_report.json"
+
+    def review_path(self) -> Path:
+        return rp.rsi_r0_protocol_dir() / "independent_review.json"
+
+    def _self_hashed(self, doc: dict[str, Any], key: str = "report_sha256") -> bool:
+        """产物自哈希：报告里记的哈希必须等于"去掉该键后整份文档"的哈希。"""
+        body = {k: v for k, v in doc.items() if k != key}
+        return doc.get(key) == sha256_of(body)
+
+    def t3_acceptance(self) -> tuple[bool, dict[str, Any]]:
+        """T3 控制矩阵是否真的跑齐：21 负控全检出、6 mutation 全杀、权限全 ok。"""
+        from orchestrator.rsi_r0 import controls as ctl
+        from orchestrator.rsi_r0.instances import PLANS
+
+        p = self.controls_report_path()
+        detail: dict[str, Any] = {"artifact": str(p), "artifact_present": p.exists()}
+        if not p.exists():
+            return False, {**detail, "why": "缺 t3_controls_report.json（控制矩阵没跑过）"}
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, {**detail, "why": f"报告不可解析：{exc}"}
+        neg = doc.get("negatives") or {}
+        mut = doc.get("mutations") or {}
+        pos = doc.get("positives") or {}
+        perm = doc.get("permissions") or {}
+        facts = {
+            "report_passed": doc.get("passed") is True,
+            "report_self_hash": self._self_hashed(doc),
+            "negatives_complete": (int(neg.get("total") or 0) == 21
+                                   and int(neg.get("passed") or 0) == 21
+                                   and not (neg.get("missed") or [])),
+            "mutations_killed": (int(mut.get("total") or 0) == 6
+                                 and int(mut.get("killed") or 0) == 6
+                                 and not (mut.get("survivors") or [])),
+            "positives_passed": (int(pos.get("total") or 0) > 0
+                                 and int(pos.get("passed") or 0)
+                                 == int(pos.get("total") or 0)),
+            "permissions_ok": perm.get("ok") is True,
+            # 报告必须是**当前**判据下的产物：改了判据还拿旧报告过门就是作弊。
+            "criteria_matches_now": doc.get("criteria_hash") == ctl.criteria_hash(PLANS),
+        }
+        return all(facts.values()), {**detail, "facts": facts,
+                                     "negatives": {"total": neg.get("total"),
+                                                   "passed": neg.get("passed")},
+                                     "mutations": {"total": mut.get("total"),
+                                                   "killed": mut.get("killed")}}
+
+    def t4_acceptance(self) -> tuple[bool, dict[str, Any]]:
+        """T4 零付费端到端是否真的跑过：POST=0 且 13 个 slot 全 COMPLETED。"""
+        p = self.dryrun_report_path()
+        detail: dict[str, Any] = {"artifact": str(p), "artifact_present": p.exists()}
+        if not p.exists():
+            return False, {**detail, "why": "缺 dryrun_report.json（零付费端到端没跑过）"}
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, {**detail, "why": f"报告不可解析：{exc}"}
+        slots = doc.get("slots") or []
+        completed = [s for s in slots if s.get("state") == "COMPLETED"]
+        # 期望的是**实例 slot**集合（13 个：P1–P4 + 9 个 E/D/R×dev/v1/v2），
+        # 不是批次个数（10）。旧版拿 len(BATCH_SLOTS)=10 去比 13 个 slot，
+        # 于是真 dry-run 报告永远过不了门，而只有恰好 10 条的假报告能过。
+        expected_slots = {sid for slots_, _cap in BATCH_SLOTS.values() for sid in slots_}
+        observed_ids = [s.get("slot_id") for s in slots]
+        facts = {
+            "report_self_hash": self._self_hashed(doc),
+            "posts_zero": doc.get("posts") == 0,
+            "paid_zero": float(doc.get("paid_usd") or 0.0) == 0.0,
+            "backend_mock": doc.get("simulation_backend") == "mock",
+            "slots_all_completed": (len(slots) == len(expected_slots)
+                                    and len(completed) == len(slots)
+                                    and set(observed_ids) == expected_slots),
+        }
+        return all(facts.values()), {**detail, "facts": facts,
+                                     "slots": {"total": len(slots),
+                                               "completed": len(completed)}}
+
+    def independent_review(self) -> tuple[bool, dict[str, Any]]:
+        """独立评审件：必须绑**当前 code 集**，verdict 必须是 APPROVE。
+
+        绑定 ``code_set_sha256`` 而不是 git commit：评审件自身要提交，提交会改
+        HEAD，绑 commit 就等于一提交就失效。绑代码集则精确表达"评审的是这份实现"，
+        评审后任何代码改动都会让条件立刻变假，必须重新评审。
+        """
+        p = self.review_path()
+        detail: dict[str, Any] = {"artifact": str(p), "artifact_present": p.exists()}
+        if not p.exists():
+            return False, {**detail, "why": "缺 independent_review.json（没有独立评审件）"}
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return False, {**detail, "why": f"评审件不可解析：{exc}"}
+        current = self.lock_snapshot().get("code_set_sha256")
+        facts = {
+            "self_hash": doc.get("review_sha256") == sha256_of(
+                {k: v for k, v in doc.items() if k != "review_sha256"}),
+            "verdict_approve": str(doc.get("verdict", "")).upper() == "APPROVE",
+            "bound_to_current_code": doc.get("reviewed_code_set_sha256") == current,
+            "blocking_findings_zero": int(doc.get("blocking_findings") or 0) == 0,
+        }
+        return all(facts.values()), {**detail, "facts": facts,
+                                     "verdict": doc.get("verdict"),
+                                     "reviewed_code_set_sha256": doc.get("reviewed_code_set_sha256"),
+                                     "current_code_set_sha256": current}
+
+    def write_independent_review(self, *, verdict: str, reviewer_lane: str,
+                                 reviewed_commit: str, findings: dict[str, int],
+                                 basis: str) -> dict[str, Any]:
+        """写一次即锁的独立评审件（G-P 的 independent_review 条件读它）。"""
+        if len((basis or "").strip()) < 20:
+            raise RunnerError("basis 太短：请写清评审车道、被评范围与结论出处（≥20 字）")
+        if not reviewer_lane.strip():
+            raise RunnerError("reviewer_lane 不能为空")
+        code_set = self.lock_snapshot().get("code_set_sha256")
+        blocking = int(findings.get("major", 0)) + int(findings.get("critical", 0))
+        doc = {
+            "schema": "rsi_r0.independent_review.v1",
+            "created_at_utc": self.clock(),
+            "reviewer_lane": reviewer_lane.strip(),
+            "reviewed_commit": reviewed_commit.strip(),
+            "reviewed_code_set_sha256": code_set,
+            "reviewed_lock_sha256": self.verify_lock().get("lock_sha256"),
+            "verdict": verdict.strip().upper(),
+            "findings": {k: int(v) for k, v in findings.items()},
+            "blocking_findings": blocking,
+            "basis": basis.strip(),
+        }
+        doc["review_sha256"] = sha256_of(doc)
+        data = json.dumps(doc, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        path = self.review_path()
+        if path.exists():
+            if path.read_text(encoding="utf-8") != data:
+                raise RunnerError(f"评审件已存在且内容不同，拒绝覆盖：{path}")
+            return json.loads(data)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        return json.loads(data)
+
+    def reconciled(self) -> tuple[bool, dict[str, Any]]:
+        """AC31：账本/attempts/预留三方逐 request 对账（评审 MAJOR-5）。"""
+        from orchestrator.rsi_r0 import reconcile as reconcile_mod
+
+        journal = AttemptJournal(rp.rsi_r0_attempts_path(),
+                                 BudgetReservations(self.caps, rp.rsi_r0_reservations_dir()))
+        journal.recover()
+        return reconcile_mod.reconcile_campaign(
+            rp.rsi_r0_ledger_path(), journal, journal.reservations)
+
     def lock_status(self) -> tuple[bool, dict[str, Any]]:
         try:
             verdict = self.verify_lock()
@@ -410,6 +572,10 @@ class R0Runner:
                       and float(approval_doc.get("usd_ceiling") or 0.0) >= worst_total)
         seals_ok, seal_detail = self.seals_verified()
         lock_ok, lock_detail = self.lock_status()
+        t3_ok, t3_detail = self.t3_acceptance()
+        t4_ok, t4_detail = self.t4_acceptance()
+        review_ok, review_detail = self.independent_review()
+        recon_ok, recon_detail = self.reconciled()
 
         gm_facts = {
             "budget_contract_approved": approval_ok,
@@ -426,6 +592,10 @@ class R0Runner:
             "no_unknown_attempts": bool(pre.get("no_unknown_attempts")),
             "criteria_frozen": bool(pre.get("criteria_matches_now")),
             "lock_present": lock_ok,
+            "t3_acceptance": t3_ok,
+            "t4_acceptance": t4_ok,
+            "independent_review": review_ok,
+            "ledger_attempts_reconciled": recon_ok,
             "detail": {
                 "batch_id": batch_id,
                 "approval": {"path": str(approval), "ok": approval_ok,
@@ -436,6 +606,10 @@ class R0Runner:
                                      "ceiling_covered_by_approval": ceiling_ok},
                 "seals": seal_detail,
                 "lock": lock_detail,
+                "t3_acceptance": t3_detail,
+                "t4_acceptance": t4_detail,
+                "independent_review": review_detail,
+                "reconcile": recon_detail,
             },
         }
         facts["gate_p_passed"] = gates.evaluate_gate("G-P", facts)["passed"]
@@ -456,10 +630,40 @@ class R0Runner:
                                          "present": report is not None,
                                          "report_sha256": (report or {}).get("report_sha256")},
                                      "validation_snapshot": snap_detail}})
+            facts["gate_v_passed"] = gates.evaluate_gate("G-V", facts)["passed"]
         return facts
 
     def require_gate(self, gate: str, *, batch_id: str = "R0-P") -> dict[str, Any]:
         return gates.assert_gate(gate, self.gate_facts(gate, batch_id=batch_id))
+
+    def gates_state(self, *, write: bool = True) -> dict[str, Any]:
+        """由**可执行门定义**生成 ``protocol/gates.json``（评审 MAJOR-2 的第二半）。
+
+        旧版 gates.json 是手写的，写着「G-P 需要 T0–T4 验收 + 独立评审」，而
+        ``gates.py`` 只认五条——两套清单并存时，能变绿的总是宽松的那一套。现在
+        状态与条件清单都从 ``gate_facts`` 现算，手写件一次都留不下。
+        """
+        out: dict[str, Any] = {"schema": "rsi_r0.gates.v1",
+                               "updated_at_utc": self.clock(),
+                               "authority": "R0Runner.gates_state（与 gates.py 同源现算）"}
+        passed_key = {"G-M": "gate_m_passed", "G-P": "gate_p_passed",
+                      "G-V": "gate_v_passed"}
+        for name in ("G-M", "G-P", "G-V"):
+            facts = self.gate_facts(name)
+            verdict = gates.evaluate_gate(name, facts)
+            out[name] = {
+                "state": "PASSED" if verdict["passed"] else "PENDING",
+                "definition_hash": verdict["definition_hash"],
+                "conditions": [{"key": r["key"], "ok": r["ok"],
+                                "description": r["description"]} for r in verdict["conditions"]],
+                "missing": verdict["missing"],
+                "passed_key": passed_key[name],
+            }
+        out["unresolved"] = [f"{g}: {out[g]['missing']}"
+                             for g in ("G-M", "G-P", "G-V") if out[g]["missing"]]
+        if write:
+            _atomic_write_json(rp.rsi_r0_protocol_dir() / "gates.json", out)
+        return out
 
     # ---- dry-run（零付费端到端） ----
     def dry_run(self, *, resume: bool = True, fresh: bool = False) -> dict[str, Any]:
@@ -586,9 +790,30 @@ class R0Runner:
                      "evaluator", "controls", "attempts", "gates", "runner",
                      "reference_analysis", "faults", "image_pin",
                      "budget_contract", "protocol_probe", "probe_tool", "seals",
-                     "develop", "validate"):
+                     "develop", "validate", "reconcile", "cli", "matrix"):
             p = here / f"{name}.py"
-            code[name] = sha256_of(p.read_text(encoding="utf-8"))
+            code[name] = sha256_of(p.read_text(encoding="utf-8")) if p.exists() else None
+        # 评审 MAJOR-1：入口、控制矩阵与**真正决定"发不发、发几次、记到哪"**的
+        # 通用模块也必须是实验定义的一部分。旧版锁只收 rsi_r0/ 包内 19 个文件，
+        # 于是把 router 改成重试 5 次、把 task0 帽改成 60、删掉 cli 里的门检查，
+        # `lock --verify` 一律照样绿——那等于"悄悄改代码检不出"。
+        for dotted, rel in {
+            "gateway.router": ("gateway", "router.py"),
+            "gateway.quota_ledger": ("gateway", "quota_ledger.py"),
+            "common.runtime_paths": ("common", "runtime_paths.py"),
+            "common.fsutil": ("common", "fsutil.py"),
+        }.items():
+            p = here.parent / rel[0] / rel[1]
+            code[dotted] = sha256_of(p.read_text(encoding="utf-8")) if p.exists() else None
+        # 同一逻辑的延伸：**产出"门要读的产物"的脚本**也属于实验定义。
+        # 改了 t3_controls.py 就能让 21/0 的结论凭空成立，改了 admission.py 就能
+        # 重造基线清单；两者若在锁外，"锁校验通过"就管不住门的输入。
+        for dotted, rel in {
+            "scripts.rsi_r0.admission": ("scripts", "rsi_r0", "admission.py"),
+            "scripts.rsi_r0.t3_controls": ("scripts", "rsi_r0", "t3_controls.py"),
+        }.items():
+            p = here.parent.parent.joinpath(*rel)
+            code[dotted] = sha256_of(p.read_text(encoding="utf-8")) if p.exists() else None
         protocol = rp.rsi_r0_protocol_dir()
         tasks_lock = protocol / "t2_tasks_lock.json"
         criteria = protocol / "t3_criteria.json"
@@ -737,6 +962,20 @@ class R0Runner:
                 "old_created_at_utc": old.get("created_at_utc"),
                 "archive": archive.name, "reason": reason.strip(),
                 "new_lock_sha256": new["lock_sha256"]}
+        # 评审 MAJOR-6：取代理由曾经是手写的，于是出现过"声称 cli.py 已入锁、实际
+        # 没入"这种自相矛盾。审计行里的 code 键差异一律**由代码生成**，手写部分
+        # 只表达"为什么"，不表达"改了哪些"。
+        old_code = old.get("code") or {}
+        new_code = new.get("code") or {}
+        added = sorted(set(new_code) - set(old_code))
+        removed = sorted(set(old_code) - set(new_code))
+        changed = sorted(k for k in set(old_code) & set(new_code)
+                         if old_code[k] != new_code[k])
+        line.update({"code_keys_added": added, "code_keys_removed": removed,
+                     "code_keys_changed": changed,
+                     "code_diff_generated_by": "R0Runner.supersede_lock"})
+        line["reason"] = (f"{reason.strip()}；[机生成] code 键 "
+                          f"+{added} ~{changed} -{removed}")
         hist = path.parent / "lock_history.jsonl"
         with open(hist, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")

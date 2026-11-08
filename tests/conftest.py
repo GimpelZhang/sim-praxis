@@ -39,6 +39,24 @@ def _hermetic_phase2_quota_root(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_rsi_r0_env():
+    """RSI-R0 路径 env 全量快照/还原（评审 MINOR-7：跨测试状态泄漏）。
+
+    ``R0Runner._bind_campaign`` 会把 campaign 落成**进程级** env（这是 CLI 的正确
+    行为：路径解析必须只有一个真值）。但测试里它会在函数返回后留下
+    ``SIMPRAXIS_RSI_R0_ROOT/CAMPAIGN``，而各用例的 fixture 只"还原到进入时的值"，
+    于是 A 用例的 campaign 会漏进 B 用例 —— 实测 ``-k rsi_r0`` 三次运行的失败
+    集合各不相同（1/2/3 个）。这里按前缀整体还原，谁也别想漏出去。
+    """
+    prefix = "SIMPRAXIS_RSI_R0"
+    saved = {k: v for k, v in os.environ.items() if k.startswith(prefix)}
+    yield
+    for key in [k for k in os.environ if k.startswith(prefix)]:
+        del os.environ[key]
+    os.environ.update(saved)
+
+
 def pytest_configure(config):
     # Phase 1：真实付费/真实飞书事件测试打 paid 标记，裸跑 pytest 时函数体内自行 skip
     # （需显式 SIMPRAXIS_ALLOW_PAID=1 才触网）；不新增 pytest.ini/setup.cfg/pyproject.toml。

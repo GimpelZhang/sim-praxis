@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -346,3 +347,50 @@ def test_call_record_carries_scene_identity_for_replay(fake_service):
     rec = sess.calls[0]
     assert rec["steps_run"] == 10
     assert len(rec["scene_sha256"]) == 64
+
+
+# ---------------------------------------------------------------------------
+# 产物口径：stage_models.yaml 只允许**一套**哈希约定（评审 MINOR-3）
+# ---------------------------------------------------------------------------
+
+def test_admission_records_stage_models_hash_in_the_engine_convention():
+    """admission 记录的口径必须与 model_approval/t4_lock 相同，且键名写明口径。
+
+    旧版这里记原始字节 sha256（键名 ``sha256``），而引擎侧记
+    ``sha256_of(text)``——同一份文件两个值、两个都叫"sha256"，对照必误判漂移。
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from orchestrator.rsi_r0.contracts import sha256_of
+
+    repo = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "rsi_r0_admission_probe", repo / "scripts" / "rsi_r0" / "admission.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    doc = mod.collect_stage_models()
+    text = (repo / "orchestrator" / "gateway" / "stage_models.yaml").read_text(
+        encoding="utf-8")
+    hash_keys = sorted(k for k in doc if "sha256" in k)
+    assert hash_keys == ["sha256_of_text"], hash_keys
+    assert doc["sha256_of_text"] == sha256_of(text)
+
+
+def test_admission_refuses_to_overwrite_a_frozen_campaign(tmp_path, monkeypatch):
+    """campaign id 不可复用：T0 的手写 gates.json 不许盖掉已开跑 campaign 的机算件。"""
+    import importlib.util
+
+    repo = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(
+        "rsi_r0_admission_probe2", repo / "scripts" / "rsi_r0" / "admission.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    monkeypatch.delenv("SIMPRAXIS_DATA_ROOT", raising=False)
+    campaign = tmp_path / mod.R0_FAMILY_DIRNAME / "frozen"
+    (campaign / "protocol").mkdir(parents=True)
+    (campaign / "protocol" / "gates.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(mod.AdmissionError, match="不可复用"):
+        mod.run_admission("frozen", 0, data_root=str(tmp_path))
