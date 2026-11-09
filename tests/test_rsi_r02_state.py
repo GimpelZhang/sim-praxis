@@ -184,6 +184,28 @@ def test_campaign_pause_requires_resolution_to_clear(ctx):
         "provider_log")
 
 
+def test_campaign_pause_writes_decision_event_before_state(ctx):
+    """评审 M4：暂停必须先把决策事件落 journal，再改状态。
+
+    结案的 ``codes`` 只数 journal 事件；暂停若不写事件，「运行时因污染暂停」
+    在生产里永远不会被判成 CONTAMINATED（状态文件不进 codes）。顺序也必须
+    是 journal 先行——写事件失败就不得声称已暂停（fail-closed）。
+    """
+    camp = ST.CampaignState(ctx)
+    camp.start()
+    camp.pause(code=ST.EV_CONTAMINATION, reason="fixture:污染暂停")
+    j = ST.Journal(ctx)
+    decisions = [e for e in j.events
+                 if e.get("kind") == "decision" and e.get("action") == "pause"]
+    assert len(decisions) == 1
+    assert decisions[0]["code"] == ST.EV_CONTAMINATION
+    assert decisions[0]["ok"] is False
+    assert [e["code"] for e in decisions] == [ST.EV_CONTAMINATION]
+    assert ST.CampaignState(ctx).paused
+    with pytest.raises(ST.StateError):
+        camp.pause(code=ST.EV_UNKNOWN_SENT, reason="   ")
+
+
 def test_campaign_close_blocks_restart(ctx):
     camp = ST.CampaignState(ctx)
     camp.close()

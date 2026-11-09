@@ -235,6 +235,43 @@ def test_cli_run_without_execute_paid_is_refused(ctx, capsys):
     assert "--execute-paid" in out["refused"]
 
 
+def test_cli_run_refuses_paid_post_without_frozen_lock(ctx, capsys):
+    """AC21：未冻结（或已漂移）的 LOCK 一律拒绝付费 POST，早于任何 G-P/分词器检查。"""
+    rc = CI.main(["--campaign-id", "r02_test", "run", "--phase", "dev",
+                  "--execute-paid"])
+    assert rc == CI.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert "FREEZE_INVALID" in out["refused"]
+    assert "FINAL_LOCK_MISSING" in out["refused"]
+    # 评审 M6：还没开跑的 campaign 被拒不是「仪器失效」，不得写 FREEZE_INVALID
+    assert "已记 EV_FREEZE_INVALID" not in out["refused"]
+    assert not any(e.get("code") == ST.EV_FREEZE_INVALID
+                   for e in ST.Journal(ctx).events)
+
+
+def test_cli_run_records_freeze_invalid_once_trials_started(ctx, capsys):
+    """评审 M6：跑到一半实现漂移 ⇒ 必须留下 EV_FREEZE_INVALID 事件。
+
+    否则结案只能看到「没跑完」（INCOMPLETE），仪器失效被记成进度不足。
+    """
+    _prepare(ctx, SG.dev_specs())
+    store = ST.StateStore(ctx)
+    spec = SG.dev_specs()[0]
+    st = store.start(trial_id=spec.trial_id, instance_id=spec.instance_id,
+                     family=spec.family, phase=spec.phase,
+                     slot_ids=[], post_cap=spec.post_cap)
+    store.transition(st, status=ST.TRIAL_RUNNING)
+    rc = CI.main(["--campaign-id", "r02_test", "run", "--phase", "dev",
+                  "--execute-paid"])
+    assert rc == CI.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert "已记 EV_FREEZE_INVALID" in out["refused"]
+    ev = [e for e in ST.Journal(ctx).events
+          if e.get("code") == ST.EV_FREEZE_INVALID]
+    assert len(ev) == 1 and ev[0]["ok"] is False
+    assert ev[0]["action"] == "freeze"
+
+
 def test_cli_closeout_main_end_to_end(ctx, capsys):
     _prepare(ctx, SG.dev_specs())
     _dev_pass(ctx)

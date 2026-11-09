@@ -29,8 +29,8 @@ EXIT_REFUSED = 2
 
 #: 这些终态之后仍可继续跑同阶段其他 trial（§10.2 CONTINUE_OTHERS）。
 CONTINUE_STATUSES = frozenset({
-    ST.TRIAL_SUBMITTED, ST.TRIAL_VALID_FAIL_CAP, ST.TRIAL_BLOCKED,
-    ST.TRIAL_BLOCKED_INPUT_LIMIT, ST.TRIAL_ASSISTED,
+    ST.TRIAL_SUBMITTED, ST.TRIAL_VALID_FAIL_CAP, ST.TRIAL_VALID_FAIL_POLICY,
+    ST.TRIAL_BLOCKED, ST.TRIAL_BLOCKED_INPUT_LIMIT, ST.TRIAL_ASSISTED,
 })
 #: 这些终态/停因必须立刻停止本阶段（不自动重启、不补考）。
 STOP_STATUSES = frozenset({
@@ -380,10 +380,42 @@ def _cmd_clear_pause(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _record_freeze_invalid(ctx: C.CampaignContext,
+                           problems: Sequence[str]) -> str:
+    """LOCK 漂移要留下 ``EV_FREEZE_INVALID`` 证据（评审 M6）。
+
+    否则「跑到一半实现被改」时 CLI 只抛错、结案看不到任何冻结事件，测量轴
+    会落 INCOMPLETE 而不是 INVALID_INSTRUMENT——仪器失效被记成「没跑完」。
+    只在**已经开过 trial** 时记：还没开跑就被拒不是样本仪器失效，写进去反而
+    把「未启动」伪装成「仪器坏」，两轴都失真。
+    """
+    trials_dir = ctx.relative("trials")
+    started = trials_dir.is_dir() and any(trials_dir.glob("*/state.json"))
+    if not started:
+        return ""
+    try:
+        ST.Journal(ctx).append(
+            kind="decision", trial_id="campaign", action="freeze", ok=False,
+            code=ST.EV_FREEZE_INVALID,
+            message=f"FREEZE_INVALID: {list(problems)[:3]}")
+    except (OSError, ValueError, ST.StateError) as exc:
+        return f"（冻结失效事件落盘失败：{exc}）"
+    return "（已记 EV_FREEZE_INVALID 事件）"
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     ctx = _ctx(args)
     if not args.execute_paid:
         raise CliError("run 会真实付费：必须显式 --execute-paid（并满足 G-P/分词器）")
+    # AC21：先冻结再模型请求——最终 LOCK 缺件/漂移（任一实现或共享依赖改动）
+    # 一律拒绝付费 POST，不给「自觉遵守」留口子。
+    from orchestrator.rsi_r02 import lock as LK
+
+    verdict = LK.verify(ctx)
+    if not verdict["ok"]:
+        note = _record_freeze_invalid(ctx, verdict["problems"])
+        raise CliError("FREEZE_INVALID：最终 LOCK 未冻结或实现/证据已漂移 "
+                       f"{verdict['problems'][:3]}；拒绝付费 POST{note}")
     specs = SG.specs_for(args.phase)
     store = ST.StateStore(ctx)
     pending = SG.pending_trials(specs, store)

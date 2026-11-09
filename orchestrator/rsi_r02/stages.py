@@ -57,12 +57,14 @@ def dev_specs() -> "tuple[TrialSpec, ...]":
 
 def validation_specs() -> "tuple[TrialSpec, ...]":
     specs = []
-    for instance_id in VALIDATION_ORDER:
+    for order, instance_id in enumerate(VALIDATION_ORDER, start=1):
         if instance_id not in TC.VALIDATION_IDS:
             raise StageError(f"未知验证实例：{instance_id}")
+        # 槽 id 是 **分配表序号**（`{family}-val-{order}-{i:02d}`，T0 build_slots 冻结），
+        # 不是实例名后缀：D-val-1 是第 2 个验证实例 ⇒ 槽前缀 `D-val-2-`。
         specs.append(TrialSpec(trial_id=instance_id, instance_id=instance_id,
                                family=_family_of(instance_id), phase="validation",
-                               slot_prefix=f"{instance_id}-"))
+                               slot_prefix=f"{_family_of(instance_id)}-val-{order}-"))
     return tuple(specs)
 
 

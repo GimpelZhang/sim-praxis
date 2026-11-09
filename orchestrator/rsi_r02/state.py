@@ -48,6 +48,10 @@ TRIAL_READY = "READY"
 TRIAL_RUNNING = "RUNNING"
 TRIAL_SUBMITTED = "SUBMITTED"
 TRIAL_VALID_FAIL_CAP = "VALID_FAIL_CAP"
+#: §10.2「越权被正确拦截 ⇒ VALID_FAIL_POLICY，停该 trial」：有效配置下的策略
+#: 失败，不是仪器失效、也不是泄密（隔离未失效）。2026-11-10 T3 评审 H3 补齐：
+#: 处置矩阵早在 §10.2 有这一行，状态机却缺对应终态，导致结案侧无法如实落账。
+TRIAL_VALID_FAIL_POLICY = "VALID_FAIL_POLICY"
 TRIAL_BLOCKED_INPUT_LIMIT = "BLOCKED_INPUT_LIMIT"
 TRIAL_BLOCKED = "BLOCKED"
 TRIAL_TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
@@ -56,9 +60,9 @@ TRIAL_ABORTED = "ABORTED"
 TRIAL_ASSISTED = "ASSISTED"
 TRIAL_INVALID = "INVALID"
 TRIAL_TERMINAL = frozenset({
-    TRIAL_SUBMITTED, TRIAL_VALID_FAIL_CAP, TRIAL_BLOCKED_INPUT_LIMIT,
-    TRIAL_BLOCKED, TRIAL_TOOL_OUTCOME_UNKNOWN, TRIAL_UNKNOWN_SENT,
-    TRIAL_ABORTED, TRIAL_ASSISTED, TRIAL_INVALID})
+    TRIAL_SUBMITTED, TRIAL_VALID_FAIL_CAP, TRIAL_VALID_FAIL_POLICY,
+    TRIAL_BLOCKED_INPUT_LIMIT, TRIAL_BLOCKED, TRIAL_TOOL_OUTCOME_UNKNOWN,
+    TRIAL_UNKNOWN_SENT, TRIAL_ABORTED, TRIAL_ASSISTED, TRIAL_INVALID})
 
 # ---- campaign 状态 ----
 CAMP_NOT_STARTED = "NOT_STARTED"
@@ -553,9 +557,19 @@ class CampaignState:
         self._save()
 
     def pause(self, *, code: str, reason: str) -> None:
-        """全局暂停：已占槽保留，预留保留，未发槽一律不得发送。"""
+        """全局暂停：已占槽保留，预留保留，未发槽一律不得发送。
+
+        评审 M4：暂停**必须在 journal 留一条 decision 事件**。closeout 的
+        ``codes`` 只数 journal 事件，若只写 ``campaign_state.json``，「实际泄密
+        ⇒ 暂停 ⇒ CONTAMINATED」这条链在真实运行里永远不可达，只有 fixture 能
+        造出污染判定——安全轴形同装饰。事件先落盘再改状态：日志失败时宁可
+        暂停不生效（fail-closed），也不留下「已暂停但无证据」的悬空状态。
+        """
         if not reason.strip():
             raise StateError("全局暂停必须写明原因")
+        Journal(self.ctx).append(kind="decision", trial_id="campaign",
+                                 action="pause", ok=False, code=code,
+                                 message=str(reason)[:500])
         self.doc["pause"] = {"code": code, "reason": str(reason)[:500],
                              "at_utc": utc_now_iso_z()}
         self.doc["status"] = CAMP_PAUSED

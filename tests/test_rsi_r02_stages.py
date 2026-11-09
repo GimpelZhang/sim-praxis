@@ -36,6 +36,21 @@ def test_validation_specs_fixed_six():
     assert all(s.instance_id in TC.VALIDATION_IDS for s in specs)
 
 
+def test_validation_slot_prefix_uses_allocation_order():
+    """槽 id 是分配表序号（T0 build_slots：`{family}-val-{order}-{i:02d}`）。
+
+    回归点：D-val-1 是第 2 个验证实例，其槽前缀必须是 `D-val-2-`；若按实例名后缀
+    拼成 `D-val-1-`，`slot_ids_for` 会拿到 0 槽并拒绝整阶段（T3 控制实跑暴露）。
+    """
+    specs = SG.validation_specs()
+    assert [s.slot_prefix for s in specs] == [
+        "E-val-1-", "D-val-2-", "R-val-3-", "E-val-4-", "D-val-5-", "R-val-6-"]
+    # 每个前缀必须与分配表里的 24 个槽 id 严格对应（与 t0_baseline.build_slots 同构）
+    for order, spec in enumerate(specs, start=1):
+        expected = [f"{spec.family}-val-{order}-{i:02d}" for i in range(1, 25)]
+        assert [e for e in expected if e.startswith(spec.slot_prefix)] == expected
+
+
 def test_specs_for_rejects_unknown_phase():
     with pytest.raises(SG.StageError):
         SG.specs_for("pilot")

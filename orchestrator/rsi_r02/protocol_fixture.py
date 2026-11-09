@@ -1,0 +1,408 @@
+"""RSI-R0.2 协议 fixture 与协议检查器（计划 §6.1，T3 预演 / T4 准入）。
+
+两条 fixture（P1/P2）各自是一条**四轮真实链**：preregister → run_experiment →
+analyze → submit。它们只使用公开信息（复用 E-dev 的公开场景参数与动作面；
+**不读**其私有 tolerance / fault / reference_gains），判据是这里写死的协议
+检查器，不是任务判据。
+
+**nonce 绑定的通道**：``analyze`` 源码由候选写，必须在 stdout 打印一行
+``PROTO_STAT <json>``；该行经工具回包 ``analysis.stdout_preview`` 回到候选，
+候选在 ``submit`` 的原始 JSON 里逐字引用 ``nonce`` 与该统计值。因此
+
+* 换链、换 nonce 后静态复读旧回复必然对不上（AC22「不能预先写下一轮消息」）；
+* 检查器既看原始回复文本，也**独立重算**统计（不信自述）。
+
+两条 fixture 的 nonce 由 campaign id + fixture id + slot 确定性派生并记录在
+``protocol_contract.json``：它是反静态复读标记，不是能力样本。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+from orchestrator.rsi_r01 import schemas as S
+from orchestrator.rsi_r02 import candidate as CD
+from orchestrator.rsi_r02 import messages as M
+
+SCHEMA_FIXTURE = "simpraxis.rsi_r02.protocol_fixture.v1"
+SCHEMA_VERDICT = "simpraxis.rsi_r02.protocol_verdict.v1"
+
+FIXTURE_IDS = ("P1", "P2")
+ACTION_ORDER = ("preregister", "run_experiment", "analyze", "submit")
+STAT_KEY = "max_abs_x"
+PROTO_LINE = "PROTO_STAT "
+
+#: 两条链各自的实验参数（公开、可核验；两链不同以证明结果非静态复读）。
+FIXTURE_PARAMS: "dict[str, dict[str, Any]]" = {
+    "P1": {"kp": 60.0, "kd": 8.0, "max_force": 30.0, "steps": 300},
+    "P2": {"kp": 140.0, "kd": 15.0, "max_force": 70.0, "steps": 420},
+}
+
+PROTO_SOURCE_TEMPLATE = '''\
+import glob, json
+NONCE = {nonce!r}
+docs = []
+for path in sorted(glob.glob("/data/run_*.json")):
+    with open(path, "r", encoding="utf-8") as fh:
+        docs.append(json.load(fh))
+stat = None
+run_ids = []
+for doc in docs:
+    run_ids.append(doc["run_id"])
+    if doc.get("x"):
+        value = max(abs(v) for v in doc["x"])
+        stat = value if stat is None else max(stat, value)
+payload = {{"nonce": NONCE, "stat": stat, "run_ids": sorted(run_ids)}}
+with open("/out/analysis.json", "w", encoding="utf-8") as fh:
+    json.dump(payload, fh, sort_keys=True)
+print("{line}" + json.dumps(payload, sort_keys=True))
+'''
+
+
+class ProtocolError(RuntimeError):
+    """fixture 配置或协议前提被破坏（不是模型能力结论）。"""
+
+
+def derive_nonce(*, campaign_id: str, fixture_id: str, slot_id: str) -> str:
+    """确定性 nonce：同一 (campaign, fixture, slot) 可被第三方逐字重算。"""
+    raw = f"{campaign_id}:protocol:{fixture_id}:{slot_id}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class ProtocolFixture:
+    fixture_id: str
+    instance_id: str
+    slot_id: str
+    nonce: str
+    params: Mapping[str, Any]
+    stat_key: str = STAT_KEY
+
+    def __post_init__(self) -> None:
+        if self.fixture_id not in FIXTURE_IDS:
+            raise ProtocolError(f"未知 fixture：{self.fixture_id!r}")
+        if not self.nonce:
+            raise ProtocolError("nonce 不能为空")
+
+    def as_dict(self) -> "dict[str, Any]":
+        return {"schema": SCHEMA_FIXTURE, "fixture_id": self.fixture_id,
+                "instance_id": self.instance_id, "slot_id": self.slot_id,
+                "nonce": self.nonce, "params": dict(self.params),
+                "stat_key": self.stat_key,
+                "action_order": list(ACTION_ORDER),
+                "analyze_line": PROTO_LINE,
+                "note": "nonce 为反静态复读标记（确定性派生），非能力样本"}
+
+    def task_doc(self) -> "dict[str, Any]":
+        """候选可见的公开任务文档（协议合同放在 interface 里，逐字可见）。"""
+        return {
+            "schema": "simpraxis.rsi_r02.protocol_task.v1",
+            "instance_id": self.instance_id,
+            "family": "E",
+            "public": {
+                "goal": (f"协议准入 fixture {self.fixture_id}：按四动作链完成一次公开实验，"
+                         f"不得跳步或重排"),
+                "interface": {
+                    "kind": "push_control",
+                    "keys": sorted(self.params),
+                    "limits": {"kp": [0, 5000], "kd": [0, 500],
+                               "max_force": [0, 500],
+                               "steps": [1, 3000]},
+                    "steps_max": 3000,
+                    "protocol": {
+                        "fixture_id": self.fixture_id,
+                        "nonce": self.nonce,
+                        "action_order": list(ACTION_ORDER),
+                        "stat_key": self.stat_key,
+                        "analyze_line": PROTO_LINE,
+                        "bind": ("analyze 源码必须打印 PROTO_STAT <json>；submit 必须"
+                                 "逐字引用 nonce、STDOUT 里的 stat 与本轮 run_id/analysis_id"),
+                    },
+                },
+            },
+        }
+
+
+def make_fixture(*, campaign_id: str, fixture_id: str, slot_id: str,
+                 instance_id: str = "E-dev") -> ProtocolFixture:
+    params = FIXTURE_PARAMS[fixture_id]
+    return ProtocolFixture(fixture_id=fixture_id, instance_id=instance_id,
+                           slot_id=slot_id,
+                           nonce=derive_nonce(campaign_id=campaign_id,
+                                              fixture_id=fixture_id,
+                                              slot_id=slot_id),
+                           params=dict(params))
+
+
+def analyze_source(fixture: ProtocolFixture) -> str:
+    return PROTO_SOURCE_TEMPLATE.format(nonce=fixture.nonce, line=PROTO_LINE)
+
+
+# ---------------------------------------------------------------------------
+# 确定性 actor（T3 预演用；T4 换成真实模型，检查器不变）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProtocolStub:
+    """四动作确定性 actor：只读渲染后的工具结果，逐轮绑定本轮真实 id。"""
+
+    fixture: ProtocolFixture
+    usage: Mapping[str, Any] = field(
+        default_factory=lambda: {"in": 1000, "out": 200,
+                                 "cache_read": 0, "cache_create": 0})
+    requests: "list[M.Request]" = field(default_factory=list)
+    results: "list[dict[str, Any]]" = field(default_factory=list)
+    decisions: "list[dict[str, Any]]" = field(default_factory=list)
+
+    def __call__(self, request: M.Request) -> CD.Reply:
+        self.requests.append(request)
+        n = _turn_count(request.messages)
+        if n > len(self.results):
+            last = request.messages[-1] if request.messages else {}
+            if last.get("role") != "user":
+                raise ProtocolError("轮次计数与消息结构不符")
+            self.results.append(json.loads(str(last.get("content") or "")))
+        if n != len(self.results):
+            raise ProtocolError(f"轮次计数漂移：turns={n} results={len(self.results)}")
+        text = json.dumps(self._decide(), ensure_ascii=False, sort_keys=True)
+        self.decisions.append({"turn": n, "text_sha256":
+                               hashlib.sha256(text.encode()).hexdigest()[:16]})
+        return CD.Reply(text=text, capture={
+            "usage": dict(self.usage), "attempts_http": 1, "stop_reason": "stop",
+            "provider_model": "protocol_stub",
+            "provider_request_id": f"proto-{n}",
+            "body_sha256": "0" * 64, "content_bytes": len(text),
+            "producer": "protocol_stub_control"})
+
+    def _decide(self) -> "dict[str, Any]":
+        res = self.results
+        if not res:
+            return {"schema": S.SCHEMA_ACTION, "action": "preregister",
+                    "plan": {"question": f"协议 fixture {self.fixture.fixture_id}",
+                             "h": 1, "cells": [dict(self.fixture.params)],
+                             "metric": "final_distance_m",
+                             "formula_version": "rsi_r01.push.v1",
+                             "delta": float(S.DELTA),
+                             "censoring_rule": "不适用",
+                             "analysis_procedure": "单次公开实验 + stdout 统计",
+                             "stop_rule": "四动作链完成即停"}}
+        if res[0].get("action") != "preregister" or not res[0].get("ok"):
+            raise ProtocolError(f"登记未成功：{res[0]}")
+        run = [r for r in res if r.get("action") == "run_experiment" and r.get("ok")]
+        if not run:
+            return {"schema": S.SCHEMA_ACTION, "action": "run_experiment",
+                    "params": dict(self.fixture.params)}
+        analyzed = [r for r in res if r.get("action") == "analyze" and r.get("ok")]
+        if not analyzed:
+            return {"schema": S.SCHEMA_ACTION, "action": "analyze",
+                    "source": analyze_source(self.fixture),
+                    "run_ids": [str(run[0]["run_id"])]}
+        payload = _parse_proto_line(str((analyzed[0].get("analysis") or {})
+                                        .get("stdout_preview") or ""))
+        return {"schema": S.SCHEMA_ACTION, "action": "submit",
+                "claim": S.ClaimStatus.SUPPORTED,
+                "run_ids": [str(run[0]["run_id"])],
+                "analysis_ids": [str((analyzed[0].get("analysis") or {})
+                                     .get("analysis_id"))],
+                "mean_effect": None, "z": None,
+                "nonce": self.fixture.nonce,
+                "stat": payload.get("stat"),
+                "stat_key": self.fixture.stat_key}
+
+
+def _turn_count(messages: Sequence[Mapping[str, str]]) -> int:
+    n = 0
+    for m in messages:
+        if m.get("role") == "assistant":
+            n += 1
+        elif (m.get("role") == "user"
+              and str(m.get("content") or "").startswith("### 更早轮次")):
+            n += sum(1 for line in str(m["content"]).splitlines()
+                     if line.startswith("- "))
+    return n
+
+
+def _parse_proto_line(stdout: str) -> "dict[str, Any]":
+    for line in stdout.splitlines():
+        if line.startswith(PROTO_LINE):
+            try:
+                doc = json.loads(line[len(PROTO_LINE):])
+            except ValueError as exc:
+                raise ProtocolError(f"PROTO_STAT 行不是合法 JSON：{exc}") from exc
+            if not isinstance(doc, dict):
+                raise ProtocolError("PROTO_STAT 必须是 JSON 对象")
+            return doc
+    raise ProtocolError("stdout 里没有 PROTO_STAT 行")
+
+
+# ---------------------------------------------------------------------------
+# 协议检查器（T4 对真实模型用同一个）
+# ---------------------------------------------------------------------------
+
+
+def recovered_runs(trusted_dir: "str | Path", trial_id: str,
+                   problems: "list[str] | None" = None) -> "list[Any]":
+    """已终态 trial 的 run 记录复原（重跑幂等；评审 H4 重跑暴露的缺口）。
+
+    恢复语义下 ``TrialRunner.runs`` 是空的（本进程没跑物理动作），但观测原件
+    与 manifest 仍躺在 ``observations/trusted/<instance>/``。这里**只**重建
+    定位信息（run_id + manifest 原文），统计重算仍由 :func:`_host_stat` 经
+    ``store.load_trusted`` 逐件验 hash/trial/instance——重建不降低任何校验。
+
+    ``cell`` 从受信 manifest 原样取回；manifest 没有该键时按 **manifest 里的
+    params + instance_id** 用与真实分派同一条 ``trial.cell_of`` 归类复原——
+    恒置 None 会让 R 族独立 oracle 在重跑时整族跳过（评审 LOW-1：那个分支
+    看似复原、实际空转）。读不了的 manifest 不静默跳过（评审 N3）：
+    给 ``problems`` 就逐条记账，不给就直接抛。
+    """
+    from orchestrator.rsi_r01 import task_contract as TC
+    from orchestrator.rsi_r01 import trial as TRIAL
+    from orchestrator.rsi_r01.trial import RunRecord
+
+    def _cell(doc: Mapping[str, Any], name: str) -> Any:
+        # manifest 自带 cell 就原样用（E/D 族是参数字典，R 族是格标签），
+        # 不做任何类型转换。
+        if doc.get("cell") is not None:
+            return doc["cell"]
+        params = doc.get("params")
+        inst_id = doc.get("instance_id")
+        if not isinstance(params, Mapping) or not inst_id:
+            return None
+        try:
+            return TRIAL.cell_of(TC.get(str(inst_id)), params)
+        except Exception as exc:  # noqa: BLE001 —— 含 TrialRejected/KeyError
+            if problems is None:
+                raise ProtocolError(
+                    f"清单 cell 不可复原：{name}: {exc}") from exc
+            problems.append(f"CELL_UNRESOLVED: {name}: {exc}")
+            return None
+
+    out: "list[Any]" = []
+    for path in sorted(Path(trusted_dir).glob("run_*.manifest.json")):
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            if problems is None:
+                raise ProtocolError(f"清单不可读：{path.name}: {exc}") from exc
+            problems.append(f"MANIFEST_UNREADABLE: {path.name}: {exc}")
+            continue
+        if str(doc.get("trial_id")) != str(trial_id):
+            continue
+        out.append(RunRecord(run_id=str(doc.get("run_id")
+                                       or path.name.split(".")[0]),
+                             cell=_cell(doc, path.name), params={}, manifest=doc,
+                             summary={}))
+    return out
+
+
+def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
+               trial: Any) -> "dict[str, Any]":
+    """按冻结顺序检查四动作链 + nonce/统计绑定；统计由宿主独立重算。"""
+    problems: "list[str]" = []
+    evidence: "dict[str, Any]" = {"fixture_id": fixture.fixture_id,
+                                  "nonce": fixture.nonce}
+
+    results = [e for e in events
+               if e.get("kind") == "result" and e.get("action") == "post"]
+    texts = [str((e.get("payload") or {}).get("assistant_text") or "")
+             for e in results]
+    acts = [e for e in events
+            if e.get("kind") == "result" and e.get("ok") is True
+            and e.get("action") not in (None, "post")]
+    evidence["n_posts"] = len(results)
+    evidence["actions"] = [str(a.get("action")) for a in acts]
+    if len(results) != 4:
+        problems.append(f"POST 数必须是 4，实际 {len(results)}")
+    if tuple(evidence["actions"][:4]) != ACTION_ORDER:
+        problems.append(f"动作顺序不符：{evidence['actions']} != {list(ACTION_ORDER)}")
+
+    parsed: "list[dict[str, Any]]" = []
+    for text in texts:
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            problems.append("回复不是合法 JSON")
+            parsed.append({})
+            continue
+        parsed.append(doc if isinstance(doc, dict) else {})
+    by_action = {str(d.get("action")): d for d in parsed}
+
+    analyze = by_action.get("analyze") or {}
+    source = str(analyze.get("source") or "")
+    evidence["analyze_has_nonce"] = fixture.nonce in source
+    if fixture.nonce not in source:
+        problems.append("analyze 源码没有逐字包含 nonce")
+
+    stats = {}
+    analysis_id = None
+    stdout = ""
+    for evt in events:
+        if evt.get("kind") != "result" or evt.get("action") != "analyze":
+            continue
+        pay = evt.get("payload") or {}
+        if isinstance(pay, Mapping) and pay.get("stdout_preview"):
+            stdout = str(pay["stdout_preview"])
+        analysis_id = str((pay or {}).get("analysis_id") or "") or analysis_id
+    if not stdout:
+        # journal 里没有分析回包时，退回读 trial 自己的事件记录（同源）
+        for ev in getattr(trial, "events", []):
+            if ev.get("action") == "analyze" and ev.get("analysis"):
+                stdout = str(ev["analysis"].get("stdout_preview") or "")
+                analysis_id = str(ev["analysis"].get("analysis_id") or "") \
+                    or analysis_id
+    try:
+        payload = _parse_proto_line(stdout)
+    except ProtocolError as exc:
+        problems.append(str(exc))
+        payload = {}
+    evidence["proto_payload"] = payload
+    evidence["analysis_id"] = analysis_id
+    if payload.get("nonce") != fixture.nonce:
+        problems.append("PROTO_STAT 的 nonce 与 fixture 不符")
+
+    submit = by_action.get("submit") or {}
+    run_ids = list(submit.get("run_ids") or [])
+    analysis_ids = list(submit.get("analysis_ids") or [])
+    evidence["submit_run_ids"] = run_ids
+    evidence["submit_analysis_ids"] = analysis_ids
+    if str(submit.get("nonce")) != fixture.nonce:
+        problems.append("submit 没有逐字引用 nonce")
+    if run_ids != list(payload.get("run_ids") or []):
+        problems.append("submit 的 run_id 与分析产物不一致")
+    if analysis_id is None or analysis_ids != [analysis_id]:
+        problems.append("submit 的 analysis_id 与本轮分析不符")
+    if submit.get("stat") is None or submit.get("stat") != payload.get("stat"):
+        problems.append("submit 的 stat 与 STDOUT 统计不一致")
+
+    # 宿主独立重算统计（不信自述）
+    expected = _host_stat(trial, run_ids, key=fixture.stat_key)
+    evidence["host_stat"] = expected
+    if expected is None:
+        problems.append("宿主无法重算统计（缺可信观测）")
+    elif payload.get("stat") is None or abs(float(payload["stat"]) - expected) > 1e-12:
+        problems.append(f"统计与分析产物不符：{payload.get('stat')} != {expected}")
+
+    return {"schema": SCHEMA_VERDICT, "fixture_id": fixture.fixture_id,
+            "ok": not problems, "problems": problems, "evidence": evidence}
+
+
+def _host_stat(trial: Any, run_ids: Sequence[str], *, key: str) -> "float | None":
+    if key != STAT_KEY:
+        raise ProtocolError(f"未知统计量 {key!r}")
+    want = set(run_ids)
+    best = None
+    for rec in getattr(trial, "runs", []):
+        if want and rec.run_id not in want:
+            continue
+        doc = trial.store.load_trusted(
+            rec.run_id, rec.manifest,
+            expected_trial=getattr(trial, "trial_id", None),
+            expected_instance=getattr(getattr(trial, "instance", None),
+                                      "instance_id", None))
+        value = max(abs(float(v)) for v in doc["x"])
+        best = value if best is None else max(best, value)
+    return None if best is None else float(best)

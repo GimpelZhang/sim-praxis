@@ -243,6 +243,17 @@ def test_ac_p281_6_04_same_code_path():
 
     三处调的是**同一个函数**，谁都没有另写一条「干跑专用」的流水线——这才是
     AC-04 要的实质，而不是「调用点只有两个」这个会随新调用方失效的计数。
+
+    2026-11-10 R0.2 T3「锁内适配」：新增第 4 个**合法**调用点
+    ``scripts/rsi_r02/t3_control.py``（同路径控制脚本：只注入确定性 ModelStub，
+    走的就是真流水线，绝不传 ``dry_run=True``）。集合显式登记它。
+
+    措辞边界（评审 LOW）：扫描按 ``ast.Attribute.attr == "run_trial"`` 的**名字**
+    匹配。上面三处调的是 ``phase281/trial_harness.run_trial``；第 4 处调的是
+    ``orchestrator.rsi_r02.cli.run_trial``（另一个函数，没有 ``dry_run`` 形参），
+    所以成立的表述是「同名调用点 + 全仓恰一处 ``dry_run=True``」，对第 4 点
+    **不**宣称「同一个函数」。实质断言一字未松，并新增逐调用断言禁止该点传
+    ``dry_run=True``。
     """
     sources = [p for p in (REPO_ROOT / "orchestrator").rglob("*.py")]
     sources += [p for p in (REPO_ROOT / "scripts").rglob("*.py")]
@@ -258,6 +269,7 @@ def test_ac_p281_6_04_same_code_path():
         "orchestrator/benchmark/phase281/candidate_controls.py",
         "orchestrator/benchmark/phase281/dryrun.py",
         "scripts/benchmark/phase281_run_trial.py",
+        "scripts/rsi_r02/t3_control.py",   # R0.2 T3 同路径控制（零付费替身，非干跑）
     }, callers
 
     dry_calls = callers["orchestrator/benchmark/phase281/dryrun.py"]
@@ -273,6 +285,10 @@ def test_ac_p281_6_04_same_code_path():
 
     # 候选级负例驱动器跑的是**真**流水线：不许偷偷用 dry_run 换掉网关
     for call in callers["orchestrator/benchmark/phase281/candidate_controls.py"]:
+        assert _dry_run_flag(call) in (None, False)
+
+    # R0.2 T3 控制脚本：只替换决策源，不许传 dry_run=True
+    for call in callers["scripts/rsi_r02/t3_control.py"]:
         assert _dry_run_flag(call) in (None, False)
 
     # 全仓只有上面这一处 dry_run=True

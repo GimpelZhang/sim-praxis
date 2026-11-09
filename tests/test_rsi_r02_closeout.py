@@ -176,6 +176,51 @@ def test_contamination_is_measurement_contaminated(ctx):
         CO.MEAS_CONTAMINATED
 
 
+def test_contamination_outranks_invalid_trial(ctx):
+    """§10.2 行9：污染行的 trial 处置就是 INVALID；测量轴必须判 CONTAMINATED。
+
+    评审 H3 复现：仪器检查在前时，污染永远被判成 INVALID_INSTRUMENT，安全结论
+    被仪器结论吞掉。
+    """
+    store = ST.StateStore(ctx)
+    spec = SG.dev_specs()[0]
+    _finish(store, spec, status=ST.TRIAL_INVALID, success=False)
+    ST.Journal(ctx).append(kind="decision", trial_id=spec.trial_id,
+                           action="analyze", ok=False,
+                           code=ST.EV_CONTAMINATION, message="越权读取真值")
+    verdict = CO.judge(CO.read_facts(ctx))
+    assert verdict["measurement"]["status"] == CO.MEAS_CONTAMINATED
+    assert "CONTAMINATION" in verdict["measurement"]["reasons"]
+
+
+def test_freeze_invalid_event_invalidates_instrument(ctx):
+    """§10「LOCK 语义改变 ⇒ FREEZE_INVALID」：无 INVALID trial 也判仪器失效。"""
+    _all_pass(ctx)
+    ST.Journal(ctx).append(kind="decision", trial_id="E-dev", action="freeze",
+                           ok=False, code=ST.EV_FREEZE_INVALID,
+                           message="LOCK 语义改变")
+    facts = CO.read_facts(ctx)
+    verdict = CO.judge(facts)
+    assert facts["journal"]["codes"]["freeze_invalid"] == 1
+    assert verdict["measurement"]["status"] == CO.MEAS_INVALID_INSTRUMENT
+    assert "FREEZE_INVALID" in verdict["measurement"]["reasons"]
+
+
+def test_budget_hit_records_cancelled_slots_without_faking_adds(ctx):
+    """触帽是合同内结局：事件计数 + 取消槽如实记录，process 不因此伪装失败。"""
+    _all_pass(ctx)
+    ST.Journal(ctx).append(kind="decision", trial_id="campaign", action="budget",
+                           ok=False, code=ST.EV_BUDGET_HIT, message="触帽")
+    book = ST.SlotBook(ctx)
+    book.cancel("E-dev-24", reason="BLOCKED_BUDGET")
+    facts = CO.read_facts(ctx)
+    verdict = CO.judge(facts)
+    assert facts["journal"]["codes"]["budget_hit"] == 1
+    assert facts["slots_cancelled"]["slot_ids"] == ["E-dev-24"]
+    assert verdict["process"]["status"] == CO.PROCESS_COMPLETE
+    assert verdict["measurement"]["status"] == CO.MEAS_VALID
+
+
 def test_unknown_cost_keeps_process_incomplete(ctx):
     _all_pass(ctx)
     book = B.BillingBook(ctx)

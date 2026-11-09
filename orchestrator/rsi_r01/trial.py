@@ -82,6 +82,16 @@ def _cell_of(inst: TC.Instance, params: Mapping[str, Any]) -> str | None:
         f"(damping={damping}, theta0={theta0}) 不在本实例冻结四格内")
 
 
+def cell_of(inst: "TC.Instance", params: Mapping[str, Any]) -> "str | None":
+    """``_cell_of`` 的公开入口（单真值不放两份）。
+
+    R0.2 的恢复路径要按受信 manifest 的 params 复原 RunRecord.cell，必须与
+    真实分派用**同一条**归类逻辑，否则复原出来的 cell 可能与原 run 不同
+    （oracle 会拿错的格做独立复算）。
+    """
+    return _cell_of(inst, params)
+
+
 class TrialRunner:
     """一个 (instance, trial) 的全部分派状态与产物。"""
 

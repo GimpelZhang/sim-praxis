@@ -51,6 +51,31 @@ def test_full_loop_dynamic_feedback_then_submit(ctx):
     assert book.summary()["settled_usd"] > 0
 
 
+def test_policy_violation_is_terminal_valid_fail(ctx):
+    """§10.2 行8（评审 M5）：越权动作被拦截 ⇒ 该 trial VALID_FAIL_POLICY 并停。
+
+    以前只记一个错误码然后继续自修——越权的 POST 已经花掉，模型若下一轮直接
+    提交就会被计成独立成功（等于奖励越权）。现在必须终态停该 trial、不判成功、
+    不叫泄密（未越权成功），剩余槽保留给别的 trial。
+    """
+    illegal = H.action_json(action="run_experiment", params={"force": 0.5,
+                                                            "admin_reset": 1})
+    loop, model, store, journal, slots, book = H.build_loop(
+        ctx, slot_ids=["E-dev-01", "E-dev-02"],
+        replies=[illegal, SUBMIT], with_campaign_state=True)
+    out = loop.run()
+    assert out["outcome"] == "policy_violation"
+    assert out["status"] == ST.TRIAL_VALID_FAIL_POLICY
+    assert out["independent_success"] is not True   # 从未提交，绝不计成功
+    assert out["posts_sent"] == 1                 # 越权那一次 POST 已花
+    assert len(model.requests) == 1               # 停 trial，绝不继续自修
+    ev = [e for e in journal.events if e.get("code") == ST.EV_POLICY_VIOLATION]
+    assert ev and ev[0]["ok"] is False
+    assert ev[0]["payload"]["slot_id"] == "E-dev-01"
+    assert slots.status("E-dev-02") == ST.SLOT_UNUSED
+    assert book.summary()["settled_usd"] > 0
+
+
 def test_malformed_json_gets_visible_error_and_self_repairs(ctx):
     loop, model, store, journal, slots, _ = H.build_loop(
         ctx, slot_ids=["E-dev-01", "E-dev-02"],
