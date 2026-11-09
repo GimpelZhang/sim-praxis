@@ -132,6 +132,35 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
     }
 
 
+def check_batch_credential(ctx: C.CampaignContext, batch_id: str, *,
+                           posts: int = TOTAL_POSTS, task: int = 0,
+                           stage: str = "coding_debug") -> "dict[str, Any]":
+    """实呼前的批次凭据自检（缺件/错配/批准数不足一律零 POST 拒绝）。
+
+    G-P 自批件（``R02-B1.json``）是**花钱授权**；网关 preflight 另要一份**批次
+    凭据**（``task/stage/approved/beyond_normal``）。两者不是同一个东西，也不
+    互相替代：这里把后者的缺口在第一次 POST 之前暴露，而不是等 preflight 在
+    槽已 claim 之后拦截（那会把 protocol slot 记成 UNKNOWN_SENT）。
+    """
+    from orchestrator.gateway.quota_ledger import QuotaError, load_approval
+
+    try:
+        cred = load_approval(batch_id, ctx.relative("quota/approvals"))
+    except QuotaError as exc:
+        return {"ok": False, "batch_id": batch_id, "credential": None,
+                "problems": [f"CREDENTIAL_MISSING: {exc}"]}
+    problems: "list[str]" = []
+    if cred.get("task") != task:
+        problems.append(f"CREDENTIAL_TASK_MISMATCH: {cred.get('task')} != {task}")
+    if cred.get("stage") != stage:
+        problems.append(f"CREDENTIAL_STAGE_MISMATCH: {cred.get('stage')} != {stage}")
+    approved = cred.get("approved")
+    if not isinstance(approved, int) or isinstance(approved, bool) or approved < posts:
+        problems.append(f"CREDENTIAL_COVERAGE: approved={approved!r} < 本批 {posts} 次")
+    return {"ok": not problems, "batch_id": batch_id, "problems": problems,
+            "credential": cred if not problems else None}
+
+
 def cancel_pending_slots(ctx, failed_fixture: str) -> "list[str]":
     """链失败后取消「失败链自身的未用槽 + 其后所有链」的槽，返回被取消的槽 id。
 
@@ -156,6 +185,8 @@ def main(argv: "list[str] | None" = None) -> int:
     ap.add_argument("--root", default=None)
     ap.add_argument("--tokenizer", default=str(T3C.DEFAULT_TOKENIZER))
     ap.add_argument("--tokenizer-sha256", default=None)
+    ap.add_argument("--batch-id", required=True,
+                    help="网关批次凭据 id（billing_context 归属；本 campaign quota/approvals）")
     ap.add_argument("--gpus", action="store_true")
     args = ap.parse_args(argv)
 
@@ -174,9 +205,17 @@ def main(argv: "list[str] | None" = None) -> int:
     if not args.tokenizer_sha256:
         print(json.dumps({"refused": "缺 --tokenizer-sha256"}, ensure_ascii=False))
         return 2
+    # 批次凭据自检：缺件/错配/批准数不足都在**第一次 POST 之前**拒绝（零 POST）。
+    cred = check_batch_credential(ctx, args.batch_id)
+    if not cred["ok"]:
+        print(json.dumps({"refused": "BATCH_CREDENTIAL",
+                          "batch_id": args.batch_id,
+                          "problems": cred["problems"]}, ensure_ascii=False))
+        return 2
     caller, counter = CLI.make_paid_caller(
         tokenizer_path=args.tokenizer,
-        tokenizer_sha256=args.tokenizer_sha256)
+        tokenizer_sha256=args.tokenizer_sha256,
+        batch_id=args.batch_id)
 
     chains: "list[dict[str, Any]]" = []
     for fixture_id in PF.FIXTURE_IDS:
@@ -196,6 +235,7 @@ def main(argv: "list[str] | None" = None) -> int:
     g_d = {
         "schema": SCHEMA_REPORT,
         "campaign_id": ctx.campaign_id,
+        "batch_id": args.batch_id,
         "lock_sha256": lock_v.get("lock_sha256"),
         "chains": [{k: ch[k] for k in ("trial_id", "status", "posts_recorded",
                                        "chain_ok", "verdict", "slot_binding",

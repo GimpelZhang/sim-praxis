@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
@@ -73,14 +74,33 @@ class GatewayCaller:
 
     ``max_attempts=1`` 是硬前提（SDK/HTTP 层重试会破坏「每逻辑调用 ≤1 POST」）；
     构造时拒绝其它值，运行后再核对 ``attempts_http``。
+
+    记账归属（``billing``）同样是构造期硬前提：网关挂了账本（``_billing`` 非空）
+    时没有 ``{task, batch_id, thread_id}`` 的 caller 一构造就拒绝，把「缺
+    billing_context 的付费调用」挡在第一次 POST 之前，而不是等网关 fail-closed。
+    T4 首跑（2026-11-10）正是漏了这一层：槽已 claim、那次 POST 记为 UNKNOWN_SENT，
+    整条协议链作废——此处的构造期守卫与 ``__call__`` 的上下文包裹是它的修复。
     """
 
     def __init__(self, *, gateway: Any, stage: str = DEFAULT_STAGE,
-                 temperature: float = 0.2, timeout: int = 120):
+                 temperature: float = 0.2, timeout: int = 120,
+                 billing: "Mapping[str, Any] | None" = None):
         if int(getattr(gateway, "max_attempts", 0) or 0) != 1:
             raise CandidateError(
                 "ModelGateway 必须以 max_attempts=1 构造（关闭内部退避重试）；"
                 f"当前 max_attempts={getattr(gateway, 'max_attempts', None)!r}")
+        self.billing = None if billing is None else {
+            "task": int(billing["task"]),
+            "batch_id": str(billing["batch_id"]),
+            "thread_id": str(billing.get("thread_id") or ""),
+        }
+        if (self.billing is None
+                and getattr(gateway, "_billing", None) is not None):
+            raise CandidateError(
+                "网关挂了账本但 GatewayCaller 未给 billing 归属（task/batch_id/"
+                "thread_id）：付费实呼必须落在 billing_context 内，构造即拒绝")
+        if self.billing is not None and not self.billing["batch_id"].strip():
+            raise CandidateError("billing.batch_id 不得为空（批次凭据按它取）")
         self.gateway = gateway
         self.stage = stage
         self.temperature = float(temperature)
@@ -90,11 +110,22 @@ class GatewayCaller:
         capture: "dict[str, Any]" = {}
         messages = [{"role": "system", "content": request.system},
                     *request.as_messages()]
-        text, _tokens = self.gateway.call(
-            self.stage, messages, max_tokens=request.max_tokens,
-            temperature=self.temperature, timeout=self.timeout,
-            capture=capture)
+        with self._billing_context():
+            text, _tokens = self.gateway.call(
+                self.stage, messages, max_tokens=request.max_tokens,
+                temperature=self.temperature, timeout=self.timeout,
+                capture=capture)
         return Reply(text=str(text or ""), capture=dict(capture))
+
+    def _billing_context(self) -> Any:
+        """每次 POST 一个独立上下文（不在进程级常驻，跨 trial 不串账）。"""
+        if self.billing is None:
+            return contextlib.nullcontext()
+        from orchestrator.gateway.quota_ledger import billing_context
+
+        return billing_context(task=self.billing["task"],
+                               batch_id=self.billing["batch_id"],
+                               thread_id=self.billing["thread_id"])
 
 
 # ---------------------------------------------------------------------------

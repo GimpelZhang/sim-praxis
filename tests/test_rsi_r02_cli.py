@@ -253,6 +253,15 @@ def test_gp_approval_requires_enough_posts_and_cap(ctx):
     assert doc["authorized_posts"] == 72
 
 
+def test_make_paid_caller_requires_explicit_batch_id():
+    """批次归属没有缺省值：省略即 TypeError，空串即 CliError（都在触网/读分词器之前）。"""
+    with pytest.raises(TypeError):
+        CI.make_paid_caller(tokenizer_path="x", tokenizer_sha256="y")
+    with pytest.raises(CI.CliError):
+        CI.make_paid_caller(tokenizer_path="x", tokenizer_sha256="y",
+                            batch_id="   ")
+
+
 def test_cli_run_without_execute_paid_is_refused(ctx, capsys):
     rc = CI.main(["--campaign-id", "r02_test", "run", "--phase", "dev"])
     assert rc == CI.EXIT_REFUSED

@@ -218,6 +218,65 @@ def test_gateway_caller_requires_single_attempt():
         CD.GatewayCaller(gateway=Gw())
 
 
+def _req() -> "CD.M.Request":
+    return CD.M.Request(system="SYS", messages=({"role": "user", "content": "hi"},),
+                        max_tokens=8192, serialized="{}", sha256="0" * 64,
+                        n_bytes=2, local_tokens=3)
+
+
+def test_gateway_caller_requires_billing_when_gateway_has_ledger():
+    """T4 首跑事故的构造期守卫：挂了账本却没有记账归属 ⇒ 造 caller 就拒绝。
+
+    此前该缺陷只在第一次网关调用时由 ``BillingGate._ctx()`` 暴露，槽已 claim、
+    那次 POST 被记成 UNKNOWN_SENT，整条协议链作废。守卫前移到构造点。
+    """
+    class Gw:
+        max_attempts = 1
+        _billing = object()
+
+        def call(self, *a, **k):        # pragma: no cover - 构造期就该拒绝
+            raise AssertionError("不得调用")
+
+    with pytest.raises(CD.CandidateError):
+        CD.GatewayCaller(gateway=Gw())
+
+
+def test_gateway_caller_wraps_each_call_in_billing_context():
+    from orchestrator.gateway.quota_ledger import current_billing
+
+    seen: "dict[str, object]" = {}
+
+    class Gw:
+        max_attempts = 1
+        _billing = object()
+
+        def call(self, stage, messages, **kw):
+            ctx = current_billing()
+            seen.update(task=None if ctx is None else ctx.task,
+                        batch_id=None if ctx is None else ctx.batch_id,
+                        thread_id=None if ctx is None else ctx.thread_id)
+            kw["capture"].update({"attempts_http": 1})
+            return "ok", (1, 1)
+
+    caller = CD.GatewayCaller(gateway=Gw(),
+                              billing={"task": 0, "batch_id": "R02-T4-1",
+                                       "thread_id": "proto"})
+    reply = caller(_req())
+    assert reply.text == "ok"
+    assert seen == {"task": 0, "batch_id": "R02-T4-1", "thread_id": "proto"}
+    # 上下文只包住单次调用，不在进程里常驻（跨 trial 不串账）
+    assert current_billing() is None
+
+
+def test_gateway_caller_rejects_blank_batch_id():
+    class Gw:
+        max_attempts = 1
+        _billing = object()
+
+    with pytest.raises(CD.CandidateError):
+        CD.GatewayCaller(gateway=Gw(), billing={"task": 0, "batch_id": "   "})
+
+
 def test_gateway_caller_passes_system_and_capture():
     seen = {}
 

@@ -101,3 +101,48 @@ def test_failed_chain_cancels_its_own_unused_slots_too(ctx):
     book = ST.SlotBook(ctx)
     assert book.status("P-A-1") == ST.SLOT_SENT      # 已发槽不被改写成取消
     assert all(book.status(sid) == ST.SLOT_CANCELLED for sid in cancelled)
+
+
+# ---------------------------------------------------------------------------
+# 批次凭据自检（T4 首跑事故的修复：凭据缺口必须在第一次 POST 之前暴露）
+# ---------------------------------------------------------------------------
+
+def _write_credential(ctx, **over) -> None:
+    cred = {"schema": "simpraxis.quota.batch_approval.v1",
+            "batch_id": "R02-T4-1", "task": 0, "stage": "coding_debug",
+            "approved": 8, "beyond_normal": False,
+            "approved_by": "agent_self_approval",
+            "note": "T4 协议准入 8 POST（G-S 豁免 $1.5/POST，批帽 $100）"}
+    cred.update(over)
+    ctx.write_json("quota/approvals/R02-T4-1.json", cred)
+
+
+def test_batch_credential_missing_refuses_before_any_post(ctx):
+    out = T4.check_batch_credential(ctx, "R02-T4-1")
+    assert out["ok"] is False
+    assert out["problems"] and out["problems"][0].startswith("CREDENTIAL_MISSING")
+    assert out["credential"] is None
+
+
+def test_batch_credential_requires_task_stage_and_coverage(ctx):
+    _write_credential(ctx, task=1)
+    problems = T4.check_batch_credential(ctx, "R02-T4-1")["problems"]
+    assert problems == ["CREDENTIAL_TASK_MISMATCH: 1 != 0"]
+
+    _write_credential(ctx, stage="visual_rollout")
+    problems = T4.check_batch_credential(ctx, "R02-T4-1")["problems"]
+    assert problems == ["CREDENTIAL_STAGE_MISMATCH: visual_rollout != coding_debug"]
+
+    _write_credential(ctx)
+    out = T4.check_batch_credential(ctx, "R02-T4-1")
+    assert out["ok"] is True and out["credential"]["approved"] == 8
+
+    _write_credential(ctx, approved=7)
+    problems = T4.check_batch_credential(ctx, "R02-T4-1")["problems"]
+    assert problems == ["CREDENTIAL_COVERAGE: approved=7 < 本批 8 次"]
+
+    # bool 是 int 子类：{"approved": true} 不得被当成 1 次书面批准——load_approval
+    # 在更早一层就拒（凭据损坏/字段不合法 ⇒ 当缺件），本检查保持同一结论。
+    _write_credential(ctx, approved=True)
+    problems = T4.check_batch_credential(ctx, "R02-T4-1")["problems"]
+    assert problems and problems[0].startswith("CREDENTIAL_MISSING")

@@ -57,17 +57,29 @@ def make_trial(ctx: C.CampaignContext, spec: SG.TrialSpec, *,
                        trial_id=spec.trial_id, gpus=gpus)
 
 
-def make_paid_caller(*, tokenizer_path: str, tokenizer_sha256: str
+def make_paid_caller(*, tokenizer_path: str, tokenizer_sha256: str,
+                     batch_id: str, task: int = 0, thread_id: str = ""
                      ) -> "tuple[CD.GatewayCaller, M.LocalCounter]":
-    """唯一的付费入口：ModelGateway 单试、namespace 2902、钉死分词器。"""
+    """唯一的付费入口：ModelGateway 单试、namespace 2902、钉死分词器、显式记账归属。
+
+    ``batch_id`` **没有缺省值**：T4 首跑（2026-11-10）忘了把 billing_context 包住
+    实呼，八槽里第一槽已 claim、那次 POST 记为 UNKNOWN_SENT，整条协议链作废。
+    付费入口因此改为必须显式给出批次归属；缺省即拒绝，不给「裸跑」留路径。
+    """
     from orchestrator.common.runtime_paths import rsi_r02_gateway_state_path
     from orchestrator.gateway.quota_ledger import QuotaLedger
     from orchestrator.gateway.router import ModelGateway
 
+    if not str(batch_id or "").strip():
+        raise CliError("付费入口必须给出批次 id（billing_context 归属）；缺省即拒绝")
     counter = M.LocalCounter.load(tokenizer_path, tokenizer_sha256)
     gateway = ModelGateway(ledger=QuotaLedger.rsi_r02(), max_attempts=1,
                            pause_state_path=rsi_r02_gateway_state_path())
-    return CD.GatewayCaller(gateway=gateway), counter
+    caller = CD.GatewayCaller(gateway=gateway,
+                              billing={"task": int(task),
+                                       "batch_id": str(batch_id),
+                                       "thread_id": str(thread_id)})
+    return caller, counter
 
 
 # ---------------------------------------------------------------------------
@@ -436,8 +448,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                         cap_usd=args.cap_usd)
     if not (args.tokenizer and args.tokenizer_sha256):
         raise CliError("付费运行需要 --tokenizer 与 --tokenizer-sha256")
+    if not args.batch_id:
+        raise CliError("付费运行需要 --batch-id（billing_context 归属；批次凭据按它取）")
     caller, counter = make_paid_caller(tokenizer_path=args.tokenizer,
-                                       tokenizer_sha256=args.tokenizer_sha256)
+                                       tokenizer_sha256=args.tokenizer_sha256,
+                                       batch_id=args.batch_id)
     out = run_phase(ctx, args.phase, call_model=caller, counter=counter,
                     gpus=args.gpus)
     _emit(out, as_json=True)
@@ -473,6 +488,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--execute-paid", action="store_true")
     p.add_argument("--tokenizer", default=None)
     p.add_argument("--tokenizer-sha256", default=None)
+    p.add_argument("--batch-id", default=None,
+                   help="批次凭据 id（billing_context 归属；付费运行必填）")
     p.add_argument("--cap-usd", type=float, default=B.USD_CAP)
     p.add_argument("--gpus", action="store_true")
     p.set_defaults(func=_cmd_run)
