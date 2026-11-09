@@ -1325,6 +1325,12 @@ def render_report(facts: dict, result: dict, matrix: dict, cost: dict) -> str:
         "报告**不写回**它验证的包（AC33 由机判逐件断言：包内不含报告/矩阵/机判/签名，"
         "报告内含包 manifest sha256）。",
         "",
+        "**建包与终验顺序**（无循环的唯一闭合路径）：① `--build` 生成判决件 → ② 机判首跑"
+        "（落 `cleanup.json` / `ledger_seals.json` 两件入包证据）→ ③ `--pack --clean` → "
+        "④ `--build` 复核，把包 manifest sha256 写进本报告 → ⑤ 三签 → ⑥ 机判 `--reuse-derived` "
+        "终验（只读派生件、不重写，保证包内副本与根件逐字节相等；终验自己的实时探针结论"
+        "仍写进包外的 `closure_judge.json`）。",
+        "",
         "## 10. 收尾与后续未启动",
         "",
         "见 `closeout/cleanup.json`：容器 0、后台 0、显存 ≤200 MiB、无看门狗残留、"

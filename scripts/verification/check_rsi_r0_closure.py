@@ -258,7 +258,27 @@ def check_ledger(j: Judge, campaign: Path, out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 # AC32 封存账拒写探针（只读；产出 ledger_seals.json）
 # ---------------------------------------------------------------------------
-def check_seals(j: Judge, campaign: Path, out_dir: Path) -> dict:
+def write_derived(path: Path, facts: dict, *, reuse: bool) -> None:
+    """写派生证据件（cleanup / ledger_seals），``reuse`` 时只做在场性核验。
+
+    这两件是**入包**的原始证据（``PACK_FILES`` 里 required=True）。机判会被
+    重复运行（建包前一次拿事实、三签后一次终验），若每次都刷新
+    ``generated_at_utc``，包内副本与活件必然漂移，违背本仓「包内证据与根件
+    逐字节相等」的既有纪律。故：首次运行写件；之后的 ``--reuse-derived``
+    终验一律只读不写——终验自己的实时探针结论照常写进 ``closure_judge.json``
+    （判决件，包外），所以并没有用旧件冒充新证据。
+    """
+    if reuse:
+        if not path.is_file():
+            raise SystemExit(f"[JUDGE-FAIL] --reuse-derived 但派生件不在场：{path}")
+        return
+    path.write_text(json.dumps(facts, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def check_seals(j: Judge, campaign: Path, out_dir: Path, *,
+                reuse_derived: bool = False) -> dict:
     os.environ.setdefault("SIMPRAXIS_RSI_R0_ROOT", str(campaign.parent))
     os.environ.setdefault("SIMPRAXIS_RSI_R0_CAMPAIGN", campaign.name)
 
@@ -300,9 +320,7 @@ def check_seals(j: Judge, campaign: Path, out_dir: Path) -> dict:
         "campaign_ledger_writable": writable,
         "all_refused_and_unchanged": all_ok,
     }
-    (out_dir / "ledger_seals.json").write_text(
-        json.dumps(facts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(out_dir / "ledger_seals.json", 0o600)
+    write_derived(out_dir / "ledger_seals.json", facts, reuse=reuse_derived)
     j.check("seals.refused_and_unchanged", all_ok,
             {"n_sealed": len(rows), "campaign_writable": writable})
     return facts
@@ -456,7 +474,8 @@ def _run(cmd: list[str]) -> tuple[int, str]:
         return 127, str(exc)
 
 
-def check_cleanup(j: Judge, campaign: Path, out_dir: Path) -> dict:
+def check_cleanup(j: Judge, campaign: Path, out_dir: Path, *,
+                  reuse_derived: bool = False) -> dict:
     rc_d, out_d = _run(["docker", "ps", "-aq"])
     containers = [x for x in out_d.splitlines() if x.strip()] if rc_d == 0 else []
     rc_g, out_g = _run(["nvidia-smi", "--query-gpu=memory.used",
@@ -490,9 +509,7 @@ def check_cleanup(j: Judge, campaign: Path, out_dir: Path) -> dict:
             "四 tour 实跑、能力对比重设计）",
         ],
     }
-    (out_dir / "cleanup.json").write_text(
-        json.dumps(facts, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.chmod(out_dir / "cleanup.json", 0o600)
+    write_derived(out_dir / "cleanup.json", facts, reuse=reuse_derived)
     j.check("cleanup.containers_zero", len(containers) == 0,
             {"count": len(containers)})
     j.check("cleanup.gpu_le_200_mib", facts["gpu_under_200_mib"] is True,
@@ -508,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--campaign", default=DEFAULT_CAMPAIGN)
     ap.add_argument("--report", default=None,
                     help="机判件路径（缺省 <campaign>/closeout/closure_judge.json）")
+    ap.add_argument("--reuse-derived", action="store_true",
+                    help="不重写 cleanup.json/ledger_seals.json（建包后终验用；仍在场性核验）")
     args = ap.parse_args(argv)
     campaign = Path(args.campaign).resolve()
     out_dir = campaign / "closeout"
@@ -604,14 +623,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # --- 事实重算 ---
     ledger_facts = check_ledger(j, campaign, out_dir)
-    seals = check_seals(j, campaign, out_dir)
+    seals = check_seals(j, campaign, out_dir, reuse_derived=args.reuse_derived)
     logs = check_logs(j, campaign)
     pack_facts = check_no_circularity(j, campaign, result, report_text)
     signs = check_signs(j, campaign,
                         (result.get("artifacts") or {}).get("human_report", {})
                         .get("sha256") or "",
                         pack_facts.get("manifest_sha256"))
-    cleanup = check_cleanup(j, campaign, out_dir)
+    cleanup = check_cleanup(j, campaign, out_dir, reuse_derived=args.reuse_derived)
 
     # 报告必须逐字含双轴判决
     j.check("report.states_both_axes",
