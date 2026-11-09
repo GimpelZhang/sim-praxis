@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from orchestrator.rsi_r01 import campaign as C
+from orchestrator.rsi_r01 import lock as L
 from orchestrator.rsi_r01 import paid as P
 from orchestrator.rsi_r01 import schemas as S
 from orchestrator.rsi_r01 import transport as T
@@ -549,7 +550,14 @@ class ProtocolRunner:
             raise ProtocolBlocked("PREREG_MISMATCH",
                                   f"模型不符：{doc.get('model')} != {self.model}")
         tok = doc.get("tokenizer") or {}
-        if tok and self.tokenizer and tok.get("sha256") != self.tokenizer.sha256:
+        # reviewer-r3 L3：登记与否必须双向一致——预登记无 tokenizer 而 runner 有
+        # （或反之）不得当作「无需比对」，否则长链可能用未登记的计数器跑。
+        if bool(tok) != (self.tokenizer is not None):
+            raise ProtocolBlocked(
+                "PREREG_MISMATCH",
+                f"分词器登记不符：prereg={'有' if tok else '无'}"
+                f"/runner={'有' if self.tokenizer is not None else '无'}")
+        if tok and tok.get("sha256") != self.tokenizer.sha256:
             raise ProtocolBlocked("PREREG_MISMATCH", "分词器哈希不符")
         posts = doc.get("posts") or []
         if len(posts) != PROTOCOL_POSTS:
@@ -562,6 +570,36 @@ class ProtocolRunner:
                 raise ProtocolBlocked(
                     "PREREG_MISMATCH",
                     f"slot {rec['slot']}#{rec['index']} 请求 hash 不符")
+        # 元数据完整性（reviewer-r3 MAJOR M1）：只验请求体字节不够——篡改者可以
+        # 重算 request_sha256，把长链件换成短请求并放宽 interval，整份 prereg 仍
+        # 自洽。链位（slot/kind/index）、每槽条数与长链目标区间一律与**代码常量**
+        # 比对（代码常量随实现面入 LOCK manifest），文件只作载体不作真值。
+        expected: "list[tuple[int, str, int]]" = [
+            (slot, kind, idx)
+            for slot, kind, _chain, n in CHAIN
+            for idx in range(1, n + 1)]
+        if doc.get("post_count") not in (None, PROTOCOL_POSTS):
+            raise ProtocolBlocked("PREREG_MISMATCH",
+                                  f"post_count={doc.get('post_count')}")
+        for rec, (slot, kind, idx) in zip(posts, expected):
+            got_pos = (int(rec.get("slot", -1)), str(rec.get("kind")),
+                       int(rec.get("index", -1)))
+            if got_pos != (slot, kind, idx):
+                raise ProtocolBlocked(
+                    "PREREG_MISMATCH",
+                    f"预登记链位不符：{got_pos} != {(slot, kind, idx)}")
+            want = (LONG_TARGETS[slot][idx - 2]
+                    if kind == "long_context_tool_chain" and idx >= 2 else None)
+            got = rec.get("interval")
+            if want is None:
+                if got not in (None, []):
+                    raise ProtocolBlocked(
+                        "PREREG_MISMATCH",
+                        f"slot {slot}#{idx} 非长链件不得带区间：{got}")
+            elif got is None or tuple(int(x) for x in got) != want:
+                raise ProtocolBlocked(
+                    "PREREG_MISMATCH",
+                    f"slot {slot}#{idx} 区间 {got} 与代码常量 {list(want)} 不符")
         return doc
 
     # -- 单 POST ----------------------------------------------------------
@@ -605,6 +643,11 @@ class ProtocolRunner:
                              accounting=accounting)
         except ProtocolBlocked:
             raise
+        except L.LockError as exc:
+            # 付费闸拒绝发生在任何 POST 之前（reviewer-r3 M3 的反面保证）：
+            # 不能记成「状态不确定」——零发送必须如实分类为审批/锁定类阻断。
+            raise ProtocolBlocked(str(exc.code or "BLOCKED_APPROVAL"),
+                                  f"{slot_id}#{rec['index']} LOCK 闸拒绝：{exc}")
         except Exception as exc:  # noqa: BLE001 —— 发送状态不确定：记账后即停，绝不重发
             last = None
             for cand in self._attempts():
@@ -771,6 +814,12 @@ class ProtocolRunner:
         if not isinstance(action, Mapping) or action.get("tool") != "read_file":
             raise ProtocolBlocked("TOOL_ACTION_INVALID",
                                   f"{slot_id} 首轮未产出合法动作：{parsed}")
+        # reviewer-r3 L6：与短链对齐——长链也必须点名预登记标记文件，否则
+        # 模型可以要求读任意文件而仍被我们喂入标记内容。
+        if str(action.get("name") or "") != MARKER_NAME:
+            raise ProtocolBlocked(
+                "TOOL_ACTION_INVALID",
+                f"{slot_id} 首轮动作文件名 {action.get('name')!r} != {MARKER_NAME!r}")
         expect = marker_for(first["nonce"])
         info = tool.prepare(name=MARKER_NAME, content=expect)
         got = tool.read(MARKER_NAME)
@@ -786,7 +835,9 @@ class ProtocolRunner:
                                   overhead=overhead)
             parsed_n = parse_json_object(store.get(att.request_sha256, ({}, ""))[1])
             key = f"stage{rec['index']}_"
-            target = tuple(rec["interval"]) if rec.get("interval") else None
+            # 目标区间取代码常量而不取文件字段（MAJOR M1 的纵深防御：load_prereg
+            # 已要求文件与常量相等，这里再以常量为准，文件篡改不可能放宽判据）。
+            target = LONG_TARGETS[int(first["slot"])][int(rec["index"]) - 2]
             inside = (target is not None
                       and acc.lower_tokens is not None
                       and acc.upper_tokens is not None
@@ -847,13 +898,33 @@ class ProtocolRunner:
                         overhead = self._overhead_band()
                     if tool is None:
                         raise ProtocolBlocked("TOOL_UNAVAILABLE", "无工具执行器")
+                    # reviewer-r3 L4：整槽先算计数再发第一件——若 stage3 区间
+                    # 不可证，绝不能先花掉 stage1/2 两个 POST 才发现。
+                    for rec in recs[1:]:
+                        plan = T.SendPlan(
+                            request=rec["request"],
+                            max_output_tokens=int(rec["max_output_tokens"]))
+                        pre = self._account(
+                            plan,
+                            LONG_TARGETS[int(rec["slot"])][int(rec["index"]) - 2],
+                            overhead)
+                        if pre.verdict != T.AccountingVerdict.OK:
+                            code = ("TOKEN_OVER_CAP"
+                                    if pre.verdict ==
+                                    T.AccountingVerdict.TOKEN_OVER_CAP
+                                    else "BLOCKED_CONTEXT_MEASUREMENT")
+                            raise ProtocolBlocked(
+                                code,
+                                f"{slot_id} 预检 stage{rec['index']} 未过："
+                                f"{pre.verdict} {list(pre.reasons)}")
                     row = self._run_long(recs, slot_id=slot_id, sender=wrapped,
                                          store=store, tool=tool, overhead=overhead)
                 row["kind"] = kind
                 rows.append(row)
             except ProtocolBlocked as exc:
                 blocked = exc
-                if self.budget is not None and exc.code in ("PREFLIGHT_BLOCKED",):
+                if self.budget is not None and exc.code in (
+                        "PREFLIGHT_BLOCKED", "BLOCKED_APPROVAL", "LOCK_CHANGED"):
                     try:
                         self.budget.mark_preflight_blocked(f"{slot_id}:{slot}",
                                                            reason=exc.code)
@@ -862,6 +933,16 @@ class ProtocolRunner:
                 rows.append({"slot": slot, "chain": chain, "kind": kind,
                              "state": "FAILED", "code": exc.code,
                              "detail": exc.detail})
+            except Exception as exc:  # noqa: BLE001 —— 未预料异常同样必须停链并留报告
+                # reviewer-r3 M2：ToolError/SlotExhausted/IndexError 等非
+                # ProtocolBlocked 异常原先会逃出 run()，导致既不写报告也不把
+                # 余槽标 CANCELLED。此处一律收敛为 CALL_FAILED（失败即停）。
+                blocked = ProtocolBlocked(
+                    "CALL_FAILED", f"{slot_id} 未预料异常 "
+                                   f"({type(exc).__name__}: {exc})；不重试")
+                rows.append({"slot": slot, "chain": chain, "kind": kind,
+                             "state": "FAILED", "code": blocked.code,
+                             "detail": blocked.detail})
         report = {
             "schema": REPORT_SCHEMA,
             "checked_at_utc": C._utc_now(),
@@ -875,7 +956,23 @@ class ProtocolRunner:
             "posts": self.posts,
             "transport": (self.transport.summary() if self.transport else None),
             "note": ("12/12 PASS 只称「固定探针通过」，不宣称统计可靠率；"
-                     "失败即停，后续 slot CANCELLED，不补考。"),
+                     "失败即停，后续 slot CANCELLED，不补考。"
+                     "overhead_additive_assumption：开销带由前 6 个短/工具 POST 的"
+                     "usage−分词器计数外推到 ~19k 输入，隐含 delta 与长度弱相关；"
+                     "spread≤16 与事后 ACCOUNTING_MISMATCH 为该假设的两道兜底"
+                     "（reviewer-r3 L5）。"),
         }
         C.write_json(self.ctx, self.report_relpath(), report)
+        # reviewer-r3 M4：结案器读 `protocol/t6_protocol.json` 的 ``passed``，
+        # 而人读报告在 analysis/…；两份同源派生，字段名不同处在此显式对接。
+        C.write_json(self.ctx, "protocol/t6_protocol.json", {
+            "schema": "simpraxis.rsi_r01.t6_protocol.v1",
+            "checked_at_utc": report["checked_at_utc"],
+            "passed": report["verdict"] == "PASS",
+            "verdict": report["verdict"],
+            "blocked_code": report["blocked_code"],
+            "posts_sent": report["posts_sent"],
+            "overhead_band": report["overhead_band"],
+            "report_relpath": self.report_relpath(),
+        })
         return report

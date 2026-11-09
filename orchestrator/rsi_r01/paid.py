@@ -19,14 +19,27 @@ __all__ = ["PaidTransport"]
 
 
 class PaidTransport:
-    """在 :class:`transport.Transport` 之上强制 LOCK 闸的付费通道。"""
+    """在 :class:`transport.Transport` 之上强制 LOCK 闸的付费通道。
+
+    rev 3（M-2-a / reviewer-r3 L2）：底层 Transport 存于名字改写属性并只经只读
+    property 暴露——``slots`` 禁新增属性，赋 ``_inner`` 会抛 ``AttributeError``。
+    静态扫描（``tests/test_rsi_r01_paid.py``）仍是**启发式**，不是安全边界：
+    真正保证「付费 POST 只经本类」的是生产代码里没有第二处构造 Transport。
+    """
+
+    __slots__ = ("ctx", "repo_root", "__inner")
 
     def __init__(self, ctx: C.CampaignContext, *,
                  repo_root: "Any" = L.REPO_ROOT) -> None:
         self.ctx = ctx
         self.repo_root = repo_root
         # rev 3（M-2-a）：底层 Transport 私有化——生产代码不得绕过闸直接用它
-        self._inner = T.Transport()
+        self.__inner = T.Transport()
+
+    @property
+    def _inner(self) -> T.Transport:
+        """只读视图（供 ``attempts``/``summary`` 与报告穿透）；无 setter。"""
+        return self.__inner
 
     # --- 透传只读视图 ---------------------------------------------------
     @property

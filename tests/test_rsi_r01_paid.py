@@ -90,19 +90,61 @@ def test_paid_transport_has_no_public_inner():
 
 
 def test_only_paid_module_constructs_transport():
-    """静态检查：付费路径只准经 PaidTransport；直接 Transport() 仅限 paid.py 与测试。
+    """静态检查（AST，非字符串匹配）：付费路径只准经 PaidTransport。
 
-    transport.py 自身定义类、campaign 侧不构造；若有新站点出现，本测试失败，
-    必须在评审里说明为什么它不是绕过闸的付费路径。
+    reviewer-r3 L1：字面匹配 ``T.Transport(`` 可被别名导入或
+    ``getattr(T, "Transport")()`` 绕过；这里解析 AST 并追踪 import 来源，
+    任何「解析到 transport.Transport 的构造调用」都算违规。扫描仍是启发式
+    （动态 eval 不在覆盖面内），生产保证是「全仓没有第二处构造」。
     """
+    import ast
+
+    def _transport_aliases(tree: "ast.Module") -> "set[str]":
+        names: "set[str]" = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                if node.module.endswith("rsi_r01.transport"):
+                    for a in node.names:
+                        if a.name == "Transport":
+                            names.add(a.asname or a.name)
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name.endswith("rsi_r01.transport"):
+                        names.add(a.asname or a.name)
+        return names
+
     offenders = []
     for path, text in _source_scan(None).items():
         if path.name in ("transport.py", "paid.py"):
             continue
-        for i, line in enumerate(text.splitlines(), 1):
-            if "T.Transport(" in line or "transport.Transport(" in line:
-                offenders.append(f"{path.name}:{i}")
+        tree = ast.parse(text, filename=str(path))
+        aliases = _transport_aliases(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            hit = False
+            if isinstance(func, ast.Name) and func.id in aliases:
+                hit = True
+            elif isinstance(func, ast.Attribute) and func.attr == "Transport":
+                hit = True
+            elif (isinstance(func, ast.Name) and func.id == "getattr"
+                  and len(node.args) >= 2
+                  and isinstance(node.args[1], ast.Constant)
+                  and node.args[1].value == "Transport"):
+                hit = True
+            if hit:
+                offenders.append(f"{path.name}:{node.lineno}")
     assert offenders == [], f"绕过 PaidTransport 直接构造 Transport：{offenders}"
+
+
+def test_inner_cannot_be_reassigned():
+    """L2：``_inner`` 是只读 property（无 setter），外部不能替换底层通道。"""
+    tr = P.PaidTransport(ctx=None)
+    with pytest.raises(AttributeError):
+        tr._inner = T.Transport()
+    with pytest.raises(AttributeError):
+        tr.other = 1          # __slots__ 禁新增属性
 
 
 def test_protocol_runner_defaults_to_paid_transport(monkeypatch):
