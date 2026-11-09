@@ -3,7 +3,7 @@
 设计约束：
 * 本模块是 **T6–T9 所有付费 POST 的唯一入口**——Agent 侧的付费 runner 必须持
   :class:`PaidTransport`，不得直接调用 :class:`transport.Transport`。
-* 每一 POST 之前重算全部 LOCK 事实（自哈希 + 实现面 25 件 + G-I 证据 + 计划/授权
+* 每一 POST 之前重算全部 LOCK 事实（自哈希 + 实现面全部件 + G-I 证据 + 计划/授权
   活文件 + 价格/预算 + 双签）；任一漂移抛 :class:`lock.LockError`，**零 POST**。
 * 闸门失败不消耗 attempt、不占用 seq、不写台账——因为还没发。
 """
