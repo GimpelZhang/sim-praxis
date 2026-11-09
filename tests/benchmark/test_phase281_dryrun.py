@@ -247,6 +247,8 @@ def test_ac_p281_6_04_same_code_path():
     2026-11-10 R0.2 T3「锁内适配」：新增第 4 个**合法**调用点
     ``scripts/rsi_r02/t3_control.py``（同路径控制脚本：只注入确定性 ModelStub，
     走的就是真流水线，绝不传 ``dry_run=True``）。集合显式登记它。
+    T4 又新增第 5 个**合法**调用点 ``scripts/rsi_r02/t4_protocol.py``（协议准入：
+    决策源换成真网关模型，动作面/容器/计费同一条路径，同样绝不传 ``dry_run=True``）。
 
     措辞边界（评审 LOW）：扫描按 ``ast.Attribute.attr == "run_trial"`` 的**名字**
     匹配。上面三处调的是 ``phase281/trial_harness.run_trial``；第 4 处调的是
@@ -270,6 +272,7 @@ def test_ac_p281_6_04_same_code_path():
         "orchestrator/benchmark/phase281/dryrun.py",
         "scripts/benchmark/phase281_run_trial.py",
         "scripts/rsi_r02/t3_control.py",   # R0.2 T3 同路径控制（零付费替身，非干跑）
+        "scripts/rsi_r02/t4_protocol.py",  # R0.2 T4 协议准入（真流水线，付费模型）
     }, callers
 
     dry_calls = callers["orchestrator/benchmark/phase281/dryrun.py"]
@@ -287,9 +290,11 @@ def test_ac_p281_6_04_same_code_path():
     for call in callers["orchestrator/benchmark/phase281/candidate_controls.py"]:
         assert _dry_run_flag(call) in (None, False)
 
-    # R0.2 T3 控制脚本：只替换决策源，不许传 dry_run=True
-    for call in callers["scripts/rsi_r02/t3_control.py"]:
-        assert _dry_run_flag(call) in (None, False)
+    # R0.2 T3 控制脚本 / T4 协议准入：只替换决策源，不许传 dry_run=True
+    for name in ("scripts/rsi_r02/t3_control.py",
+                 "scripts/rsi_r02/t4_protocol.py"):
+        for call in callers[name]:
+            assert _dry_run_flag(call) in (None, False)
 
     # 全仓只有上面这一处 dry_run=True
     flagged = [name for name, calls in callers.items()

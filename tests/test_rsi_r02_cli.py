@@ -59,6 +59,31 @@ def test_run_trial_submits_and_starts_campaign(ctx):
     assert ST.CampaignState(ctx).status == ST.CAMP_RUNNING
 
 
+def test_run_trial_public_doc_override_reaches_the_model(ctx):
+    """T4 协议 fixture 的公开文档必须**真的**进系统提示（锁内适配 D-T3-13）。
+
+    协议链要求模型看到 nonce 与四动作合同；缺省路径读的是实例自带文档，
+    盲跑等于让候选凭猜答协议。这里钉死「显式传入即逐字进系统提示」，
+    同时不改变缺省行为。
+    """
+    from orchestrator.rsi_r02 import protocol_fixture as PF
+
+    _prepare(ctx, SG.dev_specs()[:2])
+    fx = PF.make_fixture(campaign_id=ctx.campaign_id, fixture_id="P1",
+                         slot_id="E-dev-01")
+    model = H.FakeModel([SUBMIT])
+    CI.run_trial(ctx, SG.dev_specs()[0], call_model=model, counter=lambda t: 100,
+                 trial=H.FakeTrial(), public_doc=fx.task_doc())
+    system = model.requests[0].system
+    assert fx.nonce in system
+    assert "protocol" in system
+
+    model2 = H.FakeModel([SUBMIT])
+    CI.run_trial(ctx, SG.dev_specs()[1], call_model=model2, counter=lambda t: 100,
+                 trial=H.FakeTrial())
+    assert fx.nonce not in model2.requests[0].system
+
+
 def test_run_trial_refuses_paused_campaign_before_post(ctx):
     _prepare(ctx, SG.dev_specs()[:1])
     ST.CampaignState(ctx).pause(code=ST.EV_UNKNOWN_SENT, reason="发送不明")

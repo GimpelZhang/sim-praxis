@@ -259,8 +259,12 @@ def run_protocol(ctx: C.CampaignContext, *, counter: Any, gpus: bool
                             post_cap=len(slot_ids) or 4)
         runner = CLI.make_trial(ctx, spec, gpus=gpus)
         stub = PF.ProtocolStub(fixture=fixture)
+        # 协议 fixture 的公开文档（含 nonce 与四动作合同）必须**真的**交给候选：
+        # 控制跑若用实例自带的 E-dev 文档，等于让 stub 凭内存里的 fixture 答题，
+        # 与 T4「模型只看这份文档」不是同一条路（锁内适配，见 Complete D-T3-13）。
         run_out = CLI.run_trial(ctx, spec, call_model=stub, counter=counter,
-                                trial=runner, gpus=gpus)
+                                trial=runner, gpus=gpus,
+                                public_doc=fixture.task_doc())
         if not runner.runs:
             # 恢复语义（重跑幂等）：进程没跑物理动作 ⇒ runs 为空。观测原件仍在
             # 盘上，从 manifest 复原后统计重算照旧逐件验 hash，不走「自述」。

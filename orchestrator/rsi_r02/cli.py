@@ -162,8 +162,16 @@ def run_trial(ctx: C.CampaignContext, spec: SG.TrialSpec, *,
               counter: Any, trial: Any = None, gpus: bool = False,
               config: "CD.LoopConfig | None" = None,
               campaign: "ST.CampaignState | None" = None,
-              trial_factory: Callable[..., Any] = make_trial) -> "dict[str, Any]":
-    """跑一个 trial；已有状态时严格走恢复语义，绝不重跑物理动作。"""
+              trial_factory: Callable[..., Any] = make_trial,
+              public_doc: "Mapping[str, Any] | None" = None
+              ) -> "dict[str, Any]":
+    """跑一个 trial；已有状态时严格走恢复语义，绝不重跑物理动作。
+
+    ``public_doc`` 缺省时按 ``spec.instance_id`` 读 ``public/tasks/<id>/task.json``。
+    T4 协议准入的专用公开 fixture 是**另一份**公开文档（含 nonce 与四动作合同），
+    用同一 ``E-dev`` 物理实例跑，故显式传入；不传时行为与以前逐字相同——
+    这一参数只改「候选可见的公开文档从哪来」，不改动作面/权限/序列化。
+    """
     store = ST.StateStore(ctx)
     journal = ST.Journal(ctx)
     slots = ST.SlotBook(ctx)
@@ -211,7 +219,8 @@ def run_trial(ctx: C.CampaignContext, spec: SG.TrialSpec, *,
 
     if trial is None:
         trial = trial_factory(ctx, spec, gpus=gpus)
-    public_doc = CD.load_public_doc(ctx, spec.instance_id)
+    if public_doc is None:
+        public_doc = CD.load_public_doc(ctx, spec.instance_id)
     loop = CD.CandidateLoop(
         ctx=ctx, trial=trial, public_doc=public_doc, store=store, state=st,
         journal=journal, slots=slots, billing=B.BillingBook(ctx),
