@@ -271,3 +271,24 @@ def test_signature_validation_rejects_malformed():
     assert L.validate_signature(dict(good, binding_sha256="b" * 64),
                                 "reviewer", "a" * 64)
     assert L.validate_signature(dict(good, signed_by=""), "reviewer", "a" * 64)
+
+
+def test_verify_lock_catches_hand_edited_duplicate_signers(tmp_path, price_file):
+    """V-2-a：手工构造的 final_lock.json 两角色同名也必须被 verify 抓到。"""
+    ctx = _fake_campaign(tmp_path)
+    sha = L.build_candidate(ctx)["lock_sha256"]
+    _sign(ctx, "reviewer", sha, "reviewer-a")
+    _sign(ctx, "verifier", sha, "verifier-b")
+    _finalize(ctx)
+    path = ctx.root / "contract" / L.LOCK_FILENAME
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    # 签名不进自哈希 ⇒ 改署名后 lock_sha256 仍然“自洽”，只能靠互异检查拦
+    doc["signatures"]["verifier"]["signed_by"] = "reviewer-a"
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    assert doc["lock_sha256"] == L.core_sha256(doc)
+    report = L.verify_lock(ctx)
+    assert report["verdict"] == "FAIL"
+    assert any("签名人相同" in p for p in report["problems"])
+    with pytest.raises(L.LockError) as exc:
+        L.assert_paid_allowed(ctx)
+    assert exc.value.code == "BLOCKED_APPROVAL"

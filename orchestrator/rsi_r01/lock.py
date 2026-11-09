@@ -656,6 +656,15 @@ def verify_lock(ctx: C.CampaignContext,
         else:
             problems.extend(validate_signature(sig, role, expected))
             problems.extend(signature_evidence_problems(sig, role, fresh))
+    # verifier-r2 缺口 V-2-a：署名互异原来只有 finalize 校验；手工构造的
+    # final_lock.json 若两角色同名可绕过付费闸。此处镜像同一检查。
+    signers = [((doc.get("signatures") or {}).get(role) or {}).get("signed_by")
+               if isinstance((doc.get("signatures") or {}).get(role), Mapping)
+               else None
+               for role in SIG_ROLES]
+    if all(isinstance(s, str) and s.strip() for s in signers) and \
+            len(set(signers)) != len(signers):
+        problems.append("reviewer/verifier 签名人相同（须独立两遍）")
     return {"schema": f"{S.PREFIX}.lock_verification.v1",
             "campaign_id": ctx.campaign_id,
             "checked_utc": S.utc_now(),

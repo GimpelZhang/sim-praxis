@@ -25,23 +25,24 @@ class PaidTransport:
                  repo_root: "Any" = L.REPO_ROOT) -> None:
         self.ctx = ctx
         self.repo_root = repo_root
-        self.inner = T.Transport()
+        # rev 3（M-2-a）：底层 Transport 私有化——生产代码不得绕过闸直接用它
+        self._inner = T.Transport()
 
     # --- 透传只读视图 ---------------------------------------------------
     @property
     def attempts(self) -> "list[T.Attempt]":
-        return self.inner.attempts
+        return self._inner.attempts
 
     @property
     def posts(self) -> int:
-        return self.inner.posts
+        return self._inner.posts
 
     def summary(self) -> dict[str, Any]:
-        return self.inner.summary()
+        return self._inner.summary()
 
     # --- 受闸发送 ---------------------------------------------------------
     def send(self, plan: T.SendPlan, accounting: T.Accounting, *,
              slot_id: str, sender: "Callable[[T.SendPlan], Any]") -> T.Attempt:
         """先过 LOCK 闸再发；闸失败 ⇒ ``LockError`` 且 sender 一次都没被调用。"""
         L.assert_paid_allowed(self.ctx, repo_root=self.repo_root)
-        return self.inner.send(plan, accounting, slot_id=slot_id, sender=sender)
+        return self._inner.send(plan, accounting, slot_id=slot_id, sender=sender)
