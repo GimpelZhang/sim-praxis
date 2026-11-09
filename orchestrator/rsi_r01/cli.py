@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from orchestrator.rsi_r01 import campaign as camp
+from orchestrator.rsi_r01 import lock as L
 
 
 def _cmd_init(args: "argparse.Namespace") -> int:
@@ -37,6 +38,51 @@ def _cmd_init(args: "argparse.Namespace") -> int:
     return 0
 
 
+def _cmd_lock(args: "argparse.Namespace") -> int:
+    ctx = camp.load_campaign(campaign_id=args.campaign_id, root=args.root)
+    try:
+        if args.candidate:
+            out = L.build_candidate(ctx, repo_root=args.repo_root)
+        elif args.finalize:
+            out = L.finalize(ctx, repo_root=args.repo_root)
+        else:
+            out = L.verify_lock(ctx, repo_root=args.repo_root)
+    except L.LockError as exc:
+        print(json.dumps({"ok": False, "code": exc.code,
+                          "problems": exc.problems}, ensure_ascii=False,
+                         indent=2))
+        return 4
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return 0 if out.get("verdict", "PASS") == "PASS" else 4
+
+
+def _cmd_sign(args: "argparse.Namespace") -> int:
+    ctx = camp.load_campaign(campaign_id=args.campaign_id, root=args.root)
+    cand_path = ctx.root / "contract" / L.CANDIDATE_FILENAME
+    if not cand_path.is_file():
+        print(json.dumps({"ok": False, "code": "BLOCKED_APPROVAL",
+                          "problems": ["缺 lock_candidate（先 lock --candidate）"]},
+                         ensure_ascii=False, indent=2))
+        return 4
+    candidate = json.loads(cand_path.read_text(encoding="utf-8"))
+    expected = L.core_sha256(candidate)
+    if args.binding_sha != expected or candidate.get("lock_sha256") != expected:
+        print(json.dumps({"ok": False, "code": "LOCK_HASH_MISMATCH",
+                          "problems": [f"给定 binding-sha 与候选不一致（候选 {expected}）"]},
+                         ensure_ascii=False, indent=2))
+        return 4
+    sig = L.signature_document(
+        role=args.role, verdict=args.verdict, binding_sha256=expected,
+        signed_by=args.signed_by,
+        evidence_sha256=candidate["facts"]["g_i"]["evidence"],
+        notes=args.note or [])
+    sig["implementation_sha256"] = candidate["facts"]["code"]["implementation_sha256"]
+    path = camp.write_json(ctx, f"{L.SIG_DIR}/{args.role}.json", sig)
+    print(json.dumps({"ok": True, "path": str(path), "role": args.role,
+                      "binding_sha256": expected}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> "argparse.ArgumentParser":
     p = argparse.ArgumentParser(
         prog="python -m orchestrator.rsi_r01.cli",
@@ -54,6 +100,31 @@ def build_parser() -> "argparse.ArgumentParser":
                         help="代码仓根（默认当前目录；用于绑定 code_commit）")
     p_init.add_argument("--root", default=None,
                         help="家族根覆盖（测试/演练用；生产缺省 $DATA_ROOT/rsi_r01）")
+
+    p_lock = sub.add_parser(
+        "lock", help="T5 最终 LOCK：--candidate 生成候选 / --finalize 汇总双签 / 缺省执行复核")
+    p_lock.add_argument("--campaign-id", required=True)
+    p_lock.add_argument("--root", default=None)
+    p_lock.add_argument("--repo-root", default=str(L.REPO_ROOT))
+    p_lock.add_argument("--candidate", action="store_true",
+                        help="重算事实并写 contract/lock_candidate.json")
+    p_lock.add_argument("--finalize", action="store_true",
+                        help="双签齐备后写 contract/final_lock.json")
+    p_lock.add_argument("--verify", action="store_true",
+                        help="重算事实并校验自哈希/双签（默认动作）")
+
+    p_sign = sub.add_parser(
+        "sign", help="G-I 独立签字（role=reviewer/verifier，绑定同一 lock_sha256）")
+    p_sign.add_argument("--campaign-id", required=True)
+    p_sign.add_argument("--root", default=None)
+    p_sign.add_argument("--role", required=True, choices=L.SIG_ROLES)
+    p_sign.add_argument("--verdict", required=True, choices=("APPROVE", "REJECT"))
+    p_sign.add_argument("--binding-sha", required=True,
+                        help="候选的 lock_sha256（签字对象）")
+    p_sign.add_argument("--signed-by", required=True,
+                        help="签字人/独立审查遍标识（reviewer 与 verifier 必须不同）")
+    p_sign.add_argument("--note", action="append", default=[],
+                        help="结论依据（可重复）")
     return p
 
 
@@ -61,6 +132,10 @@ def main(argv: "list[str] | None" = None) -> int:
     args = build_parser().parse_args(argv)
     if args.cmd == "init":
         return _cmd_init(args)
+    if args.cmd == "lock":
+        return _cmd_lock(args)
+    if args.cmd == "sign":
+        return _cmd_sign(args)
     raise SystemExit(f"未知子命令：{args.cmd}")
 
 

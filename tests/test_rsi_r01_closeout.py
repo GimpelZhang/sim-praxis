@@ -5,6 +5,7 @@ fixture 覆盖计划 §9.3 每个事件；复验器用**独立实现**重推，�
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -16,8 +17,22 @@ for _p in (_REPO / "scripts" / "rsi_r01", _REPO / "scripts" / "verification"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-import check_rsi_r01_closure as CHK  # noqa: E402
-import closeout as CO  # noqa: E402
+
+def _load(name: str, path: Path):
+    """按文件路径加载，避免与 ``scripts/benchmark/closeout.py`` 的
+    同名模块冲突（全量套件里 ``import closeout`` 会命中先导入的那个）。"""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+CHK = _load("rsi_r01_closure_checker_under_test",
+            _REPO / "scripts" / "verification" / "check_rsi_r01_closure.py")
+CO = _load("rsi_r01_closeout_under_test",
+           _REPO / "scripts" / "rsi_r01" / "closeout.py")
 
 from orchestrator.rsi_r01 import schemas as S  # noqa: E402
 
