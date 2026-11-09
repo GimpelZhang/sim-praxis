@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -38,6 +39,8 @@ import reference_actor as RA  # noqa: E402  （公开动作构造复用，不改
 #: 旧 R0 反例记录（只读；AC19 要求逐字节不变）。
 OLD_DEFECT = Path("/mnt/artifacts/simpraxis/rsi_r0/r0_20261108T0825Z/"
                   "protocol/instrument_defect_t6_rev_4.json")
+#: 旧件取证脚本（只读；确定性重放用同一 service/场景/算法，零付费零容器）。
+OLD_PRODUCER = OLD_DEFECT.parent / "instrument_defect_t6_rev_4_producer.py"
 OLD_DIFF = 0.004693908885525677
 OLD_EFFECT_200 = 0.48717948717948717
 OLD_EFFECT_FULL = 0.49187339606501285
@@ -472,20 +475,25 @@ def ctl_tail_omission() -> dict[str, Any]:
         return EV.claim_of(mean, 1)[0]
     summary_claim = claim_from_summary(clean_sum)
     replay = EV.judge_research(observations=bad_sum, h=1)  # 摘要当原件的重放
+    # 摘要只有沉降索引、没有 2001 行原件 ⇒ 判据必须把它判 INVALID（不可冒充原件）；
+    # 「摘要可算值 SUPPORTED」与「全文件 CENSORED/INCONCLUSIVE」的差异正是被判拒的原因。
     ok = (same_summary
           and j_clean.claim_status == S.ClaimStatus.SUPPORTED
           and j_bad.observation_status == S.ObservationStatus.CENSORED
           and j_bad.claim_status == S.ClaimStatus.INCONCLUSIVE
           and summary_claim == S.ClaimStatus.SUPPORTED
-          and replay.observation_status == S.ObservationStatus.COMPLETE)
+          and replay.observation_status == S.ObservationStatus.INVALID
+          and replay.analysis_valid is False)
     return {"name": "summary_omits_decisive_tail",
-            "expected": "同摘要 / 全文件 CENSORED+INCONCLUSIVE / 摘要估算 SUPPORTED 被拒",
+            "expected": "同摘要 / 全文件 CENSORED+INCONCLUSIVE / 摘要估算 SUPPORTED"
+                        "/ 摘要冒充原件判 INVALID",
             "observed": {"same_summary": same_summary,
                          "clean_claim": j_clean.claim_status,
                          "full_file_observation": j_bad.observation_status,
                          "full_file_claim": j_bad.claim_status,
                          "summary_claim": summary_claim,
-                         "summary_replay_observation": replay.observation_status},
+                         "summary_replay_observation": replay.observation_status,
+                         "summary_replay_analysis_valid": replay.analysis_valid},
             "rejected": bool(ok), "decisive": True}
 
 
@@ -527,8 +535,45 @@ def ctl_numeric_boundaries() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _replay_old_producer() -> dict[str, Any]:
+    """确定性重放旧取证脚本（同一 service、同一旧场景、同一算法）。
+
+    旧件 `artifact_sha256=794dfb59…` 是脚本打印内容的哈希；重放拿到同一哈希即
+    「原数据差异可重现」。重放只读：不写任何旧件文件、不触网、零付费、零容器。
+    """
+    proc = subprocess.run([sys.executable, str(OLD_PRODUCER)],
+                          capture_output=True, text=True, timeout=1800)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"old producer rc={proc.returncode}: {proc.stderr[-400:]}")
+    text = proc.stdout
+    start = text.rfind("\n{\n")
+    if start < 0:
+        start = text.find("{")
+    if start < 0:
+        raise RuntimeError("old producer 未打印 JSON")
+    return json.loads(text[start:])
+
+
+def _naive_decimated_effect(docs: Mapping[str, Mapping[str, Any]]) -> float | None:
+    """按旧候选口径（每 10 点取 1）在**新**数据上估算效应量（对照用）。"""
+    values = []
+    for sign in ("plus", "minus"):
+        lo, hi = docs[f"low/{sign}"], docs[f"high/{sign}"]
+        st_lo = EV.settling(lo["theta"], lo["omega"], lo["t"])
+        st_hi = EV.settling(hi["theta"], hi["omega"], hi["t"])
+        values.append(EV.effect(st_lo.time_s, st_hi.time_s)["value"])
+    good = [v for v in values if v is not None]
+    return sum(good) / len(good) if good else None
+
+
 def ctl_old_counterexample(root: Path, gpus: bool) -> dict[str, Any]:
-    """旧件不变 + 差异可复现 + 新合同同数据正确 PASS / 改错 effect FAIL。"""
+    """旧件不变 + 原数据差异复现 + 新合同同数据正确 PASS / 改错 effect FAIL。
+
+    复现口径：旧件记录的是**旧 R0 场景**（scene sha af7594…）下的全分辨率/200 点
+    两种效应量之差。R0.1 场景契约已换（d1ee3ae…），因此旧数值只能用旧数据路径
+    确定性重放；新数据另作「新合同」验证，两者不混算。
+    """
     if not OLD_DEFECT.is_file():
         return {"name": "old_200_2000_counterexample",
                 "expected": "旧件存在", "observed": {"missing": str(OLD_DEFECT)},
@@ -536,11 +581,26 @@ def ctl_old_counterexample(root: Path, gpus: bool) -> dict[str, Any]:
     before = _sha_file(OLD_DEFECT)
     record = json.loads(OLD_DEFECT.read_text(encoding="utf-8"))
 
-    # 用新全分辨率可信观测复现（R-dev 与旧件同参数）。
+    # 1) 原数据路径确定性重放：旧值逐项复现（1e-9），重放自哈希与旧件一致。
+    replay = _replay_old_producer()
+    replay_diff = abs(float(replay["mean_effect_full_resolution"])
+                      - float(replay["mean_effect_candidate_view"]))
+    reproduced = bool(
+        replay.get("artifact_sha256") == record.get("artifact_sha256")
+        and abs(replay_diff - float(record["abs_diff"])) < 1e-9
+        and abs(float(replay["mean_effect_full_resolution"])
+                - float(record["mean_effect_full_resolution"])) < 1e-9
+        and abs(float(replay["mean_effect_candidate_view"])
+                - float(record["mean_effect_candidate_view"])) < 1e-9
+        and replay.get("settle_full_resolution") == record.get("settle_full_resolution")
+        and replay.get("settle_candidate_view") == record.get("settle_candidate_view"))
+
+    # 2) 新合同在**新**全分辨率数据上：正确分析 PASS；200 点视图直接判 INVALID
+    #    （旧合同拿它当唯一可算的效应量再按 1e-3 比对——正是旧误拒的根源）。
     runner = _new_trial(root, "ctl_old_counterexample", "R-dev", gpus)
     _prereg(runner)
     cells = runner.instance.r_cells
-    events = _run_cells(runner, cells)
+    _run_cells(runner, cells)
     by_cell = {runner.runs[i].cell: runner.runs[i] for i in range(len(runner.runs))}
     full_docs, dec_docs = {}, {}
     for cell, rec in by_cell.items():
@@ -553,9 +613,19 @@ def ctl_old_counterexample(root: Path, gpus: bool) -> dict[str, Any]:
                           "omega": doc["omega"][::10]}
     j_full = EV.judge_research(observations=full_docs, h=1)
     j_dec = EV.judge_research(observations=dec_docs, h=1)
-    diff = abs(float(j_full.mean_effect) - float(j_dec.mean_effect))
+    full_ok = (j_full.observation_status == S.ObservationStatus.COMPLETE
+               and j_full.claim_status == S.ClaimStatus.SUPPORTED
+               and isinstance(j_full.mean_effect, float))
+    dec_rejected = (j_dec.observation_status == S.ObservationStatus.INVALID
+                    and j_dec.claim_status == S.ClaimStatus.INCONCLUSIVE
+                    and j_dec.mean_effect is None)
+    naive_dec = _naive_decimated_effect(dec_docs)
+    naive_gap = (None if (j_full.mean_effect is None or naive_dec is None)
+                 else abs(float(j_full.mean_effect) - naive_dec))
+    # 旧陷阱的量级在新数据上依旧 > 1e-3；新合同不靠「摘要可算值」比对，故不误拒。
+    trap_magnitude = bool(naive_gap is not None and naive_gap > OLD_TOL)
 
-    # 新合同下：正确分析（全分辨率）提交 → PASS；改错 effect（按降采样结论）→ FAIL。
+    # 3) 提交面：正确分析提交 → PASS；改错 effect → FAIL。
     run_ids = [rec.run_id for rec in runner.runs]
     ev_full = _analyze(runner, r_source(h=1), run_ids)
     _, aids = _ids(ev_full)
@@ -568,20 +638,24 @@ def ctl_old_counterexample(root: Path, gpus: bool) -> dict[str, Any]:
     judge_wrong = runner.judge()
 
     after = _sha_file(OLD_DEFECT)
-    reproduced = (abs(j_dec.mean_effect - record["mean_effect_candidate_view"]) < 1e-9
-                  and abs(j_full.mean_effect - record["mean_effect_full_resolution"]) < 1e-9
-                  and abs(diff - record["abs_diff"]) < 1e-9)
     ok = (before == after
           and reproduced
+          and full_ok and dec_rejected and trap_magnitude
           and judge_correct["pass"] is True
           and judge_wrong["pass"] is False)
     return {"name": "old_200_2000_counterexample",
-            "expected": "旧件 hash 不变；差异复现 1e-9；正确 PASS；改错 FAIL",
+            "expected": "旧件 hash 不变；原数据差异复现 1e-9；新合同正确 PASS /"
+                        "改错 FAIL；200 点视图判 INVALID",
             "observed": {"old_sha_before": before, "old_sha_after": after,
-                         "old_diff_recorded": OLD_DIFF, "new_diff": diff,
-                         "decimated_mean": j_dec.mean_effect,
-                         "full_mean": j_full.mean_effect,
+                         "old_diff_recorded": OLD_DIFF,
+                         "replay_diff": replay_diff,
+                         "replay_artifact_sha256": replay.get("artifact_sha256"),
                          "reproduced": reproduced,
+                         "new_full_mean": j_full.mean_effect,
+                         "new_naive_decimated_mean": naive_dec,
+                         "new_trap_gap": naive_gap,
+                         "new_decimated_observation": str(j_dec.observation_status),
+                         "full_ok": full_ok, "dec_rejected": dec_rejected,
                          "correct_pass": judge_correct["pass"],
                          "wrong_pass": judge_wrong["pass"]},
             "rejected": bool(ok)}
