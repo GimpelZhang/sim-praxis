@@ -112,18 +112,40 @@ def plan_for(instance_id: str):
     raise DevelopmentError(f"未冻结的实例：{instance_id}")
 
 
+def host_scene_xml(instance_id: str,
+                   params: Mapping[str, Any] | None = None) -> str:
+    """按**本次实验参数**重建宿主场景（候选永远拿不到 XML）。
+
+    T6-REV-1（2026-11-09 独立评审）：R 族的 damping 是候选自选的干预变量，必须
+    逐调用进入场景。旧接线只在建会话时按公开 ``scene_params`` 构造一次 XML，
+    ``scene_builder`` 又把候选参数丢掉，结果两个自选阻尼水平跑的是同一个
+    damping=0.05 场景（L5 的删失是接线缺陷，不是能力/判据结论）。
+
+    这里只把候选面白名单里的 ``damping`` 并入本文场景参数；E/D 的候选面没有
+    场景参数，XML 与旧接线逐字节相同（含 D 族的故障注入）。
+    """
+    plan = plan_for(instance_id)
+    private = load_private(instance_id)
+    base = dict(plan.public["scene_params"])
+    if plan.template == "pendulum" and params and "damping" in params:
+        base["damping"] = float(params["damping"])
+    scene_xml = build_scene(plan.template, base)
+    fault = private.get("fault")
+    if fault:
+        scene_xml = apply_fault(scene_xml, fault)
+    return scene_xml
+
+
 def build_host_session(instance_id: str) -> tuple[ExperimentSession, dict[str, Any], str]:
     """宿主侧会话：场景由任务书构造；D 族在这里注入故障（候选永远看不到）。"""
     plan = plan_for(instance_id)
     task = load_task(instance_id)
     private = load_private(instance_id)
-    scene_xml = build_scene(plan.template, plan.public["scene_params"])
+    scene_xml = host_scene_xml(instance_id, {})
     host_fields: dict[str, Any] = {}
     fault = private.get("fault")
-    if fault:
-        scene_xml = apply_fault(scene_xml, fault)
-        if fault["kind"] == "force_scale":
-            host_fields = {"force_scale": float(fault["scale"])}
+    if fault and fault["kind"] == "force_scale":
+        host_fields = {"force_scale": float(fault["scale"])}
     kind = str(task["interface"]["kind"])
     # 任务书公开 keys 只有增益类字段；target_x/target_y 是**题目**（goal.target），
     # 由宿主注入为固定参数。T6 首跑实测（2026-11-08）：不注入时容器 push_control
@@ -134,7 +156,8 @@ def build_host_session(instance_id: str) -> tuple[ExperimentSession, dict[str, A
         fixed = {"target_x": float(target[0]), "target_y": float(target[1])}
     session = ExperimentSession(
         kind=kind, image_digest=IMAGE_REF,
-        scene_builder=lambda _params, _xml=scene_xml: _xml,
+        # 逐调用重建：R 族候选自选的 damping 必须真的进场景（T6-REV-1）。
+        scene_builder=lambda params: host_scene_xml(instance_id, params),
         max_steps=int(task["steps_max"]), host_fields=host_fields or None,
         fixed_params=fixed or None)
     return session, task, scene_xml
@@ -523,6 +546,11 @@ class DevelopmentTrial:
         scenes_kwargs: dict[str, Any] = {}
         if scenes and scene_sha:
             scenes_kwargs["scene_sha256"] = scene_sha
+            if instance_id:
+                # 逐调用场景身份（R 族每个阻尼一个场景）。复用宿主同一构造函数，
+                # 不另写一份"期望值"，否则修好的接线与判据又可能分叉（T6-REV-1）。
+                scenes_kwargs["scene_for"] = lambda call: sha256_of(
+                    host_scene_xml(instance_id, dict(call.get("params") or {})))
         result = evaluate(EvaluationInput(
             task=task, answer=answer, calls=list(session.calls),
             replay=replay, truth=truth, priv_rules=priv_rules,
@@ -654,3 +682,38 @@ def write_report(report: Mapping[str, Any], path: Path | None = None) -> Path:
     private_write(target, json.dumps(report, ensure_ascii=False, indent=2,
                                      sort_keys=True) + "\n")
     return target
+
+
+def merge_report(new_report: Mapping[str, Any],
+                 prior: Mapping[str, Any]) -> dict[str, Any]:
+    """把**部分族**重跑的新报告并回旧报告（其余族逐字保留）。
+
+    只用于 T6-REV-1 仪器修复后对 R 族的单次复测：E/D 的轨迹没有重跑，报告里
+    必须还是它们原来的行。合并来源写进 ``merged_from``（旧报告哈希、重跑族、
+    沿用族），不掩盖「这是一次部分重跑」的事实；totals 与 ``report_sha256``
+    按合并后的行重算，哈希口径与 :func:`_run_development_locked` 相同（对不含
+    ``report_sha256`` 的正文求哈希）。
+    """
+    order = ("E", "D", "R")
+    prior_rows = {str(r.get("family")): r for r in prior.get("families") or []}
+    new_rows = {str(r.get("family")): r for r in new_report.get("families") or []}
+    rows = [new_rows.get(k) or prior_rows.get(k) for k in order]
+    rows = [r for r in rows if r is not None]
+    merged = {k: v for k, v in new_report.items()
+              if k not in ("families", "totals", "report_sha256", "merged_from")}
+    merged["families"] = rows
+    merged["totals"] = {
+        "requests_used": sum(int(r.get("requests_used") or 0) for r in rows),
+        "tokens": {
+            "in": sum(int((r.get("tokens") or {}).get("in") or 0) for r in rows),
+            "out": sum(int((r.get("tokens") or {}).get("out") or 0) for r in rows),
+        },
+        "ledger_seqs": [s for r in rows for s in (r.get("ledger_seqs") or [])],
+    }
+    merged["merged_from"] = {
+        "prior_report_sha256": prior.get("report_sha256"),
+        "rerun_families": [k for k in order if k in new_rows],
+        "carried_families": [k for k in order if k in prior_rows and k not in new_rows],
+    }
+    merged["report_sha256"] = sha256_of(merged)
+    return merged

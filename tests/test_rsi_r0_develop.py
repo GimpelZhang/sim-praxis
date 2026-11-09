@@ -383,3 +383,105 @@ def test_protocol_spec_v2_declares_preregistration():
     assert spec["actions"] == ["preregister", "run_experiment", "submit"]
     assert spec["preregistration"]["required"] is True
     assert spec["preregistration"]["required_fields"] == list(dv.PREREG_REQUIRED_FIELDS)
+
+
+# ---------------------------------------------------------------------------
+# T6-REV-1 仪器修复（2026-11-09 独立评审判 INVALID_INSTRUMENT 后）
+# 缺陷：R 族 damping 在宿主接线上从未进入场景；修复后逐调用重建并逐调用判场景身份。
+# ---------------------------------------------------------------------------
+PEND_TASK = {"interface": {"kind": "free_run"}, "steps_max": 2000,
+             "goal": {"type": "controlled_experiment"}}
+
+
+def test_pendulum_damping_is_wired_into_every_run(monkeypatch):
+    """候选自选的 damping 必须改变场景 XML；旧接线两个水平跑同一场景。"""
+    monkeypatch.setattr(dv, "load_task", lambda _id: PEND_TASK)
+    monkeypatch.setattr(dv, "load_private", lambda _id: {})
+    session, _task, base = dv.build_host_session("R-dev")
+    assert 'damping="0.050000"' in base                      # 公开面默认值
+    low = session.validate({"initial_angle": 0.8, "damping": 0.2, "steps": 2000})
+    high = session.validate({"initial_angle": 0.8, "damping": 0.6, "steps": 2000})
+    xml_low = session._build_scene(low)
+    xml_high = session._build_scene(high)
+    assert 'damping="0.200000"' in xml_low and 'damping="0.600000"' in xml_high
+    assert sha256_of(xml_low) != sha256_of(xml_high)
+    assert sha256_of(xml_low) != sha256_of(base)
+    assert sha256_of(xml_high) != sha256_of(base)
+
+
+def test_free_run_request_carries_the_candidate_damping(monkeypatch):
+    """真正发给可信服务的 scene_xml 也要逐次不同（不只是 builder 返回值）。"""
+    from orchestrator.rsi_r0 import trusted as tr
+
+    monkeypatch.setattr(dv, "load_task", lambda _id: PEND_TASK)
+    monkeypatch.setattr(dv, "load_private", lambda _id: {})
+    session, _task, _base = dv.build_host_session("R-dev")
+    seen: list[str] = []
+
+    def _fake(request, **_kw):
+        seen.append(request["scene_xml"])
+        return {"run_id": f"run_{len(seen)}", "steps_run": request["steps"],
+                "events_sha256": "e" * 64, "angle_series": [],
+                "final_angle": 0.0, "final_angular_speed": 0.0}
+
+    monkeypatch.setattr(tr, "call_service", _fake)
+    session.run({"initial_angle": 0.8, "damping": 0.2, "steps": 100})
+    session.run({"initial_angle": 0.8, "damping": 0.6, "steps": 100})
+    assert 'damping="0.200000"' in seen[0] and 'damping="0.600000"' in seen[1]
+    assert seen[0] != seen[1]
+    assert (session.calls[0]["scene_sha256"]
+            != session.calls[1]["scene_sha256"])
+
+
+def test_scene_for_is_fed_to_the_evaluator(campaign, monkeypatch):
+    """L2 场景身份必须逐调用判（evaluator 的 scene_for），不能只比一个常量。"""
+    seen: list[dict] = []
+
+    class _Result:
+        def as_dict(self):
+            return {"execution": "COMPLETE", "scientific": "NOT_APPLICABLE",
+                    "layers": {}, "first_failure_layer": None}
+
+    def _fake_evaluate(inp):
+        seen.append({"scene_for": inp.scene_for, "scene_sha256": inp.scene_sha256})
+        return _Result()
+
+    monkeypatch.setattr(dv, "evaluate", _fake_evaluate)
+    submit = json.dumps({"action": "submit", "family": "E", "run_id": "run_000"})
+    _trial, _row = _run(campaign, monkeypatch, [PREREG, submit])
+    assert seen and seen[0]["scene_for"] is not None
+    assert seen[0]["scene_for"]({"params": {"kp": 1.0, "steps": 100}}) == sha256_of(
+        "<mujoco/>")
+
+
+def test_merge_report_carries_untouched_families_and_rehashes():
+    """部分族重跑：未重跑的族逐字沿用，totals/报告哈希按合并正文重算。"""
+    prior = {
+        "report_sha256": "a" * 64,
+        "families": [
+            {"family": "E", "requests_used": 3,
+             "tokens": {"in": 1, "out": 2}, "ledger_seqs": [1, 2, 3]},
+            {"family": "D", "requests_used": 4,
+             "tokens": {"in": 5, "out": 6}, "ledger_seqs": [4]},
+            {"family": "R", "requests_used": 7,
+             "tokens": {"in": 7, "out": 8}, "ledger_seqs": [9]},
+        ],
+    }
+    new = {
+        "report_sha256": "b" * 64,
+        "families": [
+            {"family": "R", "requests_used": 6,
+             "tokens": {"in": 10, "out": 20}, "ledger_seqs": [40, 41, 42]},
+        ],
+    }
+    merged = dv.merge_report(new, prior)
+    assert [r["family"] for r in merged["families"]] == ["E", "D", "R"]
+    assert merged["families"][0] is prior["families"][0]      # 逐字沿用
+    assert merged["families"][1] is prior["families"][1]
+    assert merged["families"][2]["requests_used"] == 6
+    assert merged["totals"]["requests_used"] == 13
+    assert merged["merged_from"] == {"prior_report_sha256": "a" * 64,
+                                     "rerun_families": ["R"],
+                                     "carried_families": ["E", "D"]}
+    body = {k: v for k, v in merged.items() if k != "report_sha256"}
+    assert merged["report_sha256"] == sha256_of(body)

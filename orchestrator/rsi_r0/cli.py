@@ -33,6 +33,7 @@ from orchestrator.rsi_r0.attempts import AttemptJournal, _utc_now
 from orchestrator.rsi_r0.contracts import (
     CalibrationVerdict,
     pick_primary_verdict,
+    private_write,
     sha256_of,
 )
 from orchestrator.rsi_r0.runner import (
@@ -307,7 +308,18 @@ def cmd_develop(args: argparse.Namespace) -> int:
         _emit({"command": "develop", "refused": str(exc), "gate": "G-P"})
         return EXIT_REFUSED
     families = tuple(args.families.split(",")) if args.families else ("E", "D", "R")
+    target = rp.rsi_r0_protocol_dir() / "development_report.json"
+    prior = (json.loads(target.read_text(encoding="utf-8"))
+             if target.exists() else None)
     report = dev.run_development(runner, _gateway(), families)
+    if prior is not None and families != ("E", "D", "R"):
+        # 部分族重跑（T6-REV-1 仪器修复后的 R 单次复测）：旧报告先归档，再把
+        # 未重跑的族逐字并回，报告里留 merged_from 取证。全量重跑不走这条路。
+        sha8 = str(prior.get("report_sha256") or "nosha")[:8]
+        archive = target.parent / f"development_report.before_retest_{sha8}.json"
+        if not archive.exists():
+            private_write(archive, target.read_text(encoding="utf-8"))
+        report = dev.merge_report(report, prior)
     out = dev.write_report(report)
     _emit({"command": "develop", "families": [r.get("family") for r in report["families"]],
            "states": {r["family"]: r.get("state") for r in report["families"]},
