@@ -106,6 +106,13 @@ from orchestrator.common.runtime_paths import (
     rsi_r01_gateway_state_path,
     rsi_r01_ledger_path,
     rsi_r01_quota_dir,
+    assert_rsi_r02_roots_isolated,  # RSI-R0.2：九根（含 R0/R0.1 家族根）互异互斥
+    rsi_r02_approvals_dir,
+    rsi_r02_counters_path,
+    rsi_r02_gateway_state_dir,
+    rsi_r02_gateway_state_path,
+    rsi_r02_ledger_path,
+    rsi_r02_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -619,6 +626,22 @@ RSI_R01_HARD_CAP = 228
 # （计划 §6.3 唯一时间线），混进 228 会让重验悄悄吃掉正式校准额度。
 RSI_R01_NORMAL_BUDGET = RSI_R01_HARD_CAP
 
+# ---- RSI-R0.2：独立新账（T0，2026-11-09；计划 §3.3/§7；照 RSI-R0.1 复制，不泛化）----
+# 期号取 **2902**（计划 §3.3 建议值；T0 全仓扫描确认 2/25/26/27/281/2900/2901 已占用、
+# 2902 无冲突后锁定）。R0 与 R0.1 两本账自 R0.2 起**封存只读**——两家 campaign 根在
+# runtime_paths.rsi_r02_protected_write_roots() 中，R0.2 的任何写路径都拒绝落进去。
+LEDGER_RSI_R02 = 2902
+# 任务编号沿用 R0/R0.1 口径（协议0、E1、D2、R3）；每族帽 = 开发 24 + 验证 2×24 = 72，
+# 协议 8（§6.1：两条同路径四轮真链，取代供应侧长上下文证明），合计恰
+# 224 = 8 + 72×3（计划 §7 预算表）。
+RSI_R02_TASK_CAPS = types.MappingProxyType({0: 8, 1: 72, 2: 72, 3: 72})
+# 硬帽按**独立字面量**写（同 PHASE26/27/281/RSI_R0/RSI_R01 先例：硬帽不是任务帽合计，
+# 任一处单方面改动都不该悄悄让另一处跟着变）。224 = 8 + 72×3。
+RSI_R02_HARD_CAP = 224
+# 条件换供重验**不**计入本硬帽：R0.2 计划未设 R0.1 那样的独立预准入账套（§6.1 明确
+# 用两条真链替代换供长上下文证明），故本值等于硬帽，不留账外开口。
+RSI_R02_NORMAL_BUDGET = RSI_R02_HARD_CAP
+
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
 # 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
 # 模板 scripts/milestone2/quota_pause_schema_v2.template.json）的书面签收并
@@ -701,17 +724,20 @@ class _LedgerNamespace:
         phase2 早已结案（历史 455 行），2.7 起不会再有 phase2 写入者。
         """
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
-                              LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01)
+                              LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
+                              LEDGER_RSI_R02)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
-                              LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01)
+                              LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
+                              LEDGER_RSI_R02)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
-                              LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01)
+                              LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
+                              LEDGER_RSI_R02)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -807,6 +833,19 @@ RSI_R01_NAMESPACE = _LedgerNamespace(
     normal_budget=RSI_R01_NORMAL_BUDGET,
 )
 
+RSI_R02_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_R02,
+    quota_dir_fn=rsi_r02_quota_dir,
+    ledger_path_fn=rsi_r02_ledger_path,
+    counters_path_fn=rsi_r02_counters_path,
+    approvals_dir_fn=rsi_r02_approvals_dir,
+    pause_dir_fn=rsi_r02_gateway_state_dir,
+    pause_path_fn=rsi_r02_gateway_state_path,
+    task_caps=RSI_R02_TASK_CAPS,
+    hard_cap=RSI_R02_HARD_CAP,
+    normal_budget=RSI_R02_NORMAL_BUDGET,
+)
+
 
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
@@ -831,6 +870,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_r0_roots_isolated()
     elif ns.phase == LEDGER_RSI_R01:
         assert_rsi_r01_roots_isolated()
+    elif ns.phase == LEDGER_RSI_R02:
+        assert_rsi_r02_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1079,6 +1120,15 @@ class QuotaLedger:
         （``RsiR01CampaignUnsetError``），绝不回退到任何缺省 campaign。
         """
         return cls(RSI_R01_NAMESPACE)
+
+    @classmethod
+    def rsi_r02(cls) -> "QuotaLedger":
+        """RSI-R0.2 账（当前唯一可写账；含 R0/R0.1 在内的八本旧账已封存只读）。
+
+        campaign 由 ``SIMPRAXIS_RSI_R02_CAMPAIGN`` 选定，未设置即 fail-closed
+        （``RsiR02CampaignUnsetError``），绝不回退到任何缺省 campaign。
+        """
+        return cls(RSI_R02_NAMESPACE)
 
     # ---- 命名空间内寻址（所有 IO 经 ns 间接，函数每次调用读 env） ----
 
@@ -1698,23 +1748,25 @@ def _namespace_for_cli(phase: int) -> _LedgerNamespace:
         return RSI_R0_NAMESPACE
     if phase == LEDGER_RSI_R01:  # RSI-R0.1：2901（campaign 由 env 选定）
         return RSI_R01_NAMESPACE
+    if phase == LEDGER_RSI_R02:  # RSI-R0.2：2902（campaign 由 env 选定）
+        return RSI_R02_NAMESPACE
     return PHASE2_NAMESPACE
 
 
 def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(
         description="配额账本（批准凭据/恢复/计数；Phase 1/2/2.5/2.6/2.7/2.8.1、"
-                    "RSI-R0 账已封存；--ledger-phase 2901 走 RSI-R0.1 独立新账）")
-    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25/26/27/281/2900 为封存账，
-    # 2901 为 R0.1 独立新账（唯一可写）。
+                    "RSI-R0/R0.1 账已封存；--ledger-phase 2902 走 RSI-R0.2 独立新账）")
+    # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25/26/27/281/2900/2901 为封存账，
+    # 2902 为 R0.2 独立新账（唯一可写）。
     p.add_argument("--ledger-phase", type=int, default=LEDGER_PHASE,
                    choices=(LEDGER_PHASE, LEDGER_PHASE25, LEDGER_PHASE26,
                             LEDGER_PHASE27, LEDGER_PHASE281, LEDGER_RSI_R0,
-                            LEDGER_RSI_R01),
+                            LEDGER_RSI_R01, LEDGER_RSI_R02),
                    help=("台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 "
                          "封存账，26=Phase 2.6 封存账，27=Phase 2.7 封存账，"
                          "281=Phase 2.8.1 封存账，2900=RSI-R0 封存账，"
-                         "2901=RSI-R0.1 独立新账"))
+                         "2901=RSI-R0.1 封存账，2902=RSI-R0.2 独立新账"))
     sub = p.add_subparsers(dest="cmd", required=True)
 
     # Task0：--task choices 取各期 caps 并集仅为通过 argparse；写侧 write_approval
@@ -1722,7 +1774,8 @@ def main(argv: "list[str] | None" = None) -> int:
     all_tasks = sorted(set(PHASE1_TASK_CAPS) | set(PHASE2_TASK_CAPS)
                        | set(PHASE25_TASK_CAPS) | set(PHASE26_TASK_CAPS)
                        | set(PHASE27_TASK_CAPS) | set(PHASE281_TASK_CAPS)
-                       | set(RSI_R0_TASK_CAPS) | set(RSI_R01_TASK_CAPS))
+                       | set(RSI_R0_TASK_CAPS) | set(RSI_R01_TASK_CAPS)
+                       | set(RSI_R02_TASK_CAPS))
     pa = sub.add_parser("approve", help="写入一批书面批准凭据（显式参数，无默认值）")
     pa.add_argument("--batch-id", required=True)
     pa.add_argument("--task", type=int, required=True, choices=all_tasks)
@@ -1769,7 +1822,7 @@ def main(argv: "list[str] | None" = None) -> int:
         allow_events=(("selfcheck",)
                       if ns.phase in (LEDGER_PHASE26, LEDGER_PHASE27,
                                       LEDGER_PHASE281, LEDGER_RSI_R0,
-                                      LEDGER_RSI_R01) else ()))
+                                      LEDGER_RSI_R01, LEDGER_RSI_R02) else ()))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:
