@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from orchestrator.rsi_r01 import attempts as AT
 from orchestrator.rsi_r01 import campaign as C
 from orchestrator.rsi_r01 import lock as L
 from orchestrator.rsi_r01 import paid as P
@@ -58,6 +59,16 @@ CHAIN: "tuple[tuple[int, str, str, int], ...]" = (
     (6, "long_context_tool_chain", "L2", 3),
 )
 PROTOCOL_POSTS = sum(p for _, _, _, p in CHAIN)
+
+
+def budget_slot_id(slot_id: str, slot: int) -> str:
+    """槽账唯一键（reviewer-r3 CRITICAL）。
+
+    ``SlotBudget`` 是「键即事实」的账：``claim`` 建立的键必须与
+    ``record_post``/``mark_preflight_blocked`` 使用**同一个字面串**，否则第一条真实
+    POST 记账即抛 ``SlotExhausted``。这里只允许经本函数生成键，禁止各处手拼。
+    """
+    return f"{slot_id}:{slot}"
 assert PROTOCOL_POSTS == 12
 
 #: 长链第 2/3 轮输入的目标区间（token，闭区间）。
@@ -564,30 +575,61 @@ class ProtocolRunner:
             raise ProtocolBlocked("PREREG_MISMATCH",
                                   f"预登记请求数 {len(posts)} != {PROTOCOL_POSTS}")
         for rec in posts:
-            plan = T.SendPlan(request=rec["request"],
-                              max_output_tokens=int(rec["max_output_tokens"]))
+            if not isinstance(rec, Mapping):
+                raise ProtocolBlocked("PREREG_MISMATCH", "posts 条目不是映射")
+            # reviewer-r3 LOW：非数值字段不得以 ValueError 逃逸——一律归为
+            # 预登记不符（fail-closed 且可分类）。
+            try:
+                mot = int(rec["max_output_tokens"])
+                req = rec["request"]
+                req_mot = int(req["max_tokens"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProtocolBlocked(
+                    "PREREG_MISMATCH",
+                    f"预登记数值字段不可解析（{type(exc).__name__}: {exc}）") from exc
+            # reviewer-r3 LOW：max_output_tokens 字段不在 request hash 覆盖范围内，
+            # 必须与 request.max_tokens 显式相等，否则可单独放大输出帽。
+            if mot != req_mot:
+                raise ProtocolBlocked(
+                    "PREREG_MISMATCH",
+                    f"max_output_tokens={mot} != request.max_tokens={req_mot}")
+            plan = T.SendPlan(request=req, max_output_tokens=mot)
             if plan.sha256 != rec.get("request_sha256"):
                 raise ProtocolBlocked(
                     "PREREG_MISMATCH",
                     f"slot {rec['slot']}#{rec['index']} 请求 hash 不符")
+            # reviewer-r3 LOW：nonce 必须真实出现在发网字节里——否则 `nonce` 字段
+            # 与请求体解耦，「标记由 nonce 派生」的前提就不成立。
+            nonce = str(rec.get("nonce") or "")
+            if not nonce or nonce.encode("utf-8") not in plan.serialized:
+                raise ProtocolBlocked(
+                    "PREREG_MISMATCH",
+                    f"slot {rec['slot']}#{rec['index']} nonce 未绑定在请求体字节内")
         # 元数据完整性（reviewer-r3 MAJOR M1）：只验请求体字节不够——篡改者可以
         # 重算 request_sha256，把长链件换成短请求并放宽 interval，整份 prereg 仍
         # 自洽。链位（slot/kind/index）、每槽条数与长链目标区间一律与**代码常量**
         # 比对（代码常量随实现面入 LOCK manifest），文件只作载体不作真值。
-        expected: "list[tuple[int, str, int]]" = [
-            (slot, kind, idx)
-            for slot, kind, _chain, n in CHAIN
+        expected: "list[tuple[int, str, str, int]]" = [
+            (slot, kind, chain, idx)
+            for slot, kind, chain, n in CHAIN
             for idx in range(1, n + 1)]
         if doc.get("post_count") not in (None, PROTOCOL_POSTS):
             raise ProtocolBlocked("PREREG_MISMATCH",
                                   f"post_count={doc.get('post_count')}")
-        for rec, (slot, kind, idx) in zip(posts, expected):
-            got_pos = (int(rec.get("slot", -1)), str(rec.get("kind")),
-                       int(rec.get("index", -1)))
-            if got_pos != (slot, kind, idx):
+        for rec, (slot, kind, chain, idx) in zip(posts, expected):
+            try:
+                got_pos = (int(rec.get("slot")), str(rec.get("kind")),
+                           str(rec.get("chain")), int(rec.get("index")))
+            except (TypeError, ValueError) as exc:
                 raise ProtocolBlocked(
                     "PREREG_MISMATCH",
-                    f"预登记链位不符：{got_pos} != {(slot, kind, idx)}")
+                    f"链位字段不可解析（{type(exc).__name__}: {exc}）") from exc
+            # REVIEWER-R3 LOW：链标识也须绑定——只验 (slot,kind,index) 时，
+            # 把 chain 改成任意串仍可通过。
+            if got_pos != (slot, kind, chain, idx):
+                raise ProtocolBlocked(
+                    "PREREG_MISMATCH",
+                    f"预登记链位不符：{got_pos} != {(slot, kind, chain, idx)}")
             want = (LONG_TARGETS[slot][idx - 2]
                     if kind == "long_context_tool_chain" and idx >= 2 else None)
             got = rec.get("interval")
@@ -596,10 +638,17 @@ class ProtocolRunner:
                     raise ProtocolBlocked(
                         "PREREG_MISMATCH",
                         f"slot {slot}#{idx} 非长链件不得带区间：{got}")
-            elif got is None or tuple(int(x) for x in got) != want:
-                raise ProtocolBlocked(
-                    "PREREG_MISMATCH",
-                    f"slot {slot}#{idx} 区间 {got} 与代码常量 {list(want)} 不符")
+            else:
+                try:
+                    got_iv = tuple(int(x) for x in got)
+                except (TypeError, ValueError) as exc:
+                    raise ProtocolBlocked(
+                        "PREREG_MISMATCH",
+                        f"slot {slot}#{idx} 区间不可解析（{exc}）") from exc
+                if got_iv != want:
+                    raise ProtocolBlocked(
+                        "PREREG_MISMATCH",
+                        f"slot {slot}#{idx} 区间 {got} 与代码常量 {list(want)} 不符")
         return doc
 
     # -- 单 POST ----------------------------------------------------------
@@ -616,14 +665,14 @@ class ProtocolRunner:
         return count_plan(plan, tokenizer=self.tokenizer, overhead=overhead,
                           interval=interval)
 
-    def _claim(self, slot_id: str) -> None:
+    def _claim(self, budget_key: str) -> None:
         if self.budget is not None:
-            self.budget.claim(slot_id=slot_id, scope="protocol", family=None,
+            self.budget.claim(slot_id=budget_key, scope="protocol", family=None,
                               trial_id=None)
 
-    def _record(self, slot_id: str, *, state: str) -> None:
+    def _record(self, budget_key: str, *, state: str) -> None:
         if self.budget is not None:
-            self.budget.record_post(slot_id, state=state)
+            self.budget.record_post(budget_key, state=state)
 
     def _attempts(self) -> "list[T.Attempt]":
         """读底层 Transport 已记录的 Attempt（PaidTransport 包裹时穿透）。"""
@@ -631,7 +680,7 @@ class ProtocolRunner:
         inner = getattr(tr, "inner", None) or getattr(tr, "_inner", None)
         return list(getattr(inner or tr, "attempts", []) or [])
 
-    def _post(self, rec: Mapping[str, Any], *, slot_id: str,
+    def _post(self, rec: Mapping[str, Any], *, slot_id: str, budget_key: str,
               sender: T.Sender,
               overhead: "tuple[int, int] | None" = None) -> "tuple[T.Attempt, T.Accounting]":
         plan = T.SendPlan(request=rec["request"],
@@ -654,18 +703,19 @@ class ProtocolRunner:
                 if cand.request_sha256 == plan.sha256:
                     last = cand
             if last is not None:
-                self._record(slot_id, state=last.state)
+                # 先落「已发」事实再记账：即使槽账拒绝，报告里的 posts_sent 也必须
+                # 反映真实发网次数（reviewer-r3 CRITICAL 的观测面）。
                 self.posts.append({"slot": rec["slot"], "chain": rec["chain"],
                                    "index": rec["index"],
                                    "attempt": last.as_dict(),
                                    "accounting": accounting.as_dict(),
                                    "tokenizer_tokens": None,
                                    "interval": rec.get("interval")})
+                self._record(budget_key, state=last.state)
             raise ProtocolBlocked(
                 "CALL_FAILED",
                 f"{slot_id}#{rec['index']} 发送状态不确定 "
                 f"({type(exc).__name__}: {exc})；不重发") from exc
-        self._record(slot_id, state=att.state)
         tok_tokens = (self.tokenizer.count(render_text(plan))
                       if self.tokenizer is not None else None)
         self.posts.append({"slot": rec["slot"], "chain": rec["chain"],
@@ -674,6 +724,7 @@ class ProtocolRunner:
                            "accounting": accounting.as_dict(),
                            "tokenizer_tokens": tok_tokens,
                            "interval": rec.get("interval")})
+        self._record(budget_key, state=att.state)
         # 事后证伪：供应商实际 usage 必须落在发网前声明的计数界内。越界说明
         # 上界（或下界）不成立——那正是「长链长度/≤20000」两处声明的依据，
         # 因此按仪器故障停链，不把越界当噪声放过。
@@ -740,8 +791,10 @@ class ProtocolRunner:
 
     # -- 三条链 -----------------------------------------------------------
     def _run_short(self, rec: Mapping[str, Any], *, slot_id: str,
-                   sender: T.Sender, store) -> "dict[str, Any]":
-        att, acc = self._post(rec, slot_id=slot_id, sender=sender)
+                   budget_key: str, sender: T.Sender,
+                   store) -> "dict[str, Any]":
+        att, acc = self._post(rec, slot_id=slot_id, budget_key=budget_key,
+                              sender=sender)
         text = store.get(att.request_sha256, ({}, ""))[1]
         parsed = parse_json_object(text)
         checks = {
@@ -760,9 +813,11 @@ class ProtocolRunner:
                 "usage": att.usage}
 
     def _run_tool(self, recs: "list[Mapping[str, Any]]", *, slot_id: str,
-                  sender: T.Sender, store, tool: ToolExec) -> "dict[str, Any]":
+                  budget_key: str, sender: T.Sender, store,
+                  tool: ToolExec) -> "dict[str, Any]":
         first = recs[0]
-        att1, _ = self._post(first, slot_id=slot_id, sender=sender)
+        att1, _ = self._post(first, slot_id=slot_id, budget_key=budget_key,
+                             sender=sender)
         parsed = parse_json_object(store.get(att1.request_sha256, ({}, ""))[1])
         action = (parsed or {}).get("action") or {}
         if not isinstance(action, Mapping) or action.get("tool") != "read_file":
@@ -784,7 +839,8 @@ class ProtocolRunner:
         if str(got.get("content")) != expect:
             raise ProtocolBlocked("TOOL_CONTENT_MISMATCH",
                                   f"{slot_id} 容器内容与预登记标记不符")
-        att2, _ = self._post(recs[1], slot_id=slot_id, sender=sender)
+        att2, _ = self._post(recs[1], slot_id=slot_id, budget_key=budget_key,
+                             sender=sender)
         parsed2 = parse_json_object(store.get(att2.request_sha256, ({}, ""))[1])
         checks = {
             "action_valid": True,
@@ -805,10 +861,11 @@ class ProtocolRunner:
                 "requests": [att1.request_sha256, att2.request_sha256]}
 
     def _run_long(self, recs: "list[Mapping[str, Any]]", *, slot_id: str,
-                  sender: T.Sender, store, tool: ToolExec,
+                  budget_key: str, sender: T.Sender, store, tool: ToolExec,
                   overhead: "tuple[int, int]") -> "dict[str, Any]":
         first = recs[0]
-        att1, _ = self._post(first, slot_id=slot_id, sender=sender)
+        att1, _ = self._post(first, slot_id=slot_id, budget_key=budget_key,
+                             sender=sender)
         parsed = parse_json_object(store.get(att1.request_sha256, ({}, ""))[1])
         action = (parsed or {}).get("action") or {}
         if not isinstance(action, Mapping) or action.get("tool") != "read_file":
@@ -831,8 +888,8 @@ class ProtocolRunner:
                                      "tool_executed_in_container":
                                          bool(got.get("executed_in_container"))}
         for rec in recs[1:]:
-            att, acc = self._post(rec, slot_id=slot_id, sender=sender,
-                                  overhead=overhead)
+            att, acc = self._post(rec, slot_id=slot_id, budget_key=budget_key,
+                                  sender=sender, overhead=overhead)
             parsed_n = parse_json_object(store.get(att.request_sha256, ({}, ""))[1])
             key = f"stage{rec['index']}_"
             # 目标区间取代码常量而不取文件字段（MAJOR M1 的纵深防御：load_prereg
@@ -883,15 +940,20 @@ class ProtocolRunner:
                 rows.append({"slot": slot, "chain": chain, "kind": kind,
                              "state": "CANCELLED", "reason": blocked.code})
                 continue
-            self._claim(f"{slot_id}:{slot}")
+            bkey = budget_slot_id(slot_id, slot)
             try:
+                # reviewer-r3 MEDIUM：占用必须在 try 内——恢复态下 SlotExhausted
+                # 原先会直接逃出 run()，既不写报告也不标余槽 CANCELLED。
+                self._claim(bkey)
                 if kind == "short_text":
                     row = self._run_short(recs[0], slot_id=slot_id,
+                                          budget_key=bkey,
                                           sender=wrapped, store=store)
                 elif kind == "tool_roundtrip":
                     if tool is None:
                         raise ProtocolBlocked("TOOL_UNAVAILABLE", "无工具执行器")
-                    row = self._run_tool(recs, slot_id=slot_id, sender=wrapped,
+                    row = self._run_tool(recs, slot_id=slot_id, budget_key=bkey,
+                                         sender=wrapped,
                                          store=store, tool=tool)
                 else:
                     if overhead is None:
@@ -917,17 +979,25 @@ class ProtocolRunner:
                                 code,
                                 f"{slot_id} 预检 stage{rec['index']} 未过："
                                 f"{pre.verdict} {list(pre.reasons)}")
-                    row = self._run_long(recs, slot_id=slot_id, sender=wrapped,
-                                         store=store, tool=tool, overhead=overhead)
+                    row = self._run_long(recs, slot_id=slot_id, budget_key=bkey,
+                                         sender=wrapped, store=store, tool=tool,
+                                         overhead=overhead)
                 row["kind"] = kind
                 rows.append(row)
+            except AT.SlotExhausted as exc:
+                # 槽账拒绝是独立的阻断类（不与「未预料异常」混同）：零 POST，
+                # 不补考，后续槽 CANCELLED。
+                blocked = ProtocolBlocked(
+                    "BLOCKED_BUDGET", f"{slot_id} 槽账拒绝：{exc}；不补考")
+                rows.append({"slot": slot, "chain": chain, "kind": kind,
+                             "state": "FAILED", "code": blocked.code,
+                             "detail": blocked.detail})
             except ProtocolBlocked as exc:
                 blocked = exc
                 if self.budget is not None and exc.code in (
                         "PREFLIGHT_BLOCKED", "BLOCKED_APPROVAL", "LOCK_CHANGED"):
                     try:
-                        self.budget.mark_preflight_blocked(f"{slot_id}:{slot}",
-                                                           reason=exc.code)
+                        self.budget.mark_preflight_blocked(bkey, reason=exc.code)
                     except Exception:  # noqa: BLE001 —— 记账失败不掩盖原始阻塞
                         pass
                 rows.append({"slot": slot, "chain": chain, "kind": kind,

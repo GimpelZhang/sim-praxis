@@ -397,6 +397,80 @@ def test_cli_refuses_redirects_and_posts_once():
     assert src.count("_OPENER.open(") == 1, "疑似出现重试/多次发送站点"
 
 
+def _budgeted_runner(ctx: C.CampaignContext, budget, *, tokenizer=None):
+    return PR.ProtocolRunner(ctx=ctx, model="probe-model", tokenizer=tokenizer,
+                             transport=P.PaidTransport(ctx=None), budget=budget,
+                             root=ctx.root / "analysis" / "t6_protocol")
+
+
+def test_full_protocol_with_real_slot_budget(tmp_path, monkeypatch):
+    """CRITICAL（reviewer-r3）：生产接线（真 SlotBudget）下 12 POST 必须走完。
+
+    旧实现 claim 用 ``protocol_S1:1`` 而 record 用 ``protocol_S1``，第一条真实
+    POST 记账即 ``SlotExhausted``——单测全部 ``budget=None``，故 129 绿也漏掉。
+    """
+    from orchestrator.rsi_r01 import attempts as AT
+    monkeypatch.setattr(L, "assert_paid_allowed",
+                        lambda ctx, repo_root=L.REPO_ROOT: {"ok": True})
+    ctx = _campaign(tmp_path)
+    qpath = tmp_path / "quota" / "slots_protocol.json"
+    runner = _budgeted_runner(ctx, AT.SlotBudget(path=qpath),
+                              tokenizer=StubTokenizer())
+    prereg = runner.write_prereg(nonces={i: f"n{i:04d}" for i in range(1, 7)})
+    report = runner.run(sender=_scripted_sender(prereg), tool=FakeTool())
+    assert report["verdict"] == "PASS", report.get("blocked_detail")
+    assert report["posts_sent"] == 12
+    slots = json.loads(qpath.read_text(encoding="utf-8"))
+    assert set(slots) == {PR.budget_slot_id(f"protocol_{chain}", slot)
+                          for slot, _k, chain, _n in PR.CHAIN}
+    for slot, _kind, chain, n in PR.CHAIN:
+        rec = slots[PR.budget_slot_id(f"protocol_{chain}", slot)]
+        assert rec["posts"] == n, rec
+        assert rec["state"] == "sent_ok", rec
+
+
+def test_exhausted_budget_stops_chain_and_writes_report(tmp_path, monkeypatch):
+    """MEDIUM（reviewer-r3）：占用在 try 内——恢复态 SlotExhausted 必须落报告。"""
+    from orchestrator.rsi_r01 import attempts as AT
+    monkeypatch.setattr(L, "assert_paid_allowed",
+                        lambda ctx, repo_root=L.REPO_ROOT: {"ok": True})
+    ctx = _campaign(tmp_path)
+    qpath = tmp_path / "quota" / "slots_protocol.json"
+    budget = AT.SlotBudget(path=qpath)
+    budget.claim(slot_id=PR.budget_slot_id("protocol_S1", 1),
+                 scope="protocol", family=None, trial_id=None)
+    runner = _budgeted_runner(ctx, budget)
+    prereg = runner.write_prereg(nonces={i: f"n{i:04d}" for i in range(1, 7)})
+    report = runner.run(sender=_scripted_sender(prereg), tool=FakeTool())
+    assert report["verdict"] == "FAILED"
+    assert report["blocked_code"] == "BLOCKED_BUDGET"
+    assert report["posts_sent"] == 0
+    assert [r["state"] for r in report["slots"]] == ["FAILED"] + ["CANCELLED"] * 5
+    assert (ctx.root / "analysis/t6_protocol/protocol_report.json").is_file()
+
+
+def test_prereg_max_output_and_chain_bound_refused(tmp_path, monkeypatch):
+    """LOW：max_output_tokens 与 request.max_tokens 脱钩、chain 被改都须拒发。"""
+    monkeypatch.setattr(L, "assert_paid_allowed",
+                        lambda ctx, repo_root=L.REPO_ROOT: {"ok": True})
+    for mutate in ("max_out", "chain"):
+        (tmp_path / mutate).mkdir()
+        ctx = _campaign(tmp_path / mutate)
+        runner = _runner(ctx)
+        runner.write_prereg(nonces={i: f"n{i:04d}" for i in range(1, 7)})
+        path = ctx.root / runner.prereg_relpath()
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        if mutate == "max_out":
+            doc["posts"][0]["max_output_tokens"] += 4096
+        else:
+            doc["posts"][0]["chain"] = "X9"
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        with pytest.raises(PR.ProtocolBlocked) as exc:
+            runner.run(sender=lambda plan: (_ for _ in ()).throw(
+                AssertionError("不应发送")), tool=FakeTool())
+        assert exc.value.code == "PREREG_MISMATCH", mutate
+
+
 class BadHashTool(FakeTool):
     """容器读回的哈希被篡改：工具往返必须失败，不得以 HTTP 200 通过。"""
 
