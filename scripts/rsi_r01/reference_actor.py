@@ -164,7 +164,10 @@ def gain_ladder(inst: TC.Instance) -> list[dict[str, float]]:
     ref = inst.private["reference_gains"]
     boundary = inst.param_bounds
     ladder: list[dict[str, float]] = [dict(ref)]
-    for factor in (2.0, 4.0, 8.0, 16.0):
+    # 上限 32×：D v2 的 20 N 外力偏置要压到 actor 自设 0.01 m 内需要 kp≈3800
+    # （参考 120 × 32），而私有容差 0.06 m 在 4× 就已满足——阶梯必须覆盖更严的
+    # 自设判据，否则正确参考会因自设标准给不出 SUPPORTED 而假失败。
+    for factor in (2.0, 4.0, 8.0, 16.0, 32.0):
         ladder.append({"kp": min(boundary["kp"][1], ref["kp"] * factor),
                        "kd": min(boundary["kd"][1], ref["kd"] * (factor ** 0.5)),
                        "max_force": min(boundary["max_force"][1],
