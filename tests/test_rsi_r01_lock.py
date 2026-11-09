@@ -40,13 +40,21 @@ def _fake_campaign(tmp_path: Path) -> C.CampaignContext:
         json.dumps(sealed), encoding="utf-8")
     (root / "analysis" / "t1_container").mkdir(parents=True, exist_ok=True)
     (root / "analysis" / "t1_container" / "evidence.json").write_text(
-        json.dumps({"all_pass": True}), encoding="utf-8")
+        json.dumps({"all_pass": True,
+                    "verdicts": {k: "PASS" for k in
+                                 ("AC05", "AC06", "AC07", "AC08", "AC09")}}),
+        encoding="utf-8")
     (root / "analysis" / "controls").mkdir(parents=True, exist_ok=True)
     (root / "analysis" / "controls" / "controls.json").write_text(
-        json.dumps({"rejected_all": True, "total": 13}), encoding="utf-8")
+        json.dumps({"rejected_all": True, "total": 13,
+                    "controls": [{"name": f"ctl_{i}", "rejected": True}
+                                 for i in range(13)]}), encoding="utf-8")
     (root / "analysis" / "t3_oracle").mkdir(parents=True, exist_ok=True)
     (root / "analysis" / "t3_oracle" / "audit.json").write_text(
-        json.dumps({"verdict": "PASS"}), encoding="utf-8")
+        json.dumps({"verdict": "PASS",
+                    "checks": {"import_audit": True, "real_sequences": True,
+                               "boundary_sequences": True, "t_low_zero": True}}),
+        encoding="utf-8")
     (root / "closeout").mkdir(parents=True, exist_ok=True)
     (root / "closeout" / "t2_design_gate.json").write_text(json.dumps(
         {"campaign_verdict": "DESIGN_READY", "decision": "PROCEED_T3"}),
@@ -208,6 +216,49 @@ def test_missing_price_source_blocks(tmp_path, monkeypatch):
     with pytest.raises(L.LockError) as exc:
         L.build_candidate(ctx)
     assert exc.value.code == "BLOCKED_PRICE"
+
+
+def test_stage_models_endpoint_read_from_meta():
+    doc = L.stage_models(Path(L.REPO_ROOT) / "orchestrator" / "gateway"
+                         / "stage_models.yaml")
+    assert doc["endpoint"] == "anthropic-messages"   # MEDIUM-1 回归
+    assert doc["base_url_env"] == "ANTHROPIC_BASE_URL"
+
+
+def test_live_plan_edit_refuses_paid(tmp_path, price_file):
+    ctx = _fake_campaign(tmp_path)
+    sha = L.build_candidate(ctx)["lock_sha256"]
+    _sign(ctx, "reviewer", sha, "reviewer-a")
+    _sign(ctx, "verifier", sha, "verifier-b")
+    _finalize(ctx)
+    Path(ctx.plan_path).write_text("plan-bytes-edited", encoding="utf-8")
+    report = L.verify_lock(ctx)
+    assert report["verdict"] == "FAIL"
+    assert any("plan_sha256" in p for p in report["problems"])
+    with pytest.raises(L.LockError):
+        L.assert_paid_allowed(ctx)
+
+
+def test_signature_evidence_mismatch_refused(tmp_path, price_file):
+    ctx = _fake_campaign(tmp_path)
+    sha = L.build_candidate(ctx)["lock_sha256"]
+    bogus = L.signature_document(role="reviewer", verdict="APPROVE",
+                                 binding_sha256=sha, signed_by="reviewer-a",
+                                 evidence_sha256={"controls": "0" * 64})
+    C.write_json(ctx, f"{L.SIG_DIR}/reviewer.json", bogus)
+    _sign(ctx, "verifier", sha, "verifier-b")
+    with pytest.raises(L.LockError) as exc:
+        L.finalize(ctx)
+    assert any("证据" in p for p in exc.value.problems)
+
+
+def test_non_mapping_signature_file_raises_lock_error(tmp_path, price_file):
+    ctx = _fake_campaign(tmp_path)
+    L.build_candidate(ctx)
+    C.write_json(ctx, f"{L.SIG_DIR}/reviewer.json", ["not", "a", "mapping"])
+    with pytest.raises(L.LockError) as exc:
+        L.load_signatures(ctx.root)
+    assert exc.value.code == "BLOCKED_APPROVAL"
 
 
 def test_signature_validation_rejects_malformed():

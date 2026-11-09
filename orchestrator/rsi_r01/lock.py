@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import sys
 from pathlib import Path
@@ -153,8 +154,12 @@ def stage_models(path: Path) -> dict[str, Any]:
     stages = (doc.get("stages") or doc.get("stage_models") or {})
     models = {name: (cfg or {}).get("model_id") for name, cfg in stages.items()
               if isinstance(cfg, Mapping)}
+    # 供应端身份取自 yaml 的 ``meta`` 段（t0_baseline 读的同一键）；旧实现误读
+    # ``gateway`` 导致 endpoint 恒 null，reviewer MEDIUM-1 已修。
+    meta = doc.get("meta") or doc.get("gateway") or {}
     return {"path": str(path), "sha256": _sha(path), "models": models,
-            "endpoint": (doc.get("gateway") or {}).get("endpoint")}
+            "endpoint": meta.get("endpoint"),
+            "base_url_env": meta.get("base_url_env")}
 
 
 def _verdicts(campaign: Path) -> "tuple[dict[str, Any], list[str]]":
@@ -168,13 +173,40 @@ def _verdicts(campaign: Path) -> "tuple[dict[str, Any], list[str]]":
             continue
         hashes[key] = _sha(path)
         doc = json.loads(path.read_text(encoding="utf-8"))
-        if key == "t1_container" and doc.get("all_pass") is not True:
-            problems.append("T1 容器证据 all_pass != true")
+        if key == "t1_container":
+            if doc.get("all_pass") is not True:
+                problems.append("T1 容器证据 all_pass != true")
+            verdicts = doc.get("verdicts")
+            if not isinstance(verdicts, Mapping):
+                problems.append("T1 容器证据缺逐 AC verdicts（只信摘要不算过）")
+            else:
+                bad = [f"{k}={verdicts.get(k)}" for k in
+                       ("AC05", "AC06", "AC07", "AC08", "AC09")
+                       if verdicts.get(k) != "PASS"]
+                if bad:
+                    problems.append(f"T1 逐 AC 未全 PASS：{', '.join(bad)}")
         if key == "controls":
             if doc.get("rejected_all") is not True or int(doc.get("total") or 0) < 13:
                 problems.append("T3 负控未全拒或数量 < 13")
-        if key == "oracle_audit" and doc.get("verdict") != "PASS":
-            problems.append("T3 oracle 审计 verdict != PASS")
+            items = doc.get("controls")
+            if not isinstance(items, list) or len(items) < 13:
+                problems.append("T3 负控缺逐项列表（只信摘要不算过）")
+            else:
+                not_rejected = [str(it.get("name")) for it in items
+                                if isinstance(it, Mapping)
+                                and it.get("rejected") is not True]
+                if not_rejected:
+                    problems.append("T3 逐项存在未拒：" + ", ".join(not_rejected))
+        if key == "oracle_audit":
+            if doc.get("verdict") != "PASS":
+                problems.append("T3 oracle 审计 verdict != PASS")
+            checks = doc.get("checks")
+            if not isinstance(checks, Mapping) or not checks:
+                problems.append("T3 oracle 审计缺逐项 checks")
+            else:
+                bad = [k for k, v in checks.items() if v is not True]
+                if bad:
+                    problems.append("T3 oracle 子项未全 true：" + ", ".join(map(str, bad)))
         if key == "t2_design_gate":
             if (doc.get("campaign_verdict") != "DESIGN_READY"
                     or doc.get("decision") != "PROCEED_T3"):
@@ -192,6 +224,19 @@ def _verdicts(campaign: Path) -> "tuple[dict[str, Any], list[str]]":
     return hashes, problems
 
 
+_CONSENT_ENV = "SIMPRAXIS_RSI_R01_CONSENT"
+_CONSENT_DEFAULT = Path.home() / "文档" / "RSI_R0.1_Consent.txt"
+
+
+def _consent_path(ctx: C.CampaignContext) -> "Path | None":
+    """授权活文件路径：优先上下文记录；早期上下文无此字段时用常量/环境回退。"""
+    raw = getattr(ctx, "consent_path", "") or ""
+    if raw:
+        return Path(raw)
+    env = os.environ.get(_CONSENT_ENV)
+    return Path(env) if env else _CONSENT_DEFAULT
+
+
 def collect_facts(ctx: C.CampaignContext,
                   repo_root: Path = REPO_ROOT) -> dict[str, Any]:
     """现场重算 §3.2 全部绑定事实；缺件与不一致以 problems 返回。"""
@@ -202,6 +247,21 @@ def collect_facts(ctx: C.CampaignContext,
     models = stage_models(repo_root / "orchestrator/gateway/stage_models.yaml")
     if None in models["models"].values():
         problems.append("stage_models 含 model_id: null（需用户裁决）")
+    if not models.get("endpoint"):
+        problems.append("stage_models 缺 meta.endpoint（供应端身份未知）")
+
+    # 计划/授权活文件重算（reviewer MEDIUM-2）：建 campaign 后改计划或授权必须暴露，
+    # 不能只信 campaign_context.json 里的旧 hash。
+    binding: "dict[str, Any]" = {}
+    for key, raw_path, expected in (
+            ("plan_sha256", ctx.plan_path, ctx.plan_sha256),
+            ("consent_sha256", _consent_path(ctx), ctx.consent_sha256)):
+        live = Path(raw_path) if raw_path else None
+        actual = _sha(live) if live is not None and live.is_file() else None
+        binding[key] = {"path": str(live) if live else None,
+                        "expected": expected, "actual": actual}
+        if actual != expected:
+            problems.append(f"{key} 与活文件不符（计划/授权在冻结后被改）")
 
     baseline_path = campaign / "contract" / "baseline.json"
     baseline: dict[str, Any] = {}
@@ -235,8 +295,21 @@ def collect_facts(ctx: C.CampaignContext,
          + S.MAX_OUTPUT_TOKENS * PRICE_PER_1M_OUTPUT_USD) / 1_000_000, 12)
     worst_total = round(worst_per_request * grand_posts, 12)
     price_sha = _sha(PRICE_SOURCE) if PRICE_SOURCE.is_file() else None
+    price_doc: "dict[str, Any]" = {}
     if price_sha is None:
         problems.append(f"价格来源缺失（BLOCKED_PRICE）：{PRICE_SOURCE}")
+    else:
+        # 价目必须从来源件实读并与绑定常量相等（reviewer LOW-7）：硬编码不再自证。
+        try:
+            price_doc = json.loads(PRICE_SOURCE.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001 —— 解析失败即价格未知
+            problems.append(f"价格来源不可解析（BLOCKED_PRICE）：{exc}")
+        for key, const in (("price_per_1m_input_usd", PRICE_PER_1M_INPUT_USD),
+                           ("price_per_1m_output_usd", PRICE_PER_1M_OUTPUT_USD)):
+            actual = price_doc.get(key)
+            if actual != const:
+                problems.append(
+                    f"价格来源 {key}={actual} 与绑定常量 {const} 不符（BLOCKED_PRICE）")
     if worst_total > USD_CEILING:
         problems.append(
             f"最坏费用 {worst_total} > 货币帽 {USD_CEILING}（BLOCKED_PRICE）")
@@ -349,6 +422,9 @@ def collect_facts(ctx: C.CampaignContext,
             "fx_basis": "计价与结算同为美元，无换汇（改币种须重签）",
             "pricing_basis": "conservative_ceiling_not_vendor_quote",
             "price_source": {"path": str(PRICE_SOURCE), "sha256": price_sha},
+            "price_source_values": {
+                "price_per_1m_input_usd": price_doc.get("price_per_1m_input_usd"),
+                "price_per_1m_output_usd": price_doc.get("price_per_1m_output_usd")},
             "price_per_1m_input_usd": PRICE_PER_1M_INPUT_USD,
             "price_per_1m_output_usd": PRICE_PER_1M_OUTPUT_USD,
             "worst_case_per_request_usd": worst_per_request,
@@ -379,6 +455,7 @@ def collect_facts(ctx: C.CampaignContext,
             "required": "reference 同路径 9/9 + 负控 13/13 全拒 + 独立 oracle PASS",
         },
         "protected": protected,
+        "binding": binding,
         "model_change_this_campaign": baseline.get("model_change_this_campaign"),
         "conditional_batch": {
             "name": "R01-M0",
@@ -479,12 +556,30 @@ def validate_signature(sig: Mapping[str, Any], role: str,
     return problems
 
 
+def signature_evidence_problems(sig: Mapping[str, Any], role: str,
+                                facts: Mapping[str, Any]) -> "list[str]":
+    """签名声明绑定的证据 hash 必须与候选 ``g_i.evidence`` 逐字相同。
+
+    reviewer MEDIUM-3：只校验「是 Mapping」等于没校验——签名可以声明一组与
+    候选无关的证据 hash 而仍通过。此处做等值比对，任一差异即列问题。
+    """
+    declared = sig.get("evidence_sha256")
+    actual = (facts.get("g_i") or {}).get("evidence")
+    if canonical_bytes(declared) != canonical_bytes(actual):
+        return [f"{role}: 签名声明证据 hash 与候选 g_i.evidence 不同"]
+    return []
+
+
 def load_signatures(campaign: Path) -> "dict[str, Any]":
     out: "dict[str, Any]" = {}
     for role in SIG_ROLES:
         path = campaign / SIG_DIR / f"{role}.json"
         if path.is_file():
-            out[role] = json.loads(path.read_text(encoding="utf-8"))
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(doc, Mapping):
+                raise LockError("BLOCKED_APPROVAL",
+                                [f"{role} 签名不是 JSON 对象"])
+            out[role] = doc
     return out
 
 
@@ -514,6 +609,7 @@ def finalize(ctx: C.CampaignContext,
             problems.append(f"缺 {role} 签名（LOCK_PENDING_SIGNATURES）")
         else:
             problems.extend(validate_signature(sigs[role], role, expected))
+            problems.extend(signature_evidence_problems(sigs[role], role, fresh))
     signers = [s.get("signed_by") for s in sigs.values() if isinstance(s, Mapping)]
     if len(signers) == 2 and signers[0] == signers[1]:
         problems.append("reviewer/verifier 签名人相同（须独立两遍）")
@@ -559,6 +655,7 @@ def verify_lock(ctx: C.CampaignContext,
             problems.append(f"缺 {role} 签名")
         else:
             problems.extend(validate_signature(sig, role, expected))
+            problems.extend(signature_evidence_problems(sig, role, fresh))
     return {"schema": f"{S.PREFIX}.lock_verification.v1",
             "campaign_id": ctx.campaign_id,
             "checked_utc": S.utc_now(),

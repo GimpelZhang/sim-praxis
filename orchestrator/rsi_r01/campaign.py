@@ -148,6 +148,7 @@ class CampaignContext:
     code_commit: str
     consent_sha256: str
     protected_roots: "tuple[tuple[str, Path], ...]"
+    consent_path: str = ""     # 早期上下文无此字段；空 ⇒ lock 用常量回退
     schema_prefix: str = SCHEMA_PREFIX
     schema_version: int = SCHEMA_VERSION
 
@@ -164,6 +165,7 @@ class CampaignContext:
             "plan_sha256": self.plan_sha256,
             "code_commit": self.code_commit,
             "consent_sha256": self.consent_sha256,
+            "consent_path": self.consent_path,
             "protected_roots": {name: str(p) for name, p in self.protected_roots},
         }
 
@@ -190,6 +192,7 @@ class CampaignContext:
             code_commit=str(obj["code_commit"]),
             consent_sha256=str(obj["consent_sha256"]),
             protected_roots=roots,
+            consent_path=str(obj.get("consent_path") or ""),
         )
 
     # ---- 路径 ----
@@ -313,6 +316,7 @@ def create_campaign(*, campaign_id: str, plan_path: "str | Path",
         plan_sha256=plan_sha,
         code_commit=commit,
         consent_sha256=consent_sha,
+        consent_path=str(consent.resolve()),
         protected_roots=tuple(sorted((k, _resolved(v))
                                      for k, v in protected_write_roots().items())),
     )

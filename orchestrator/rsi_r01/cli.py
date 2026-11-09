@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -77,6 +78,20 @@ def _cmd_sign(args: "argparse.Namespace") -> int:
         evidence_sha256=candidate["facts"]["g_i"]["evidence"],
         notes=args.note or [])
     sig["implementation_sha256"] = candidate["facts"]["code"]["implementation_sha256"]
+    # 旧签名不得被静默顶掉（reviewer LOW-1）：先归档到 signatures/history/，
+    # 再写新签名。修订（rev2…）因此保留完整的签字沿革。
+    target = ctx.root / L.SIG_DIR / f"{args.role}.json"
+    if target.is_file():
+        try:
+            prev = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prev = {}
+        stamp = str(prev.get("binding_sha256") or "unknown")[:12]
+        hist = ctx.root / L.SIG_DIR / "history"
+        hist.mkdir(parents=True, exist_ok=True)
+        os.chmod(hist, 0o700)
+        dest = hist / f"{args.role}-{stamp}.json"
+        os.replace(target, dest)
     path = camp.write_json(ctx, f"{L.SIG_DIR}/{args.role}.json", sig)
     print(json.dumps({"ok": True, "path": str(path), "role": args.role,
                       "binding_sha256": expected}, ensure_ascii=False, indent=2))
