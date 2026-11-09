@@ -94,6 +94,12 @@ AUTHORIZED_PUSH_HEADS = (
     # ``judge`` 刷新其内嵌 ``git_commit`` 并恢复不动点②。取值来自
     # ``git rev-parse origin/main`` 的完整 40 hex，非构造。
     "f19889a8428ac7a0da05f1db5b88588ad51de4b6",
+    # *锁内适配*（RSI-R0.1 T0，2026-11-09）：RSI-R0 结案件（27 提交）经用户
+    # 逐字指示「commit并推送至remote」过人工 STOP 门推送到 origin/main，
+    # 远端前移至 ``0066878``（R0 T8 结案修 AC33 证据指针）。同 ``5895fe0`` /
+    # ``82a1427`` / ``065231b`` / ``0796027`` / ``f19889a`` 先例：只登记**已推
+    # 上去的**那个完整 sha，集合仍是精确集合，未登记的新 sha 照样判红。
+    "0066878f60018628cae1cbd88658b4034c5fb7f4",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")

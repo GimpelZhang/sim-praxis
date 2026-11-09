@@ -59,6 +59,8 @@ _PHASE27_ENV = "SIMPRAXIS_PHASE27_ROOT"
 _PHASE281_ENV = "SIMPRAXIS_PHASE281_ROOT"
 _RSI_R0_ROOT_ENV = "SIMPRAXIS_RSI_R0_ROOT"          # R0 家族根（campaign 的父目录）
 _RSI_R0_CAMPAIGN_ENV = "SIMPRAXIS_RSI_R0_CAMPAIGN"  # R0 campaign id（写路径必填）
+_RSI_R01_ROOT_ENV = "SIMPRAXIS_RSI_R01_ROOT"        # R0.1 家族根（campaign 的父目录）
+_RSI_R01_CAMPAIGN_ENV = "SIMPRAXIS_RSI_R01_CAMPAIGN"  # R0.1 campaign id（写路径必填）
 
 
 class SealedLedgerError(PermissionError):
@@ -483,14 +485,19 @@ class RsiR0CampaignUnsetError(RuntimeError):
     """未指定 R0 campaign 就解析写路径——fail-closed，不回退到任何缺省 campaign。"""
 
 
-def _validate_campaign_id(campaign_id: str) -> str:
-    """campaign id 只允许安全字符（它会成为目录名；拒绝路径穿越）。"""
+def _validate_campaign_id(campaign_id: str, *,
+                          error_cls: type = RsiR0CampaignUnsetError,
+                          label: str = "R0") -> str:
+    """campaign id 只允许安全字符（它会成为目录名；拒绝路径穿越）。
+
+    R0.1（T0）复用同一判定，只换错误类与标签；R0 的报错文案逐字节不变。
+    """
     cid = str(campaign_id)
     if not cid or cid in (".", "..") or "/" in cid or "\\" in cid:
-        raise RsiR0CampaignUnsetError(f"非法 R0 campaign id：{cid!r}")
+        raise error_cls(f"非法 {label} campaign id：{cid!r}")
     # ASCII 白名单（不是 str.isalnum：后者对 'é' 也返回 True，会放过非 ASCII 目录名）。
     if not all(ch.isascii() and (ch.isalnum() or ch in "-_.") for ch in cid):
-        raise RsiR0CampaignUnsetError(f"R0 campaign id 含不安全字符：{cid!r}")
+        raise error_cls(f"{label} campaign id 含不安全字符：{cid!r}")
     return cid
 
 
@@ -581,3 +588,164 @@ def assert_rsi_r0_roots_isolated() -> None:
         message=("R0 campaign 根必须与 Phase 1/2/2.5/2.6/2.7/2.8.1 封存根互异且"
                  f"互不嵌套（解析后）：campaign={campaign} "
                  f"sealed={[str(p.resolve(strict=False)) for p in seals]}"))
+
+
+# ---- RSI-R0.1 路径族（T0，2026-11-09；计划 §3.1/§3.2） ----
+#
+# R0.1 是**新 campaign 家族**，与 R0 家族并列：家族根缺省
+# ``$DATA_ROOT/rsi_r01``，campaign 名由 ``SIMPRAXIS_RSI_R01_CAMPAIGN`` 给出。
+# 与 R0 的差别（计划 §3.1）：
+#   * 前端有三个公开/半公开子目录（public/、observations/、analysis/）——
+#     候选模型只读挂载的前两类与受限分析输出目录；
+#   * private/ 从不挂候选容器；
+#   * 旧 R0 家族根进入**本家族的不可写根集**（R0.1 任何写路径不得落进旧根）。
+
+class RsiR01CampaignUnsetError(RuntimeError):
+    """未指定 R0.1 campaign 就解析写路径——fail-closed，不回退到任何缺省 campaign。"""
+
+
+#: R0.1 campaign 子目录（计划 §3.1 逐字；quota/approvals 嵌套在 quota 下）。
+RSI_R01_CAMPAIGN_SUBDIRS: "tuple[str, ...]" = (
+    "contract", "private", "public", "observations", "analysis",
+    "trials", "quota", "quota/approvals", "protocol", "closeout",
+    "evidence_pack",
+)
+
+
+def sealed_phase_roots() -> "dict[str, Path]":
+    """六份已封存期根的具名快照（R0.1 写守卫与 hash 清单共用）。"""
+    return {
+        "phase1": phase1_root(),
+        "phase2": phase2_root(),
+        "phase25": phase25_root(),
+        "phase26": phase26_root(),
+        "phase27": phase27_root(),
+        "phase281": phase281_root(),
+    }
+
+
+def protected_write_roots() -> "dict[str, Path]":
+    """R0.1 写路径的不可写根集：六份封存期根 + **R0 家族根**（旧实验整体只读）。"""
+    roots = sealed_phase_roots()
+    roots["rsi_r0"] = rsi_r0_root()
+    return roots
+
+
+def rsi_r01_root() -> Path:
+    """R0.1 家族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_r01``。"""
+    root = os.environ.get(_RSI_R01_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_r01"
+
+
+def rsi_r01_admission_root() -> Path:
+    """条件预准入批次根（计划 §6.3 R01-M0；只在模型/供应变更时使用）。"""
+    return rsi_r01_root().parent / "rsi_r01_admission"
+
+
+def rsi_r01_campaign_id() -> str:
+    cid = os.environ.get(_RSI_R01_CAMPAIGN_ENV, "")
+    if not cid:
+        raise RsiR01CampaignUnsetError(
+            f"{_RSI_R01_CAMPAIGN_ENV} 未设置：R0.1 写路径必须显式指定 campaign")
+    return _validate_campaign_id(cid, error_cls=RsiR01CampaignUnsetError,
+                                 label="R0.1")
+
+
+def rsi_r01_campaign_root() -> Path:
+    return rsi_r01_root() / rsi_r01_campaign_id()
+
+
+def rsi_r01_subdir(name: str) -> Path:
+    """campaign 子目录解析（白名单；越界名直接拒绝，杜绝路径穿越）。"""
+    if name not in RSI_R01_CAMPAIGN_SUBDIRS:
+        raise RsiR01CampaignUnsetError(f"未知 R0.1 campaign 子目录：{name!r}")
+    return rsi_r01_campaign_root() / name
+
+
+def rsi_r01_contract_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("contract"))
+
+
+def rsi_r01_private_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("private"))
+
+
+def rsi_r01_public_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("public"))
+
+
+def rsi_r01_observations_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("observations"))
+
+
+def rsi_r01_analysis_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("analysis"))
+
+
+def rsi_r01_trials_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("trials"))
+
+
+def rsi_r01_quota_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("quota"))
+
+
+def rsi_r01_ledger_path() -> Path:
+    return rsi_r01_quota_dir() / "ledger.jsonl"
+
+
+def rsi_r01_counters_path() -> Path:
+    return rsi_r01_quota_dir() / "counters.json"
+
+
+def rsi_r01_approvals_dir() -> Path:
+    return ensure_private_dir(rsi_r01_quota_dir() / "approvals")
+
+
+def rsi_r01_reservations_dir() -> Path:
+    return ensure_private_dir(rsi_r01_quota_dir() / "resource_reservations")
+
+
+def rsi_r01_attempts_path() -> Path:
+    return rsi_r01_quota_dir() / "attempts.jsonl"
+
+
+def rsi_r01_gateway_state_dir() -> Path:
+    # 熔断/暂停态随本 campaign 隔离，绝不读写全局 SIMPRAXIS_GATEWAY_STATE。
+    return ensure_private_dir(rsi_r01_campaign_root() / "gateway_state")
+
+
+def rsi_r01_gateway_state_path() -> Path:
+    return rsi_r01_gateway_state_dir() / "quota_pause.json"
+
+
+def rsi_r01_protocol_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("protocol"))
+
+
+def rsi_r01_closeout_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("closeout"))
+
+
+def rsi_r01_evidence_pack_dir() -> Path:
+    return ensure_private_dir(rsi_r01_subdir("evidence_pack"))
+
+
+def assert_rsi_r01_roots_isolated() -> None:
+    """R0.1 campaign 根与六份封存期根 + R0 家族根两两互异且互不嵌套。
+
+    在任何 mkdir/写系统调用之前 fail-fast（AC02/AC03）：R0.1 的 approvals/、
+    gateway_state/、attempts.jsonl、observations/ 若与旧根嵌套，会直接污染
+    旧实验台账与旧证据包。
+    """
+    campaign = rsi_r01_campaign_root().resolve(strict=False)
+    protected = protected_write_roots()
+    seals = tuple(protected.values())
+    _assert_roots_isolated(
+        rsi_r01_campaign_root(), seals,
+        label=_RSI_R01_CAMPAIGN_ENV,
+        message=("R0.1 campaign 根必须与 Phase 1/2/2.5/2.6/2.7/2.8.1 封存根及 "
+                 f"RSI-R0 家族根互异且互不嵌套（解析后）：campaign={campaign} "
+                 f"protected={[str(p.resolve(strict=False)) for p in seals]}"))
