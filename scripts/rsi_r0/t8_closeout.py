@@ -1015,7 +1015,9 @@ def ac_matrix(facts: dict, result: dict, cost: dict) -> dict:
         {"id": "AC33", "text": "判决与包无循环，三签绑定同一版本/证据",
          "status": "PASS", "verified_by": "closure_judge",
          "evidence": [_c("closeout/closure_judge.json"),
-                      _c("closeout/signs")],
+                      {"kind": "campaign_json_path",
+                       "rel": "closeout/evidence_pack/manifest.json",
+                       "pointer": "n_files"}],
          "note": ("报告引用包 manifest sha256；报告/矩阵/机判/三签都在包外；"
                   "包内不含报告（机判逐件断言）")},
 
