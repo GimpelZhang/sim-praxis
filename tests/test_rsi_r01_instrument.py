@@ -248,6 +248,36 @@ def test_engineering_judgement_uses_last_trusted_run_only():
     assert EV.evaluate_engineering(runs=[], tolerance={})["status"] == "FAIL"
 
 
+def test_submit_checks_analysis_ids_against_real_analysis_events(tmp_path):
+    """回归：``_submit`` 必须读 ``AnalysisEvent`` 属性（曾按 dict 取键而崩）。"""
+    from orchestrator.rsi_r01.analysis_runner import AnalysisEvent
+    from orchestrator.rsi_r01.trial import RunRecord, TrialRejected
+
+    runner = _bare_runner(tmp_path)
+    runner.runs.append(RunRecord(run_id="run_1", cell=None, params={},
+                                 manifest={}, summary={}))
+    event = AnalysisEvent(analysis_id="an_1", source_sha256="0" * 64,
+                          run_ids=["run_1"], exit_code=0, timed_out=False,
+                          stream_bytes=0, stream_over_cap=False,
+                          stdout_preview="", stderr_preview="")
+    runner.analyses.events.append(event)
+    ok = AC.parse_action(json.dumps({"schema": S.SCHEMA_ACTION, "action": "submit",
+                                     "claim": "SUPPORTED",
+                                     "run_ids": ["run_1"],
+                                     "analysis_ids": ["an_1"]}),
+                         runner.surface)
+    assert isinstance(ok, AC.Submit)
+    out = runner._submit(ok)
+    assert out["ok"] is True and runner.submissions[-1]["analysis_ids"] == ["an_1"]
+    bad = AC.parse_action(json.dumps({"schema": S.SCHEMA_ACTION, "action": "submit",
+                                      "claim": "SUPPORTED",
+                                      "run_ids": ["run_1"],
+                                      "analysis_ids": ["an_x"]}),
+                          runner.surface)
+    with pytest.raises(TrialRejected):
+        runner._submit(bad)
+
+
 def test_measurement_contract_constants_are_self_consistent():
     doc = TC.measurement_contract()
     assert doc["dt_s"] == S.DT_S and doc["expected_rows"] == S.EXPECTED_ROWS

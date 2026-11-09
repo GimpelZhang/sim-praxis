@@ -60,18 +60,22 @@ def settle(doc):
     return float(t[last_out + 1]), None
 
 cells = {{}}
+dampings = set()
+angles = set()
 for doc in docs:
     p = doc["params"]
-    key = (float(p["damping"]), float(p["initial_angle"]))
+    d, a = float(p["damping"]), float(p["initial_angle"])
+    dampings.add(d)
+    angles.add(a)
     value, why = settle(doc)
-    cells[str(key)] = {{"t": value, "why": why, "run_id": doc["run_id"]}}
+    cells[(d, a)] = {{"t": value, "why": why, "run_id": doc["run_id"]}}
 
-dampings = sorted({{k[0] for k in cells}})
-angles = sorted({{k[1] for k in cells}})
+dampings = sorted(dampings)
+angles = sorted(angles)
 effects = {{}}
 for angle in angles:
-    t_low = cells.get(str((dampings[0], angle)), {{}}).get("t") if dampings else None
-    t_high = cells.get(str((dampings[-1], angle)), {{}}).get("t") if dampings else None
+    t_low = cells.get((dampings[0], angle), {{}}).get("t") if dampings else None
+    t_high = cells.get((dampings[-1], angle), {{}}).get("t") if dampings else None
     if t_low is None or t_high is None or t_low == 0.0:
         effects[str(angle)] = None
     else:
@@ -84,14 +88,15 @@ if z is not None and z >= {delta!r}:
     claim = "SUPPORTED"
 elif z is not None and z <= -{delta!r}:
     claim = "REFUTED"
-out = {{"kind": "r_analysis", "cells": cells, "effects": effects,
+cells_out = {{json.dumps([k[0], k[1]]): v for k, v in cells.items()}}
+out = {{"kind": "r_analysis", "cells": cells_out, "effects": effects,
        "mean_effect": mean, "z": z, "claim_status": claim}}
 with open("/out/analysis.json", "w", encoding="utf-8") as fh:
     json.dump(out, fh, sort_keys=True)
 print("analysis rows:", len(docs))
 '''
 
-#: 分析源码（E/D）：从公开副本复算末位置/末速度。
+#: 分析源码（E/D）：从公开副本复算末位置/末速度。（普通字符串，不做 format 转义）
 _PUSH_SOURCE = '''\
 import glob, json
 docs = []
@@ -104,10 +109,10 @@ for doc in docs:
     x, y = doc["x"][-1], doc["y"][-1]
     vx, vy = doc["vx"][-1], doc["vy"][-1]
     dx, dy = x - p["target_x"], y - p["target_y"]
-    rows.append({{"run_id": doc["run_id"], "distance": (dx * dx + dy * dy) ** 0.5,
-                 "final_speed": (vx * vx + vy * vy) ** 0.5}})
+    rows.append({"run_id": doc["run_id"], "distance": (dx * dx + dy * dy) ** 0.5,
+                 "final_speed": (vx * vx + vy * vy) ** 0.5})
 best = min(rows, key=lambda r: r["distance"]) if rows else None
-out = {{"kind": "push_analysis", "runs": rows, "best": best}}
+out = {"kind": "push_analysis", "runs": rows, "best": best}
 with open("/out/analysis.json", "w", encoding="utf-8") as fh:
     json.dump(out, fh, sort_keys=True)
 print("analysis rows:", len(rows))

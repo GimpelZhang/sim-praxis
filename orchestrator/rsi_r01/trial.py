@@ -242,7 +242,7 @@ class TrialRunner:
         unknown = [r for r in action.run_ids if r not in known]
         if unknown:
             raise TrialRejected("RUN_ID_UNKNOWN", f"引用了本 trial 不存在的 run {unknown}")
-        analysis_ids = {e.get("analysis_id") for e in self.analyses.events}
+        analysis_ids = {e.analysis_id for e in self.analyses.events}
         bad = [a for a in action.analysis_ids if a not in analysis_ids]
         if bad:
             raise TrialRejected("ANALYSIS_ID_UNKNOWN", f"引用了不存在的分析 {bad}")
