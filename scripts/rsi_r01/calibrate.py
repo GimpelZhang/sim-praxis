@@ -93,7 +93,35 @@ def _expected_claim(instance_id: str) -> str:
     return S.ClaimStatus.SUPPORTED if h == 1 else S.ClaimStatus.REFUTED
 
 
+def _d_fault_table() -> dict[str, Any]:
+    """D 族设计（v2）预登记：机制 + 幅度 + 参考增益下的解析稳态偏移。
+
+    v1 的瞬态型故障被闭环 P 控制抹平（T2 v1 判 DESIGN_NOT_READY），v2 只用
+    稳态可测机制；本表在**首次运行之前**落进预登记，跑完不得改。
+    """
+    from orchestrator.rsi_r01.faults import steady_state_offset
+
+    table: dict[str, Any] = {}
+    for inst in TC.by_family("D"):
+        fault = inst.private["fault"]
+        kp_ref = float(inst.private["reference_gains"]["kp"])
+        table[inst.instance_id] = {
+            "mechanism": fault["kind"],
+            "params": dict(fault),
+            "reference_kp": kp_ref,
+            "analytic_offset_at_reference_kp_m": round(
+                steady_state_offset(fault, kp=kp_ref), 6),
+            "analytic_offset_note": ("量级估计，不作判据；friction_scale 的接触"
+                                     "摩擦合成会使实测小于该值"),
+            "tolerance_m": float(inst.tolerance["distance"]),
+        }
+    return table
+
+
 def prereg_doc(*, campaign_id: str, plan_sha256: str | None) -> dict[str, Any]:
+    problems = TC.assert_matrix_complete() + TC.validate_fault_table()
+    if problems:
+        raise CalibrationError("任务表不合法，拒绝登记：" + "; ".join(problems[:5]))
     cells = {iid: TC.prereg_expected_cells(iid)
              for iid in ("R-dev", "R-val-1", "R-val-2")}
     order: list[str] = []
@@ -127,6 +155,13 @@ def prereg_doc(*, campaign_id: str, plan_sha256: str | None) -> dict[str, Any]:
         "d_identifiability": {"metric": "final_distance_m",
                               "min_pairwise_gap": IDENT_DISTANCE_GAP_M,
                               "repair_required": True},
+        "d_fault_table_v2": _d_fault_table(),
+        "d_design_revision": {
+            "revision": "v2",
+            "reason": ("v1 瞬态型故障被闭环 P 控制抹平，稳态不可辨识"
+                       "（campaign r01 T2 判 DESIGN_NOT_READY）"),
+            "r_and_e_unchanged": True,
+        },
         "execution_order": order,
         "stop_rule": ("任一 R 格删失 / 收敛超界 / |z|<δ / D 不可区分或不可修复"
                       " ⇒ STOP_TASK_DESIGN（不改参数、不换界、不跑完再挑）"),
@@ -340,20 +375,24 @@ def calibrate_e(root: Path, *, gpus: bool, trials: dict[str, Any],
 # ---------------------------------------------------------------------------
 
 
-REPAIR_GRID = [(kp, kd, fmax) for kp in (50.0, 120.0, 300.0)
+# v2 修复网格：kp 上限扩到 800——稳态偏移 ∝ 1/kp，外力偏置 20 N 需要
+# kp ≥ 约 375 才能压到 0.06 m 容差以内（v1 网格止步 300，无法覆盖）。
+REPAIR_GRID = [(kp, kd, fmax) for kp in (50.0, 120.0, 300.0, 500.0, 800.0)
                for kd in (5.0, 15.0, 40.0) for fmax in (40.0, 100.0)]
 
 
 def _push_run(inst: TC.Instance, *, scene_xml: str, gains: Mapping[str, float],
-              counter: list[int], label: str, gpus: bool
+              counter: list[int], label: str, gpus: bool,
+              with_fault: bool
               ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``with_fault`` 控制宿主私有注入；nominal 跑必须**不带**任何故障项。"""
     run_id = test_id(f"cal_{inst.instance_id.replace('-', '_')}_{label}", counter)
     req = O.ExperimentRequest.push(
         trial_id=run_id, instance_id=inst.instance_id, scene_xml=scene_xml,
         kp=gains["kp"], kd=gains["kd"], max_force=gains["max_force"],
         target=tuple(inst.public["goal"]["target"]), timestep=S.DT_S,
         steps=int(inst.private["reference_steps"]),
-        force_scale=inst.host_force_scale)
+        host_injected=inst.host_injections if with_fault else {})
     return _record(instance=inst.instance_id, kind=S.OBS_KIND_PUSH,
                    label=label, request=req, gpus=gpus)
 
@@ -365,10 +404,11 @@ def calibrate_d(root: Path, *, gpus: bool, trials: dict[str, Any],
     for inst in TC.by_family("D"):
         gains = inst.private["reference_gains"]
         nominal_result, _ = _push_run(inst, scene_xml=inst.scene_xml(), gains=gains,
-                                      counter=counter, label="nominal", gpus=gpus)
+                                      counter=counter, label="nominal", gpus=gpus,
+                                      with_fault=False)
         faulted_result, _ = _push_run(inst, scene_xml=inst.faulted_scene(),
                                       gains=gains, counter=counter,
-                                      label="faulted", gpus=gpus)
+                                      label="faulted", gpus=gpus, with_fault=True)
         detectable = (not EV.lower_bound_success(
             distance=faulted_result["final_distance"],
             final_speed=faulted_result["final_speed"], tolerance=inst.tolerance))
@@ -382,7 +422,7 @@ def calibrate_d(root: Path, *, gpus: bool, trials: dict[str, Any],
                                   gains={"kp": kp, "kd": kd, "max_force": fmax},
                                   counter=counter,
                                   label=f"repair_kp{kp:g}_kd{kd:g}_f{fmax:g}",
-                                  gpus=gpus)
+                                  gpus=gpus, with_fault=True)
             ok = EV.lower_bound_success(distance=result["final_distance"],
                                         final_speed=result["final_speed"],
                                         tolerance=inst.tolerance)

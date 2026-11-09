@@ -198,7 +198,7 @@ class TrialRunner:
                 max_force=float(params["max_force"]), target=(float(target[0]),
                                                               float(target[1])),
                 timestep=float(params["timestep"]), steps=steps,
-                force_scale=self.instance.host_force_scale)
+                host_injected=self.instance.host_injections)
         manifest, doc = self.store.run(request, gpus=self.gpus)
         if self.instance.template == "pendulum":
             settle = EV.settling(doc["theta"], doc["omega"], doc["t"])

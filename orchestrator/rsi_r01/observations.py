@@ -60,8 +60,9 @@ class TrustedServiceUnavailable(ObservationError):
 class ExperimentRequest:
     """一次可信实验请求（宿主构造 scene_xml，候选只见数值参数）。
 
-    ``host_injected`` 是**宿主私有注入项**（目前只有 D 族 ``force_scale``）：
-    它由宿主按私有故障表写进请求，候选的提交体里不存在这个键。
+    ``host_injected`` 是**宿主私有注入项**（D v2：``force_bias_x`` /
+    ``force_bias_y`` / ``deadzone``）：它由宿主按私有故障表写进请求，
+    候选的提交体里不存在这些键。
     """
 
     trial_id: str
@@ -98,8 +99,9 @@ class ExperimentRequest:
     def push(cls, *, trial_id: str, instance_id: str, scene_xml: str,
              kp: float, kd: float, max_force: float, target: tuple[float, float],
              timestep: float, steps: int,
-             force_scale: float | None = None) -> "ExperimentRequest":
-        injected = {} if force_scale is None else {"force_scale": float(force_scale)}
+             host_injected: Mapping[str, float] | None = None
+             ) -> "ExperimentRequest":
+        injected = {str(k): float(v) for k, v in (host_injected or {}).items()}
         return cls(trial_id=trial_id, instance_id=instance_id,
                    kind=S.OBS_KIND_PUSH, scene_xml=scene_xml,
                    params={"kp": float(kp), "kd": float(kd),

@@ -137,8 +137,13 @@ def main() -> int:
         steps = req.get("steps")
         if isinstance(steps, bool) or not isinstance(steps, int) or not (1 <= steps <= MAX_STEPS):
             _fail(f"steps 必须是 1..{MAX_STEPS} 的整数")
-        # 宿主注入的执行器增益（D 族 force_scale 故障载体）；候选请求里没有该项。
-        force_scale = _num(req, "force_scale", 0.2, 10.0) if "force_scale" in req else 1.0
+        # 宿主私有注入项（D v2 故障载体：恒定外力偏置 / 执行器死区）；
+        # 候选请求里没有这些键。场景级故障（friction_scale）走 scene_xml。
+        force_bias_x = _num(req, "force_bias_x", -100.0, 100.0) \
+            if "force_bias_x" in req else 0.0
+        force_bias_y = _num(req, "force_bias_y", -100.0, 100.0) \
+            if "force_bias_y" in req else 0.0
+        deadzone = _num(req, "deadzone", 0.0, 100.0) if "deadzone" in req else 0.0
         scene_sha = hashlib.sha256(scene_xml.encode("utf-8")).hexdigest()
         run_id = "run_" + uuid.uuid4().hex
         trial_id = req.get("trial_id")
@@ -173,7 +178,10 @@ def main() -> int:
             norm = float(np.linalg.norm(cmd))
             if norm > fmax and norm > 0:
                 cmd = cmd * (fmax / norm)
-            cmd = cmd * force_scale          # 故障语义：先出 fmax 再按比例衰减
+            # 故障语义：先出 fmax，再判死区，最后叠加恒定外力偏置。
+            if deadzone > 0.0 and float(np.linalg.norm(cmd)) < deadzone:
+                cmd = np.zeros(3)
+            cmd = cmd + np.array([force_bias_x, force_bias_y, 0.0])
             data.xfrc_applied[body, :3] = cmd
             data.xfrc_applied[body, 3:6] = (lever * cmd[1], -lever * cmd[0], 0.0)
             mujoco.mj_step(model, data)
@@ -192,12 +200,17 @@ def main() -> int:
                           "timestep": timestep, "steps": steps},
                "t": t_list, "x": x_list, "y": y_list,
                "vx": vx_list, "vy": vy_list}
-        return _write_observation(doc, out_extra={
+        extra = {
             "kind": kind, "run_id": run_id, "trial_id": trial_id,
             "instance_id": instance_id, "scene_sha256": scene_sha,
             "final_distance": distance, "final_speed": final_speed,
             "target": [tx, ty], "applied": dict(doc["params"]),
-            "mujoco_version": mujoco.__version__, "steps_run": steps})
+            "mujoco_version": mujoco.__version__, "steps_run": steps}
+        if force_bias_x or force_bias_y or deadzone:
+            extra["host_injected"] = {"force_bias_x": force_bias_x,
+                                      "force_bias_y": force_bias_y,
+                                      "deadzone": deadzone}
+        return _write_observation(doc, out_extra=extra)
 
     # ---- pendulum_run：完整逐步观测落盘 ----
     hinge = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "hinge")

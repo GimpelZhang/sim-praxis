@@ -20,7 +20,9 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from orchestrator.rsi_r01 import schemas as S
-from orchestrator.rsi_r0.faults import apply_fault, validate_fault
+from orchestrator.rsi_r01.faults import (KINDS as FAULT_KINDS, FaultError,
+                                         apply_scene_fault, host_injections,
+                                         validate_fault)
 from orchestrator.rsi_r0.scenes import build_pendulum_scene, build_push_scene
 
 #: R 族冻结的物理常量（长度/质量/时间步；阻尼按格注入，不写死在这里）。
@@ -80,15 +82,15 @@ class Instance:
         fault = self.private.get("fault")
         if not fault:
             return scene
-        return apply_fault(scene, fault)
+        return apply_scene_fault(scene, fault)
 
     @property
-    def host_force_scale(self) -> float | None:
-        """``force_scale`` 故障的乘子由宿主注入请求；候选请求体里没有该项。"""
+    def host_injections(self) -> dict[str, float]:
+        """宿主私有注入项（外力偏置/死区）；候选请求体里没有这些键。"""
         fault = self.private.get("fault")
-        if fault and fault.get("kind") == "force_scale":
-            return float(fault["scale"])
-        return None
+        if not fault:
+            return {}
+        return host_injections(fault)
 
     @property
     def param_bounds(self) -> dict[str, tuple[float, float]]:
@@ -183,7 +185,9 @@ def _instances() -> tuple[Instance, ...]:
          "reference_gains": {"kp": 150.0, "kd": 18.0, "max_force": 80.0},
          "reference_steps": 3000, "param_bounds": dict(_PUSH_KEYS), "steps_max": 4000}))
 
-    # ---------------- D：单故障诊断（dev + 两个不同验证故障） ----------------
+    # ---------------- D：单故障诊断（dev + 两个不同验证故障；v2 修订） ----------------
+    # v2 只用能在稳态留下可测偏置的三种互异机制（见 faults.py 头注：v1 的瞬态型
+    # 故障被闭环抹平，T2 v1 校准判 DESIGN_NOT_READY，2026-11-09 用户批准重设计）。
     d_common = {"tolerance": {"distance": 0.06, "final_speed": 0.02},
                 "reference_steps": 2000,
                 "param_bounds": dict(_PUSH_KEYS), "steps_max": 3000}
@@ -192,8 +196,9 @@ def _instances() -> tuple[Instance, ...]:
         _push_public("把箱子推到目标点并静止（本实例存在一个未公开的施加层故障）",
                      {"box_mass": 1.0, "box_half": 0.05, "friction": 0.25,
                       "timestep": S.DT_S}, (0.6, 0.0), 3000,
-                     "标定实例：故障种类与幅度已在本轮公开（friction_scale 2.0）。"),
-        dict(d_common, fault={"kind": "friction_scale", "scale": 2.0},
+                     "标定实例：故障种类与幅度已在本轮公开（external_force_bias 20 N，+x）。"),
+        dict(d_common, fault={"kind": "external_force_bias",
+                              "bias_x": 20.0, "bias_y": 0.0},
              fault_public_in_dev=True,
              reference_gains={"kp": 120.0, "kd": 12.0, "max_force": 60.0})))
     out.append(Instance(
@@ -202,7 +207,7 @@ def _instances() -> tuple[Instance, ...]:
                      {"box_mass": 1.0, "box_half": 0.05, "friction": 0.25,
                       "timestep": S.DT_S}, (0.6, 0.0), 3000,
                      "故障种类与幅度均不公开；通过公开实验与数值响应辨识。"),
-        dict(d_common, fault={"kind": "scene_tilt", "scale": 6.0},
+        dict(d_common, fault={"kind": "friction_scale", "scale": 10.0},
              fault_public_in_dev=False,
              reference_gains={"kp": 120.0, "kd": 12.0, "max_force": 60.0})))
     out.append(Instance(
@@ -211,7 +216,7 @@ def _instances() -> tuple[Instance, ...]:
                      {"box_mass": 1.0, "box_half": 0.05, "friction": 0.25,
                       "timestep": S.DT_S}, (0.6, 0.0), 3000,
                      "故障种类与幅度均不公开；通过公开实验与数值响应辨识。"),
-        dict(d_common, fault={"kind": "force_scale", "scale": 0.4},
+        dict(d_common, fault={"kind": "actuator_deadzone", "deadzone": 20.0},
              fault_public_in_dev=False,
              reference_gains={"kp": 120.0, "kd": 12.0, "max_force": 60.0})))
 
@@ -372,6 +377,12 @@ def validate_fault_table() -> list[str]:
     kinds = {i.private["fault"]["kind"] for i in by_family("D")}
     if len(kinds) != 3:
         problems.append(f"D 族故障种类必须是三个互异机制，收到 {sorted(kinds)}")
-    if "mass_scale" in kinds:
-        problems.append("禁止重新引入 mass_scale 不可辨识项")
+    # v1 的瞬态型机制在闭环 P 控制下稳态不可辨识（T2 v1 判 DESIGN_NOT_READY），
+    # 与 mass_scale 一并禁止重新引入。
+    for banned in ("mass_scale", "scene_tilt", "force_scale"):
+        if banned in kinds:
+            problems.append(f"禁止重新引入稳态不可辨识机制 {banned}")
+    unknown = kinds - set(FAULT_KINDS)
+    if unknown:
+        problems.append(f"未知故障机制 {sorted(unknown)}")
     return problems
