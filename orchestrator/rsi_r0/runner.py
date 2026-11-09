@@ -25,7 +25,7 @@ import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from orchestrator.common import runtime_paths as rp
 from orchestrator.rsi_r0 import budget_contract, gates, seals
@@ -1045,18 +1045,53 @@ class R0Runner:
     })
 
     #: 除代码键外，快照里这些字段一变就不是同一个实验；仪器修复路径逐项冻结。
+    #: ``develop_protocol``（协议字典本体）与其哈希并列：v2 之前只有哈希在这里，
+    #: 于是「修订通道按字段名放行」时字典本体根本不在被检查集合里——审计会记下
+    #: 「声明修订了 develop_protocol，但它没变」（值为哈希所覆盖，功能无洞，记账错）。
     INSTRUMENT_REPAIR_FROZEN_FIELDS = (
         "image", "criteria_hash", "criteria_now", "gates", "task_caps",
         "slot_request_cap", "instances", "development_order", "validation_order",
         "tasks_set_sha256", "stage_models_sha256", "pricing_contract_sha256",
-        "protocol_spec_sha256", "develop_protocol_sha256",
+        "protocol_spec_sha256", "develop_protocol", "develop_protocol_sha256",
+    )
+
+    #: 协议修订（2026-11-09 用户逐字授权）：`develop_protocol_*` 是**实验定义**，
+    #: 仪器修复通道本应一律拒；但 T6 实跑暴露了 R 族 L5 的结构性不可达——判据 C1
+    #: 要求 `prereg_sha256`，而 v1 协议的动作集里根本没有「登记计划」这个动作，
+    #: 候选无从产生该字段。修它必须改协议本体，即"改实验定义后重锁"。
+    #:
+    #: 这不是给自己开的后门，理由三条：① 放行面是**枚举**的（只有这两个键），
+    #: 不是"冻结面减去黑名单"；② 必须同时给出用户授权的**原文**（≥20 字）并逐字
+    #: 落进 `lock_history.jsonl`，机判能看见是谁授权的；③ 换锁会作废旧独立评审件，
+    #: 任何付费调用前都还要由独立评审绑新代码集重出 APPROVE。冻结面其余各项在
+    #: 修订通道上仍逐项校验——修订只豁免协议本体，不豁免判据/事实/报价/镜像。
+    INSTRUMENT_REPAIR_AMENDABLE_FIELDS = (
+        "develop_protocol", "develop_protocol_sha256",
     )
 
     def _instrument_repair_delta(self, old: Mapping[str, Any],
-                                 snap: Mapping[str, Any]) -> dict[str, Any]:
-        """仪器修复换锁的硬校验：只允许宿主接线变，判据面与实验定义面逐项相等。"""
+                                 snap: Mapping[str, Any], *,
+                                 amended_fields: Iterable[str] = ()
+                                 ) -> dict[str, Any]:
+        """仪器修复换锁的硬校验：只允许宿主接线变，判据面与实验定义面逐项相等。
+
+        ``amended_fields`` 只接受 :attr:`INSTRUMENT_REPAIR_AMENDABLE_FIELDS` 里
+        的键（用户逐字授权的协议修订）；其余冻结字段即使在修订通道上也不放行。
+        """
+        amend = set(amended_fields)
+        illegal = sorted(amend - set(self.INSTRUMENT_REPAIR_AMENDABLE_FIELDS))
+        if illegal:
+            raise RunnerError(
+                f"协议修订通道只认 {list(self.INSTRUMENT_REPAIR_AMENDABLE_FIELDS)}，"
+                f"不认 {illegal}")
         moved = [k for k in self.INSTRUMENT_REPAIR_FROZEN_FIELDS
                  if old.get(k) != snap.get(k)]
+        stale = sorted(k for k in amend if k not in moved)
+        if stale:
+            raise RunnerError(
+                f"声明修订但这些键并未变化：{stale}——审计行不许记假账"
+                "（没变就不必走修订通道）")
+        unexempted = [k for k in moved if k not in amend]
         old_code = old.get("code") or {}
         new_code = snap.get("code") or {}
         changed = sorted(k for k in set(old_code) & set(new_code)
@@ -1065,19 +1100,26 @@ class R0Runner:
         removed = sorted(set(old_code) - set(new_code))
         judgment = sorted(k for k in changed
                           if k not in self.INSTRUMENT_REPAIR_WIRE_ONLY)
-        if moved or judgment or added or removed:
+        if unexempted or judgment or added or removed:
             raise RunnerError(
                 "仪器修复换锁被拒：它在花钱之后动了实验定义面"
-                f"（字段差异={moved}；判据面模块={judgment}；"
+                f"（字段差异={unexempted}；判据面模块={judgment}；"
                 f"新增键={added}；删除键={removed}）。这不是修仪器，只能另开 campaign")
         return {"changed": changed, "frozen_fields_checked": list(
             self.INSTRUMENT_REPAIR_FROZEN_FIELDS),
             # 冻结的代码键 = LOCK 里的全部键 − 接线白名单；由代码现算，手写不了。
             "frozen_code_keys_checked": sorted(set(new_code)
-                                               - self.INSTRUMENT_REPAIR_WIRE_ONLY)}
+                                               - self.INSTRUMENT_REPAIR_WIRE_ONLY),
+            "amended_fields": sorted(amend),
+            # 修订前后逐键留档：审计行只说"被授权改了哪些"，值本身也要能复查。
+            "amended_values": {k: {"old": old.get(k), "new": snap.get(k)}
+                               for k in sorted(amend)}}
 
     def supersede_lock(self, reason: str, *,
-                       instrument_repair: bool = False) -> dict[str, Any]:
+                       instrument_repair: bool = False,
+                       amendment: Iterable[str] = (),
+                       amendment_authorization: str | None = None
+                       ) -> dict[str, Any]:
         """显式取代旧 LOCK，旧件不删。
 
         旧件归档为 ``t4_lock.superseded.<sha8>.json`` 并追加 ``lock_history.jsonl``
@@ -1091,9 +1133,23 @@ class R0Runner:
         ``instrument_repair``/``sent_attempts_at_supersede``/改动模块清单。绕过它
         没有任何"静默"余地：换锁后 G-P 的 ``independent_review`` 会把独立评审绑定到
         新的 code_set，任何后续付费调用前都要重新取得 APPROVE。
+
+        ``amendment`` 是 2026-11-09 用户逐字授权的**协议修订**通道：只认
+        :attr:`INSTRUMENT_REPAIR_AMENDABLE_FIELDS`（develop 协议本体与其哈希），
+        必须走仪器修复通道，且必须附用户授权原文（≥20 字，逐字落审计行）。放开
+        的只有协议本体这一面；判据/事实/报价/镜像仍逐项冻结。
         """
         if len((reason or "").strip()) < 20:
             raise RunnerError("取代理由太短：请写清为何旧 LOCK 需被取代（≥20 字）")
+        amended = tuple(amendment or ())
+        if amended:
+            if not instrument_repair:
+                raise RunnerError(
+                    "协议修订必须走仪器修复通道（instrument_repair=True）："
+                    "改实验定义后重锁不能伪装成常规换锁")
+            if len((amendment_authorization or "").strip()) < 20:
+                raise RunnerError(
+                    "协议修订必须附用户授权原文（≥20 字），逐字落 lock_history")
         path = self.lock_path()
         if not path.exists():
             raise RunnerError(f"没有可取代的快照锁：{path}")
@@ -1113,7 +1169,9 @@ class R0Runner:
                 f"账本/attempts/预留对账存在漂移，禁止取代快照锁：{recon.get('why')}"
                 "（三份权威互相矛盾时任何通道都不许换锁：先查清谁在说谎）")
         old = json.loads(path.read_text(encoding="utf-8"))
-        repair = self._instrument_repair_delta(old, self.lock_snapshot()) if sent else None
+        repair = (self._instrument_repair_delta(old, self.lock_snapshot(),
+                                                amended_fields=amended)
+                  if (sent or amended) else None)
         old_sha = str(old.get("lock_sha256") or "")
         archive = path.parent / f"t4_lock.superseded.{old_sha[:8] or 'nosha'}.json"
         if archive.exists():
@@ -1174,7 +1232,8 @@ class R0Runner:
                         {k: v for k, v in on_disk.items()
                          if k not in ("created_at_utc", "lock_sha256")}):
                     raise RunnerError("落盘的 LOCK 自哈希不符（写入与校验之间被动过）")
-                self._instrument_repair_delta(old, on_disk)
+                self._instrument_repair_delta(old, on_disk,
+                                              amended_fields=amended)
             except RunnerError:
                 _rollback()
                 raise
@@ -1214,7 +1273,14 @@ class R0Runner:
                                          if review_archive is not None else None),
                      "frozen_fields_checked": (repair or {}).get("frozen_fields_checked"),
                      "frozen_code_keys_checked": (repair or {}).get(
-                         "frozen_code_keys_checked")})
+                         "frozen_code_keys_checked"),
+                     # 协议修订的机器事实（2026-11-09 用户授权）：改了哪两个键、
+                     # 用户授权的原文、修订前后逐键取值。没有授权原文的行根本写不出来
+                     # （上面已拒），所以这里如实记 = 授权可被第三方逐字复核。
+                     "amendment_fields": (repair or {}).get("amended_fields") or None,
+                     "amendment_authorization": (
+                         amendment_authorization.strip() if amended else None),
+                     "amendment_values": (repair or {}).get("amended_values") or None})
         line["reason"] = (f"{reason.strip()}；[机生成] code 键 "
                           f"+{added} ~{changed} -{removed}")
         hist = path.parent / "lock_history.jsonl"
@@ -1223,7 +1289,9 @@ class R0Runner:
             fh.flush()
             os.fsync(fh.fileno())
         return {"superseded": old_sha, "archive": str(archive),
-                "new_lock_sha256": new["lock_sha256"], "reason": reason.strip()}
+                "new_lock_sha256": new["lock_sha256"], "reason": reason.strip(),
+                "instrument_repair": bool(repair),
+                "amendment_fields": (repair or {}).get("amended_fields") or None}
 
     # ---- 付费入口 ----
     def run_paid_slot(self, spec: TrialSpec) -> dict[str, Any]:

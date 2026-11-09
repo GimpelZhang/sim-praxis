@@ -698,16 +698,19 @@ def test_cli_pricing_approve_and_model_approval(campaign, capsys):
     assert cli_main(["pricing", "--campaign", str(campaign), "--write"]) == EXIT_OK
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert payload["ok"] is True
+    # 显式钉住批准时间：不钉的话「同内容重入幂等」实际是在赌两次调用落在同一秒内，
+    # 机器一忙就秒翻页、批准件正文不同而被拒（2026-11-09 全量跑实测踩到这个 flake）。
+    pin = ["--approved-at", "2026-11-08T00:00:00Z"]
     assert cli_main(["approve", "--campaign", str(campaign), "--batch", "R0-P",
-                     "--task", "0", "--requests", "6"]) == EXIT_OK
+                     "--task", "0", "--requests", "6"] + pin) == EXIT_OK
     approve = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert approve["ticket_created"] is True and approve["requests"] == 6
     # 同内容重入幂等
     assert cli_main(["approve", "--campaign", str(campaign), "--batch", "R0-P",
-                     "--task", "0", "--requests", "6"]) == EXIT_OK
+                     "--task", "0", "--requests", "6"] + pin) == EXIT_OK
     # 不同内容拒覆盖
     assert cli_main(["approve", "--campaign", str(campaign), "--batch", "R0-P",
-                     "--task", "0", "--requests", "5"]) == EXIT_REFUSED
+                     "--task", "0", "--requests", "5"] + pin) == EXIT_REFUSED
     capsys.readouterr()
     assert cli_main(["model-approval", "--campaign", str(campaign),
                      "--decided-at", "2026-11-02T00:00:00Z",

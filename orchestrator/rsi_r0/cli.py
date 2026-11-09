@@ -116,7 +116,9 @@ def cmd_lock(args: argparse.Namespace) -> int:
         return EXIT_OK if verdict["ok"] else EXIT_REFUSED
     if args.supersede_reason:
         out = runner.supersede_lock(args.supersede_reason,
-                                    instrument_repair=args.instrument_repair)
+                                    instrument_repair=args.instrument_repair,
+                                    amendment=args.amend_field,
+                                    amendment_authorization=args.amend_authorization)
         _emit({"command": "lock", "superseded": out,
                "verify": runner.verify_lock()})
         return EXIT_OK
@@ -508,6 +510,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help=("计划 §「INVALID_INSTRUMENT → 修仪器、全控制重跑、新criteria锁」"
                          "通道：允许在已有发网 attempt 后换锁，但判据面/实验定义面必须"
                          "逐项相等（只许宿主接线变），审计行由代码写明改动模块"))
+    p.add_argument("--amend-field", action="append", default=[], metavar="KEY",
+                   help=("协议修订（须与 --instrument-repair 并用）：只认 "
+                         "develop_protocol / develop_protocol_sha256；改实验定义后重锁，"
+                         "必须同时给 --amend-authorization 的用户授权原文"))
+    p.add_argument("--amend-authorization", default=None,
+                   help="用户授权原文（≥20 字，逐字落 lock_history.jsonl）")
     p.set_defaults(func=cmd_lock)
 
     p = sub.add_parser("pricing", help="资源与报价合同（零付费；--write 落盘）")

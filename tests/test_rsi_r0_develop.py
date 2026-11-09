@@ -24,6 +24,13 @@ def sha256_of_text(text: str) -> str:
     return sha256_of(text)
 
 
+#: v2 协议：首次实验前必须先登记计划（计划 L129 的 C1 通道）。
+PLAN = {"hypothesis": "增大关节阻尼会缩短沉降时间",
+        "expected_direction": "阻尼越大沉降越快",
+        "variables": ["damping"], "controls": ["initial_angle", "steps"]}
+PREREG = json.dumps({"action": "preregister", "plan": PLAN}, ensure_ascii=False)
+
+
 class FakeSession:
     """假的宿主会话：结果来自请求参数，事件哈希确定性。"""
 
@@ -125,6 +132,7 @@ def test_development_trial_submits_and_evaluates(campaign, monkeypatch):
     env_backup = monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
     runner = _arm(campaign, monkeypatch)
     replies = [
+        PREREG,
         json.dumps({"action": "run_experiment",
                     "params": {"kp": 100.0, "kd": 10.0, "max_force": 50.0, "steps": 100}}),
         json.dumps({"action": "submit", "family": "E", "run_id": "run_000",
@@ -135,17 +143,18 @@ def test_development_trial_submits_and_evaluates(campaign, monkeypatch):
                                 clock=lambda: "2026-11-08T00:00:00Z")
     row = trial.run()
     assert row["state"] == "SUBMITTED", row.get("blocked_reason")
-    assert row["requests_used"] == 2
+    assert row["requests_used"] == 3
     assert row["evaluation"]["layers"]["L4"]["status"] == "PASS", row["evaluation"]
     assert row["first_failure_layer"] is None
-    assert row["ledger_seqs"] == [1, 2]
+    assert row["ledger_seqs"] == [1, 2, 3]
+    assert row["prereg"]["sha256"] == sha256_of(PLAN)
 
 
 def test_request_cap_is_enforced(campaign, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
     runner = _arm(campaign, monkeypatch)
-    gateway = FakeGateway([json.dumps({"action": "run_experiment",
-                                       "params": {"steps": 10}})] * 30)
+    gateway = FakeGateway([PREREG] + [json.dumps({"action": "run_experiment",
+                                                  "params": {"steps": 10}})] * 30)
     trial = dv.DevelopmentTrial(runner, gateway, "E", session_factory=_factory())
     row = trial.run()
     assert row["state"] == "NO_SUBMISSION"
@@ -270,15 +279,107 @@ def test_blocked_row_keeps_the_per_request_log(campaign, monkeypatch):
     good = json.dumps({"action": "run_experiment",
                        "params": {"kp": 100.0, "kd": 10.0, "max_force": 50.0,
                                   "steps": 100}})
-    gateway = _RaisingGateway([good], fail_at=2)
+    gateway = _RaisingGateway([PREREG, good], fail_at=3)
     monkeypatch.setattr(dv, "build_host_session", lambda _id: _factory()(_id))
     report = dv._run_development_locked(
         runner, gateway, ("E",), clock=lambda: "2026-11-08T00:00:00Z")
     row = report["families"][0]
     assert row["state"] == "BLOCKED"
-    assert row["requests_used"] == 1
-    # 第 1 轮的动作类型与终止原因必须留在现场里
-    assert row["log"] and row["log"][0]["index"] == 1
-    assert row["log"][0]["action"]["kind"] == "run_experiment"
+    assert row["requests_used"] == 2
+    # 每一轮的动作类型与终止原因必须留在现场里
+    assert [e["action"]["kind"] for e in row["log"]] == ["preregister", "run_experiment"]
+    assert row["log"][1]["index"] == 2
     assert row["log"][0]["stop_reason"] == "end_turn"
-    assert row["tokens"]["in"] == 100 and row["tokens"]["out"] == 50
+    # 两轮各 100/50（FakeGateway 固定用量），BLOCKED 行不许把它们吞掉
+    assert row["tokens"] == {"in": 200, "out": 100}
+
+
+# ---------------------------------------------------------------------------
+# v2 协议：计划登记（preregistration）——修 R 的 L5/C1 结构性不可达
+# ---------------------------------------------------------------------------
+def _run(campaign, monkeypatch, replies, *, family="E"):
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    runner = _arm(campaign, monkeypatch)
+    gateway = FakeGateway(replies)
+    trial = dv.DevelopmentTrial(runner, gateway, family, session_factory=_factory(),
+                                clock=lambda: "2026-11-09T00:00:00Z")
+    return trial, trial.run()
+
+
+def test_experiment_before_prereg_is_refused(campaign, monkeypatch):
+    """未登记就发实验：不收参数、不代跑，只回错误类别；登记后照常继续。"""
+    run = json.dumps({"action": "run_experiment",
+                      "params": {"kp": 100.0, "kd": 10.0, "max_force": 50.0,
+                                 "steps": 100}})
+    submit = json.dumps({"action": "submit", "family": "E", "run_id": "run_000",
+                         "claim": {"distance": 0.0, "final_speed": 0.0}})
+    trial, row = _run(campaign, monkeypatch, [run, PREREG, run, submit])
+    kinds = [e["action"]["kind"] for e in row["log"]]
+    assert kinds == ["prereg_required", "preregister", "run_experiment", "submit"]
+    # 被拒的那一轮没有真的跑实验：整条轨迹只有一次 session.run
+    assert row["calls"] == 1
+    assert row["state"] == "SUBMITTED"
+    assert trial._prereg["runs_before"] == 0
+
+
+def test_prereg_cannot_be_replaced_after_experiments_ran(campaign, monkeypatch):
+    """跑过实验再补登 = 事后解释：一律按 duplicate 拒，第一次登记不被覆盖。"""
+    run = json.dumps({"action": "run_experiment",
+                      "params": {"kp": 100.0, "kd": 10.0, "max_force": 50.0,
+                                 "steps": 100}})
+    other = json.dumps({"action": "preregister",
+                        "plan": {"hypothesis": "事后改口", "expected_direction": "down"}})
+    trial, row = _run(campaign, monkeypatch, [PREREG, run, other])
+    kinds = [e["action"]["kind"] for e in row["log"]]
+    assert kinds[:3] == ["preregister", "run_experiment", "prereg_duplicate"]
+    assert row["prereg"]["plan"] == PLAN             # 早先那次登记不被覆盖
+    assert row["prereg"]["request_index"] == 1
+
+
+def test_duplicate_prereg_is_refused_and_first_one_stands(campaign, monkeypatch):
+    first = json.dumps({"action": "preregister",
+                        "plan": {"hypothesis": "A", "expected_direction": "up"}})
+    second = json.dumps({"action": "preregister",
+                         "plan": {"hypothesis": "B", "expected_direction": "down"}})
+    trial, row = _run(campaign, monkeypatch, [first, second])
+    assert [e["action"]["kind"] for e in row["log"]][:2] == ["preregister",
+                                                             "prereg_duplicate"]
+    assert row["prereg"]["plan"] == {"hypothesis": "A", "expected_direction": "up"}
+
+
+def test_incomplete_plan_is_refused_then_can_be_retried(campaign, monkeypatch):
+    weak = json.dumps({"action": "preregister", "plan": {"hypothesis": "只有假设"}})
+    trial, row = _run(campaign, monkeypatch, [weak, PREREG])
+    assert [e["action"]["kind"] for e in row["log"]][:2] == ["prereg_incomplete",
+                                                             "preregister"]
+    assert row["prereg"]["sha256"] == sha256_of(PLAN)
+
+
+def test_prereg_hash_and_timestamp_are_fed_to_the_evaluator(campaign, monkeypatch):
+    """C1 的硬证据：评测器拿到的 prereg_sha256 必须等于登记时算出的哈希。"""
+    seen: list[dict] = []
+
+    class _Result:
+        def as_dict(self):
+            return {"execution": "COMPLETE", "scientific": "NOT_APPLICABLE",
+                    "layers": {}, "first_failure_layer": None}
+
+    def _fake_evaluate(inp):
+        seen.append({"prereg_sha256": inp.prereg_sha256, "slot_id": inp.slot_id})
+        return _Result()
+
+    monkeypatch.setattr(dv, "evaluate", _fake_evaluate)
+    submit = json.dumps({"action": "submit", "family": "E", "run_id": "run_000"})
+    trial, row = _run(campaign, monkeypatch, [PREREG, submit])
+    assert seen and seen[0]["prereg_sha256"] == sha256_of(PLAN)
+    assert row["prereg"]["sha256"] == sha256_of(PLAN)
+    assert row["prereg"]["registered_at_utc"] == "2026-11-09T00:00:00Z"
+
+
+def test_protocol_spec_v2_declares_preregistration():
+    """协议自述与实现同源：改动作集就必须改规格哈希（评审/锁都看它）。"""
+    spec = dv.PROTOCOL_SPEC
+    assert spec["schema"] == "rsi_r0.dev_protocol.v2"
+    assert spec["actions"] == ["preregister", "run_experiment", "submit"]
+    assert spec["preregistration"]["required"] is True
+    assert spec["preregistration"]["required_fields"] == list(dv.PREREG_REQUIRED_FIELDS)

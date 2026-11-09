@@ -53,10 +53,20 @@ DEV_ACTOR_NAME = "rsi_r0.develop"
 HIDDEN_RETRY_MARKER = "HiddenRetryDetected"
 TASKS_ROOT = Path(__file__).resolve().parents[2] / "benchmarks" / "rsi_r0" / "tasks"
 
+#: 计划登记（preregistration）要求：v2 起每个家族的**首次实验之前**必须先交计划。
+#: 依据：计划 L129「首次实验前保存带时间与哈希的 hypothesis / competing-explanation /
+#: experiment-plan；声明变量、单位、对照、预期方向」。v1 从未实现该通道，评测器
+#: `_research_layer` 却硬查 `inp.prereg_sha256` 非空 —— 结果 R 的 L5（C1）对任何
+#: agent 都判不过（2026-11-08 实测：R 唯一能填该值的只有 controls.py 的测试替身）。
+#: 2026-11-09 用户裁决「真修协议：加登记计划动作」，故 v2 把 preregistration 写进协议。
+PREREG_REQUIRED_FIELDS: tuple[str, ...] = ("hypothesis", "expected_direction")
+
 PROTOCOL_SPEC: Mapping[str, Any] = {
-    "schema": "rsi_r0.dev_protocol.v1",
+    "schema": "rsi_r0.dev_protocol.v2",
     "response_format": "single_line_json_object",
-    "actions": ["run_experiment", "submit"],
+    "actions": ["preregister", "run_experiment", "submit"],
+    "preregistration": {"required": True, "before": "first_experiment",
+                        "required_fields": list(PREREG_REQUIRED_FIELDS)},
     "request_cap": DEV_CAP,
     "checkpoints": list(CHECKPOINTS),
     "retry": "none",
@@ -132,15 +142,26 @@ def build_host_session(instance_id: str) -> tuple[ExperimentSession, dict[str, A
 
 # ---------------------------------------------------------------- 提示词
 def brief_prompt(task: Mapping[str, Any], *, remaining: int) -> str:
+    fields = "、".join(PREREG_REQUIRED_FIELDS)
     return (
         "你在参加一次机器人仿真平台的开发校准轨迹。你只能通过可信服务做实验。\n"
         "任务书（公开面，JSON）：\n"
         f"{json.dumps(task, ensure_ascii=False, sort_keys=True)}\n"
         f"本轨迹最多还能发 {remaining} 次实验请求。\n"
         "每条回复只输出一行 JSON，不要解释、不要代码块围栏：\n"
-        '发实验：{"action":"run_experiment","params":{...}}\n'
+        "第一步必须先登记计划（在**任何**实验之前，只登记一次，至少写 "
+        f"{fields}，可选 variables/controls/competing_explanation）：\n"
+        '   {"action":"preregister","plan":{"hypothesis":"...",'
+        '"expected_direction":"..."}}\n'
+        '登记之后发实验：{"action":"run_experiment","params":{...}}\n'
         '交卷：{"action":"submit", ...按任务书 answer.required 的字段...}'
     )
+
+
+def prereg_ack_prompt(prereg_sha256: str) -> str:
+    return ("计划已登记（sha256="
+            f"{prereg_sha256}，登记时间与序号已入宿主记录，事后不可改）。\n"
+            "继续：只输出一行 JSON（run_experiment 或 submit）。")
 
 
 def result_prompt(result: Mapping[str, Any]) -> str:
@@ -150,8 +171,18 @@ def result_prompt(result: Mapping[str, Any]) -> str:
 
 
 def error_prompt(kind: str) -> str:
-    return (f'上一条动作被拒绝，错误类别：{kind}。'
-            "继续：只输出一行 JSON（run_experiment 或 submit）。")
+    # 继续提示必须与协议状态一致：v1 的"只会 run_experiment 或 submit"在 v2 里
+    # 会误导候选（未登记时发实验只会再被挡一次、白烧一格请求帽）。
+    if kind == "prereg_required":
+        hint = ('继续：先登记计划 {"action":"preregister","plan":{"hypothesis":'
+                '"...","expected_direction":"..."}}，登记后才能发实验。')
+    elif kind == "prereg_incomplete":
+        hint = "继续：补全计划字段后重新登记（preregister），或直接交卷。"
+    elif kind == "prereg_duplicate":
+        hint = "继续：只输出一行 JSON（run_experiment 或 submit）；已登记的计划不可替换。"
+    else:
+        hint = "继续：只输出一行 JSON（run_experiment 或 submit）。"
+    return f"上一条动作被拒绝，错误类别：{kind}。{hint}"
 
 
 def summarize_result(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -222,6 +253,8 @@ class DevelopmentTrial:
         # "第二轮才空回答"（2026-11-08 T6 重跑实测踩到：三族全 BLOCKED，log 全空）。
         self._log: list[dict[str, Any]] = []
         self._checkpoints_seen: list[dict[str, Any]] = []
+        # 计划登记（v2）：首次实验之前必须登记一次；登记后哈希与时间不可改。
+        self._prereg: dict[str, Any] | None = None
 
     # ---- 前置 ----
     def preconditions(self) -> dict[str, Any]:
@@ -359,22 +392,54 @@ class DevelopmentTrial:
             if action is None:
                 entry["action"] = {"kind": "invalid_json"}
                 messages.append({"role": "user", "content": error_prompt("invalid_json")})
-            elif action.get("action") == "run_experiment":
-                try:
-                    result = session.run(action.get("params") or {})
-                except CandidateRequestError as exc:
-                    entry["action"] = {"kind": "rejected", "error": str(exc)}
-                    messages.append({"role": "user", "content": error_prompt("CandidateRequestError")})
-                except TrustedServiceError as exc:
-                    entry["action"] = {"kind": "service_error", "error": str(exc)}
-                    blocked_reason = f"可信服务失败：{exc}"
-                    log.append(entry)
-                    break
+            elif action.get("action") == "preregister":
+                if self._prereg is not None:
+                    # 只准登记一次。注意「跑过实验再补登」在这里不可能发生：
+                    # 未登记时 run_experiment 一律被 prereg_required 挡回、不代跑，
+                    # 所以 session.calls 非空 ⇒ 必有登记；补登一律是 duplicate。
+                    entry["action"] = {"kind": "prereg_duplicate"}
+                    messages.append({"role": "user",
+                                     "content": error_prompt("prereg_duplicate")})
                 else:
-                    summary = summarize_result(result)
-                    entry["action"] = {"kind": "run_experiment", "run_id": result.get("run_id"),
-                                       "params_sha256": sha256_of(dict(action.get("params") or {}))}
-                    messages.append({"role": "user", "content": result_prompt(summary)})
+                    plan = action.get("plan")
+                    bad = _check_plan(plan)
+                    if bad is not None:
+                        entry["action"] = {"kind": bad}
+                        messages.append({"role": "user", "content": error_prompt(bad)})
+                    else:
+                        digest = sha256_of(dict(plan))
+                        self._prereg = {
+                            "sha256": digest, "plan": dict(plan),
+                            "registered_at_utc": self.clock(),
+                            "request_index": index, "runs_before": len(session.calls)}
+                        entry["action"] = {"kind": "preregister", "prereg_sha256": digest}
+                        messages.append({"role": "user",
+                                         "content": prereg_ack_prompt(digest)})
+            elif action.get("action") == "run_experiment":
+                if self._prereg is None:
+                    # 未登记就发实验：不收参数、不代跑，只回错误类别（class_only_once）。
+                    entry["action"] = {"kind": "prereg_required"}
+                    messages.append({"role": "user",
+                                     "content": error_prompt("prereg_required")})
+                else:
+                    try:
+                        result = session.run(action.get("params") or {})
+                    except CandidateRequestError as exc:
+                        entry["action"] = {"kind": "rejected", "error": str(exc)}
+                        messages.append({"role": "user",
+                                         "content": error_prompt("CandidateRequestError")})
+                    except TrustedServiceError as exc:
+                        entry["action"] = {"kind": "service_error", "error": str(exc)}
+                        blocked_reason = f"可信服务失败：{exc}"
+                        log.append(entry)
+                        break
+                    else:
+                        summary = summarize_result(result)
+                        entry["action"] = {"kind": "run_experiment",
+                                           "run_id": result.get("run_id"),
+                                           "params_sha256": sha256_of(
+                                               dict(action.get("params") or {}))}
+                        messages.append({"role": "user", "content": result_prompt(summary)})
             elif action.get("action") == "submit":
                 answer = {k: v for k, v in action.items() if k != "action"}
                 entry["action"] = {"kind": "submit", "answer_sha256": sha256_of(answer)}
@@ -421,6 +486,7 @@ class DevelopmentTrial:
             "checkpoints": checkpoints,
             "calls": len(session.calls),
             "scene_sha256": scene_sha,
+            "prereg": dict(self._prereg) if self._prereg else None,
             "answer": answer,
             "evaluation": evaluation,
             "first_failure_layer": _first_failure(evaluation),
@@ -460,6 +526,7 @@ class DevelopmentTrial:
         result = evaluate(EvaluationInput(
             task=task, answer=answer, calls=list(session.calls),
             replay=replay, truth=truth, priv_rules=priv_rules,
+            prereg_sha256=(self._prereg or {}).get("sha256"),
             slot_id=instance_id or f"{self.family_key}-checkpoint",
             requests_used=requests_used, **scenes_kwargs))
         # TrialResult → 可 JSON 化的字典（报告与门事实都只读这份）
@@ -476,6 +543,17 @@ def _priv_rules(private: Mapping[str, Any]) -> dict[str, Any]:
     if "support_threshold" in private:
         rules["support_threshold"] = private["support_threshold"]
     return rules
+
+
+def _check_plan(plan: Any) -> str | None:
+    """计划登记的最小要求：合格返回 None，否则返回错误类别（喂给候选）。"""
+    if not isinstance(plan, Mapping):
+        return "prereg_incomplete"
+    for key in PREREG_REQUIRED_FIELDS:
+        value = plan.get(key)
+        if not isinstance(value, str) or not value.strip():
+            return "prereg_incomplete"
+    return None
 
 
 def _parse_action(text: str) -> dict[str, Any] | None:
@@ -527,6 +605,7 @@ def _run_development_locked(runner: Any, gateway: Any, families: Sequence[str],
                          "first_failure_layer": None,
                          "tokens": {"in": trial._tokens_in, "out": trial._tokens_out},
                          "checkpoints": list(trial._checkpoints_seen),
+                         "prereg": dict(trial._prereg) if trial._prereg else None,
                          "log": list(trial._log)})
     report = {
         "schema": REPORT_SCHEMA,

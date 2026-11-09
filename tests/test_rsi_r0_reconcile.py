@@ -647,3 +647,133 @@ def test_instrument_repair_archives_the_stale_independent_review(bare_runner, mo
         findings={"major": 0, "critical": 0},
         basis="新代码集上的独立评审（单测夹具）——旧件已归档，写新件不该被拦。")
     assert fresh["reviewed_code_set_sha256"] == bare_runner.lock_snapshot()["code_set_sha256"]
+
+
+# ---------------------------------------------------------------- 协议修订通道
+# 2026-11-09 用户逐字授权：T6 实跑暴露 R 族 L5/C1 结构性不可达（判据要求
+# `prereg_sha256`，v1 协议动作集里没有「登记计划」动作）。修它必须改协议本体，
+# 即「改实验定义后重锁」。通道只认两个键、必须附用户授权原文、其余冻结面照旧。
+AUTHORIZATION = ("2026-11-09 用户裁决「真修协议：加登记计划动作」——"
+                 "授权修订 develop 协议并在付费后重锁（单测夹具原文）")
+
+
+def _protocol_amended(monkeypatch, mutate):
+    """模拟协议本体被修订：快照里的 develop_protocol 两键随之改变。"""
+    from orchestrator.rsi_r0.contracts import sha256_of
+    real = rn.R0Runner.lock_snapshot
+
+    def fake(self):
+        snap = real(self)
+        spec = dict(snap["develop_protocol"])
+        mutate(spec)
+        return {**snap, "develop_protocol": spec,
+                "develop_protocol_sha256": sha256_of(spec)}
+    monkeypatch.setattr(rn.R0Runner, "lock_snapshot", fake)
+
+
+def _history(runner) -> list[dict]:
+    return [json.loads(x) for x in (runner.root / "protocol" / "lock_history.jsonl")
+            .read_text(encoding="utf-8").splitlines()]
+
+
+def test_protocol_amendment_requires_the_instrument_repair_channel(
+        bare_runner, monkeypatch):
+    """改实验定义后重锁不能伪装成常规换锁：必须显式走仪器修复通道。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _protocol_amended(monkeypatch, lambda s: s.__setitem__("schema", "v9"))
+    with pytest.raises(rn.RunnerError, match="instrument_repair=True"):
+        bare_runner.supersede_lock(
+            "协议修订必须在仪器修复通道上显式登记，不能伪装成常规换锁（单测）",
+            amendment=("develop_protocol", "develop_protocol_sha256"),
+            amendment_authorization=AUTHORIZATION)
+    assert bare_runner.lock_path().exists()
+
+
+def test_protocol_amendment_requires_the_authorization_text(bare_runner, monkeypatch):
+    """没有用户授权原文就写不出审计行：换锁前一律拒。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _protocol_amended(monkeypatch, lambda s: s.__setitem__("schema", "v9"))
+    with pytest.raises(rn.RunnerError, match="授权原文"):
+        bare_runner.supersede_lock(
+            "协议修订必须附用户授权原文，否则审计行写不出来（单测）", instrument_repair=True,
+            amendment=("develop_protocol",), amendment_authorization="太短")
+    assert bare_runner.lock_path().exists()
+
+
+def test_protocol_amendment_refuses_any_other_frozen_field(bare_runner, monkeypatch):
+    """修订通道只认两个协议键：想把判据面一起"顺带修订"一律拒。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _protocol_amended(monkeypatch, lambda s: s.__setitem__("schema", "v9"))
+    with pytest.raises(rn.RunnerError, match="只认"):
+        bare_runner.supersede_lock(
+            "试图把判据面也一起塞进协议修订通道，这属于改实验（单测）", instrument_repair=True,
+            amendment=("develop_protocol", "criteria_hash"),
+            amendment_authorization=AUTHORIZATION)
+    assert bare_runner.lock_path().exists()
+
+
+def test_protocol_amendment_still_refuses_a_judgment_surface_change(
+        bare_runner, monkeypatch):
+    """豁免的只有协议本体：同一次换锁里动评测器照样整单拒。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _protocol_amended(monkeypatch, lambda s: s.__setitem__("schema", "v9"))
+    _bumped(monkeypatch, "evaluator")
+    with pytest.raises(rn.RunnerError, match="实验定义面"):
+        bare_runner.supersede_lock(
+            "协议修订顺手改评测器就是改实验，必须整单拒（单测）", instrument_repair=True,
+            amendment=("develop_protocol", "develop_protocol_sha256"),
+            amendment_authorization=AUTHORIZATION)
+    assert bare_runner.lock_path().exists()
+
+
+def test_protocol_amendment_records_the_authorization_and_new_values(
+        bare_runner, monkeypatch):
+    """放行时审计行必须能第三方复核：改了哪两键、授权原文、前后取值。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    old_spec = json.loads(bare_runner.lock_path().read_text())["develop_protocol"]
+    _protocol_amended(monkeypatch, lambda s: s.__setitem__("schema", "v9"))
+
+    # 不带修订的同一份快照必须被冻结面拒掉——证明放行确实来自这次授权。
+    with pytest.raises(rn.RunnerError, match="实验定义面"):
+        bare_runner.supersede_lock(
+            "协议本体已改但没走修订通道（单测应被拒）", instrument_repair=True)
+
+    out = bare_runner.supersede_lock(
+        "T6 实跑暴露 R 族 L5/C1 结构性不可达，按用户授权加登记计划动作后重锁（单测）",
+        instrument_repair=True,
+        amendment=("develop_protocol", "develop_protocol_sha256"),
+        amendment_authorization=AUTHORIZATION)
+    assert out["amendment_fields"] == ["develop_protocol", "develop_protocol_sha256"]
+    last = _history(bare_runner)[-1]
+    assert last["amendment_authorization"] == AUTHORIZATION.strip()
+    assert last["amendment_fields"] == ["develop_protocol", "develop_protocol_sha256"]
+    assert last["amendment_values"]["develop_protocol"]["old"] == old_spec
+    assert last["amendment_values"]["develop_protocol"]["new"]["schema"] == "v9"
+    assert last["frozen_fields_checked"]                       # 其余冻结面照旧逐项校验
+    assert bare_runner.verify_lock()["ok"] is True
+
+
+def test_protocol_amendment_refuses_a_declared_but_unchanged_field(
+        bare_runner, monkeypatch):
+    """没变却声明"被修订"= 审计造假：宁可拒，不许在 lock_history 记假账。"""
+    bare_runner.ensure_campaign()
+    bare_runner.write_lock()
+    _spend_one(bare_runner)
+    _bumped(monkeypatch, "develop")          # 只动接线模块，协议本体没变
+    with pytest.raises(rn.RunnerError, match="并未变化"):
+        bare_runner.supersede_lock(
+            "声明协议被修订但其实没动，属于在审计行记假账（单测）",
+            instrument_repair=True,
+            amendment=("develop_protocol", "develop_protocol_sha256"),
+            amendment_authorization=AUTHORIZATION)
+    assert bare_runner.lock_path().exists()
