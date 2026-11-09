@@ -62,7 +62,11 @@ def test_run_chain_uses_protocol_doc_and_sends_exactly_four(ctx):
     # 模型确实看到了协议文档（nonce 进系统提示），不是凭内存答
     assert fixture.nonce in stub.requests[0].system
     for post in rec["posts"]:
-        assert post["local"]["n_bytes"] == post["local"]["n_bytes"]  # 已记录
+        # 本地计数必须**真的量到东西**（自我相等是恒真断言，评审 MINOR-1）
+        assert isinstance(post["local"]["n_bytes"], int)
+        assert post["local"]["n_bytes"] > 0
+        assert post["local"]["local_tokens"] > 0
+        assert len(post["local"]["request_sha256"]) == 64
         assert post["provider_reported"]["attempts_http"] == 1
     assert all(item["ok"] for item in rec["slot_binding"])
 
@@ -79,3 +83,21 @@ def test_usage_rows_keep_local_counts_and_reported_values(ctx):
     assert all(r["local"]["n_bytes"] > 0 for r in rows)
     assert all(r["provider_reported"]["provider_model"] == "protocol_stub"
                for r in rows)
+
+
+def test_failed_chain_cancels_its_own_unused_slots_too(ctx):
+    """§6.1「剩余槽如实取消」必须含**失败链自身**未发送的轮次（评审 MINOR-2）。
+
+    只取消后继链时，P1 若在第 1 轮就失败，P-A-2..4 会永远停在 ``UNUSED``，
+    槽账看上去像「还打算发」——与「不补考」的结论相反。已发送的槽（这里把
+    P-A-1 手动置为 SUBMITTED 模拟）绝不能被改写成取消。
+    """
+    ST.SlotBook(ctx).claim("P-A-1", trial_id="proto_P1", call_id="c1")
+
+    cancelled = T4.cancel_pending_slots(ctx, "P1")
+    assert cancelled == ["P-A-2", "P-A-3", "P-A-4",
+                         "P-B-1", "P-B-2", "P-B-3", "P-B-4"]
+
+    book = ST.SlotBook(ctx)
+    assert book.status("P-A-1") == ST.SLOT_SENT      # 已发槽不被改写成取消
+    assert all(book.status(sid) == ST.SLOT_CANCELLED for sid in cancelled)

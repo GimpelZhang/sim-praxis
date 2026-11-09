@@ -41,6 +41,9 @@ import t3_control as T3C  # noqa: E402  —— 槽位绑定/协议判据与 T3 �
 SCHEMA_REPORT = "simpraxis.rsi_r02.t4_protocol_report.v1"
 SCHEMA_CHAIN = "simpraxis.rsi_r02.t4_protocol_chain.v1"
 TOTAL_POSTS = 8
+# G-P 核验用的本批货币帽**不许由命令行缩小**（评审 LOW-3：调用方传小值会弱化
+# 「批准件必须覆盖整批」的核验）。与 ``TOTAL_POSTS`` 同法：内部常量，非参数。
+CAP_USD = 100.0
 
 
 def _usage_rows(events: "list[Mapping[str, Any]]") -> "list[dict[str, Any]]":
@@ -129,13 +132,30 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
     }
 
 
+def cancel_pending_slots(ctx, failed_fixture: str) -> "list[str]":
+    """链失败后取消「失败链自身的未用槽 + 其后所有链」的槽，返回被取消的槽 id。
+
+    §6.1 的「剩余槽如实取消」指的是**所有**未发送的协议槽：链在第 k 轮失败时，
+    同一链的 k+1..4 也是剩余（评审 MINOR-2 前只取消了后继链）。已发送的槽是
+    ``SUBMITTED`` 或 ``SLOT_UNKNOWN``，``cancel_unused`` 只动 ``UNUSED``，
+    不会把「可能已发出去的」误记成取消。
+    """
+    start = PF.FIXTURE_IDS.index(failed_fixture)
+    book = ST.SlotBook(ctx)
+    cancelled: "list[str]" = []
+    for pending in PF.FIXTURE_IDS[start:]:
+        cancelled += book.cancel_unused(
+            reason="T4 前链失败：协议不补考（§6.1）",
+            prefix=T3C.PROTO_SLOT_PREFIX[pending])
+    return cancelled
+
+
 def main(argv: "list[str] | None" = None) -> int:
     ap = argparse.ArgumentParser(description="RSI-R0.2 T4 协议准入（真实付费）")
     ap.add_argument("--campaign-id", required=True)
     ap.add_argument("--root", default=None)
     ap.add_argument("--tokenizer", default=str(T3C.DEFAULT_TOKENIZER))
     ap.add_argument("--tokenizer-sha256", default=None)
-    ap.add_argument("--cap-usd", type=float, default=100.0)
     ap.add_argument("--gpus", action="store_true")
     args = ap.parse_args(argv)
 
@@ -150,7 +170,7 @@ def main(argv: "list[str] | None" = None) -> int:
         return 2
 
     # G-P：批准件必须覆盖本批 8 次发送与货币帽。
-    CLI.require_gp_approval(ctx, posts=TOTAL_POSTS, cap_usd=args.cap_usd)
+    CLI.require_gp_approval(ctx, posts=TOTAL_POSTS, cap_usd=CAP_USD)
     if not args.tokenizer_sha256:
         print(json.dumps({"refused": "缺 --tokenizer-sha256"}, ensure_ascii=False))
         return 2
@@ -168,11 +188,8 @@ def main(argv: "list[str] | None" = None) -> int:
               f"posts={rec['posts_recorded']} ok={rec['chain_ok']} "
               f"problems={rec['verdict']['problems']}", flush=True)
         if not rec["chain_ok"]:
-            # 模型错即停：不补发、不换题；剩余协议槽如实取消。
-            book = ST.SlotBook(ctx)
-            for other in PF.FIXTURE_IDS[len(chains):]:
-                book.cancel_unused(reason="T4 前链失败：协议不补考（§6.1）",
-                                   prefix=T3C.PROTO_SLOT_PREFIX[other])
+            # 模型错即停：不补发、不换题；剩余协议槽如实取消（含本链未用槽）。
+            cancel_pending_slots(ctx, fixture_id)
             break
 
     local_counts = [p["local"] for ch in chains for p in ch["posts"]]
