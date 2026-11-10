@@ -43,9 +43,11 @@ import t3_control as T3C  # noqa: E402  —— 槽位绑定/协议判据与 T3 �
 
 SCHEMA_REPORT = "simpraxis.rsi_r02.t4_protocol_report.v1"
 SCHEMA_CHAIN = "simpraxis.rsi_r02.t4_protocol_chain.v1"
-#: 每链 4 个必做动作 + 2 个自修余量 ⇒ 两条链的发送区间 [8, 12]。
-MIN_POSTS = 8
-TOTAL_POSTS = 12
+#: 每链 4 个必做动作 + 2 个自修余量 ⇒ 两条链的发送区间 [8, 12]。槽数口径只从
+#: ``protocol_fixture`` 取，本文件不写 6/12 字面量（评审 MINOR-3）。
+MIN_POSTS = PF.SLOTS_PER_CHAIN * len(PF.FIXTURE_IDS) - (
+    PF.REPAIR_SLOTS_PER_CHAIN * len(PF.FIXTURE_IDS))
+TOTAL_POSTS = PF.TOTAL_PROTOCOL_SLOTS
 # G-P 核验用的本批货币帽**不许由命令行缩小**（评审 LOW-3：调用方传小值会弱化
 # 「批准件必须覆盖整批」的核验）。与 ``TOTAL_POSTS`` 同法：内部常量，非参数。
 CAP_USD = 100.0
@@ -93,8 +95,10 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
     book = ST.SlotBook(ctx)
     prefix = T3C.PROTO_SLOT_PREFIX[fixture_id]
     slot_ids = sorted(book.ids(prefix=prefix))
-    if len(slot_ids) != 6:
-        raise SystemExit(f"{fixture_id} 期望 6 个协议槽（4 必做 + 2 余量），"
+    if len(slot_ids) != PF.SLOTS_PER_CHAIN:
+        raise SystemExit(f"{fixture_id} 期望 {PF.SLOTS_PER_CHAIN} 个协议槽"
+                         f"（{len(PF.ACTION_ORDER)} 必做 + "
+                         f"{PF.REPAIR_SLOTS_PER_CHAIN} 余量），"
                          f"实际 {len(slot_ids)}：{slot_ids}")
     fixture = PF.make_fixture(campaign_id=ctx.campaign_id,
                               fixture_id=fixture_id, slot_id=slot_ids[0],
@@ -131,10 +135,12 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
         "slot_problems": slot_problems,
         "slot_repairs": slot_repairs,
         "verdict": verdict,
-        "slots_after": book.counts(),
+        # 同 T3：槽账要重新载入再数（``book`` 是跑之前的内存快照，评审 MINOR-8）。
+        "slots_after": ST.SlotBook(ctx).counts(),
         "chain_ok": bool(verdict["ok"] and not slot_problems
                          and run_out.get("status") == ST.TRIAL_SUBMITTED
-                         and 4 <= len(posts) <= len(slot_ids)),
+                         and len(PF.ACTION_ORDER) <= len(posts)
+                         <= len(slot_ids)),
     }
 
 

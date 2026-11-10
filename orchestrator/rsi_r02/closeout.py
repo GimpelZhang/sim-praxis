@@ -20,6 +20,7 @@ from typing import Any, Mapping, Sequence
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.rsi_r02 import billing as B
 from orchestrator.rsi_r02 import campaign as C
+from orchestrator.rsi_r02 import protocol_fixture as PF
 from orchestrator.rsi_r02 import stages as SG
 from orchestrator.rsi_r02 import state as ST
 
@@ -63,7 +64,8 @@ def _trial_facts(store: ST.StateStore, spec: SG.TrialSpec) -> "dict[str, Any]":
 
 
 #: 协议链每链的槽数（4 必做 + 2 自修余量）；只用于**读事实**的 spec 复原。
-PROTO_SLOTS_PER_CHAIN = 6
+#: 口径取自 ``protocol_fixture``，本文件不写 6 字面量（评审 MINOR-3）。
+PROTO_SLOTS_PER_CHAIN = PF.SLOTS_PER_CHAIN
 _PROTO_SLOT_PREFIX = {"P1": "P-A-", "P2": "P-B-"}
 
 

@@ -128,6 +128,32 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
                     f"阻尼区间 {research.get('band')}，窗口 {research.get('window_s')} s")
     iface = pub.get("interface") or {}
     head.append(f"公开接口：{json.dumps(iface, ensure_ascii=False, sort_keys=True)}")
+    # 公开文档里的字段表必须**真的渲染进 system**：候选唯一的输入通道就是这份
+    # 文本（``candidate.CandidateLoop.system``），只把 required_fields 放进文档
+    # dict 而渲染时丢掉，等于 action_schema_text 指向一个候选看不见的章节——
+    # 这正是 T4 首跑判 BLOCKED_PROTOCOL 的那类自相矛盾（评审 CRITICAL-1）。
+    for key, title in (("prereg", "preregister 的 plan 必填字段"),
+                       ("submit", "submit 必填字段")):
+        spec = pub.get(key)
+        if not isinstance(spec, Mapping) or not spec:
+            continue
+        head.append("")
+        head.append(f"### {title}（逐字照抄字段名，不得增删或改名）")
+        note = str(spec.get("note") or "").strip()
+        if note:
+            head.append(note)
+        fields = spec.get("required_fields") or {}
+        if isinstance(fields, Mapping):
+            for name, desc in fields.items():
+                head.append(f"* {name}：{desc}")
+        if spec.get("delta_fixed") is not None:
+            head.append(f"* delta 必须逐字等于 {spec['delta_fixed']}")
+        if spec.get("cells_rule"):
+            head.append(f"* cells 规则：{spec['cells_rule']}")
+        values = spec.get("values")
+        if values:
+            head.append("* 本实例的参数取值：" + json.dumps(
+                values, ensure_ascii=False, sort_keys=True))
     return "\n".join(head) + "\n\n" + action_schema_text(surface)
 
 

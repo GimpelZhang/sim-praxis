@@ -35,6 +35,13 @@ ACTION_ORDER = ("preregister", "run_experiment", "analyze", "submit")
 STAT_KEY = "max_abs_x"
 PROTO_LINE = "PROTO_STAT "
 
+#: 槽数口径的**单一来源**：D-T4-1 给每条链 2 个自修余量，于是每条链 6 个槽、
+#: 两条链 12 个 POST。T0（预注册合同／硬帽）、T3（控制链）、T4（付费链）一律从
+#: 这里取，禁止各自写 6/12 字面量（评审 MINOR-3）。
+REPAIR_SLOTS_PER_CHAIN = 2
+SLOTS_PER_CHAIN = len(ACTION_ORDER) + REPAIR_SLOTS_PER_CHAIN
+TOTAL_PROTOCOL_SLOTS = SLOTS_PER_CHAIN * len(FIXTURE_IDS)
+
 #: 判据侧（rsi_r01）真实要求的必填字段——文档必须逐一覆盖它们，不许只写一部分。
 PREREG_REQUIRED = ("question", "h", "cells", "metric", "formula_version",
                    "delta", "censoring_rule", "analysis_procedure", "stop_rule")
@@ -237,10 +244,10 @@ def contract_payload(*, campaign_id: str) -> "dict[str, Any]":
         "schema": "simpraxis.rsi_r02.protocol_contract.v1",
         "campaign_id": campaign_id,
         "action_order": list(ACTION_ORDER),
-        "slots_per_chain": 6,
+        "slots_per_chain": SLOTS_PER_CHAIN,
         "required_actions": len(ACTION_ORDER),
-        "repair_slots_per_chain": 6 - len(ACTION_ORDER),
-        "total_posts_cap": 6 * len(FIXTURE_IDS),
+        "repair_slots_per_chain": REPAIR_SLOTS_PER_CHAIN,
+        "total_posts_cap": TOTAL_PROTOCOL_SLOTS,
         "doc_must_be_self_sufficient": True,
         "prereg_required": list(PREREG_REQUIRED),
         "submit_required": list(SUBMIT_REQUIRED),
@@ -251,11 +258,18 @@ def contract_payload(*, campaign_id: str) -> "dict[str, Any]":
 
 
 def check_contract(payload: Mapping[str, Any], *, campaign_id: str) -> "list[str]":
-    """合同自查：重算一次并逐项比对（漂移即返回problems，不静默）。"""
+    """合同自查：重算一次并逐项比对（漂移即返回problems，不静默）。
+
+    比对面覆盖**整份合同**而不只是槽数：字段表、自足性开关、campaign 绑定与
+    schema 名都必须在盘上件里逐字一致，否则 LOCK 钉住的就不是本链实际运行
+    的那份合同（评审 MINOR-4）。
+    """
     problems: "list[str]" = []
     live = contract_payload(campaign_id=campaign_id)
     for key in ("action_order", "slots_per_chain", "required_actions",
-                "repair_slots_per_chain", "total_posts_cap", "chains"):
+                "repair_slots_per_chain", "total_posts_cap",
+                "schema", "campaign_id", "prereg_required", "submit_required",
+                "doc_must_be_self_sufficient", "chains"):
         if (payload or {}).get(key) != live[key]:
             problems.append(f"协议合同与实机不符：{key}")
     for fid, chain in (live["chains"] or {}).items():
@@ -295,6 +309,9 @@ class ProtocolStub:
     requests: "list[M.Request]" = field(default_factory=list)
     results: "list[dict[str, Any]]" = field(default_factory=list)
     decisions: "list[dict[str, Any]]" = field(default_factory=list)
+    # 注入式坏回合（第几次 POST 从 1 起 → 原样回给宿主的文本）。T3/T4 用它真走
+    # 一遍「解析级失败 → 余量内自修」的 loop，而不是只在检查器上打桩（D-T4-1）。
+    inject: Mapping[int, str] = field(default_factory=dict)
 
     def __call__(self, request: M.Request) -> CD.Reply:
         self.requests.append(request)
@@ -303,10 +320,22 @@ class ProtocolStub:
             last = request.messages[-1] if request.messages else {}
             if last.get("role") != "user":
                 raise ProtocolError("轮次计数与消息结构不符")
-            self.results.append(json.loads(str(last.get("content") or "")))
+            raw = str(last.get("content") or "")
+            try:
+                doc = json.loads(raw)
+            except ValueError:
+                # 解析级失败时宿主回给模型的是**结构化错误**，不是 JSON 动作；
+                # actor 必须能读它并继续修，而不是把预演判式自己崩掉。
+                doc = {"raw_error": raw[:200]}
+            self.results.append(doc if isinstance(doc, dict) else {})
         if n != len(self.results):
             raise ProtocolError(f"轮次计数漂移：turns={n} results={len(self.results)}")
-        text = json.dumps(self._decide(), ensure_ascii=False, sort_keys=True)
+        # 注入式坏回合：键是**第几次 POST**（从 1 起，= 本次请求里的 assistant
+        # 消息数 + 1），值是原样回给宿主的文本。T3/T4 用它真走一遍「解析级失败
+        # → 余量内自修」的 loop，而不是只在检查器上打桩（D-T4-1）。
+        bad = self.inject.get(n + 1)
+        text = bad if bad is not None else json.dumps(
+            self._decide(), ensure_ascii=False, sort_keys=True)
         self.decisions.append({"turn": n, "text_sha256":
                                hashlib.sha256(text.encode()).hexdigest()[:16]})
         return CD.Reply(text=text, capture={
@@ -318,11 +347,14 @@ class ProtocolStub:
 
     def _decide(self) -> "dict[str, Any]":
         res = self.results
-        if not res:
+        # 找**第一次成功的** preregister，而不是硬认 res[0]：解析级失败、字段被拒
+        # 的回包都不带 ``action``，而交付一个更多动作的响应体也可能产生任意回包；
+        # 预演 actor 必须按「已成功的事实」推进，否则自修路径无法被真正走过。
+        if not any(r.get("action") == "preregister" and r.get("ok") for r in res):
+            if any(r.get("action") == "run_experiment" for r in res):
+                raise ProtocolError("登记未成功却已在跑实验（actor 状态自相矛盾）")
             return {"schema": S.SCHEMA_ACTION, "action": "preregister",
                     "plan": self._plan_from_doc()}
-        if res[0].get("action") != "preregister" or not res[0].get("ok"):
-            raise ProtocolError(f"登记未成功：{res[0]}")
         run = [r for r in res if r.get("action") == "run_experiment" and r.get("ok")]
         if not run:
             return {"schema": S.SCHEMA_ACTION, "action": "run_experiment",
@@ -339,7 +371,6 @@ class ProtocolStub:
                 "run_ids": [str(run[0]["run_id"])],
                 "analysis_ids": [str((analyzed[0].get("analysis") or {})
                                      .get("analysis_id"))],
-                "mean_effect": None, "z": None,
                 "nonce": self.fixture.nonce,
                 "stat": payload.get("stat"),
                 "stat_key": self.fixture.stat_key}
@@ -474,6 +505,10 @@ def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
     无自修余量（确定性 actor 的控制链）；付费链按预注册传更大值，坏 JSON /
     缺字段 / 不合法 prereg 各占一次 POST、可在余量内自修——但**成功动作序列**
     仍必须恰好等于 ``ACTION_ORDER``（多一次或少一次都算链 FAIL）。
+
+    判据分两层，别混：**成功动作序列 + POST 数区间**是链成立的判据；
+    不可解析的回复只计入 ``evidence["unusable_replies"]``，不单独判错——
+    它们本身就是余量要吸收的东西，而「余量被打光」会在成功序列上现形。
     """
     problems: "list[str]" = []
     evidence: "dict[str, Any]" = {"fixture_id": fixture.fixture_id,
@@ -496,15 +531,21 @@ def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
                         f"{evidence['actions']}")
 
     parsed: "list[dict[str, Any]]" = []
+    unusable = 0
     for text in texts:
         try:
             doc = json.loads(text)
         except ValueError:
-            problems.append("回复不是合法 JSON")
+            # 解析级失败在 §10.2 里是「帽内可见错误，计一次 POST」，不是链的
+            # 硬错：它恰好就是 D-T4-1 给余量的那条路。这里只记数；链是否成立
+            # 仍由「成功动作序列 == ACTION_ORDER」与 POST 数区间把关——若模型
+            # 把余量全花在坏 JSON 上，成功序列自然不齐，链照样 FAIL。
+            unusable += 1
             parsed.append({})
             continue
         parsed.append(doc if isinstance(doc, dict) else {})
-    by_action = {str(d.get("action")): d for d in parsed}
+    evidence["unusable_replies"] = unusable
+    by_action = {str(d.get("action")): d for d in parsed if d}
 
     analyze = by_action.get("analyze") or {}
     source = str(analyze.get("source") or "")
@@ -546,6 +587,11 @@ def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
     evidence["submit_analysis_ids"] = analysis_ids
     if str(submit.get("nonce")) != fixture.nonce:
         problems.append("submit 没有逐字引用 nonce")
+    # 统计量名也必须逐字对得上公开接口：只比数值不比名，等于允许候选把别的
+    # 量顶替 ``interface.protocol.stat_key``（评审 MINOR-5）。
+    if str(submit.get("stat_key") or "") != fixture.stat_key:
+        problems.append("submit 的 stat_key 与公开接口不符："
+                        f"{submit.get('stat_key')!r} != {fixture.stat_key!r}")
     if run_ids != list(payload.get("run_ids") or []):
         problems.append("submit 的 run_id 与分析产物不一致")
     if analysis_id is None or analysis_ids != [analysis_id]:

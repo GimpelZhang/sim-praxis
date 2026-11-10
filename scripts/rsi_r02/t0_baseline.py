@@ -64,17 +64,14 @@ PROTOCOL_CHAINS = ("A", "B")
 #: 首跑 P1 在 plan 字段缺失上耗掉 4 槽后链 FAIL，根因之一是"零余量"设计——坏 JSON /
 #: 缺字段 / prereg 不合法都算一次 POST，修正却无槽可用）。余量槽 required_action=None：
 #: 任何动作都可落槽，但**不豁免**动作顺序与最终 submit 契约（verify_run 判据不变）。
-PROTOCOL_ROUNDS = (
-    ("1", "preregister"),
-    ("2", "run_experiment"),
-    ("3", "analyze"),
-    ("4", "submit"),
-    ("5", None),
-    ("6", None),
-)
+#: 槽数口径只从 ``protocol_fixture`` 取，本文件不写 6/12 字面量（评审 MINOR-3）。
+PROTOCOL_ROUNDS = tuple(
+    (str(i), act) for i, act in enumerate(
+        list(PF.ACTION_ORDER) + [None] * PF.REPAIR_SLOTS_PER_CHAIN, start=1))
 PER_TRIAL_CAP = 24
 FAMILY_CAP = 72
-PROTOCOL_CAP = 12
+PROTOCOL_CAP = PF.TOTAL_PROTOCOL_SLOTS
+TOTAL_HARD_CAP = PROTOCOL_CAP + 3 * PER_TRIAL_CAP + 6 * PER_TRIAL_CAP
 
 #: 本 campaign 的实现面文件（LOCK 前置清单的一部分；后续 Task 追加）。
 CODE_FILES = (
@@ -194,7 +191,9 @@ def build_slots() -> "dict[str, Any]":
         if s["phase"] != "protocol":
             by_family[s["family"]] = by_family.get(s["family"], 0) + 1
     total = len(slots)
-    if total != 228 or counts != {"protocol": 12, "dev": 72, "validation": 144}:
+    expect = {"protocol": PROTOCOL_CAP, "dev": 3 * PER_TRIAL_CAP,
+              "validation": 6 * PER_TRIAL_CAP}
+    if total != TOTAL_HARD_CAP or counts != expect:
         raise SystemExit(f"槽位表自检失败：total={total} counts={counts}")
     if any(v != FAMILY_CAP for v in by_family.values()):
         raise SystemExit(f"槽位表族帽自检失败：{by_family}")

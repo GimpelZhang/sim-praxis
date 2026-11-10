@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +17,14 @@ from orchestrator.rsi_r01 import actions as AC
 from orchestrator.rsi_r02 import candidate as CD
 from orchestrator.rsi_r02 import messages as M
 from orchestrator.rsi_r02 import protocol_fixture as PF
+from orchestrator.rsi_r02 import state as ST
 from tests import rsi_r02_helpers as H
+
+# 槽位第二重绑定与 T3 用同一份实现：脚本目录进 sys.path（与
+# test_rsi_r02_t3_control.py 同法），避免在测试里复制一份判据。
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts" / "rsi_r02"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
 
 X_BY_RUN = {"r1": [0.0, 0.4, -0.9, 0.2], "r2": [0.0, 0.1]}
 
@@ -361,3 +370,83 @@ def test_repair_post_then_full_chain_passes_with_budget(ctx):
     assert verdict2["evidence"]["n_posts"] == 5
     # 同样的证据在默认 4 槽预算下必须判负（T3 控制链语义不放宽）
     assert not PF.verify_run(fixture, events=[bad, *extra], trial=trial)["ok"]
+
+
+def test_system_text_renders_every_declared_required_field():
+    """公开文档的字段表必须**真的渲染进 system**：候选只能看见这段文本。
+
+    只把 required_fields 放进文档 dict、渲染时丢掉，等于行动协议指向一个候选
+    看不见的章节——那正是 T4 首跑判 BLOCKED_PROTOCOL 的自相矛盾（评审 CRITICAL-1）。
+    """
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P1", slot_id="s1")
+    doc = fx.task_doc()
+    system = M.build_system(doc, _ProtocolTrial().surface)
+    assert "### preregister 的 plan 必填字段" in system
+    assert "### submit 必填字段" in system
+    for name in PF.PREREG_REQUIRED:
+        assert f"* {name}：" in system, name
+    for name in PF.SUBMIT_REQUIRED:
+        assert f"* {name}：" in system, name
+    # 文档里逐字声明的 delta 也必须进 system，而不是只留在 json dict 里
+    assert f"delta 必须逐字等于 {doc['public']['prereg']['delta_fixed']}" in system
+
+
+def test_loop_level_parse_and_field_errors_are_repaired_within_budget(ctx):
+    """**真走 loop** 的自修：坏 JSON + 缺字段各占一槽，六槽预算下链仍应成立。
+
+    这是 D-T4-1 的端到端证据：不是在检查器上插假事件，而是让候选闭环真的收到
+    两次结构化错误、再在余量里改对；同时槽位第二重绑定必须把这两次记为
+    ``repair``（可自修漂移），而不是 ``hard_error``（宿主故障）。
+    """
+    from orchestrator.rsi_r01 import schemas as S
+
+    inst = "E-pr"
+    fixture = PF.make_fixture(campaign_id=ctx.campaign_id, fixture_id="P1",
+                              slot_id=f"{inst}-01", instance_id=inst)
+    # 槽账按真实 T0 口径造：4 个必做槽（required_action 逐槽绑定）+ 2 个余量槽。
+    # 只给 6 个槽是**故意的**：两次自修正好吃掉余量，没有任何第 7 槽可退。
+    slots = [{"slot_id": f"{inst}-0{i}", "phase": "dev", "family": "E",
+              "post_cap": 1, "required_action": req, "status": ST.SLOT_UNUSED}
+             for i, req in enumerate((*PF.ACTION_ORDER,
+                                      *([None] * PF.REPAIR_SLOTS_PER_CHAIN)),
+                                     start=1)]
+    ctx.write_json("quota/slots.json", {
+        "schema": ST.SCHEMA_SLOTBOOK, "recorded_at_utc": "2026-11-10T00:00:00Z",
+        "counts": {"total": len(slots)}, "slots": slots})
+    slot_ids = [s["slot_id"] for s in slots]
+    trial = _ProtocolTrial()
+    loop, _model, _store, journal, _slots, _book = H.build_loop(
+        ctx, slot_ids=slot_ids, replies=[], trial=trial,
+        family="E", instance_id=inst)
+    stub = PF.ProtocolStub(fixture=fixture, inject={
+        1: "先写完计划再说（这段不是 JSON）",
+        2: json.dumps({"schema": S.SCHEMA_ACTION, "action": "preregister",
+                       "plan": {"question": "只写了一个字段"}},
+                      ensure_ascii=False),
+    })
+    loop.call_model = stub
+    loop.public_doc = fixture.task_doc()
+    loop.system = M.build_system(loop.public_doc, trial.surface)
+    out = loop.run()
+    assert out["outcome"] == "submitted"
+    assert [CD.action_name(a) for a in trial.calls] == list(PF.ACTION_ORDER)
+    events = [ev for ev in journal.events
+              if ev.get("trial_id") == f"{inst}-dev"]
+    verdict = PF.verify_run(fixture, events=events, trial=trial,
+                            post_budget=len(slot_ids))
+    assert verdict["ok"], verdict["problems"]
+    assert verdict["evidence"]["n_posts"] == 6
+    assert verdict["evidence"]["unusable_replies"] == 1
+
+    import t3_control as T3C
+
+    rows = T3C.slot_binding(events, ST.SlotBook(ctx))
+    assert T3C.slot_problems(rows) == []
+    # 两次坏 POST 的槽在 journal 里既有 POST 又有 ``decision/parse``：属可自修
+    # 漂移（repair），不是硬错；槽是顺序发放的，于是余量槽被它们吃掉之后，
+    # 后面四个必做动作各顺移一格——这同样只记 repair 留痕，不否决链。
+    assert [r["slot_id"] for r in rows[:2]] == slot_ids[:2]
+    assert [r["actual_action"] for r in rows[:2]] == ["", ""]
+    assert {r["slot_id"] for r in rows[:2]} <= {
+        r["slot_id"] for r in rows if r["repair"]}
+    assert not any(r["hard_error"] for r in rows)

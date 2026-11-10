@@ -229,6 +229,14 @@ def slot_binding(events: "list[dict[str, Any]]", book: "ST.SlotBook"
         if (e.get("kind") == "result" and e.get("action") != "post"
                 and e.get("slot_id")):
             dispatched.setdefault(str(e["slot_id"]), str(e["action"]))
+    # 解析级失败（坏 JSON / 缺字段）在 journal 里只有 ``decision/parse`` 事件、
+    # 没有分派结果：那是**模型输出不可解析**的可自修错误（§10.2「坏 JSON/缺字段
+    # 属帽内可见错误，计一次 POST」），不是宿主故障。宿主故障的判据是「该槽既无
+    # 分派结果、也无解析决定」——那种 POST 没人认领（评审 CRITICAL-2）。
+    parsed_failed = {str((e.get("payload") or {}).get("slot_id"))
+                     for e in events
+                     if e.get("kind") == "decision" and e.get("action") == "parse"
+                     and (e.get("payload") or {}).get("slot_id")}
     out: "list[dict[str, Any]]" = []
     for evt in posts:
         sid = str(evt.get("slot_id") or "")
@@ -243,18 +251,19 @@ def slot_binding(events: "list[dict[str, Any]]", book: "ST.SlotBook"
         # 不再一票否决——链的最终判据是成功动作序列恰好等于 ACTION_ORDER。
         # 真正的硬错误是：槽不在账上、或 POST 没有任何分派结果（宿主自身故障）。
         matched = required in (None, "") or (known and str(required) == actual)
+        handled = bool(actual) or (sid in parsed_failed)
         out.append({"slot_id": sid, "required_action": required,
                     "actual_action": actual, "slot_known": known,
                     "ok": bool(matched),
-                    "repair": bool(known and not matched and actual),
-                    "hard_error": (not known) or not actual})
+                    "repair": bool(known and not matched and handled),
+                    "hard_error": (not known) or not handled})
     return out
 
 
 def slot_problems(rows: "list[dict[str, Any]]") -> "list[str]":
     """硬错误→ problems；漂移（repair）只进审计记录，不否决链。"""
     return [f"SLOT_HARD_ERROR: {a['slot_id']} known={a['slot_known']} "
-            f"actual={a['actual_action']!r}"
+            f"actual={a['actual_action']!r}（既无分派结果也无解析决定）"
             for a in rows if a["hard_error"]]
 
 
@@ -278,7 +287,7 @@ def run_protocol(ctx: C.CampaignContext, *, counter: Any, gpus: bool
                                   instance_id="E-dev")
         spec = SG.TrialSpec(trial_id=f"proto_{fixture_id}", instance_id="E-dev",
                             family="E", phase="protocol", slot_prefix=prefix,
-                            post_cap=len(slot_ids) or 4)
+                            post_cap=len(slot_ids) or len(PF.ACTION_ORDER))
         runner = CLI.make_trial(ctx, spec, gpus=gpus)
         stub = PF.ProtocolStub(fixture=fixture)
         # 协议 fixture 的公开文档（含 nonce 与四动作合同）必须**真的**交给候选：
@@ -296,11 +305,14 @@ def run_protocol(ctx: C.CampaignContext, *, counter: Any, gpus: bool
         # Journal 在构造时缓存事件：必须**跑完之后**重新构造才能看到本 trial 的事件
         events = ST.Journal(ctx).for_trial(spec.trial_id)
         verdict = PF.verify_run(fixture, events=events, trial=runner,
-                                post_budget=len(slot_ids) or 4)
+                                post_budget=len(slot_ids) or len(PF.ACTION_ORDER))
         slot_actions = slot_binding(events, book)
         # 评审 m5 的映射仍在：槽不是随便领的，实做动作逐槽对照 required_action；
         # 自修余量开后，漂移进 ``slot_repairs`` 留痕，硬错误（未知槽/无分派）才判负。
-        counts = book.counts()
+        # 槽账必须**重新载入**再数：``SlotBook`` 在构造时把 slots.json 读成内存
+        # 快照，而本次 trial 的槽转移发生在候选自己那份 SlotBook 上并重写了盘上
+        # 文件——沿用开头那个 ``book`` 实例数出来恒是跑之前的旧值（评审 MINOR-8）。
+        counts = ST.SlotBook(ctx).counts()
         out.append({"fixture": fixture.as_dict(), "trial_id": spec.trial_id,
                     "outcome": run_out.get("outcome"),
                     "status": run_out.get("status"),
