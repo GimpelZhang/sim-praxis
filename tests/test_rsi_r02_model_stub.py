@@ -38,13 +38,19 @@ class _ScriptedTrial:
     """按参数返回结构化结果的最小真值服务替身（不含 judge/analyses 属性）。"""
 
     def __init__(self, *, settle_by_cell=None, distance_by_kp=None):
-        self.surface = AC.ActionSurface(kind="pendulum_run",
-                                        param_bounds={"damping": (0, 5),
-                                                      "initial_angle": (-3.2, 3.2),
-                                                      "kp": (0, 5000), "kd": (0, 500),
-                                                      "max_force": (0, 500),
-                                                      "steps": (1, 2000)},
-                                        fixed_params={}, max_steps=2000)
+        # 2026-11-10 R0.2 root G 文本审计 FALSE #11/#25 的连带修正：宿主解析面现在
+        # 把「本实例非固定参数」全部当必填（trial._run_experiment 直接下标取值）。
+        # 这个替身原先声明的是 R/E 两族参数的**并集**、且 fixed_params 为空——那既
+        # 不是真实 pendulum 面（真实面只有 damping/initial_angle/steps，timestep
+        # 由宿主注入），也不可能是宿主真正服务的面。按 family 给真面。
+        push = distance_by_kp is not None
+        self.surface = AC.ActionSurface(
+            kind="push_control" if push else "pendulum_run",
+            param_bounds=({"kp": (0, 5000), "kd": (0, 500), "max_force": (0, 500),
+                           "steps": (1, 2000)} if push else
+                          {"damping": (0, 5), "initial_angle": (-3.2, 3.2),
+                           "steps": (1, 2000)}),
+            fixed_params={"timestep": 0.002}, max_steps=2000)
         self.settle_by_cell = dict(settle_by_cell or {})
         self.distance_by_kp = dict(distance_by_kp or {})
         self.calls: "list[AC.Action]" = []

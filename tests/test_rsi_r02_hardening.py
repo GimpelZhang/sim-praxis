@@ -408,8 +408,10 @@ def test_repair_promise_is_not_falsely_exclusive(ctx):
         assert "仅限这一类" not in text
         assert "空回复会直接终止本 trial" in text
         assert "策略违规是终态" in text
-    # 可改正类必须逐字点名（与宿主实现一致）
-    for phrase in ("重复登记", "重复跑同一格", "run_id / analysis_id"):
+    # 可改正类必须逐字点名（与宿主实现一致）；2026-11-10 root G 文本审计：
+    # 「重复跑同一格」只有在任务给出冻结参数格时才成立（``trial._cell_of`` 对
+    # 非 R 族恒 None），故改为条件措辞「同格重跑」。
+    for phrase in ("重复登记", "同格重跑", "run_id / analysis_id"):
         assert phrase in texts[0], phrase
 
 
@@ -573,13 +575,18 @@ def test_blanket_repair_promise_carries_the_submit_exclusion(ctx):
 
     2026-11-10 root F reviewer F2：原写法「除 submit 以外，格式类失败…不终止」把
     submit 的**结构性**拒绝（缺 claim / run_ids）也说成终局，同样是假陈述。现改为
-    「submit 的结构性拒绝也在此列」+「唯一不可挽回的是 submit 被接收之后」。
+    「submit 的结构性拒绝也在此列」+ 不可挽回项**逐项枚举**（root G 文本审计：
+    原「唯一不可挽回的是 submit 被接收之后」是假全称——策略违规、空回复、预算耗尽
+    同样不可挽回，同段下一条 bullet 亦自述「策略违规是终态」）。
     """
     text = _rendered(ctx, "P1")[1]
     bullets = [x for x in text.splitlines() if x.startswith("* ")]
     general = next(x for x in bullets if "空回复会直接终止本 trial" in x)
     assert "submit 的结构性拒绝也在此列" in general
-    assert "唯一不可挽回的是 submit 被接收之后" in general
+    assert "唯一不可挽回的是 submit 被接收之后" not in general
+    for terminal in ("**不可挽回的只有这几种**", "submit 被接收之后",
+                     "策略违规", "空回复", "预算耗尽"):
+        assert terminal in general, terminal
     assert "不终止**本 trial" in general
     dev_doc = H.write_public_task(ctx, "E-dev", family="E")
     dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
@@ -635,7 +642,18 @@ def test_contract_retry_rule_does_not_promise_submit_repair(ctx):
     assert "**除 submit 以外**的动作跳步或重排、重复登记" in repairable
     assert "submit 一旦被接收就是终局" in rule
     assert "提前提交" in rule and "结链核验" in rule
-    assert "`claim` / `run_ids` 缺失或类型不符仍会在接收时被拒" in rule
+    # root G 签前自检：终局条件必须是完整的接收面清单 + 「全部通过 / 任一不通过」
+    # 的结构，不能写成「claim 合法且 run_ids 非空即成终局」这种假全称。
+    for clause in ("`claim` 属于允许值",
+                   "`run_ids` 是非空且全为字符串的数组",
+                   "`analysis_ids` 是字符串数组",
+                   "`mean_effect` / `z` 是数值或 null",
+                   "引用的 run / analysis 编号真实存在",
+                   "**全部通过**就立刻结束本 trial",
+                   "**任何一项不通过**都以 `ok=false` 退回、属上面的可自修类",
+                   "不在接收面校验"):
+        assert clause in rule, clause
+    assert "`claim` 合法且 `run_ids` 是非空字符串数组时宿主立即结束本 trial" not in rule
     assert "分三类" in rule                       # 旧串「分两类」漏了 submit 这一态
     text = _rendered(ctx, "P1")[1]
     assert "submit 一旦被接收就是终局" in text
@@ -702,3 +720,185 @@ def test_submit_structural_rejections_are_repairable_nonce_is_not(ctx):
     assert rec["posts_sent"] == 5, rec
     assert rec["chain_ok"] is True, rec
     assert rec["status"] == ST.TRIAL_SUBMITTED, rec
+
+
+def test_submit_rejections_are_repairable_on_every_receive_face(ctx):
+    """root G 签前自检：合同串不得把「前件成立」写成「必然终局」。
+
+    ``1235d7a`` 的第一版修复写「`claim` 合法且 `run_ids` 是非空字符串数组时宿主
+    立即结束本 trial」——假全称。接收面还有：``analysis_ids`` 必须是数组
+    （``actions._parse_submit`` BAD_TYPE）、``run_ids + analysis_ids`` 必须全字符串
+    （同行 BAD_TYPE）、``mean_effect``/``z`` 必须数值或 null（``_opt_num``），以及
+    ``trial._submit`` 的引用存在检查（RUN_ID_UNKNOWN / ANALYSIS_ID_UNKNOWN）。
+    任一项不通过 ⇒ ``ok=false``、trial 继续。行为级取证：探针第一次 submit 引用
+    一个不存在的 run_id，宿主拒绝后它必须能在剩余预算内补交成功。
+    """
+    import dataclasses
+    import json as _json
+
+    from orchestrator.rsi_r01 import actions as AC
+    from orchestrator.rsi_r01 import schemas as S
+
+    surface = _real_surface()
+    base = {"schema": S.SCHEMA_ACTION, "action": "submit", "claim": "SUPPORTED",
+            "run_ids": ["run-a"], "analysis_ids": ["ana-a"],
+            "nonce": "n", "stat": 1.0, "stat_key": "max_abs_x"}
+    # 前件（claim 合法 + run_ids 非空字符串数组）成立、其余任一项不通过 ⇒ 解析面拒绝
+    for bad, code in ((dict(base, analysis_ids="ana-a"), AC.ActionCode.BAD_TYPE),
+                      (dict(base, run_ids=[1]), AC.ActionCode.BAD_TYPE),
+                      (dict(base, mean_effect="x"), AC.ActionCode.BAD_TYPE),
+                      (dict(base, z=float("inf")), AC.ActionCode.BAD_TYPE)):
+        fail = AC.parse_action_obj(bad, surface)
+        assert isinstance(fail, AC.ActionFailure), (bad, fail)
+        assert fail.code == code, (bad, fail)
+    # 解析面通过但引用编号不存在 ⇒ trial._submit 抛 TrialRejected ⇒ 非终态
+    assert isinstance(AC.parse_action_obj(
+        dict(base, run_ids=["run-does-not-exist"]), surface), AC.Submit)
+
+    class _BadRunIdOnce(PF.ProbeActor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.broken = False
+
+        def __call__(self, request):
+            reply = super().__call__(request)
+            try:
+                obj = _json.loads(reply.text)
+            except ValueError:
+                return reply
+            if obj.get("action") == "submit" and not self.broken:
+                self.broken = True
+                obj["run_ids"] = ["run-does-not-exist"]
+                return dataclasses.replace(
+                    reply, text=_json.dumps(obj, ensure_ascii=False))
+            return reply
+
+    rec = T4.run_chain(ctx, "P1", caller=_BadRunIdOnce(),
+                       counter=lambda t: 100, gpus=False)
+    assert rec["posts_sent"] == 5, rec
+    assert rec["chain_ok"] is True, rec
+    assert rec["status"] == ST.TRIAL_SUBMITTED, rec
+
+
+def test_run_experiment_missing_param_is_repairable_not_fatal(ctx):
+    """root G 文本审计 #11/#25：缺必填 params 键不得把 campaign 拖进终局。
+
+    旧实现 ``actions._parse_run`` 只校验「已给的键」，缺 ``steps`` 时
+    ``trial._run_experiment`` 的 ``params.pop("steps")`` 抛 KeyError，
+    ``candidate._dispatch`` 的兜底 except 会记 ``TOOL_OUTCOME_UNKNOWN`` 并
+    **暂停整个 campaign**——与公开文本「缺字段 ⇒ ok=false 可改正」相反。
+    现改为解析面 ``MISSING_FIELD``；行为级：探针第一次 run_experiment 丢掉
+    ``steps``，宿主拒绝后它必须能在剩余预算内补交成功。
+    """
+    import dataclasses
+    import json as _json
+
+    from orchestrator.rsi_r01 import actions as AC
+    from orchestrator.rsi_r01 import schemas as S
+
+    surface = _real_surface()
+    required = sorted(set(surface.param_bounds) - set(surface.fixed_params))
+    assert required, surface.param_bounds
+    for key in required:
+        params = {k: 1.0 for k in required if k != key}
+        fail = AC.parse_action_obj(
+            {"schema": S.SCHEMA_ACTION, "action": "run_experiment",
+             "params": params}, surface)
+        assert isinstance(fail, AC.ActionFailure), (key, fail)
+        assert fail.code == AC.ActionCode.MISSING_FIELD, (key, fail)
+
+    class _DropStepsOnce(PF.ProbeActor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.broken = False
+
+        def __call__(self, request):
+            reply = super().__call__(request)
+            try:
+                obj = _json.loads(reply.text)
+            except ValueError:
+                return reply
+            if obj.get("action") == "run_experiment" and not self.broken:
+                self.broken = True
+                obj.get("params", {}).pop("steps", None)
+                return dataclasses.replace(
+                    reply, text=_json.dumps(obj, ensure_ascii=False))
+            return reply
+
+    rec = T4.run_chain(ctx, "P1", caller=_DropStepsOnce(),
+                       counter=lambda t: 100, gpus=False)
+    assert rec["posts_sent"] == 5, rec
+    assert rec["chain_ok"] is True, rec
+    assert rec["status"] == ST.TRIAL_SUBMITTED, rec
+
+
+# ---------------------------------------------------------------------------
+# root G 文本审计（2026-11-10）另四条：行为级钉死，不只比字面
+# ---------------------------------------------------------------------------
+
+
+def test_not_sent_block_is_not_counted_as_a_post():
+    """FALSE #40：发网前被拦下的动作也在 journal 里留一条 ``action="post"``。
+
+    公开文本说「已发网并收到回复才计一次 POST」。若把这条兜底拦截数进
+    ``n_posts``，则「3 次真 POST + 1 次拦截」会被判成 4 次，POST 区间判据与
+    文本就不是同一件事。
+    """
+    fx = PF.make_fixture(campaign_id="c", fixture_id="P1", slot_id="P1-1")
+    def _post(text: str, **extra) -> dict:
+        return {"kind": "result", "action": "post", "ok": False,
+                "payload": {"assistant_text": text, **extra}}
+    events = [_post("{}") for _ in range(4)]
+    events.append(_post("", sent_state="NOT_SENT"))
+    rec = PF.verify_run(fx, events=events, trial=object(), post_budget=4)
+    assert rec["evidence"]["n_posts"] == 4, rec["evidence"]
+    assert not any("POST 数须在" in p for p in rec["problems"]), rec["problems"]
+
+
+def test_clipped_reply_keeps_structural_fields():
+    """FALSE #31：回包超帽不得把 analysis_id / stdout 一起丢掉。
+
+    候选被要求逐字引用 analyze 的 analysis_id 与它打印的 stat；整包替换成存根
+    会让一次「stdout 打多了」变成链不可能成立。
+    """
+    big_stdout = "PROTO_STAT " + json.dumps({"nonce": "n", "stat": 1.0}) + "\n" \
+        + "x" * (M.TOOL_REPLY_MAX_BYTES * 2)
+    big = {"ok": True, "action": "analyze", "analysis_id": "a-7",
+           "path": "analysis/a.json", "sha256": "b" * 64,
+           "analysis": {"analysis_id": "a-7", "stdout_preview": big_stdout}}
+    out = M.Turn(model_text="{}", result=big).clipped().result
+    assert out.get("analysis_id") == "a-7", out
+    assert out.get("sha256") == "b" * 64, out
+    assert out.get("truncated") is True, out
+    assert len(json.dumps(out, ensure_ascii=False).encode("utf-8")) \
+        <= M.TOOL_REPLY_MAX_BYTES, len(json.dumps(out).encode("utf-8"))
+    assert "[TRUNCATED_BY_HOST]" in json.dumps(out, ensure_ascii=False)
+
+
+def test_protocol_text_states_the_run_ids_check_that_actually_runs():
+    """IMPRECISE #33/#35：宿主不校验「升序」，也不比 analyze 动作的 run_ids。
+
+    真正被判的是「PROTO_STAT 的 run_ids == submit 的 run_ids」。文本必须说这条，
+    否则候选会按一条不存在的规则自我约束。
+    """
+    fx = PF.make_fixture(campaign_id="c", fixture_id="P1", slot_id="P1-1")
+    rendered = M.build_system(fx.task_doc(),
+                              M.surface_from_doc(fx.task_doc()))
+    assert "逐字相同（含顺序）" in rendered
+    assert "升序" not in rendered
+    assert "必须与该 analyze 动作的 run_ids 相同" not in rendered
+
+
+def test_data_layout_text_matches_the_file_the_container_writes():
+    """FALSE #36：``/data/<run_id>.json`` 不是「每个键都是等长数组」。
+
+    真形状（rsi_r01/service.py）：schema/kind/trial_id/run_id/instance_id 是
+    字符串、params 是对象，只有 t 与观测序列是等长数组。文本必须照实说。
+    """
+    doc = PF.make_fixture(campaign_id="c", fixture_id="P1",
+                          slot_id="P1-1").task_doc()
+    shape = doc["public"]["analyze"]["data"]["shape"]
+    assert "每个键是一个等长数组" not in shape, shape
+    assert "等长数组" in shape and "params" in shape, shape
+    rendered = M.build_system(doc, M.surface_from_doc(doc))
+    assert "每个键是一个等长数组" not in rendered

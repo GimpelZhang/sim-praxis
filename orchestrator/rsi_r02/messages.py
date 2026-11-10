@@ -134,10 +134,11 @@ def action_schema_text(surface: AC.ActionSurface, *,
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
         "* 每次回复恰好一个动作。**空回复会直接终止本 trial**（按已响应的失败处理，"
         "不隐式重试）。格式类失败（JSON 写坏、缺字段、类型不符）"
-        "以及会被宿主拒绝的动作（重复登记、重复跑同一格、登记内容不合规、引用不存在的 "
-        "run_id / analysis_id）都以 `ok=false` 返回、**不终止**本 trial，你可以在剩余"
-        "预算内改正（submit 的结构性拒绝也在此列，见下一条）；唯一不可挽回的是 "
-        "submit 被接收之后——它立刻结束本 trial。",
+        "以及会被宿主拒绝的动作（重复登记、任务给出冻结参数格时的同格重跑、登记内容"
+        "不合规、引用不存在的 run_id / analysis_id）都以 `ok=false` 返回、**不终止**"
+        "本 trial，你可以在剩余预算内改正（submit 的结构性拒绝也在此列，见下一条）。"
+        "**不可挽回的只有这几种**：submit 被接收之后（它立刻结束本 trial）、"
+        "策略违规、空回复、预算耗尽。",
         # 2026-11-10 root E reviewer HIGH：上面那句原先无例外，而 ``submit`` 完全不同——
         # ``rsi_r01.actions._parse_submit`` 不查 nonce/stat/stat_key（只查 claim、
         # run_ids、analysis_ids 的形状，analysis_ids 缺省为 []），``trial._submit``
@@ -148,12 +149,14 @@ def action_schema_text(surface: AC.ActionSurface, *,
         # 故必须把 submit 单独说成终局动作，并要求它自查。
         "* **例外：submit 是终局动作**——只要结构合法（`claim` 属于允许值、`run_ids` "
         "是非空且全为字符串的数组、`analysis_ids` 是字符串数组、引用的编号真实存在，"
-        "可选的 `mean_effect`/`z` 必须是数值），宿主就接受它并**立刻结束本 trial**，"
+        "可选的 `mean_effect`/`z` 是数值或 null），宿主就接受它并**立刻结束本 trial**，"
         "此后没有任何改正机会；提前提交（例如跳过 analyze）也一样会被接受。"
         + ("本链对 submit 的核验发生在**结链时**：`nonce` 必须逐字等于公开合同给出的值、"
-           "`stat` 必须等于你 analyze 打印的数值（宿主会用真实数据独立重算并逐位比对）、"
-           "`stat_key` 必须逐字相符、动作序列必须"
-           "恰好是 preregister→run_experiment→analyze→submit 各一次——**任何一项不符，"
+           "`stat` 必须逐字等于你 analyze 打印的数值（宿主会用真实数据独立重算该数值，"
+           "并按 1e-12 容差与打印值比对）、"
+           "`stat_key` 必须逐字相符、**成功的**动作序列必须"
+           "恰好是 preregister→run_experiment→analyze→submit 各一次（被拒的动作不占位，"
+           "只消耗预算）——**任何一项不符，"
            "整条链直接判失败**。请在 submit 之前逐项自查。"
            if protocol else
            "提交后宿主会按你的真实数据复核结论；结论与数据不符，本 trial 的结论判为不成立。"),
@@ -189,9 +192,11 @@ def action_schema_text(surface: AC.ActionSurface, *,
              "被接收就立刻终局，这些字段只在结链"
              "核验时判失败，没有改正机会。")]
           if (has_prereg or has_submit) else []),
-        "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
+        "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），输出目录 `/out` "
+        "只接受 `analysis.json`（写其它文件名记违规）；"
         "数值必须来自你本次实验的真实观测。",
-        "* submit 的数字必须由你之前的 analyze 结果给出，并逐字引用 run_id / analysis_id。",
+        "* submit 的 `claim` 必须由你之前的 analyze 结果给出，并逐字引用 run_id / "
+        "analysis_id；宿主按你的真实数据复核**结论类别**（你自报的 mean_effect/z 不参与判决）。",
     ])
 
 
@@ -267,8 +272,9 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
                 head.append(f"* {line or 'PROTO_STAT <json>'} 里的 {name}：{desc}")
         data = analyze.get("data")
         if isinstance(data, Mapping) and data:
+            shape = str(data.get("shape") or "").strip()
             head.append(f"* 容器内数据文件：{data.get('path')}"
-                        f"（{data.get('shape') or '列式 JSON'}）")
+                        + (f"（{shape}）" if shape else ""))
             if data.get("note"):
                 head.append(f"* {data['note']}")
             keys = data.get("keys") or []
@@ -278,6 +284,13 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
                 head.append(f"* 统计算法：{data['stat_rule']}")
         if analyze.get("output"):
             head.append(f"* 分析产物写到：{analyze['output']}")
+        # 2026-11-10 R0.2 root G 文本审计 FALSE #31：这个上限原先没写进公开面，
+        # 候选无从知道「print 太多会被截」。现在按宿主真实行为披露：成功回包
+        # 约 4 KiB、失败回包约 2 KiB，超长按字段截断而结构字段保留。
+        head.append("* 工具回包上限：成功约 4 KiB、失败约 2 KiB。超长时宿主按字段"
+                    "截断（被截的字符串末尾标 [TRUNCATED_BY_HOST]），"
+                    "run_id / analysis_id 这类结构字段会保留——但 stdout 只需"
+                    "打印上面要求的那一行，不要刷屏。")
     proto = (pub.get("interface") or {}).get("protocol") or {}
 
     def _section(name: str) -> bool:
@@ -484,9 +497,37 @@ class Turn:
         raw = json.dumps(result, ensure_ascii=False, sort_keys=True)
         if len(raw.encode("utf-8")) <= limit:
             return dict(result)
-        return {"ok": ok, "code": result.get("code") or "RESULT_TRUNCATED",
-                "message": _clip(str(result.get("message") or ""), limit // 2),
-                "truncated": True}
+        # 2026-11-10 R0.2 root G 文本审计 FALSE #31：超帽时原先整包替换成
+        # ``{ok, code, message}`` 存根，把 ``analysis_id`` 与 ``stdout_preview``
+        # 一并丢掉——而公开文本要求候选逐字引用 analyze 的 analysis_id、并用
+        # 它打印的 stat 提交。于是一次「回包太大」就能把本该成立的链判死，
+        # 属于仪器耦合，不是候选能力。改为**保结构**截断：先按字段把超长
+        # 字符串各自截断（含嵌套），保住全部结构键；仍超帽才退化为存根。
+        budget = max(256, limit // 4)
+
+        def clip_tree(node: Any, depth: int = 0) -> Any:
+            if depth > 6:
+                return node
+            if isinstance(node, str):
+                return _clip(node, budget)
+            if isinstance(node, Mapping):
+                return {k: clip_tree(v, depth + 1) for k, v in node.items()}
+            if isinstance(node, (list, tuple)):
+                return [clip_tree(v, depth + 1) for v in node]
+            return node
+
+        clipped = clip_tree(dict(result))
+        clipped["truncated"] = True
+        if len(json.dumps(clipped, ensure_ascii=False,
+                          sort_keys=True).encode("utf-8")) <= limit:
+            return clipped
+        keep = ("ok", "action", "run_id", "analysis_id", "analysis_ids", "path",
+                "sha256", "status", "claim", "cell", "code", "message")
+        compact = {k: clipped[k] for k in keep if k in clipped}
+        compact["message"] = _clip(str(result.get("message") or ""), budget)
+        compact["code"] = result.get("code") or "RESULT_TRUNCATED"
+        compact["truncated"] = True
+        return compact
 
 
 @dataclass(frozen=True)

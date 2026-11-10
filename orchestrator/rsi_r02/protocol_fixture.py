@@ -168,12 +168,21 @@ class ProtocolFixture:
                 "goal": (f"协议准入 fixture {self.fixture_id}：按四动作链完成一次公开实验，"
                          f"不得跳步或重排"),
                 "prereg": {
+                    # 2026-11-10 root G 文本审计 IMPRECISE #30/#32：原文把「字符串：…」
+                    # 「整数 +1/−1」写得像逐条机判，实际宿主只强制三条（字段齐全、
+                    # h ∈ {+1,−1}、delta 等于预规定值），cells 只强制「非空数组 +
+                    # 每项是对象」。类型描述是写清楚的规范，不是判据——把它显式说出来，
+                    # 候选才不会误以为「键名写错会被宿主拦下」（不会，只会让你自己的
+                    # 分析脚本失配）。
                     "note": ("preregister 的 plan 对象必须逐字包含下列全部字段；"
-                             "第一次实验之前提交，成功后不得重复登记。"),
+                             "第一次实验之前提交，成功后不得重复登记。"
+                             "宿主**只强制**：字段齐全、h ∈ {+1,−1}、delta 逐字等于"
+                             "预规定值、cells 是非空数组且每项为对象；其余类型描述是"
+                             "书写规范（写错不会当场判负，但可能让你自己的分析对不上）。"),
                     "required_fields": dict(PREREG_FIELD_SPEC),
                     "delta_fixed": float(S.DELTA),
-                    "cells_rule": ("cells 为非空数组，每项是对象，键取 interface.keys；"
-                                   "本 fixture 只需计划 1 格，取 values 里的参数。"),
+                    "cells_rule": ("cells 为非空数组，每项是对象（宿主只校验这两点）；"
+                                   "本 fixture 计划 1 格，参数取 values。"),
                     "values": dict(self.params),
                 },
                 "submit": {
@@ -197,15 +206,27 @@ class ProtocolFixture:
                     "payload_fields": {
                         "nonce": "逐字等于 interface.protocol.nonce",
                         "stat": "本轮统计值（数值类型，算法见 data.stat_rule）",
-                        "run_ids": ("本次分析覆盖的 run_id 数组（升序），"
-                                    "必须与该 analyze 动作的 run_ids 相同"),
+                        # 2026-11-10 root G 文本审计 IMPRECISE #33/#35：原文写
+                        # 「升序」「必须与该 analyze 动作的 run_ids 相同」——宿主
+                        # 并不校验这两条（verify_run 只把这一行打印的 run_ids 与
+                        # submit 的 run_ids 逐字比较，并用它独立重算统计量）。
+                        # 改为陈述真正被判的那条。
+                        "run_ids": ("本次分析覆盖的 run_id 数组；必须与 submit 的"
+                                    " run_ids **逐字相同（含顺序）**——宿主用这些"
+                                    " run 的可信观测独立重算统计量"),
                     },
                     "output": ANALYZE_OUT_PATH,
                     "data": {
                         "path": DATA_PATH_TEMPLATE,
                         "note": ("容器内 /data 只读；文件名里的 <run_id> 就是 "
                                  "run_experiment 回包里给你的 run_id"),
-                        "shape": "列式 JSON：每个键是一个等长数组",
+                        # 2026-11-10 R0.2 root G 文本审计 FALSE #36：原文写「列式
+                        # JSON：每个键是一个等长数组」——与实际文件不符（params 是
+                        # 对象，schema/kind/trial_id/run_id/instance_id 是字符串，
+                        # 见 rsi_r01/service.py:196/258 的落盘形状）。
+                        "shape": ("JSON 对象：`t` 与观测序列是**等长数组**；"
+                                  "另有字符串 `schema`/`kind`/`trial_id`/"
+                                  "`run_id`/`instance_id`，以及对象 `params`"),
                         "keys": ["t", *S.OBS_SERIES["push_control"], "schema",
                                  "kind", "run_id", "trial_id", "instance_id",
                                  "params"],
@@ -240,6 +261,16 @@ class ProtocolFixture:
                         # 缺 analysis_ids/nonce/stat/stat_key 也不被拒，直接被接收并终局。
                         # 旧串等于承诺了一个不存在的改正机会，与同页新增的
                         # 「例外：submit 是终局动作」自相矛盾。
+                        # 2026-11-10 root G 签前自检（同类第七次）：F1 的第一版修复写成
+                        # 「`claim` 合法且 `run_ids` 是非空字符串数组时宿主立即结束本
+                        # trial」——**假全称**。接收面还有：``analysis_ids`` 必须是数组
+                        # （BAD_TYPE）、``run_ids + analysis_ids`` 必须全字符串
+                        # （actions._parse_submit:242-244）、``mean_effect``/``z`` 必须
+                        # 数值或 null（:227-241），以及 ``trial._submit:250-258`` 的引用
+                        # 存在检查（RUN_ID_UNKNOWN / ANALYSIS_ID_UNKNOWN）。前件成立而
+                        # 其中任一项不通过时宿主只回 ``ok=false``、trial **继续**。
+                        # 故改为「接收面校验清单 + 全部通过才终局 + 任一不通过即可自修」
+                        # 的结构，不再给充分条件式断言。
                         "retry_rule": (
                             "每次**已发网并收到回复**的动作计一次 POST（本链上限 "
                             "posts_budget；发网前被拒的请求不占 POST）。"
@@ -247,12 +278,15 @@ class ProtocolFixture:
                             "以及**除 submit 以外**的动作跳步或重排、重复登记——那一次"
                             "被拒且已计一次 POST）的回包会说明原因，你可在剩余预算内"
                             "改正，动作顺序要求不变；**submit 一旦被接收就是终局**——"
-                            "`claim` 合法且 `run_ids` 是非空字符串数组时宿主立即结束本 "
-                            "trial，**没有任何**改正机会，提前提交（如跳过 analyze）、"
-                            "缺 `analysis_ids` / `nonce` / `stat` / `stat_key` 都不会在"
-                            "接收时被拒，只会让整条链在结链核验时判失败（但 `claim` / "
-                            "`run_ids` 缺失或类型不符仍会在接收时被拒，属上面的可自修"
-                            "类）；**策略违规是终态**（params 含未授权键、数值越界），"
+                            "宿主在接收时**只做结构校验**：`claim` 属于允许值、`run_ids` "
+                            "是非空且全为字符串的数组、`analysis_ids` 是字符串数组、"
+                            "可选的 `mean_effect` / `z` 是数值或 null、引用的 run / analysis "
+                            "编号真实存在；**全部通过**就立刻结束本 trial、**没有任何**"
+                            "改正机会（提前提交、例如跳过 analyze，同样会被接受并终局）；"
+                            "**任何一项不通过**都以 `ok=false` 退回、属上面的可自修类。"
+                            "而 `nonce` / `stat` / `stat_key` 与动作序列**不在接收面校验**"
+                            "——它们只在结链核验时判，不符即整条链判失败、同样没有改正"
+                            "机会；**策略违规是终态**（params 含未授权键、数值越界），"
                             "本次协议链立即终止，不再接受任何动作。"
                             "无论哪类，成功的动作序列必须恰好等于动作顺序、每步一次。"),
                     },
@@ -945,8 +979,14 @@ def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
     evidence: "dict[str, Any]" = {"fixture_id": fixture.fixture_id,
                                   "nonce": fixture.nonce}
 
+    # 2026-11-10 R0.2 root G 文本审计 FALSE #40：发网**前**被拦下的动作也会在
+    # journal 里留一条 ``kind="result", action="post"``（candidate.py 的
+    # ``payload={"sent_state": "NOT_SENT", ...}``）。公开文本说的是「已发网并收到
+    # 回复才计一次 POST」，所以这条不能进 n_posts——否则「3 次真 POST + 1 次兜底
+    # 拦截」会被数成 4 次，POST 区间判据就与文本不是同一件事了。
     results = [e for e in events
-               if e.get("kind") == "result" and e.get("action") == "post"]
+               if e.get("kind") == "result" and e.get("action") == "post"
+               and (e.get("payload") or {}).get("sent_state") != "NOT_SENT"]
     texts = [str((e.get("payload") or {}).get("assistant_text") or "")
              for e in results]
     acts = [e for e in events

@@ -156,6 +156,18 @@ def _parse_run(obj: Mapping[str, Any], surface: ActionSurface
         return _fail(ActionCode.UNAUTHORIZED_KEY,
                      f"未授权字段 {illegal}（本实例可选 {sorted(bounds)}）",
                      action="run_experiment", path="params")
+    # 2026-11-10 R0.2 root G 文本审计（FALSE #11/#25）：此处原先只校验「已给的键」，
+    # 缺 ``steps`` 时 ``trial._run_experiment`` 的 ``params.pop("steps")`` 抛 KeyError，
+    # 而 ``candidate._dispatch`` 的兜底 except 会把它记成 TOOL_OUTCOME_UNKNOWN 并
+    # **暂停整个 campaign**——一次候选的残缺动作不该有这种杀伤，也与公开文本
+    # 「缺字段 ⇒ ok=false 可改正」相反。故在解析面把「宿主注入项以外」的键全部
+    # 当作必填（宿主实现里它们是直接下标取值，见 trial.py:185-207）。
+    required = sorted(set(bounds) - set(surface.fixed_params))
+    missing = [k for k in required if k not in raw]
+    if missing:
+        return _fail(ActionCode.MISSING_FIELD,
+                     f"params 缺必填键 {missing}（本实例必填 {required}）",
+                     action="run_experiment", path="params")
     clean: dict[str, float] = {}
     for key, value in raw.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)):
