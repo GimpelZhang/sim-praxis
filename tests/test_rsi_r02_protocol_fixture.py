@@ -450,3 +450,95 @@ def test_loop_level_parse_and_field_errors_are_repaired_within_budget(ctx):
     assert {r["slot_id"] for r in rows[:2]} <= {
         r["slot_id"] for r in rows if r["repair"]}
     assert not any(r["hard_error"] for r in rows)
+
+
+# ---- analyze 契约的公开性（2026-11-10 T4 第二次 BLOCKED_PROTOCOL 的回归闸） ----
+
+
+def test_doc_declares_the_analyze_contract_the_checker_enforces():
+    """检查器读什么，公开文档就必须写什么——包括容器数据布局与统计算法。
+
+    T4 第二次判负：候选在 analyze 连发四次（exit 1 / 超时 / exit 2 / 成功）耗尽
+    六槽预算，最终打印的 ``PROTO_STAT {"max_abs_x": ...}`` 也缺 nonce。它不是没按
+    文档做，而是文档从没说过这些要求——那份「要求」只存在于参考解与确定性 actor
+    的私有知识里。
+    """
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P1", slot_id="s1")
+    doc = fx.task_doc()
+    az = doc["public"]["analyze"]
+    assert set(PF.ANALYZE_SOURCE_MUST_CONTAIN) <= set(az["source_must_contain"])
+    assert tuple(az["payload_fields"]) == PF.ANALYZE_PAYLOAD_FIELDS
+    assert az["data"]["path"] == PF.DATA_PATH_TEMPLATE
+    assert PF.STAT_KEY in az["data"]["stat_rule"]
+    for key in ("t", *PF.S.OBS_SERIES["push_control"], "run_id"):
+        assert key in az["data"]["keys"], key
+    # 文档自足性机判与契约件共用同一份（T0 会把它签进 LOCK）
+    assert PF.doc_gaps(doc) == []
+    assert not PF.contract_payload(campaign_id="c1")["chains"]["P1"]["doc_gaps"]
+
+
+def test_doc_gaps_catches_an_incomplete_analyze_contract():
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P1", slot_id="s1")
+    no_nonce = copy.deepcopy(fx.task_doc())
+    no_nonce["public"]["analyze"]["payload_fields"].pop("nonce")
+    assert PF.doc_gaps(no_nonce) == ["public.analyze.payload_fields.nonce"]
+
+    no_data = copy.deepcopy(fx.task_doc())
+    del no_data["public"]["analyze"]["data"]
+    assert PF.doc_gaps(no_data) == ["public.analyze.data 缺失"]
+
+    no_source_bind = copy.deepcopy(fx.task_doc())
+    no_source_bind["public"]["analyze"]["source_must_contain"] = []
+    assert PF.doc_gaps(no_source_bind) == [
+        "public.analyze.source_must_contain.nonce"]
+
+    wrong_path = copy.deepcopy(fx.task_doc())
+    wrong_path["public"]["analyze"]["data"]["path"] = "/data/run_*.json"
+    assert PF.doc_gaps(wrong_path) == ["public.analyze.data.path"]
+
+
+def test_system_text_renders_the_analyze_contract():
+    """契约必须真的渲染进候选唯一能看见的那段文本，而不是只躺在 doc dict 里。"""
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P1", slot_id="s1")
+    system = M.build_system(fx.task_doc(), _ProtocolTrial().surface)
+    assert "### analyze 契约" in system
+    assert PF.DATA_PATH_TEMPLATE in system
+    assert f"* 源码必须逐字包含：nonce" in system
+    assert "统计算法" in system and PF.STAT_KEY in system
+    assert fx.nonce in system
+
+
+def test_checker_rejects_exactly_the_documented_analyze_bindings(ctx):
+    """文档声明的两项（源码含 nonce、载荷带 nonce）删掉任一项，检查器必须判负。"""
+    fixture, _out, trial, events = _run_chain(ctx, fixture_id="P1")
+    assert PF.verify_run(fixture, events=events, trial=trial)["ok"]
+
+    stripped = copy.deepcopy(events)
+    for ev in stripped:
+        if ev.get("kind") != "result" or ev.get("action") != "post":
+            continue
+        pay = ev.get("payload") or {}
+        text = str(pay.get("assistant_text") or "")
+        if not text:
+            continue
+        doc = json.loads(text)
+        if doc.get("action") == "analyze":
+            doc["source"] = doc["source"].replace(f"NONCE = {fixture.nonce!r}",
+                                                  'NONCE = ""')
+            pay["assistant_text"] = json.dumps(doc, ensure_ascii=False)
+    verdict = PF.verify_run(fixture, events=stripped, trial=trial)
+    assert not verdict["ok"]
+    assert "analyze 源码没有逐字包含 nonce" in verdict["problems"]
+
+
+def test_reference_analyze_source_honours_every_declared_binding():
+    """参考解必须逐条满足公开声明——否则「照文档做就能过」是空话。"""
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P1", slot_id="s1")
+    src = PF.analyze_source(fx)
+    az = fx.task_doc()["public"]["analyze"]
+    for need in az["source_must_contain"]:
+        assert need == "nonce" and fx.nonce in src
+    for field in az["payload_fields"]:
+        assert f'"{field}"' in src or f"'{field}'" in src, field
+    assert az["data"]["path"].replace("<run_id>", "run_*") in src
+    assert az["output"] in src

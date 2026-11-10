@@ -44,6 +44,15 @@ CAP_PILOT = "PILOT_CALIBRATED"
 
 VALID_INDEPENDENT_STATUSES = frozenset({ST.TRIAL_SUBMITTED, ST.TRIAL_VALID_FAIL_CAP})
 
+#: 协议准入口（§10.2 第 360 行「P1/P2 错误动作/空答/统计错 ⇒ 协议 FAIL，能力槽取消
+#: ⇒ BLOCKED_PROTOCOL + NOT_MEASURED，不补考」）。这一轴以前**没有**机判出口：
+#: T4 判负后 closeout 仍写 process=COMPLETE / measurement=VALID，只剩 capability 的
+#: 一句自然语言理由，计划要求的 BLOCKED_PROTOCOL 标签在判决件里根本不存在。
+PROTOCOL_OK = "PROTOCOL_OK"
+PROTOCOL_BLOCKED = "BLOCKED_PROTOCOL"
+PROTOCOL_PARTIAL = "PROTOCOL_PARTIAL"
+PROTOCOL_NOT_STARTED = "PROTOCOL_NOT_STARTED"
+
 
 def _trial_facts(store: ST.StateStore, spec: SG.TrialSpec) -> "dict[str, Any]":
     base = {"trial_id": spec.trial_id, "instance_id": spec.instance_id,
@@ -229,6 +238,11 @@ def measurement_axis(facts: Mapping[str, Any]) -> "dict[str, Any]":
         return {"status": MEAS_INVALID_INSTRUMENT,
                 "reasons": ["FREEZE_INVALID"]}
     reasons: "list[str]" = []
+    if protocol_axis(facts)["status"] == PROTOCOL_BLOCKED:
+        # 协议准入是能力测量的前置门：链判负时本次 campaign 只跑过协议 trial，
+        # 「有 trial 启动」不能被读成「测量有效」。§10.2 的标签是
+        # BLOCKED_PROTOCOL + NOT_MEASURED，测量轴必须如实记 INCOMPLETE。
+        reasons.append("PROTOCOL_BLOCKED")
     if facts["billing"].get("unknown_call_ids"):
         reasons.append("UNSETTLED_COST")
     if facts["journal"]["pending_intents"]:
@@ -242,6 +256,30 @@ def measurement_axis(facts: Mapping[str, Any]) -> "dict[str, Any]":
     if reasons:
         return {"status": MEAS_INCOMPLETE, "reasons": reasons}
     return {"status": MEAS_VALID, "reasons": []}
+
+
+def protocol_axis(facts: Mapping[str, Any]) -> "dict[str, Any]":
+    """协议准入结论：两链都提交才算 OK，任一链判负即 BLOCKED_PROTOCOL。
+
+    ``facts["trials"]`` 里协议链的 ``phase`` 是 ``protocol``；未启动的链 status 为
+    ``None``。判负状态不只看 ``VALID_FAIL_CAP``——按 fail-closed 原则，**任何**
+    非 ``TRIAL_SUBMITTED`` 的已启动状态都算链不成立（BLOCKED/INVALID 等同样阻断
+    能力测量），并把该状态逐条留档，避免「只有一种失败被机器看见」。
+    """
+    chains = [t for t in facts["trials"] if t.get("phase") == "protocol"]
+    detail = {t["trial_id"]: {"status": t.get("status"),
+                              "started": bool(t.get("started"))}
+              for t in chains}
+    started = [t for t in chains if t.get("started")]
+    if not started:
+        return {"status": PROTOCOL_NOT_STARTED, "chains": detail}
+    failed = [t for t in started if t.get("status") != ST.TRIAL_SUBMITTED]
+    if failed:
+        return {"status": PROTOCOL_BLOCKED, "chains": detail,
+                "failed": [t["trial_id"] for t in failed]}
+    if len(started) < len(chains):
+        return {"status": PROTOCOL_PARTIAL, "chains": detail}
+    return {"status": PROTOCOL_OK, "chains": detail}
 
 
 def dev_gate(facts: Mapping[str, Any]) -> "dict[str, Any]":
@@ -305,6 +343,7 @@ def judge(facts: Mapping[str, Any]) -> "dict[str, Any]":
             "recorded_at_utc": utc_now_iso_z(),
             "campaign_id": facts["campaign_id"],
             "process": process_axis(facts),
+            "protocol": protocol_axis(facts),
             "measurement": measurement_axis(facts),
             "capability": capability_axis(facts),
             "note": "三轴独立；能力字段不得覆盖安全/仪器/覆盖不足的测量结论"}

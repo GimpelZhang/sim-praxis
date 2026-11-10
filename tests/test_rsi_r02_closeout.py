@@ -311,3 +311,43 @@ def test_facts_include_protocol_trials_but_not_in_gv(ctx):
     assert gate["passed"] is True
     verdict = CO2.judge(facts)
     assert verdict["capability"]["status"] == CO2.CAP_CEILING
+
+
+# ---- 协议轴（§10.2：协议 FAIL ⇒ BLOCKED_PROTOCOL + NOT_MEASURED） ----------
+
+
+def test_protocol_axis_not_started_by_default(ctx):
+    assert CO.judge(CO.read_facts(ctx))["protocol"]["status"] == \
+        CO.PROTOCOL_NOT_STARTED
+
+
+def test_protocol_fail_is_labelled_blocked_protocol(ctx):
+    """T4 判负后判决件必须自带 BLOCKED_PROTOCOL 标签。
+
+    以前这一轴没有机判出口：process=COMPLETE、measurement=VALID，只剩 capability
+    一句话的解释，计划 §10.2 要求的标签在判决件里根本不存在。协议链判负必须由
+    机器可见的状态承载，不能靠人读理由。
+    """
+    _all_pass(ctx)
+    store = ST.StateStore(ctx)
+    spec = {s.trial_id: s for s in CO.protocol_specs()}["proto_P1"]
+    _finish(store, spec, status=ST.TRIAL_VALID_FAIL_CAP, success=False)
+    verdict = CO.judge(CO.read_facts(ctx))
+    assert verdict["protocol"]["status"] == CO.PROTOCOL_BLOCKED
+    assert verdict["protocol"]["failed"] == ["proto_P1"]
+    # §10.2：协议 FAIL 不许被读成「测量有效」
+    assert verdict["measurement"]["status"] == CO.MEAS_INCOMPLETE
+    assert "PROTOCOL_BLOCKED" in verdict["measurement"]["reasons"]
+    # 判负的协议链不掩盖已跑通的六格（三轴互不吞并）
+    assert verdict["capability"]["status"] == CO.CAP_CEILING  # 本用例已把六格跑通
+
+
+def test_protocol_pass_and_partial_are_distinguished(ctx):
+    _all_pass(ctx)
+    store = ST.StateStore(ctx)
+    specs = {s.trial_id: s for s in CO.protocol_specs()}
+    _finish(store, specs["proto_P1"])
+    assert CO.judge(CO.read_facts(ctx))["protocol"]["status"] == \
+        CO.PROTOCOL_PARTIAL
+    _finish(store, specs["proto_P2"])
+    assert CO.judge(CO.read_facts(ctx))["protocol"]["status"] == CO.PROTOCOL_OK

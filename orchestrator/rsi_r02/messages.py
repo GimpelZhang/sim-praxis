@@ -154,6 +154,39 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
         if values:
             head.append("* 本实例的参数取值：" + json.dumps(
                 values, ensure_ascii=False, sort_keys=True))
+    # analyze 契约同样必须落到文本里（2026-11-10 T4 第二次判负的根因）：
+    # 检查器读源码里的 nonce、PROTO_STAT 载荷的 nonce/stat/run_ids、容器数据布局，
+    # 这些以前只在宿主私有知识里。候选唯一的输入通道就是这段文本。
+    analyze = pub.get("analyze")
+    if isinstance(analyze, Mapping) and analyze:
+        head.append("")
+        head.append("### analyze 契约（源码在容器内执行，逐条遵守）")
+        note = str(analyze.get("note") or "").strip()
+        if note:
+            head.append(note)
+        literal = analyze.get("source_must_contain") or []
+        if literal:
+            head.append("* 源码必须逐字包含：" + "、".join(str(x) for x in literal))
+        line = str(analyze.get("prints_line") or "").strip()
+        if line:
+            head.append(f"* 必须向 stdout 打印一行：{line}")
+        payload = analyze.get("payload_fields") or {}
+        if isinstance(payload, Mapping):
+            for name, desc in payload.items():
+                head.append(f"* {line or 'PROTO_STAT <json>'} 里的 {name}：{desc}")
+        data = analyze.get("data")
+        if isinstance(data, Mapping) and data:
+            head.append(f"* 容器内数据文件：{data.get('path')}"
+                        f"（{data.get('shape') or '列式 JSON'}）")
+            if data.get("note"):
+                head.append(f"* {data['note']}")
+            keys = data.get("keys") or []
+            if keys:
+                head.append("* 数据文件键：" + "、".join(str(k) for k in keys))
+            if data.get("stat_rule"):
+                head.append(f"* 统计算法：{data['stat_rule']}")
+        if analyze.get("output"):
+            head.append(f"* 分析产物写到：{analyze['output']}")
     return "\n".join(head) + "\n\n" + action_schema_text(surface)
 
 

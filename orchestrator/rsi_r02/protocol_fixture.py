@@ -35,6 +35,18 @@ ACTION_ORDER = ("preregister", "run_experiment", "analyze", "submit")
 STAT_KEY = "max_abs_x"
 PROTO_LINE = "PROTO_STAT "
 
+#: analyze 契约的**单一来源**（2026-11-10 T4 第二次 BLOCKED_PROTOCOL 的根因）：
+#: 检查器要求 analyze 源码逐字含 nonce、PROTO_STAT 的 JSON 带 nonce/stat/run_ids，
+#: 而当时的公开文档只在 submit 一句里提 nonce，容器数据布局（``/data/<run_id>.json``
+#: 的列式形状）更是完全没写——候选逐条照文档做了，仍被判负，还先花掉三次 analyze
+#: 去猜数据在哪。公开文档、机判（``doc_gaps``）、渲染（``messages.build_system``）
+#: 与检查器（``verify_run``）现在共用这几个常量，于是「判据要什么」与「公开材料
+#: 说什么」不可能再各说各话。**修复只补声明，不动槽数、不放宽判据**。
+ANALYZE_SOURCE_MUST_CONTAIN = ("nonce",)
+ANALYZE_PAYLOAD_FIELDS = ("nonce", "stat", "run_ids")
+DATA_PATH_TEMPLATE = "/data/<run_id>.json"
+ANALYZE_OUT_PATH = "/out/analysis.json"
+
 #: 槽数口径的**单一来源**：D-T4-1 给每条链 2 个自修余量，于是每条链 6 个槽、
 #: 两条链 12 个 POST。T0（预注册合同／硬帽）、T3（控制链）、T4（付费链）一律从
 #: 这里取，禁止各自写 6/12 字面量（评审 MINOR-3）。
@@ -167,6 +179,33 @@ class ProtocolFixture:
                     "note": "submit 必须逐字回引本轮真实标识与统计，不得自述。",
                     "required_fields": dict(SUBMIT_FIELD_SPEC),
                 },
+                # 2026-11-10 T4 第二次判负的根因在这里补：判据要的每一项都必须
+                # 逐字写在公开材料里，否则「候选没做到」与「宿主没说」无法区分。
+                "analyze": {
+                    "note": ("analyze 的源码在受限容器内运行（无网络、只读根、"
+                             "CPU 限制）；源码必须逐字包含本轮 nonce（字符串字面量），"
+                             "并把一行 PROTO_STAT <json> 打印到 stdout。"),
+                    "source_must_contain": list(ANALYZE_SOURCE_MUST_CONTAIN),
+                    "prints_line": PROTO_LINE.strip() + " <json>",
+                    "payload_fields": {
+                        "nonce": "逐字等于 interface.protocol.nonce",
+                        "stat": "本轮统计值（数值类型，算法见 data.stat_rule）",
+                        "run_ids": ("本次分析覆盖的 run_id 数组（升序），"
+                                    "必须与该 analyze 动作的 run_ids 相同"),
+                    },
+                    "output": ANALYZE_OUT_PATH,
+                    "data": {
+                        "path": DATA_PATH_TEMPLATE,
+                        "note": ("容器内 /data 只读；文件名里的 <run_id> 就是 "
+                                 "run_experiment 回包里给你的 run_id"),
+                        "shape": "列式 JSON：每个键是一个等长数组",
+                        "keys": ["t", *S.OBS_SERIES["push_control"], "schema",
+                                 "kind", "run_id", "trial_id", "instance_id",
+                                 "params"],
+                        "stat_rule": (f"{STAT_KEY} = 对覆盖的每个 run 取 "
+                                      f"max(abs(x_i))，多 run 取最大值"),
+                    },
+                },
                 "interface": {
                     "kind": "push_control",
                     "keys": sorted(self.params),
@@ -181,8 +220,10 @@ class ProtocolFixture:
                         "stat_key": self.stat_key,
                         "analyze_line": PROTO_LINE,
                         "posts_budget": 6,
-                        "bind": ("analyze 源码必须打印 PROTO_STAT <json>；submit 必须"
-                                 "逐字引用 nonce、STDOUT 里的 stat 与本轮 run_id/analysis_id"),
+                        "bind": ("analyze 源码必须逐字包含 nonce 并打印 PROTO_STAT <json>"
+                                 "（json 字段见 public.analyze.payload_fields，数据见 "
+                                 "public.analyze.data）；submit 必须逐字引用 nonce、"
+                                 "STDOUT 里的 stat 与本轮 run_id/analysis_id"),
                         "retry_rule": ("每次动作计一次 POST（本链上限 posts_budget）；"
                                        "被判负的那次不改变动作顺序要求，修正后重发即可"),
                     },
@@ -217,6 +258,40 @@ def doc_gaps(doc: Mapping[str, Any]) -> "list[str]":
     else:
         missing += [f"public.submit.required_fields.{k}"
                     for k in SUBMIT_REQUIRED if k not in submit]
+    # analyze 契约：检查器（verify_run）读源码里的 nonce、PROTO_STAT 载荷的
+    # nonce/stat/run_ids、以及容器数据布局。这些以前**只存在于宿主的私有知识里**
+    # （参考解与确定性 actor），公开文档一个字都没写——T4 第二次判负就是这条缝。
+    analyze = pub.get("analyze")
+    if not isinstance(analyze, Mapping):
+        missing.append("public.analyze 缺失")
+        return missing
+    literal = analyze.get("source_must_contain")
+    if not isinstance(literal, (list, tuple)):
+        missing.append("public.analyze.source_must_contain 缺失")
+    else:
+        missing += [f"public.analyze.source_must_contain.{k}"
+                    for k in ANALYZE_SOURCE_MUST_CONTAIN if k not in literal]
+    payload = analyze.get("payload_fields")
+    if not isinstance(payload, Mapping):
+        missing.append("public.analyze.payload_fields 缺失")
+    else:
+        missing += [f"public.analyze.payload_fields.{k}"
+                    for k in ANALYZE_PAYLOAD_FIELDS if k not in payload]
+    data = analyze.get("data")
+    if not isinstance(data, Mapping):
+        missing.append("public.analyze.data 缺失")
+    else:
+        if data.get("path") != DATA_PATH_TEMPLATE:
+            missing.append("public.analyze.data.path")
+        keys = data.get("keys")
+        need = ("t", *S.OBS_SERIES["push_control"], "run_id")
+        if not isinstance(keys, (list, tuple)):
+            missing.append("public.analyze.data.keys 缺失")
+        else:
+            missing += [f"public.analyze.data.keys.{k}" for k in need
+                        if k not in keys]
+        if not str(data.get("stat_rule") or "").strip():
+            missing.append("public.analyze.data.stat_rule")
     return missing
 
 
