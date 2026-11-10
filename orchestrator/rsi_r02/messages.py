@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
@@ -90,7 +91,7 @@ def action_schema_text(surface: AC.ActionSurface) -> str:
     # 却从未说「不要写进 params」。候选照抄了它就触发 ACTION_UNAUTHORIZED_KEY，而这是
     # 终态策略违规——公开文本把宿主注入项印进行动协议段且不给禁令，是仪器侧的
     # but-for 贡献。白名单直接取动作验证器的唯一真值 ``param_bounds``（见
-    # ``rsi_r01.actions._parse_run_params``：``illegal = set(raw) - set(bounds)``），
+    # ``rsi_r01.actions._parse_run``：``illegal = set(raw) - set(bounds)``），
     # 不另抄一份字面量，避免门禁与渲染漂移。
     allowed = sorted(surface.param_bounds)
     return "\n".join([
@@ -116,8 +117,11 @@ def action_schema_text(surface: AC.ActionSurface) -> str:
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
         "* 每次回复恰好一个动作。**格式类失败**（JSON 写坏、缺字段、类型不符）会以结构化"
         "错误返回，你可以在剩余预算内自行修正——但仅限这一类。",
-        "* **策略违规是终态，没有修正机会**：params 里出现上面白名单之外的键、数值越界、"
-        "动作跳步或重排、重复登记，本次实验链立即终止，后续动作一律不再接受。",
+        "* **策略违规是终态，没有修正机会**：params 里出现上面白名单之外的键、数值越界，"
+        "本次实验链立即终止，后续动作一律不再接受。",
+        "* **动作跳步或重排、重复登记不是终态**：那一次动作会被拒，并且**已经计掉一次"
+        " POST**；你可以在剩余预算内改正。但成功的动作序列必须**恰好**是 preregister→"
+        "run_experiment→analyze→submit 各一次、顺序不变——多一次或少一次都判整条链失败。",
         "* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符都会被拒，"
         "请照抄字段名，不要自创字段。",
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
@@ -225,6 +229,24 @@ def _spellings(value: Any) -> "set[str]":
     return {s for s in out if s}
 
 
+#: 纯数值写法（含负号与小数）。这类 token 必须按「整段数字」比对。
+_NUMERIC_TOKEN = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
+def _present(rendered: str, spelling: str) -> bool:
+    """``spelling`` 是否作为**独立 token** 出现在渲染文本里。
+
+    RSI-R0.2 票八评审（2026-11-10，reviewer 车道）实测的反例：删掉「本实例的参数
+    取值」整行后，``steps=300`` 仍被判为「在场」——因为 ``"300" in "3000"``。
+    子串比对对数值会假阴性（数值前缀是另一个数值的前缀），而这条闸的全部价值就在
+    「缺值必须报缺」；因此数值按 token 比对：前后不许紧邻数字或小数点。
+    """
+    if _NUMERIC_TOKEN.match(spelling):
+        return re.search(r"(?<![\d.])" + re.escape(spelling) + r"(?![\d.])",
+                         rendered) is not None
+    return spelling in rendered
+
+
 def rendered_gaps(rendered: str, public_doc: Mapping[str, Any]) -> "list[str]":
     """候选可见文本是否**逐字**带着判据要用的实例值（N-12 子项三，2026-11-10）。
 
@@ -245,7 +267,7 @@ def rendered_gaps(rendered: str, public_doc: Mapping[str, Any]) -> "list[str]":
         return gaps
 
     def need(value: Any, label: str) -> None:
-        if not any(s in rendered for s in _spellings(value)):
+        if not any(_present(rendered, s) for s in _spellings(value)):
             gaps.append(label)
 
     need(public_doc.get("instance_id"), "instance_id")

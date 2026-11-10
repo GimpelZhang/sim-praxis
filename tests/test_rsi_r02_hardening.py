@@ -88,6 +88,53 @@ def _rendered(camp, fid: str) -> "tuple[dict, str]":
 # ---------------------------------------------------------------------------
 
 
+def test_rendered_gaps_numbers_match_as_whole_tokens(ctx):
+    """数值必须按整段数字比对：``300`` 不许拿 ``3000`` 里的子串冒充在场。
+
+    票八评审（2026-11-10，reviewer 车道）实测：删掉「本实例的参数取值」整行后，
+    ``rendered_gaps`` 只报了 kp/kd/max_force，``steps=300`` 因为 ``"300" in "3000"``
+    被判为在场——一个缺值被判成自足的假阴性。这条把「四个值全删后四个全报」钉死。
+    """
+    doc, text = _rendered(ctx, "P1")
+    values = doc["public"]["prereg"]["values"]
+    stripped = "\n".join(x for x in text.splitlines()
+                         if not x.startswith("* 本实例的参数取值"))
+    gaps = set(M.rendered_gaps(stripped, doc))
+    expected = {f"public.prereg.values.{k}.值" for k in values}
+    assert expected <= gaps, (expected - gaps, gaps)
+    # 反面对照：完整文本里一个都不报（数值比对没有把正常渲染误伤成缺口）
+    assert not any(g.startswith("public.prereg.values.") and g.endswith(".值")
+                   for g in M.rendered_gaps(text, doc))
+    # 直接钉 token 语义
+    assert M._present("单次实验步数上限：3000", "300") is False
+    assert M._present('"steps": 300}', "300") is True
+
+
+def test_order_and_duplicate_are_not_promised_as_terminal(ctx):
+    """跳步/重排/重复登记在实现里**不终止**（只回 ok=False 并计一次 POST）。
+
+    票八评审的阻塞项：加固文本曾把它们与「未授权键/越界」并列写成终态，而
+    ``candidate.POLICY_VIOLATION_CODES`` 只含 UNAUTHORIZED_KEY 与 OUT_OF_BOUNDS。
+    公开文本必须与宿主语义一致：终态句只列这两类；跳步/重复另起一句说清
+    「被拒但已计 POST，可在余量内改正，成功序列仍须恰为 ACTION_ORDER」。
+    """
+    doc, text = _rendered(ctx, "P1")
+    # 只看边界段的两条 bullet：实例值/合同的 JSON 转储行里也常含这些词，
+    # 用整行 text 会误伤（评审回放时就是这样红的）。
+    bullets = [x for x in text.splitlines() if x.startswith("* ")]
+    terminal = next(x for x in bullets if "策略违规是终态" in x)
+    assert "白名单之外的键" in terminal and "越界" in terminal
+    assert "跳步" not in terminal and "重复登记" not in terminal
+    repairable = next(x for x in bullets if "动作跳步或重排" in x)
+    assert "不是终态" in repairable
+    assert "POST" in repairable           # 明确告知代价：已经计掉一次
+    # 合同侧 retry_rule 同口径
+    rule = doc["public"]["interface"]["protocol"]["retry_rule"]
+    head, _, tail = rule.partition("**策略违规是终态**")
+    assert "动作跳步或重排、重复登记" in head and "动作跳步" not in tail
+    assert "恰好等于动作顺序" in rule
+
+
 def test_fixed_params_line_forbids_writing_into_params(ctx):
     """渲染文本必须明说「固定参数由宿主注入、禁止写进 params」。
 
