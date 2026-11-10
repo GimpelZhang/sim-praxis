@@ -244,13 +244,27 @@ def test_gp_approval_missing_refuses(ctx):
 
 def test_gp_approval_requires_enough_posts_and_cap(ctx):
     ctx.write_json("quota/approvals/p26.json",
-                   {"gate": "G-P", "authorized_posts": 8, "cap_usd": 100.0})
+                   {"gate": "G-P", "campaign_id": ctx.campaign_id,
+                    "authorized_posts": 8, "cap_usd": 100.0})
     with pytest.raises(CI.CliError):
         CI.require_gp_approval(ctx, posts=72)
+    # 2026-11-10 root D reviewer LOW：批准件必须绑定本 campaign——同一 root 里
+    # 残留的他 campaign 件（campaign_id 不符或缺席）一律不放行。
     ctx.write_json("quota/approvals/p26b.json",
+                   {"gate": "G-P", "campaign_id": "r02_other",
+                    "authorized_posts": 72, "cap_usd": 100.0})
+    with pytest.raises(CI.CliError):
+        CI.require_gp_approval(ctx, posts=72)
+    ctx.write_json("quota/approvals/p26c.json",
                    {"gate": "G-P", "authorized_posts": 72, "cap_usd": 100.0})
+    with pytest.raises(CI.CliError):
+        CI.require_gp_approval(ctx, posts=72)
+    ctx.write_json("quota/approvals/p26d.json",
+                   {"gate": "G-P", "campaign_id": ctx.campaign_id,
+                    "authorized_posts": 72, "cap_usd": 100.0})
     doc = CI.require_gp_approval(ctx, posts=72)
     assert doc["authorized_posts"] == 72
+    assert doc["campaign_id"] == ctx.campaign_id
 
 
 def test_make_paid_caller_requires_explicit_batch_id():

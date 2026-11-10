@@ -85,7 +85,16 @@ def require_counter(counter: LocalCounter | Callable[[str], int] | None
 
 
 def action_schema_text(surface: AC.ActionSurface, *,
-                       protocol: bool = False) -> str:
+                       protocol: bool = False, has_prereg: bool = False,
+                       has_submit: bool = False) -> str:
+    """动作协议段。``protocol``/``has_prereg``/``has_submit`` 必须来自**文档实况**。
+
+    N-12 子项四（2026-11-10 root D reviewer HIGH/MEDIUM）：以前无论文档里有没有
+    ``public.prereg`` / ``public.submit`` 块，动作清单都写着「必填字段逐字见任务
+    说明 public.prereg.required_fields」——而 dev/validation 文档（``public`` 只有
+    goal/interface/scene_params/task）根本没有这两块，候选被指向不存在的章节。
+    指向必须按章节是否存在条件渲染。
+    """
     bounds = {k: [v[0], v[1]] for k, v in sorted(surface.param_bounds.items())}
     fixed = {k: v for k, v in sorted(surface.fixed_params.items())}
     # N-12 子项一（2026-11-10 R0.2 结案尾债）：以前这里只印 ``固定参数：{"timestep": …}``，
@@ -100,12 +109,15 @@ def action_schema_text(surface: AC.ActionSurface, *,
         f'每条动作必须带 "schema": "{S.SCHEMA_ACTION}"。',
         "可用动作与必填字段：",
         '1) {"schema":..., "action":"preregister", "plan":{...}} —— 必须在第一个实验之前，'
-        "成功后不得重复；plan 的必填字段逐字见任务说明 public.prereg.required_fields。",
+        "成功后不得重复"
+        + ("；plan 的必填字段逐字见任务说明 public.prereg.required_fields。"
+           if has_prereg else "。"),
         '2) {"schema":..., "action":"run_experiment", "params":{参数名:数值}}',
         '3) {"schema":..., "action":"analyze", "source":"<python源码>", "run_ids":["<run_id>",...]}',
         '4) {"schema":..., "action":"submit", "claim":"SUPPORTED|REFUTED|INCONCLUSIVE", '
-        '"run_ids":[...], "analysis_ids":[...], "nonce":"<逐字>", "stat":数值} —— '
-        "必填字段逐字见任务说明 public.submit.required_fields。",
+        '"run_ids":[...], "analysis_ids":[...], "nonce":"<逐字>", "stat":数值}'
+        + (" —— 必填字段逐字见任务说明 public.submit.required_fields。"
+           if has_submit else ""),
         "",
         f"参数合法区间：{json.dumps(bounds, ensure_ascii=False, sort_keys=True)}",
         ("固定参数（**由宿主自动注入，禁止写进 params**；写进去即终态策略违规）："
@@ -116,10 +128,20 @@ def action_schema_text(surface: AC.ActionSurface, *,
         "",
         "### 边界",
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
-        "* 每次回复恰好一个动作。**格式类失败**（JSON 写坏、缺字段、类型不符）会以结构化"
-        "错误返回，你可以在剩余预算内自行修正——但仅限这一类。",
+        "* 每次回复恰好一个动作。**空回复会直接终止本 trial**（按已响应的失败处理，"
+        "不隐式重试）。**格式类失败**（JSON 写坏、缺字段、类型不符）以及会被宿主拒绝"
+        "但可改正的动作（重复登记、重复跑同一格、登记内容不合规、引用不存在的 "
+        "run_id / analysis_id）都以 `ok=false` 返回、**不终止**本 trial，你可以在剩余"
+        "预算内改正。",
         "* **策略违规是终态，没有修正机会**：params 里出现上面白名单之外的键、数值越界，"
         "本次实验链立即终止，后续动作一律不再接受。",
+        # 2026-11-10 root D reviewer HIGH：本句原为「…自行修正——但仅限这一类」，
+        # 与紧邻的协议链 bullet（跳步/重排/重复登记也可改正）自相矛盾，也与宿主
+        # 语义相反——``rsi_r01/trial.py:152-158`` 把 PREREG_INVALID/CELL_DUPLICATED/
+        # RUN_ID_UNKNOWN 等一律转成 ``ok=False`` 的非致命事件，只有
+        # ``candidate.POLICY_VIOLATION_CODES``（UNAUTHORIZED_KEY/OUT_OF_BOUNDS）
+        # 才终止。故改为枚举真实可改正类，并写明空回复才是致命的（candidate.py
+        # ``EMPTY_RESPONSE``：trial 置 BLOCKED，不重试）。
         # 「序列各一次」是**协议链专属**判据（protocol_fixture.verify_run 才判）。
         # dev/validation 的宿主允许同一 trial 多次实验（计划 §7：≤12 次实验 /
         # ≤8 次分析），把它们无条件印进 system 会给出不实承诺——票八 root C 的
@@ -129,8 +151,9 @@ def action_schema_text(surface: AC.ActionSurface, *,
              "计掉一次 POST**；你可以在剩余预算内改正。但本链成功的动作序列必须"
              "**恰好**是 preregister→run_experiment→analyze→submit 各一次、顺序"
              "不变——多一次或少一次都判整条链失败。")] if protocol else []),
-        "* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符都会被拒，"
-        "请照抄字段名，不要自创字段。",
+        # 「required_fields 是唯一权威」只在文档真的带这两块时才有指向对象。
+        *([("* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符"
+             "都会被拒，请照抄字段名，不要自创字段。")] if (has_prereg or has_submit) else []),
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
         "数值必须来自你本次实验的真实观测。",
         "* submit 的数字必须由你之前的 analyze 结果给出，并逐字引用 run_id / analysis_id。",
@@ -212,8 +235,15 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
         if analyze.get("output"):
             head.append(f"* 分析产物写到：{analyze['output']}")
     proto = (pub.get("interface") or {}).get("protocol") or {}
+
+    def _section(name: str) -> bool:
+        spec = pub.get(name)
+        return isinstance(spec, Mapping) and bool(spec)
+
     return ("\n".join(head) + "\n\n"
-            + action_schema_text(surface, protocol=bool(proto)))
+            + action_schema_text(surface, protocol=bool(proto),
+                                 has_prereg=_section("prereg"),
+                                 has_submit=_section("submit")))
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +286,8 @@ def _present(rendered: str, spelling: str) -> bool:
     return spelling in rendered
 
 
-def rendered_gaps(rendered: str, public_doc: Mapping[str, Any]) -> "list[str]":
+def rendered_gaps(rendered: str, public_doc: Mapping[str, Any],
+                  surface: "AC.ActionSurface | None" = None) -> "list[str]":
     """候选可见文本是否**逐字**带着判据要用的实例值（N-12 子项三，2026-11-10）。
 
     ``protocol_fixture.doc_gaps`` 只证明文档 dict 里有这些块；候选唯一的输入
@@ -280,6 +311,14 @@ def rendered_gaps(rendered: str, public_doc: Mapping[str, Any]) -> "list[str]":
             gaps.append(label)
 
     need(public_doc.get("instance_id"), "instance_id")
+    # 固定参数行也属「候选可用判据」：宿主自动注入它的值，写进 params 却是终态
+    # 违规。缺省用 ``surface_from_doc`` 重建（合同期/离线口径）；运行期由
+    # ``CandidateLoop`` 传入**真正用来渲染 system 的那个 surface**，确保比对的是
+    # 同一份动作面，而不是两份近似面。
+    for fixed_name, fixed_value in (surface or surface_from_doc(public_doc)
+                                    ).fixed_params.items():
+        need(fixed_name, f"fixed_params.{fixed_name}")
+        need(fixed_value, f"fixed_params.{fixed_name}.值")
     for key in iface.get("keys") or []:
         need(key, f"interface.keys.{key}")
     need(proto.get("nonce"), "interface.protocol.nonce")
@@ -331,10 +370,26 @@ def surface_from_doc(public_doc: Mapping[str, Any]) -> "AC.ActionSurface":
         bounds[str(key)] = (float(lo_hi[0]), float(lo_hi[1])) if lo_hi \
             else (0.0, 0.0)
     bounds["steps"] = (1.0, float(iface.get("steps_max") or S.N_STEPS))
-    return AC.ActionSurface(kind=str(iface.get("kind") or "push_control"),
+    # 固定参数必须与**运行期** ``rsi_r01.trial.action_surface`` 同形，否则合同期
+    # 冻结的自足性证据（rendered_gaps）与候选真正读到的文本不是同一份——
+    # root D reviewer MEDIUM-3 实测：合同期印 ``{}``、运行期印
+    # ``{"timestep": 0.002}``。运行期口径：pendulum 恒用 ``S.DT_S``，其余取实例
+    # ``public.scene_params.timestep``；文档缺这个值就保持空（真实 trial 会同处
+    # KeyError，不会静默漂移）。
+    kind = str(iface.get("kind") or "push_control")
+    fixed: "dict[str, float]" = {}
+    if kind == "pendulum_run":
+        fixed["timestep"] = float(S.DT_S)
+    else:
+        ts = (((public_doc or {}).get("public") or {}).get("scene_params")
+              or {}).get("timestep")
+        if ts is not None:
+            fixed["timestep"] = float(ts)
+    return AC.ActionSurface(kind=kind,
                             param_bounds=bounds,
-                            fixed_params={}, max_steps=int(iface.get("steps_max")
-                                                          or S.N_STEPS))
+                            fixed_params=fixed,
+                            max_steps=int(iface.get("steps_max")
+                                          or S.N_STEPS))
 
 
 def summarize_event(evt: Mapping[str, Any]) -> str:

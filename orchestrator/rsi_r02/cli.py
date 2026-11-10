@@ -189,8 +189,14 @@ def gp_approvals(ctx: C.CampaignContext) -> "list[dict[str, Any]]":
 
 def require_gp_approval(ctx: C.CampaignContext, *, posts: int,
                         cap_usd: float = B.USD_CAP) -> "dict[str, Any]":
-    """G-P 是预算自批件：授权 POST 数 ≥ 本批、货币帽与账本一致。"""
+    """G-P 是预算自批件：授权 POST 数 ≥ 本批、货币帽与账本一致、且**绑定本 campaign**。
+
+    root D reviewer LOW：以前只校验 authorized_posts/cap_usd，同一 root 里残留的
+    他 campaign 批准件也能放行；现要求 ``campaign_id`` 逐字等于 ``ctx.campaign_id``。
+    """
     for doc in gp_approvals(ctx):
+        if doc.get("campaign_id") != ctx.campaign_id:
+            continue
         authorized = doc.get("authorized_posts")
         if not isinstance(authorized, int):
             continue

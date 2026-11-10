@@ -67,8 +67,9 @@ def _fixture(camp, fid: str) -> "PF.ProtocolFixture":
 def _real_surface():
     """与 ``rsi_r01.trial.action_surface(E-dev)`` 同形的真实动作面。
 
-    ``surface_from_doc`` 只看公开文档，拿不到宿主注入的 ``timestep``；这里显式
-    带上，才能验证「固定参数行既印值、又印禁令」。
+    ``surface_from_doc`` 自 2026-11-10 起也能从 ``public.scene_params`` 还原
+    ``timestep``；这里仍显式带上，以便「从文档还原」这条路被单独断言
+    （``test_surface_from_doc_mirrors_runtime_fixed_params``）。
     """
     from orchestrator.rsi_r01 import actions as AC
     return AC.ActionSurface(
@@ -376,3 +377,89 @@ def test_probe_with_lying_stat_is_labelled_blocked_protocol(ctx):
     verdict = CO.judge(CO.read_facts(ctx))
     assert verdict["protocol"]["status"] == CO.PROTOCOL_BLOCKED
     assert verdict["protocol"]["chains"]["proto_P1"]["verdict_fail"] is True
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-10 root D reviewer 车道：文本↔语义矛盾 / 指向不存在章节 / 合同期≡运行期
+# ---------------------------------------------------------------------------
+
+
+def test_repair_promise_is_not_falsely_exclusive(ctx):
+    """HIGH：同一份 system 不许既说「可自修——但仅限这一类」，又说跳步/重排可改。
+
+    宿主真语义（``rsi_r01/trial.py:152-158``）：除 ``candidate.
+    POLICY_VIOLATION_CODES``（UNAUTHORIZED_KEY/OUT_OF_BOUNDS）终止外，
+    PREREG_INVALID/CELL_DUPLICATED/RUN_ID_UNKNOWN 等一律 ``ok=False`` 非终态。
+    「仅限这一类」是假陈述，且与紧邻的协议链 bullet 自相矛盾——root D reviewer
+    即以此为 REJECT 依据。另钉死「空回复才是致命的」（candidate EMPTY_RESPONSE）。
+    """
+    from orchestrator.rsi_r01 import task_contract as TC
+    from orchestrator.rsi_r01 import trial as TR
+
+    texts = [_rendered(ctx, fid)[1] for fid in ("P1", "P2")]
+    for iid in ("E-dev", "D-dev", "R-dev"):
+        doc = H.write_public_task(ctx, iid, family=iid[0])
+        texts.append(M.build_system(doc, TR.action_surface(TC.BY_ID[iid])))
+    for text in texts:
+        assert "仅限这一类" not in text
+        assert "空回复会直接终止本 trial" in text
+        assert "策略违规是终态" in text
+    # 可改正类必须逐字点名（与宿主实现一致）
+    for phrase in ("重复登记", "重复跑同一格", "run_id / analysis_id"):
+        assert phrase in texts[0], phrase
+
+
+def test_dev_docs_do_not_point_at_sections_they_lack(ctx):
+    """MEDIUM：dev/validation 文档没有 public.prereg/submit，文本不得指向它们。"""
+    doc = H.write_public_task(ctx, "E-dev", family="E")
+    dev = M.build_system(doc, M.surface_from_doc(doc))
+    for phrase in ("public.prereg.required_fields",
+                   "public.submit.required_fields",
+                   "required_fields 是字段要求的"):
+        assert phrase not in dev, phrase
+    proto = _rendered(ctx, "P1")[1]
+    assert "public.prereg.required_fields" in proto
+    assert "public.submit.required_fields" in proto
+    assert "required_fields 是字段要求的" in proto
+
+
+def test_surface_from_doc_mirrors_runtime_fixed_params(ctx):
+    """MEDIUM-3：合同期渲染用的动作面必须与运行期 ``trial.surface`` 逐字段同形。
+
+    root D reviewer 实测旧实现：合同期固定参数行印 ``{}``、运行期印
+    ``{"timestep": 0.002}``——冻结的自足性证据与候选读到的文本不是同一份。
+    """
+    from orchestrator.rsi_r01 import schemas as S
+    from orchestrator.rsi_r01 import task_contract as TC
+    from orchestrator.rsi_r01 import trial as TR
+
+    doc = _fixture(ctx, "P1").task_doc()
+    sd, rt = M.surface_from_doc(doc), TR.action_surface(TC.BY_ID["E-dev"])
+    assert sd.kind == rt.kind
+    assert dict(sd.fixed_params) == dict(rt.fixed_params) == {"timestep": 0.002}
+    assert dict(sd.param_bounds) == dict(rt.param_bounds)
+    assert sd.max_steps == rt.max_steps
+    # push_control 取公开 scene_params；pendulum 恒取 S.DT_S（与运行期同口径）
+    dev = H.write_public_task(ctx, "E-dev", family="E")
+    dev["public"]["scene_params"] = {"timestep": 0.002}
+    assert dict(M.surface_from_doc(dev).fixed_params) == {"timestep": 0.002}
+    dev["public"]["interface"]["kind"] = "pendulum_run"
+    assert dict(M.surface_from_doc(dev).fixed_params) == {"timestep": float(S.DT_S)}
+
+
+def test_rendered_gaps_catch_a_missing_fixed_param(ctx):
+    """固定参数行丢了名字或数值都必须报 gap（合同期与运行期都用同一条断言）。"""
+    doc, text = _rendered(ctx, "P1")
+    assert M.rendered_gaps(text, doc) == []
+    stripped = "\n".join(x for x in text.splitlines()
+                         if not x.startswith("固定参数（"))
+    gaps = set(M.rendered_gaps(stripped, doc))
+    assert {"fixed_params.timestep", "fixed_params.timestep.值"} <= gaps
+
+
+def test_retry_rule_counts_only_sent_posts(ctx):
+    """LOW：发网前被拒的请求零 POST（candidate 预发阶段），重试口径必须说清楚。"""
+    rule = _fixture(ctx, "P1").task_doc()["public"]["interface"]["protocol"]["retry_rule"]
+    assert "已发网" in rule
+    assert "发网前被拒的请求不占 POST" in rule
+    assert "每次动作计一次 POST" not in rule

@@ -180,6 +180,12 @@ class ProtocolFixture:
                     "note": "submit 必须逐字回引本轮真实标识与统计，不得自述。",
                     "required_fields": dict(SUBMIT_FIELD_SPEC),
                 },
+                # 运行期 trial 的固定参数（宿主动态注入 timestep）也必须在公开材料
+                # 里可复算：``messages.surface_from_doc`` 据此重建与运行期同形的
+                # 动作面，合同期冻结的 rendered_gaps 才等于候选读到的文本
+                # （root D reviewer MEDIUM-3）。本 fixture 的 trial 是 push_control
+                # 实例，恒用场景的 timestep。
+                "scene_params": {"timestep": float(S.DT_S)},
                 # 2026-11-10 T4 第二次判负的根因在这里补：判据要的每一项都必须
                 # 逐字写在公开材料里，否则「候选没做到」与「宿主没说」无法区分。
                 "analyze": {
@@ -226,7 +232,8 @@ class ProtocolFixture:
                                  "public.analyze.data）；submit 必须逐字引用 nonce、"
                                  "STDOUT 里的 stat 与本轮 run_id/analysis_id"),
                         "retry_rule": (
-                            "每次动作计一次 POST（本链上限 posts_budget）。"
+                            "每次**已发网并收到回复**的动作计一次 POST（本链上限 "
+                            "posts_budget；发网前被拒的请求不占 POST）。"
                             "分两类：**可自修失败**（JSON 解析失败、缺字段、类型不符，"
                             "以及动作跳步或重排、重复登记——那一次被拒且已计一次 POST）"
                             "的回包会说明原因，你可在剩余预算内改正，动作顺序要求不变；"
