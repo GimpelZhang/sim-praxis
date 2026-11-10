@@ -84,7 +84,8 @@ def require_counter(counter: LocalCounter | Callable[[str], int] | None
 # ---------------------------------------------------------------------------
 
 
-def action_schema_text(surface: AC.ActionSurface) -> str:
+def action_schema_text(surface: AC.ActionSurface, *,
+                       protocol: bool = False) -> str:
     bounds = {k: [v[0], v[1]] for k, v in sorted(surface.param_bounds.items())}
     fixed = {k: v for k, v in sorted(surface.fixed_params.items())}
     # N-12 子项一（2026-11-10 R0.2 结案尾债）：以前这里只印 ``固定参数：{"timestep": …}``，
@@ -119,9 +120,15 @@ def action_schema_text(surface: AC.ActionSurface) -> str:
         "错误返回，你可以在剩余预算内自行修正——但仅限这一类。",
         "* **策略违规是终态，没有修正机会**：params 里出现上面白名单之外的键、数值越界，"
         "本次实验链立即终止，后续动作一律不再接受。",
-        "* **动作跳步或重排、重复登记不是终态**：那一次动作会被拒，并且**已经计掉一次"
-        " POST**；你可以在剩余预算内改正。但成功的动作序列必须**恰好**是 preregister→"
-        "run_experiment→analyze→submit 各一次、顺序不变——多一次或少一次都判整条链失败。",
+        # 「序列各一次」是**协议链专属**判据（protocol_fixture.verify_run 才判）。
+        # dev/validation 的宿主允许同一 trial 多次实验（计划 §7：≤12 次实验 /
+        # ≤8 次分析），把它们无条件印进 system 会给出不实承诺——票八 root C 的
+        # reviewer 实测 E-dev（无 protocol 块）也出现该句，而 T3 的 D-dev 成功跑了
+        # 6 次 run_experiment 且 judge_pass=true。故只在带 protocol 块的文档里渲染。
+        *([("* **动作跳步或重排、重复登记不是终态**：那一次动作会被拒，并且**已经"
+             "计掉一次 POST**；你可以在剩余预算内改正。但本链成功的动作序列必须"
+             "**恰好**是 preregister→run_experiment→analyze→submit 各一次、顺序"
+             "不变——多一次或少一次都判整条链失败。")] if protocol else []),
         "* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符都会被拒，"
         "请照抄字段名，不要自创字段。",
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
@@ -204,7 +211,9 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
                 head.append(f"* 统计算法：{data['stat_rule']}")
         if analyze.get("output"):
             head.append(f"* 分析产物写到：{analyze['output']}")
-    return "\n".join(head) + "\n\n" + action_schema_text(surface)
+    proto = (pub.get("interface") or {}).get("protocol") or {}
+    return ("\n".join(head) + "\n\n"
+            + action_schema_text(surface, protocol=bool(proto)))
 
 
 # ---------------------------------------------------------------------------

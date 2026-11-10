@@ -135,6 +135,31 @@ def test_order_and_duplicate_are_not_promised_as_terminal(ctx):
     assert "恰好等于动作顺序" in rule
 
 
+def test_sequence_once_promise_only_renders_for_protocol_docs(ctx):
+    """「动作序列必须各一次」只是**协议链**判据，dev/validation 文档不得承诺。
+
+    票八评审（2026-11-10，reviewer 车道）为 root C 的 LOCK 出具 REJECT 的证据：
+    E-dev 的公开文档没有 ``public.interface.protocol`` 块，system 文本里却印着
+    「必须恰好是 … 各一次——多一次或少一次都判整条链失败」；而宿主对 dev trial
+    允许同一实例多次实验（计划 §7：≤12 次实验 / ≤8 次分析），root C 自己的 T3
+    就成功跑了 D-dev 6 次 ``run_experiment`` 且 ``judge_pass=true``。承诺与语义
+    相反 ⇒ 候选按文本办事会被判整条链失败。这条把「只在带 protocol 块的文档里
+    渲染该句」钉死，正反两面都断言。
+    """
+    # 正面：协议文档（P1 fixture 自带 protocol 块）必须渲染
+    _doc, proto_text = _rendered(ctx, "P1")
+    assert "各一次" in proto_text and "整条链失败" in proto_text
+    # 反面：dev 文档（write_public_task 无 protocol 块）一个词都不许出现
+    dev_doc = H.write_public_task(ctx, "E-dev", family="E")
+    assert "protocol" not in dev_doc["public"]["interface"]
+    dev_text = M.build_system(dev_doc, _real_surface())
+    for phrase in ("各一次", "整条链失败", "动作跳步或重排"):
+        assert phrase not in dev_text, phrase
+    # 直接调渲染函数时 protocol 缺省即不渲染（默认面向非协议 trial）
+    assert "各一次" not in M.action_schema_text(_real_surface())
+    assert "各一次" in M.action_schema_text(_real_surface(), protocol=True)
+
+
 def test_fixed_params_line_forbids_writing_into_params(ctx):
     """渲染文本必须明说「固定参数由宿主注入、禁止写进 params」。
 
