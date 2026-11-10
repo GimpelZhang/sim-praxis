@@ -289,7 +289,11 @@ def run_protocol(ctx: C.CampaignContext, *, counter: Any, gpus: bool
                             family="E", phase="protocol", slot_prefix=prefix,
                             post_cap=len(slot_ids) or len(PF.ACTION_ORDER))
         runner = CLI.make_trial(ctx, spec, gpus=gpus)
-        stub = PF.ProtocolStub(fixture=fixture)
+        # 票八（2026-11-10 复盘 N-12 子项二）：控制预演换成**只读渲染文本**的
+        # 探针 actor。旧 ``ProtocolStub`` 手里握着 fixture（nonce/参数/源码模板
+        # 都是现成的），于是「公开信息是否充分」这一环在预演里恒真；探针没有任何
+        # 现成实例值，解析不出就当场报缺，把自足性问题推到 LOCK 之前。
+        stub = PF.ProbeActor()
         # 协议 fixture 的公开文档（含 nonce 与四动作合同）必须**真的**交给候选：
         # 控制跑若用实例自带的 E-dev 文档，等于让 stub 凭内存里的 fixture 答题，
         # 与 T4「模型只看这份文档」不是同一条路（锁内适配，见 Complete D-T3-13）。

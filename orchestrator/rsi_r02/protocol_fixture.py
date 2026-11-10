@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -224,8 +225,12 @@ class ProtocolFixture:
                                  "（json 字段见 public.analyze.payload_fields，数据见 "
                                  "public.analyze.data）；submit 必须逐字引用 nonce、"
                                  "STDOUT 里的 stat 与本轮 run_id/analysis_id"),
-                        "retry_rule": ("每次动作计一次 POST（本链上限 posts_budget）；"
-                                       "被判负的那次不改变动作顺序要求，修正后重发即可"),
+                        "retry_rule": (
+                            "每次动作计一次 POST（本链上限 posts_budget）。"
+                            "分两类：**可自修失败**（JSON 解析失败、缺字段、类型不符）"
+                            "的回包会说明原因，修正后重发即可，动作顺序要求不变；"
+                            "**策略违规是终态**（params 含未授权键、数值越界、动作跳步或"
+                            "重排、重复登记），本次协议链立即终止，不再接受任何动作。"),
                     },
                 },
             },
@@ -246,12 +251,27 @@ def doc_gaps(doc: Mapping[str, Any]) -> "list[str]":
     """
     pub = (doc or {}).get("public") or {}
     missing: "list[str]" = []
+    # 动作面的白名单与协议块：``rendered_gaps`` 在缺协议块时会跳过检查（非协议
+    # trial 不适用），所以「协议文档丢了协议块」必须由这里拦下，否则两道闸一起漏。
+    iface = pub.get("interface") or {}
+    if not iface.get("keys"):
+        missing.append("public.interface.keys 缺失")
+    proto = iface.get("protocol")
+    if not isinstance(proto, Mapping) or not proto:
+        missing.append("public.interface.protocol 缺失")
+    else:
+        missing += [f"public.interface.protocol.{k}"
+                    for k in ("nonce", "stat_key", "analyze_line", "action_order")
+                    if not proto.get(k)]
     prereg = (pub.get("prereg") or {}).get("required_fields")
     if not isinstance(prereg, Mapping):
         missing.append("public.prereg.required_fields 缺失")
     else:
         missing += [f"public.prereg.required_fields.{k}"
                     for k in PREREG_REQUIRED if k not in prereg]
+    # cells 必须取实例参数；文档没给取值，候选只能自造（票一 T4 首跑即此类）。
+    if not ((pub.get("prereg") or {}).get("values") or {}):
+        missing.append("public.prereg.values 缺失")
     submit = (pub.get("submit") or {}).get("required_fields")
     if not isinstance(submit, Mapping):
         missing.append("public.submit.required_fields 缺失")
@@ -325,6 +345,10 @@ def contract_payload(*, campaign_id: str) -> "dict[str, Any]":
             "nonce": fx.nonce,
             "task_doc_sha256": hashlib.sha256(blob).hexdigest(),
             "doc_gaps": doc_gaps(doc),
+            # N-12 子项三：doc_gaps 只查文档 dict，候选读到的却是渲染文本。
+            # 这里把「渲染后是否逐字带着实例值」也冻结进合同（离线可重算）。
+            "rendered_gaps": M.rendered_gaps(
+                M.build_system(doc, M.surface_from_doc(doc)), doc),
         }
     return {
         "schema": "simpraxis.rsi_r02.protocol_contract.v1",
@@ -361,6 +385,8 @@ def check_contract(payload: Mapping[str, Any], *, campaign_id: str) -> "list[str
     for fid, chain in (live["chains"] or {}).items():
         if chain.get("doc_gaps"):
             problems.append(f"{fid} 公开文档不自足：{chain['doc_gaps']}")
+        if chain.get("rendered_gaps"):
+            problems.append(f"{fid} 渲染文本未带实例值：{chain['rendered_gaps']}")
     return problems
 
 
@@ -496,6 +522,301 @@ class ProtocolStub:
                                    f"打印 {PROTO_LINE}<json> 行"),
             "stop_rule": "四动作链完成即停",
         }
+
+
+# ---------------------------------------------------------------------------
+# 自足性探针 actor（N-12 子项二）：只读**渲染后的公开文本**，不认识参考解
+# ---------------------------------------------------------------------------
+
+
+def _sections(text: str) -> "dict[str, list[str]]":
+    """按 ``### 标题`` 切块（标题原样保序）。"""
+    out: "dict[str, list[str]]" = {}
+    cur = ""
+    for line in text.splitlines():
+        if line.startswith("### "):
+            cur = line[4:].strip()
+            out.setdefault(cur, [])
+        elif cur:
+            out[cur].append(line)
+    return out
+
+
+def _section(sections: "dict[str, list[str]]", prefix: str) -> "list[str] | None":
+    for title, lines in sections.items():
+        if title.startswith(prefix):
+            return lines
+    return None
+
+
+def _bullets(lines: Sequence[str]) -> "list[tuple[str, str]]":
+    """``* 名字：说明`` → [(名字, 说明)]；只收标识符名，顺序按出现。
+
+    同一节里还夹着 ``* cells 规则：…``、``* 本实例的参数取值：…``、``* delta
+    必须逐字等于 …`` 这类说明行；字段名的形态是**标识符**，据此把它们排除，
+    免得把说明行误当必填字段。
+    """
+    out: "list[tuple[str, str]]" = []
+    for line in lines:
+        raw = line.strip()
+        if not raw.startswith("* "):
+            continue
+        body = raw[2:]
+        if "：" not in body:
+            continue
+        name, desc = body.split("：", 1)
+        name = name.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            continue
+        out.append((name, desc.strip()))
+    return out
+
+
+@dataclass(frozen=True)
+class ProbeView:
+    """探针从渲染文本里解析出的全部实例事实（没有第二处来源）。"""
+    nonce: str
+    stat_key: str
+    values: "dict[str, Any]"
+    delta: "float | None"
+    action_order: "tuple[str, ...]"
+    prereg_fields: "tuple[str, ...]"
+    submit_fields: "tuple[str, ...]"
+    data_path: str
+    data_keys: "tuple[str, ...]"
+    stat_rule: str
+    out_path: str
+    print_line: str
+    obs_key: str
+
+
+def parse_rendered(system: str) -> ProbeView:
+    """只从候选可见 system 文本抽取实例事实；抽不到就逐条报缺。
+
+    这是「公开信息是否充分」的**行为级**检验：探针没有 fixture 对象，拿不到
+    nonce/参数/源码模板，一切必须来自文本。
+    """
+    gaps: "list[str]" = []
+    iface: "dict[str, Any]" = {}
+    values: "dict[str, Any]" = {}
+    delta: "float | None" = None
+    order: "list[str]" = []
+    for line in (system or "").splitlines():
+        line = line.strip()
+        if line.startswith("公开接口："):
+            try:
+                iface = json.loads(line[len("公开接口："):])
+            except ValueError:
+                gaps.append("公开接口 JSON 不可解析")
+        elif line.startswith("* 本实例的参数取值："):
+            try:
+                values = json.loads(line[len("* 本实例的参数取值："):])
+            except ValueError:
+                gaps.append("本实例参数取值 JSON 不可解析")
+        elif line.startswith("* delta 必须逐字等于"):
+            raw = line.split("等于", 1)[-1].strip()
+            try:
+                delta = float(raw)
+            except ValueError:
+                gaps.append("delta 不可解析")
+        elif re.match(r"^\d\)\s", line):
+            m = re.search(r'"action"\s*:\s*"([a-z_]+)"', line)
+            if m:
+                order.append(m.group(1))
+    proto = (iface or {}).get("protocol") or {}
+    if not order:
+        order = [str(x) for x in proto.get("action_order") or []]
+    if not order:
+        gaps.append("动作顺序（动作协议编号行或 interface.protocol.action_order）")
+    if not values:
+        gaps.append("本实例参数取值")
+    sections = _sections(system or "")
+    prereg = _section(sections, "preregister 的 plan 必填字段")
+    submit = _section(sections, "submit 必填字段")
+    analyze = _section(sections, "analyze 契约")
+    prereg_fields = tuple(n for n, _ in _bullets(prereg or []))
+    submit_fields = tuple(n for n, _ in _bullets(submit or []))
+    for label, names, required in (("prereg", prereg_fields, PREREG_REQUIRED),
+                                   ("submit", submit_fields, SUBMIT_REQUIRED)):
+        absent = [k for k in required if k not in names]
+        if absent:
+            gaps.append(f"{label} 渲染文本缺必填字段 {absent}")
+
+    data_path = out_path = print_line = stat_rule = ""
+    data_keys: "tuple[str, ...]" = ()
+    payload_names: "list[str]" = []
+    for raw in (analyze or []):
+        line = raw.strip()
+        if not line.startswith("* "):
+            continue
+        body = line[2:]
+        if body.startswith("容器内数据文件："):
+            data_path = body.split("：", 1)[1].split("（", 1)[0].strip()
+        elif body.startswith("数据文件键："):
+            data_keys = tuple(x.strip() for x in
+                              body.split("：", 1)[1].replace("、", ",").split(",")
+                              if x.strip())
+        elif body.startswith("统计算法："):
+            stat_rule = body.split("：", 1)[1].strip()
+        elif body.startswith("分析产物写到："):
+            out_path = body.split("：", 1)[1].strip()
+        elif body.startswith("必须向 stdout 打印一行："):
+            print_line = body.split("：", 1)[1].strip()
+        else:
+            m = re.match(r"^(.*) 里的 ([A-Za-z_][A-Za-z0-9_]*)：", body)
+            if m:
+                payload_names.append(m.group(2))
+    if not data_path:
+        gaps.append("容器内数据文件路径")
+    if not print_line:
+        gaps.append("stdout 打印行格式")
+    if not out_path:
+        gaps.append("分析产物路径")
+    if not stat_rule:
+        gaps.append("统计算法")
+    absent_payload = [k for k in ANALYZE_PAYLOAD_FIELDS
+                      if k not in payload_names]
+    if absent_payload:
+        gaps.append(f"打印行载荷字段 {absent_payload}")
+    m = re.search(r"max\(abs\((\w+?)(?:_i)?\)\)", stat_rule or "")
+    if not m:
+        gaps.append("统计规则不可解析（需要形如 max(abs(x_i)) 的写法）")
+    if gaps:
+        raise ProtocolError(f"渲染文本不足以驱动探针：{sorted(set(gaps))}")
+    return ProbeView(
+        nonce=str(proto.get("nonce") or ""),
+        stat_key=str(proto.get("stat_key") or ""),
+        values=dict(values), delta=delta, action_order=tuple(order),
+        prereg_fields=prereg_fields, submit_fields=submit_fields,
+        data_path=data_path, data_keys=data_keys, stat_rule=stat_rule,
+        out_path=out_path, print_line=print_line,
+        obs_key=m.group(1))
+
+
+class ProbeActor:
+    """只读渲染文本的四动作 actor（自足性探针，不是能力测量）。
+
+    与 ``ProtocolStub`` 的分界：Stub 手里握着 ``ProtocolFixture``，nonce、参数、
+    analyze 源码模板都是现成的，于是它证明不了「公开文本够不够用」。本 actor
+    在**第一次被调用时**才从 ``request.system`` 解析实例事实（``parse_rendered``），
+    解析不出即 ``ProtocolError``——预演阶段就暴露，而不是花真实 POST 才发现。
+    唯一保留的先验是字段的**语义**（plan 里 question/h/cells 各是什么），这属于
+    任何候选的常识，不属于本 fixture 的私有真值。
+    """
+
+    def __init__(self) -> None:
+        self.view: "ProbeView | None" = None
+        self.requests: "list[M.Request]" = []
+        self.results: "list[dict[str, Any]]" = []
+        self.decisions: "list[dict[str, Any]]" = []
+
+    # -- 动作 -------------------------------------------------------------
+
+    def _source(self) -> str:
+        v = self.view
+        assert v is not None
+        glob_pat = re.sub(r"<run_id>", "*", v.data_path)
+        line = v.print_line.split("<json>")[0] if "<json>" in v.print_line \
+            else v.print_line + " "
+        if v.data_keys and v.obs_key not in v.data_keys:
+            # 统计规则指向的观测列必须在文档声明的数据键里；否则探针写出的源码
+            # 与「公开的数据布局」自相矛盾。
+            raise ProtocolError(
+                f"统计规则要求观测列 {v.obs_key!r}，但公开数据键是 {v.data_keys}")
+        return "\n".join([
+            "import glob, json",
+            f"NONCE = {v.nonce!r}",
+            "docs = []",
+            f"for path in sorted(glob.glob({glob_pat!r})):",
+            "    with open(path, 'r', encoding='utf-8') as fh:",
+            "        docs.append(json.load(fh))",
+            "stat = None",
+            "run_ids = []",
+            "for doc in docs:",
+            "    run_ids.append(doc['run_id'])",
+            f"    if doc.get({v.obs_key!r}):",
+            f"        value = max(abs(v) for v in doc[{v.obs_key!r}])",
+            "        stat = value if stat is None else max(stat, value)",
+            "payload = {'nonce': NONCE, 'stat': stat, 'run_ids': sorted(run_ids)}",
+            f"with open({v.out_path!r}, 'w', encoding='utf-8') as fh:",
+            "    json.dump(payload, fh, sort_keys=True)",
+            f"print({line!r} + json.dumps(payload, sort_keys=True))",
+        ])
+
+    def _plan(self) -> "dict[str, Any]":
+        v = self.view
+        assert v is not None
+        body = {
+            "question": "这一次实验里给定参数下观测量是多少",
+            "h": 1,
+            "cells": [dict(v.values)],
+            "metric": "本链的全部 run 的核心统计（见 analyze）",
+            "formula_version": "probe/derived-from-text",
+            "delta": float(v.delta if v.delta is not None else S.DELTA),
+            "censoring_rule": "无删失；实验失败或未产生观测记 INCONCLUSIVE",
+            "analysis_procedure": f"打印 {v.print_line} 一行",
+            "stop_rule": "四动作链完成即停",
+        }
+        unknown = [k for k in v.prereg_fields if k not in body]
+        if unknown:
+            # 文档要求一个探针产不出的字段 ⇒ 自足性不成立（不是探针能力问题）：
+            # 公开材料把「宿主私有语义」写进了必填面。
+            raise ProtocolError(f"公开文档要求了无法从文本推导的 plan 字段 {unknown}")
+        return {k: body[k] for k in v.prereg_fields if k in body}
+
+    def _decide(self) -> "dict[str, Any]":
+        v = self.view
+        assert v is not None
+        res = self.results
+        done = {r.get("action") for r in res if r.get("ok")}
+        if "preregister" not in done:
+            return {"schema": S.SCHEMA_ACTION, "action": "preregister",
+                    "plan": self._plan()}
+        if "run_experiment" not in done:
+            return {"schema": S.SCHEMA_ACTION, "action": "run_experiment",
+                    "params": dict(v.values)}
+        run = [r for r in res if r.get("action") == "run_experiment" and r.get("ok")]
+        if "analyze" not in done:
+            return {"schema": S.SCHEMA_ACTION, "action": "analyze",
+                    "source": self._source(), "run_ids": [str(run[0]["run_id"])]}
+        ana = [r for r in res if r.get("action") == "analyze" and r.get("ok")]
+        analysis = ana[0].get("analysis") or {}
+        payload = _parse_proto_line(str(analysis.get("stdout_preview") or ""))
+        return {"schema": S.SCHEMA_ACTION, "action": "submit",
+                "claim": S.ClaimStatus.SUPPORTED,
+                "run_ids": [str(run[0]["run_id"])],
+                "analysis_ids": [str(analysis.get("analysis_id"))],
+                "nonce": v.nonce,
+                "stat": payload.get("stat"),
+                "stat_key": v.stat_key}
+
+    # -- 调用 -------------------------------------------------------------
+
+    def __call__(self, request: M.Request) -> CD.Reply:
+        self.requests.append(request)
+        if self.view is None:
+            self.view = parse_rendered(request.system)
+        n = _turn_count(request.messages)
+        if n > len(self.results):
+            last = request.messages[-1] if request.messages else {}
+            raw = str(last.get("content") or "")
+            try:
+                doc = json.loads(raw)
+            except ValueError:
+                doc = {"raw_error": raw[:200]}
+            self.results.append(doc if isinstance(doc, dict) else {})
+        if n != len(self.results):
+            raise ProtocolError(f"轮次计数漂移：turns={n} results={len(self.results)}")
+        text = json.dumps(self._decide(), ensure_ascii=False, sort_keys=True)
+        self.decisions.append({"turn": n, "text_sha256":
+                               hashlib.sha256(text.encode()).hexdigest()[:16]})
+        return CD.Reply(text=text, capture={
+            "usage": {"in": 1000, "out": 200, "cache_read": 0, "cache_create": 0},
+            "attempts_http": 1, "stop_reason": "stop",
+            "provider_model": "protocol_probe",
+            "provider_request_id": f"probe-{n}",
+            "body_sha256": "0" * 64, "content_bytes": len(text),
+            "producer": "protocol_probe_control"})
 
 
 def _turn_count(messages: Sequence[Mapping[str, str]]) -> int:

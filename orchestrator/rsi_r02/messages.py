@@ -86,6 +86,13 @@ def require_counter(counter: LocalCounter | Callable[[str], int] | None
 def action_schema_text(surface: AC.ActionSurface) -> str:
     bounds = {k: [v[0], v[1]] for k, v in sorted(surface.param_bounds.items())}
     fixed = {k: v for k, v in sorted(surface.fixed_params.items())}
+    # N-12 子项一（2026-11-10 R0.2 结案尾债）：以前这里只印 ``固定参数：{"timestep": …}``，
+    # 却从未说「不要写进 params」。候选照抄了它就触发 ACTION_UNAUTHORIZED_KEY，而这是
+    # 终态策略违规——公开文本把宿主注入项印进行动协议段且不给禁令，是仪器侧的
+    # but-for 贡献。白名单直接取动作验证器的唯一真值 ``param_bounds``（见
+    # ``rsi_r01.actions._parse_run_params``：``illegal = set(raw) - set(bounds)``），
+    # 不另抄一份字面量，避免门禁与渲染漂移。
+    allowed = sorted(surface.param_bounds)
     return "\n".join([
         "### 动作协议（每次回复只允许一条 JSON 对象，不要解释文字）",
         f'每条动作必须带 "schema": "{S.SCHEMA_ACTION}"。',
@@ -99,12 +106,18 @@ def action_schema_text(surface: AC.ActionSurface) -> str:
         "必填字段逐字见任务说明 public.submit.required_fields。",
         "",
         f"参数合法区间：{json.dumps(bounds, ensure_ascii=False, sort_keys=True)}",
-        f"固定参数：{json.dumps(fixed, ensure_ascii=False, sort_keys=True)}",
+        ("固定参数（**由宿主自动注入，禁止写进 params**；写进去即终态策略违规）："
+         f"{json.dumps(fixed, ensure_ascii=False, sort_keys=True)}"),
+        (f"params 允许的键**仅有**这些（多写一个键即终态策略违规）："
+         f"{json.dumps(allowed, ensure_ascii=False)}"),
         f"单次实验步数上限：{surface.max_steps}",
         "",
         "### 边界",
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
-        "* 每次回复恰好一个动作；动作失败会以结构化错误返回，你可以在剩余预算内自行修正。",
+        "* 每次回复恰好一个动作。**格式类失败**（JSON 写坏、缺字段、类型不符）会以结构化"
+        "错误返回，你可以在剩余预算内自行修正——但仅限这一类。",
+        "* **策略违规是终态，没有修正机会**：params 里出现上面白名单之外的键、数值越界、"
+        "动作跳步或重排、重复登记，本次实验链立即终止，后续动作一律不再接受。",
         "* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符都会被拒，"
         "请照抄字段名，不要自创字段。",
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
@@ -193,6 +206,104 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
 # ---------------------------------------------------------------------------
 # 历史压缩与请求构造
 # ---------------------------------------------------------------------------
+
+
+def _spellings(value: Any) -> "set[str]":
+    """一个值在文本里**可能**的合法写法（数值/字符串都算）。
+
+    模板用 f-string 印 float、用 json.dumps 印 dict，两种写法对同一数值可能不同
+    （``0.002`` vs ``0.0020``）。比对用「任一写法逐字出现」，避免把渲染格式差异
+    误报成自足性缺口。
+    """
+    out: "set[str]" = {str(value)}
+    try:
+        out.add(json.dumps(value, ensure_ascii=False))
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float):
+        out.add(repr(value))
+    return {s for s in out if s}
+
+
+def rendered_gaps(rendered: str, public_doc: Mapping[str, Any]) -> "list[str]":
+    """候选可见文本是否**逐字**带着判据要用的实例值（N-12 子项三，2026-11-10）。
+
+    ``protocol_fixture.doc_gaps`` 只证明文档 dict 里有这些块；候选唯一的输入
+    通道却是本模块 ``build_system`` 的**渲染文本**。两者之间掉一段（块在 dict
+    里、渲染时被丢掉）会让「候选没做到」与「宿主没说」无法区分。本函数从文档
+    取值，到渲染文本里逐字找；缺失即报 gap，空列表才算自足。
+
+    与 ``doc_gaps`` 分工：那个查「文档块结构」，这个查「渲染后实例值是否在场」。
+    """
+    pub = (public_doc or {}).get("public") or {}
+    iface = pub.get("interface") or {}
+    proto = iface.get("protocol") or {}
+    gaps: "list[str]" = []
+    if not proto:
+        # 非协议 trial（开发/能力族）的文档本来就没有协议块：本检查不适用。
+        # 「协议文档丢了协议块」由 protocol_fixture.doc_gaps 在合同/预演期拦下。
+        return gaps
+
+    def need(value: Any, label: str) -> None:
+        if not any(s in rendered for s in _spellings(value)):
+            gaps.append(label)
+
+    need(public_doc.get("instance_id"), "instance_id")
+    for key in iface.get("keys") or []:
+        need(key, f"interface.keys.{key}")
+    need(proto.get("nonce"), "interface.protocol.nonce")
+    need(proto.get("stat_key"), "interface.protocol.stat_key")
+    need(proto.get("analyze_line"), "interface.protocol.analyze_line")
+    for name in proto.get("action_order") or []:
+        need(name, f"interface.protocol.action_order.{name}")
+    prereg = pub.get("prereg") or {}
+    for name in prereg.get("required_fields") or {}:
+        need(name, f"public.prereg.required_fields.{name}")
+    if prereg.get("delta_fixed") is not None:
+        need(prereg["delta_fixed"], "public.prereg.delta_fixed")
+    values = prereg.get("values") or {}
+    if not values:
+        # 计划里的 cells 必须取实例参数；渲染文本没有取值，候选只能编（票一事故）。
+        gaps.append("public.prereg.values 缺失")
+    for name, value in values.items():
+        need(name, f"public.prereg.values.{name}")
+        need(value, f"public.prereg.values.{name}.值")
+    for name in (pub.get("submit") or {}).get("required_fields") or {}:
+        need(name, f"public.submit.required_fields.{name}")
+    analyze = pub.get("analyze") or {}
+    for lit in analyze.get("source_must_contain") or []:
+        need(lit, f"public.analyze.source_must_contain.{lit}")
+    need(analyze.get("prints_line"), "public.analyze.prints_line")
+    for name in analyze.get("payload_fields") or {}:
+        need(name, f"public.analyze.payload_fields.{name}")
+    need(analyze.get("output"), "public.analyze.output")
+    data = analyze.get("data") or {}
+    need(data.get("path"), "public.analyze.data.path")
+    for key in data.get("keys") or []:
+        need(key, f"public.analyze.data.keys.{key}")
+    need(data.get("stat_rule"), "public.analyze.data.stat_rule")
+    return gaps
+
+
+def surface_from_doc(public_doc: Mapping[str, Any]) -> "AC.ActionSurface":
+    """仅凭公开文档重建动作面（供离线自足性检查用，不参与真实运行）。
+
+    真实 trial 的 surface 由 ``rsi_r01.trial.action_surface(instance)`` 给出；
+    这里只是让「文档 → 渲染文本」这条路可以在没有实例的情况下被机判走到。
+    白名单口径与验证器一致：``interface.keys`` + ``steps``。
+    """
+    iface = ((public_doc or {}).get("public") or {}).get("interface") or {}
+    limits = iface.get("limits") or {}
+    bounds: "dict[str, tuple[float, float]]" = {}
+    for key in iface.get("keys") or []:
+        lo_hi = limits.get(key)
+        bounds[str(key)] = (float(lo_hi[0]), float(lo_hi[1])) if lo_hi \
+            else (0.0, 0.0)
+    bounds["steps"] = (1.0, float(iface.get("steps_max") or S.N_STEPS))
+    return AC.ActionSurface(kind=str(iface.get("kind") or "push_control"),
+                            param_bounds=bounds,
+                            fixed_params={}, max_steps=int(iface.get("steps_max")
+                                                          or S.N_STEPS))
 
 
 def summarize_event(evt: Mapping[str, Any]) -> str:

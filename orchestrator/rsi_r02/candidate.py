@@ -235,6 +235,13 @@ class CandidateLoop:
         self.config = config
         self._count = M.require_counter(counter)
         self.system = M.build_system(self.public_doc, trial.surface)
+        # N-12 子项三的运行期闸：候选唯一的输入通道就是这份 system 文本，所以
+        # 「判据要用的实例值是否逐字在文本里」必须在这里 fail-closed——非空即
+        # 拒绝起跑（零 POST），而不是花真实调用后再说「模型没做到」。
+        gaps = M.rendered_gaps(self.system, self.public_doc)
+        if gaps:
+            raise CandidateError(
+                f"候选可见文本不自足：{gaps}（零 POST 拒跑，先修公开文档/渲染）")
         self._turns: "list[M.Turn]" = []
 
     # -- 运行 -------------------------------------------------------------
