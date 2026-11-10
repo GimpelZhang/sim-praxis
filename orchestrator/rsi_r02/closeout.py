@@ -174,7 +174,9 @@ def read_facts(ctx: C.CampaignContext) -> "dict[str, Any]":
               "hidden_retry": codes.count("HIDDEN_RETRY"),
               "contamination": codes.count(ST.EV_CONTAMINATION),
               "freeze_invalid": codes.count(ST.EV_FREEZE_INVALID),
-              "budget_hit": codes.count(ST.EV_BUDGET_HIT)}
+              "budget_hit": codes.count(ST.EV_BUDGET_HIT),
+              # §7「发网前阻断单列零POST」：与 UNKNOWN_SENT 分列，结案不得混算。
+              "preflight_blocked": codes.count(ST.EV_PREFLIGHT_BLOCKED)}
     cancelled_slots: "list[str]" = []
     if slot_book is not None:
         cancelled_slots = [sid for sid in slot_book.ids()

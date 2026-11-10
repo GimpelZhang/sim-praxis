@@ -87,6 +87,7 @@ EV_COST_UNKNOWN = "COST_UNKNOWN"
 EV_TOOL_OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"
 EV_FREEZE_INVALID = "FREEZE_INVALID"
 EV_BUDGET_HIT = "BLOCKED_BUDGET"
+EV_PREFLIGHT_BLOCKED = "PREFLIGHT_BLOCKED"
 EV_ABORTED = "ABORTED"
 
 
@@ -265,6 +266,24 @@ class SlotBook:
             raise StateError("取消必须给理由（§10.2 保留分母且可解释）")
         with self._lock():
             slot = self._transition(slot_id, allowed_from=(SLOT_UNUSED,),
+                                    status=SLOT_CANCELLED, reason=reason,
+                                    call_id=None, trial_id=None)
+            self._save()
+            return dict(slot)
+
+    def release_claimed(self, slot_id: str, *, reason: str) -> Mapping[str, Any]:
+        """发网前拦截的**已占**槽：``SENT → CANCELLED_WITH_REASON``（零 POST）。
+
+        intent/预留先于发送落盘（崩溃安全），所以网关 preflight 拒绝时槽已经
+        是 SENT。此时既不能回到 UNUSED（同槽不可再发，分母保留），也不能记
+        FAIL（那会把「一个字节都没发」冒充成「已发送且失败」，违反 §7
+        「发网前阻断单列零POST」）——按 CANCELLED_WITH_REASON 收口，原因逐字
+        保留，结案按 reason 前缀分列 preflight。
+        """
+        if not reason.strip():
+            raise StateError("取消必须给理由")
+        with self._lock():
+            slot = self._transition(slot_id, allowed_from=(SLOT_SENT,),
                                     status=SLOT_CANCELLED, reason=reason,
                                     call_id=None, trial_id=None)
             self._save()

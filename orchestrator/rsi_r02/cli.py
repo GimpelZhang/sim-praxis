@@ -57,29 +57,104 @@ def make_trial(ctx: C.CampaignContext, spec: SG.TrialSpec, *,
                        trial_id=spec.trial_id, gpus=gpus)
 
 
-def make_paid_caller(*, tokenizer_path: str, tokenizer_sha256: str,
-                     batch_id: str, task: int = 0, thread_id: str = ""
-                     ) -> "tuple[CD.GatewayCaller, M.LocalCounter]":
-    """唯一的付费入口：ModelGateway 单试、namespace 2902、钉死分词器、显式记账归属。
-
-    ``batch_id`` **没有缺省值**：T4 首跑（2026-11-10）忘了把 billing_context 包住
-    实呼，八槽里第一槽已 claim、那次 POST 记为 UNKNOWN_SENT，整条协议链作废。
-    付费入口因此改为必须显式给出批次归属；缺省即拒绝，不给「裸跑」留路径。
-    """
+def _paid_gateway(*, task: int, batch_id: str) -> "CD.GatewayCaller":
+    """单个「任务×批次」归属的付费网关（构造期硬前置与以前逐字相同）。"""
     from orchestrator.common.runtime_paths import rsi_r02_gateway_state_path
     from orchestrator.gateway.quota_ledger import QuotaLedger
     from orchestrator.gateway.router import ModelGateway
 
     if not str(batch_id or "").strip():
         raise CliError("付费入口必须给出批次 id（billing_context 归属）；缺省即拒绝")
-    counter = M.LocalCounter.load(tokenizer_path, tokenizer_sha256)
     gateway = ModelGateway(ledger=QuotaLedger.rsi_r02(), max_attempts=1,
                            pause_state_path=rsi_r02_gateway_state_path())
-    caller = CD.GatewayCaller(gateway=gateway,
-                              billing={"task": int(task),
-                                       "batch_id": str(batch_id),
-                                       "thread_id": str(thread_id)})
-    return caller, counter
+    return CD.GatewayCaller(gateway=gateway,
+                            billing={"task": int(task),
+                                     "batch_id": str(batch_id),
+                                     "thread_id": ""})
+
+
+def make_paid_caller(*, tokenizer_path: str, tokenizer_sha256: str,
+                     batch_id: str, task: int = 0
+                     ) -> "tuple[CD.GatewayCaller, M.LocalCounter]":
+    """唯一的付费入口：ModelGateway 单试、namespace 2902、钉死分词器、显式记账归属。
+
+    ``batch_id`` **没有缺省值**：T4 首跑（2026-11-10）忘了把 billing_context 包住
+    实呼，八槽里第一槽已 claim、那次 POST 记为 UNKNOWN_SENT，整条协议链作废。
+    付费入口因此改为必须显式给出批次归属；缺省即拒绝，不给「裸跑」留路径。
+
+    2026-11-10 T5 首启事故后：``task`` 只对协议链有意义（task=0）。开发/验证
+    必须**按族**记任务（:data:`TASK_OF_FAMILY`），由 :func:`_cmd_run` 用
+    :func:`make_phase_callers` 逐族构造——默认 0 只保留给协议脚本自己的显式调用。
+    """
+    if not str(batch_id or "").strip():
+        raise CliError("付费入口必须给出批次 id（billing_context 归属）；缺省即拒绝")
+    counter = M.LocalCounter.load(tokenizer_path, tokenizer_sha256)
+    return _paid_gateway(task=task, batch_id=batch_id), counter
+
+
+#: 计划 §7「family 帽 E/D/R 各 72，协议 8」对应的任务号（R0/R0.1 同口径）。
+TASK_OF_FAMILY = {"E": 1, "D": 2, "R": 3}
+
+
+def parse_family_batches(raw: str) -> "dict[str, str]":
+    """``E=<batch>,D=<batch>,R=<batch>`` → ``{family: batch_id}``（缺一即拒绝）。
+
+    每个批次凭据只带一个 task，而三个族记三个不同 task，所以一个 ``--batch-id``
+    无法覆盖整阶段——T5 首启正是因为三族共用 task 0 的批次，第 5 次就被
+    ``task_hard_cap`` 拦下。这里不给「一个 id 通用」留路径：缺族/多族/空值全拒绝。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        raise CliError("--batch-id 必须给出按族映射：E=<id>,D=<id>,R=<id>")
+    out: "dict[str, str]" = {}
+    for part in text.split(","):
+        piece = part.strip()
+        if not piece:
+            raise CliError(f"--batch-id 映射含空项：{text!r}")
+        if "=" not in piece:
+            raise CliError(
+                "付费阶段必须按族给批次：E=<id>,D=<id>,R=<id>"
+                f"（收到 {piece!r}；三族记不同 task，单一批次无法通用）")
+        fam, _, batch = piece.partition("=")
+        fam, batch = fam.strip().upper(), batch.strip()
+        if fam not in TASK_OF_FAMILY:
+            raise CliError(f"--batch-id 未知族 {fam!r}（只允许 E/D/R）")
+        if not batch:
+            raise CliError(f"--batch-id 族 {fam} 的批次 id 为空")
+        if fam in out:
+            raise CliError(f"--batch-id 族 {fam} 重复出现")
+        out[fam] = batch
+    missing = sorted(set(TASK_OF_FAMILY) - set(out))
+    if missing:
+        raise CliError(f"--batch-id 缺族：{missing}（三族都必须给批次）")
+    return out
+
+
+def make_phase_callers(family_batches: Mapping[str, str], *,
+                       tokenizer_path: str, tokenizer_sha256: str
+                       ) -> "tuple[Callable[[SG.TrialSpec], CD.GatewayCaller], M.LocalCounter]":
+    """按族构造付费 caller（task=1/2/3，批次按族取），共用同一个本地计数器。"""
+    missing = sorted(set(TASK_OF_FAMILY) - set(family_batches or {}))
+    if missing:
+        raise CliError(f"缺族批次：{missing}（三族都必须给批次，缺一即拒绝）")
+    for fam in sorted(TASK_OF_FAMILY):
+        if not str(family_batches.get(fam) or "").strip():
+            raise CliError(f"族 {fam} 的批次 id 为空")
+    counter = M.LocalCounter.load(tokenizer_path, tokenizer_sha256)
+    cache: "dict[str, CD.GatewayCaller]" = {}
+
+    def caller_for(spec: SG.TrialSpec) -> CD.GatewayCaller:
+        fam = spec.family
+        if fam not in TASK_OF_FAMILY:
+            raise CliError(f"未知族 {fam!r}：无法确定 task 归属")
+        if fam not in cache:
+            batch = family_batches.get(fam)
+            if not batch:
+                raise CliError(f"族 {fam} 没有批次凭据（三族都必须给）")
+            cache[fam] = _paid_gateway(task=TASK_OF_FAMILY[fam], batch_id=batch)
+        return cache[fam]
+
+    return caller_for, counter
 
 
 # ---------------------------------------------------------------------------
@@ -250,12 +325,20 @@ def _stop_of(out: Mapping[str, Any]) -> "str | None":
 
 
 def run_phase(ctx: C.CampaignContext, phase: str, *,
-              call_model: Callable[[M.Request], CD.Reply],
+              call_model: "Callable[[M.Request], CD.Reply] | None" = None,
+              call_model_for: "Callable[[SG.TrialSpec], Callable[[M.Request], CD.Reply]] | None" = None,
               counter: Any, trial_factory: Callable[..., Any] = make_trial,
               trial: Any = None, gpus: bool = False,
               config: "CD.LoopConfig | None" = None,
               gate: bool = True) -> "dict[str, Any]":
-    """固定顺序跑完（或停住）一个阶段；返回逐 trial 结果与停因。"""
+    """固定顺序跑完（或停住）一个阶段；返回逐 trial 结果与停因。
+
+    ``call_model_for(spec)`` 优先于固定的 ``call_model``：付费入口必须按族
+    决定 task/批次归属（E/D/R ⇒ task 1/2/3），一个全局 caller 覆盖不了整阶段。
+    两者都没给即拒绝——不留「顺手用错归属」的默认。
+    """
+    if call_model is None and call_model_for is None:
+        raise CliError("run_phase 需要 call_model 或 call_model_for（付费归属不可缺省）")
     specs = SG.specs_for(phase)
     if phase == "validation" and gate:
         require_gv(ctx)
@@ -274,7 +357,10 @@ def run_phase(ctx: C.CampaignContext, phase: str, *,
         if camp.paused:
             stop = f"campaign_paused: {camp.pause_reason()}"
             break
-        out = run_trial(ctx, spec, call_model=call_model, counter=counter,
+        out = run_trial(ctx, spec,
+                        call_model=(call_model_for(spec) if call_model_for
+                                    else call_model),
+                        counter=counter,
                         trial=trial, gpus=gpus, config=config,
                         campaign=camp, trial_factory=trial_factory)
         results.append(out)
@@ -450,11 +536,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         raise CliError("付费运行需要 --tokenizer 与 --tokenizer-sha256")
     if not args.batch_id:
         raise CliError("付费运行需要 --batch-id（billing_context 归属；批次凭据按它取）")
-    caller, counter = make_paid_caller(tokenizer_path=args.tokenizer,
-                                       tokenizer_sha256=args.tokenizer_sha256,
-                                       batch_id=args.batch_id)
-    out = run_phase(ctx, args.phase, call_model=caller, counter=counter,
-                    gpus=args.gpus)
+    family_batches = parse_family_batches(args.batch_id)
+    caller_for, counter = make_phase_callers(
+        family_batches, tokenizer_path=args.tokenizer,
+        tokenizer_sha256=args.tokenizer_sha256)
+    out = run_phase(ctx, args.phase, call_model_for=caller_for,
+                    counter=counter, gpus=args.gpus)
     _emit(out, as_json=True)
     return EXIT_OK if out["completed"] else EXIT_REFUSED
 
@@ -489,7 +576,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tokenizer", default=None)
     p.add_argument("--tokenizer-sha256", default=None)
     p.add_argument("--batch-id", default=None,
-                   help="批次凭据 id（billing_context 归属；付费运行必填）")
+                   help="按族批次映射：E=<id>,D=<id>,R=<id>（三族记不同 task，"
+                        "单一批次无法通用）")
     p.add_argument("--cap-usd", type=float, default=B.USD_CAP)
     p.add_argument("--gpus", action="store_true")
     p.set_defaults(func=_cmd_run)

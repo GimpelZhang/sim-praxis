@@ -298,3 +298,71 @@ def test_gateway_caller_passes_system_and_capture():
     assert seen["messages"][0] == {"role": "system", "content": "SYS"}
     assert seen["messages"][1]["content"] == "hi"
     assert seen["max_tokens"] == 8192
+
+
+# ---- 发网前阻断（§7「发网前阻断单列零POST」；2026-11-10 T5 首启事故回归） ----
+
+
+def _presend(reason: str, **trigger: Any):
+    from orchestrator.gateway.quota_ledger import GatewayPausedError
+    return GatewayPausedError({"status": "PAUSED_WAITING_QUOTA",
+                               "stage": "coding_debug", "reason": reason,
+                               "scope": "task", "trigger": dict(trigger),
+                               "resume_at_iso": None})
+
+
+def test_budget_preflight_block_is_zero_post_not_unknown(ctx):
+    """task 帽在**发网前**拦下：不得记成 UNKNOWN_SENT（T5 首启真实事故）。
+
+    事实链：ledger 已有 ``preflight_blocked``（seq=null，占批不占实呼），所以
+    trial 侧只能补零 POST 的对应事实——预留按 $0 释放、已占槽按 CANCELLED 收口、
+    剩余槽按 §10.2「帽触及⇒取消剩余槽」取消，且**不得**触发费用 UNKNOWN 暂停。
+    """
+    loop, model, store, journal, slots, book = H.build_loop(
+        ctx, slot_ids=["E-dev-01", "E-dev-02", "E-dev-03"],
+        replies=[RUN, _presend("task_hard_cap", task=1, task_used=72,
+                               task_hard_cap=72)],
+        with_campaign_state=True)
+    out = loop.run()
+
+    assert out["outcome"] == "preflight_blocked"
+    assert out["status"] == ST.TRIAL_BLOCKED
+    assert out["reason_code"] == ST.EV_BUDGET_HIT
+    assert out["posts_sent"] == 1 and out["turns"] == 1
+    # 已占但零 POST 的槽：CANCELLED_WITH_REASON，不是 FAIL/UNKNOWN
+    assert slots.status("E-dev-02") == ST.SLOT_CANCELLED
+    assert "PREFLIGHT_BLOCKED" in slots.get("E-dev-02")["reason"]
+    assert slots.status("E-dev-03") == ST.SLOT_CANCELLED   # 帽触及⇒取消剩余槽
+    # 预留按 $0 结清（零 POST 零费用），不挂 UNKNOWN
+    rec = book.record("E1-dev::E-dev-02")
+    assert rec.status == B.STATUS_SETTLED and rec.settled_usd == 0.0
+    assert rec.cost_status == B.COST_EXACT
+    assert "PREFLIGHT_BLOCKED" in (rec.failure or "")
+    # 费用账没有 UNKNOWN、没有全局费用暂停
+    assert book.pause_reason() is None
+    assert "unknown" not in [r.status for r in book.records()]
+    # journal 里是 BLOCKED_BUDGET，不是 UNKNOWN_SENT
+    codes = [e.get("code") for e in journal.events if e.get("code")]
+    assert ST.EV_BUDGET_HIT in codes and ST.EV_UNKNOWN_SENT not in codes
+    ev = [e for e in journal.events if e.get("code") == ST.EV_BUDGET_HIT][0]
+    assert ev["payload"]["sent_state"] == "NOT_SENT"
+    assert ev["payload"]["call_id"] == "E1-dev::E-dev-02"
+    # campaign 停全部（§6.2 仪器/预算事件暂停一切）
+    camp = ST.CampaignState(ctx)
+    assert camp.paused and ST.EV_BUDGET_HIT in (camp.pause_reason() or "")
+
+
+def test_neutral_preflight_block_keeps_unused_slots(ctx):
+    """中性发网前拦截（凭据/暂停件/配置错误）只停全部，不预先烧掉剩余槽。"""
+    loop, model, store, journal, slots, book = H.build_loop(
+        ctx, slot_ids=["E-dev-01", "E-dev-02"],
+        replies=[_presend("batch_approval_missing")],
+        with_campaign_state=True)
+    out = loop.run()
+    assert out["outcome"] == "preflight_blocked"
+    assert out["reason_code"] == ST.EV_PREFLIGHT_BLOCKED
+    assert out["posts_sent"] == 0
+    assert slots.status("E-dev-01") == ST.SLOT_CANCELLED
+    assert slots.status("E-dev-02") == ST.SLOT_UNUSED    # 不取消剩余槽
+    assert book.record("E1-dev::E-dev-01").settled_usd == 0.0
+    assert ST.CampaignState(ctx).paused

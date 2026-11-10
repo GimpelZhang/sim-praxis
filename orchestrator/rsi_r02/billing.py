@@ -392,6 +392,30 @@ class BillingBook:
             self._write(new)
             return new
 
+    def release(self, *, call_id: str, reason: str) -> Record:
+        """发网前阻断（零 POST / 零费用）：释放预留并按 $0 结清，绝不记 UNKNOWN。
+
+        计划 §7「发网前阻断单列零POST」：网关在 preflight 就拒绝时本次调用
+        一个字节都没发出——响应不存在、费用为零。把它记成 UNKNOWN 会同时污染
+        费用三态（预留长期挂着）与全局暂停（迫使后续全部 trial 停机）。故单列
+        本入口，只允许 ``PENDING → SETTLED(0.0/EXACT)``，原因逐字保留在
+        ``failure`` 供结案机判重算。
+        """
+        if not str(reason or "").strip():
+            raise BillingError("释放预留必须写明原因（发网前阻断的 reason_code）")
+        with self._lock():
+            rec = self.record(call_id)
+            if rec.status != STATUS_PENDING:
+                raise BillingError(f"状态 {rec.status} 不可按零 POST 释放：{call_id}")
+            new = Record(call_id=rec.call_id, slot_id=rec.slot_id,
+                         reserved_usd=rec.reserved_usd, status=STATUS_SETTLED,
+                         created_at_utc=rec.created_at_utc,
+                         settled_at_utc=self._now(), settled_usd=0.0,
+                         cost_status=COST_EXACT, usage=None,
+                         failure=f"PREFLIGHT_BLOCKED: {str(reason)[:800]}")
+            self._write(new)
+            return new
+
     def mark_unknown(self, *, call_id: str, failure: str) -> Record:
         """发送状态不明：占槽、保留预留、全局暂停（不重发）。"""
         with self._lock():

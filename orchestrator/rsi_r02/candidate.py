@@ -47,6 +47,41 @@ class CandidateError(RuntimeError):
     """配置/协议前提被破坏（不是模型能力结论）。"""
 
 
+#: 账本熔断原因里属于「预算帽」的一类：它们同样是**发网前**拒绝（零 POST），
+#: 但语义上要落 ``BLOCKED_BUDGET`` 而不是中性的 ``PREFLIGHT_BLOCKED``（§10.2
+#: 「全局费用/资源帽触及 ⇒ BLOCKED_BUDGET，覆盖不足」）。
+BUDGET_PAUSE_REASONS = frozenset({
+    "task_hard_cap", "global_hard_cap", "batch_budget_reached"})
+
+
+def presend_exception_types() -> "tuple[type[BaseException], ...]":
+    """网关**发网前**拒绝的异常族（零 POST、零费用；计划 §7 单列口径）。
+
+    这些类型全部在 ``ModelGateway.call`` 的 preflight 之前抛出——一个字节都没
+    发出、供应端无响应、费用为零。把它们并进「发送状态未知」会让一次纯粹的
+    本地拦截冒充 UNKNOWN_SENT（2026-11-10 T5 首启实测：task0 帽拦下第 5 次
+    调用，被记成 UNKNOWN，槽/预留/全局暂停全被污染）。延迟导入是因为网关模块
+    会拖入 litellm，而本模块的单测不应因此变重。
+    """
+    from orchestrator.gateway.router import (
+        GatewayPausedError, MissingGatewayCredentialError, NonRetryableError,
+        PauseStateCorruptError, StageUnresolvedError)
+    return (GatewayPausedError, PauseStateCorruptError,
+            MissingGatewayCredentialError, NonRetryableError,
+            StageUnresolvedError)
+
+
+def presend_code(exc: BaseException) -> "tuple[str, str]":
+    """发网前拒绝 → ``(journal code, reason)``；预算帽与中性拦截分开。"""
+    state = getattr(exc, "state", None)
+    reason = ""
+    if isinstance(state, Mapping):
+        reason = str(state.get("reason") or "")
+    if reason in BUDGET_PAUSE_REASONS:
+        return ST.EV_BUDGET_HIT, reason
+    return ST.EV_PREFLIGHT_BLOCKED, reason or type(exc).__name__
+
+
 # ---------------------------------------------------------------------------
 # 模型调用（唯一入口：ModelGateway；测试注入替身）
 # ---------------------------------------------------------------------------
@@ -249,7 +284,10 @@ class CandidateLoop:
 
             try:
                 reply = self.call_model(request)
-            except Exception as exc:  # noqa: BLE001 —— 发送状态未知：绝不重发
+            except Exception as exc:  # noqa: BLE001
+                if isinstance(exc, presend_exception_types()):
+                    # 发网前拒绝：零 POST、零费用。单列，绝不冒充 UNKNOWN_SENT。
+                    return self._presend_blocked(st, slot_id, call_id, exc)
                 failure = f"{type(exc).__name__}: {exc}"[:400]
                 self.billing.mark_unknown(call_id=call_id, failure=failure)
                 self.slots.settle(slot_id, status=ST.SLOT_UNKNOWN,
@@ -466,6 +504,38 @@ class CandidateLoop:
             if self.slots.status(sid) == ST.SLOT_UNUSED:
                 return sid
         return None
+
+    def _presend_blocked(self, st: ST.TrialState, slot_id: str, call_id: str,
+                         exc: BaseException) -> "dict[str, Any]":
+        """发网前拒绝的收口：预留按 $0 释放、槽按 CANCELLED 收、campaign 停全部。
+
+        计划 §7「发网前阻断单列零POST」+ §10.2「全局费用/资源帽触及 ⇒
+        BLOCKED_BUDGET，取消剩余槽；覆盖不足，不能提高本 campaign 帽」。
+        事实链：ledger 已有一行 ``preflight_blocked``（``seq=null``，占批不占
+        实呼）；这里只补 trial 侧的对应事实，不写 UNKNOWN、不占实呼。
+        """
+        code, reason = presend_code(exc)
+        detail = f"{type(exc).__name__}: {exc}"[:400]
+        self.billing.release(call_id=call_id,
+                             reason=f"{code} {reason} {detail}"[:900])
+        self.slots.release_claimed(
+            slot_id, reason=f"PREFLIGHT_BLOCKED {code} {detail}"[:400])
+        self.journal.append(
+            kind="result", trial_id=st.trial_id, action="post", slot_id=slot_id,
+            ok=False, code=code, message=detail,
+            payload={"sent_state": "NOT_SENT", "call_id": call_id,
+                     "posts_sent": st.posts_sent, "pause_reason": reason})
+        self._pause_campaign(code, f"{st.trial_id} slot={slot_id} "
+                                   f"发网前阻断（零 POST）：{detail}")
+        if code == ST.EV_BUDGET_HIT:
+            # §10.2 只有「全局费用/资源帽触及」才取消剩余槽；中性拦截
+            # （凭据缺失/暂停件/配置错误）只停全部，不预先烧掉本 trial 的槽。
+            self.slots.cancel_unused(
+                reason=f"{code}: 发网前阻断后不再发送（§10.2 取消剩余槽）",
+                prefix=self._slot_prefix())
+        self.store.transition(st, status=ST.TRIAL_BLOCKED, code=code,
+                              reason=f"发网前阻断（零 POST）：{detail}")
+        return self._summary("preflight_blocked")
 
     def _slot_prefix(self) -> str:
         if not self.slot_ids:

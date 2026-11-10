@@ -324,3 +324,211 @@ def test_assist_trial_marks_independent_false(ctx):
     out = CI.assist_trial(ctx, "E-dev", "维护者手工替换了候选分析源码")
     assert out["status"] == ST.TRIAL_ASSISTED
     assert out["independent_success"] is False
+
+
+# ---- 按族付费归属（2026-11-10 T5 首启事故：三族共用 task 0 的批次） ----
+
+
+def test_parse_family_batches_requires_all_three_families():
+    assert CI.parse_family_batches("E=a,D=b,R=c") == {"E": "a", "D": "b", "R": "c"}
+    with pytest.raises(CI.CliError):        # 单一批次无法覆盖三族
+        CI.parse_family_batches("R02-T5-dev-1")
+    with pytest.raises(CI.CliError):        # 缺族
+        CI.parse_family_batches("E=a,D=b")
+    with pytest.raises(CI.CliError):        # 未知族
+        CI.parse_family_batches("E=a,D=b,R=c,X=d")
+    with pytest.raises(CI.CliError):        # 重复族
+        CI.parse_family_batches("E=a,E=b,R=c")
+    with pytest.raises(CI.CliError):        # 空批
+        CI.parse_family_batches("E=a,D=,R=c")
+
+
+def test_task_of_family_matches_budget_contract():
+    """计划 §7：family 帽 E/D/R 各 72 ⇒ task 1/2/3（协议 0 只给协议链）。"""
+    assert CI.TASK_OF_FAMILY == {"E": 1, "D": 2, "R": 3}
+
+
+def test_run_phase_requires_a_caller(ctx):
+    _prepare(ctx, SG.dev_specs()[:1])
+    with pytest.raises(CI.CliError):
+        CI.run_phase(ctx, "dev", counter=lambda t: 100, trial_factory=_factory)
+
+
+def test_run_phase_uses_per_family_caller(ctx):
+    """整阶段必须逐族取 caller：E/D/R 走 task 1/2/3，而不是一个固定归属。"""
+    _prepare(ctx, SG.dev_specs())
+    seen, models = [], {}
+
+    def caller_for(spec):
+        seen.append((spec.trial_id, spec.family))
+        models[spec.family] = H.FakeModel([SUBMIT])
+        return models[spec.family]
+
+    out = CI.run_phase(ctx, "dev", call_model_for=caller_for,
+                       counter=lambda t: 100, trial_factory=_factory)
+    assert out["completed"] is True
+    assert seen == [("E-dev", "E"), ("D-dev", "D"), ("R-dev", "R")]
+    assert all(len(m.requests) == 1 for m in models.values())
+
+
+def test_make_phase_callers_binds_family_task_and_batch(monkeypatch):
+    """付费 caller 的归属必须逐族钉死：E→task1/D→task2/R→task3 + 各族批次。"""
+    seen = []
+
+    def fake_paid(*, task, batch_id):
+        seen.append((task, batch_id))
+        return object()
+
+    monkeypatch.setattr(CI, "_paid_gateway", fake_paid)
+    monkeypatch.setattr(CI.M.LocalCounter, "load",
+                        classmethod(lambda cls, p, s: object()))
+    caller_for, _counter = CI.make_phase_callers(
+        {"E": "bE", "D": "bD", "R": "bR"},
+        tokenizer_path="p", tokenizer_sha256="s")
+    for spec in SG.dev_specs():
+        caller_for(spec)
+    assert seen == [(1, "bE"), (2, "bD"), (3, "bR")]
+    caller_for(SG.dev_specs()[0])              # 同族复用，不重复构造
+    assert len(seen) == 3
+
+
+# ---------------------------------------------------------------------------
+# T5-A1 零付费端到端预演：真 ModelGateway + 真 QuotaLedger + 假 transport
+# ---------------------------------------------------------------------------
+#
+# 2026-11-10 T5 首启事故（4 实呼后全停）暴露的控制缺口：单测里 ``_paid_gateway``
+# 与 ``QuotaLedger`` 都被替身绕过，于是「task 归属错」「发网前阻断被记成
+# UNKNOWN_SENT」两处缺陷在端到端路径上无人看见。这里只替换网络这一层
+# （``ModelGateway(transport=...)``），其余全部走生产代码：真实批次凭据校验、
+# 真实 preflight、真实账行落盘、真实 billing_context 归属。
+
+import types
+
+import orchestrator.gateway.router as R
+from orchestrator.gateway import quota_ledger as ql
+from orchestrator.rsi_r02 import billing as B
+from orchestrator.rsi_r02 import candidate as CD
+
+RUN = H.action_json(action="run_experiment", params={"force": 0.5})
+
+
+def _ok_transport(payload, calls):
+    """litellm completion 替身：记录每次真实 POST，返回给定正文。"""
+    def fake_completion(**kw):
+        calls.append(kw)
+        return types.SimpleNamespace(
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content=payload))],
+            model=str(kw.get("model", "")).split("/", 1)[-1],
+            usage=types.SimpleNamespace(input_tokens=11, output_tokens=3))
+    return fake_completion
+
+
+def _wire_real_gateway(monkeypatch, transport):
+    """只把 transport 换成替身；构造参数（ledger/max_attempts/暂停态）保持生产样。"""
+    real = R.ModelGateway
+
+    def build(**kw):
+        kw.setdefault("transport", transport)
+        kw.setdefault("sleep", lambda s: None)
+        return real(**kw)
+
+    monkeypatch.setattr(R, "ModelGateway", build)
+    monkeypatch.setenv("SIMPRAXIS_LLM_TOKEN", "r02-test-key-redacted-0001")
+    monkeypatch.setenv("SIMPRAXIS_LLM_BASE_URL", "https://llm.invalid/api/coding")
+    # 分词器与归属无关：本地计数器由 run_phase 的 counter 注入
+    monkeypatch.setattr(CI.M.LocalCounter, "load",
+                        classmethod(lambda cls, p, s: object()))
+
+
+def _approve(family_batch, *, task, approved=24):
+    ql.write_approval(batch_id=family_batch, task=task, stage=CD.DEFAULT_STAGE,
+                      approved=approved, beyond_normal=False, note="T5-A1 fixture",
+                      namespace=ql.RSI_R02_NAMESPACE)
+
+
+def _ledger_rows():
+    from orchestrator.common.runtime_paths import rsi_r02_ledger_path
+    p = rsi_r02_ledger_path()
+    return [json.loads(line) for line in p.read_text().splitlines()]
+
+
+def test_paid_e2e_attributes_each_family_to_its_own_task(ctx, monkeypatch):
+    """三族各 1 POST：账行必须分别落 task 1/2/3 与各族批次（T5 首启根因一）。"""
+    _prepare(ctx, SG.dev_specs())
+    calls: "list[dict]" = []
+    _wire_real_gateway(monkeypatch, _ok_transport(SUBMIT, calls))
+    _approve("R02-T5-E1", task=1)
+    _approve("R02-T5-D1", task=2)
+    _approve("R02-T5-R1", task=3)
+
+    caller_for, _counter = CI.make_phase_callers(
+        {"E": "R02-T5-E1", "D": "R02-T5-D1", "R": "R02-T5-R1"},
+        tokenizer_path="unused", tokenizer_sha256="unused")
+    out = CI.run_phase(ctx, "dev", call_model_for=caller_for,
+                       counter=lambda t: 100, trial_factory=_factory)
+
+    assert out["completed"] is True, out["stop_reason"]
+    assert [r["status"] for r in out["results"]] == [ST.TRIAL_SUBMITTED] * 3
+    assert len(calls) == 3                     # 每次提交恰好一次真实 POST
+
+    rows = [r for r in _ledger_rows() if r.get("event") in (None, "call")]
+    assert [(r["task"], r["batch_id"], r["stage"]) for r in rows] == [
+        (1, "R02-T5-E1", CD.DEFAULT_STAGE),
+        (2, "R02-T5-D1", CD.DEFAULT_STAGE),
+        (3, "R02-T5-R1", CD.DEFAULT_STAGE)]
+    assert [r["seq"] for r in rows] == [1, 2, 3]
+    assert all(r["ok"] is True for r in rows)
+
+
+def test_paid_e2e_preflight_block_is_zero_post_not_unknown(ctx, monkeypatch):
+    """批次帽在发网前拦下 ⇒ 落 PREFLIGHT_BLOCKED（零 POST），绝不算 UNKNOWN_SENT。
+
+    E 批次只批 1 次，而 E trial 的第二次 POST 会被 preflight 拦下：真实账行
+    必须是 **1 条 call + 1 条 seq=null 的 preflight_blocked**，transport 只被
+    调用 1 次，预留按 $0 结清，槽 CANCELLED，整阶段以 campaign 暂停收口。
+    """
+    _prepare(ctx, SG.dev_specs())
+    calls: "list[dict]" = []
+    _wire_real_gateway(monkeypatch, _ok_transport(RUN, calls))
+    _approve("R02-T5-Eb1", task=1, approved=1)    # 只够 1 次
+    _approve("R02-T5-Db1", task=2)
+    _approve("R02-T5-Rb1", task=3)
+
+    caller_for, _counter = CI.make_phase_callers(
+        {"E": "R02-T5-Eb1", "D": "R02-T5-Db1", "R": "R02-T5-Rb1"},
+        tokenizer_path="unused", tokenizer_sha256="unused")
+    out = CI.run_phase(ctx, "dev", call_model_for=caller_for,
+                       counter=lambda t: 100, trial_factory=_factory)
+
+    assert out["completed"] is False
+    assert out["stop_reason"].startswith("campaign_paused")
+    first = out["results"][0]
+    assert first["outcome"] == "preflight_blocked"
+    assert first["reason_code"] == ST.EV_BUDGET_HIT
+    assert first["posts_sent"] == 1
+    assert len(calls) == 1                     # 拦截那次零 POST
+    assert len(out["results"]) == 1            # 停全部：D/R 不再启动
+
+    rows = _ledger_rows()
+    call_rows = [r for r in rows if r.get("event") in (None, "call")]
+    blocked = [r for r in rows if r.get("event") == "preflight_blocked"]
+    assert len(call_rows) == 1 and call_rows[0]["task"] == 1
+    assert len(blocked) == 1
+    assert blocked[0]["seq"] is None and blocked[0]["task"] == 1
+    assert blocked[0]["batch_id"] == "R02-T5-Eb1"
+    assert "batch R02-T5-Eb1 used 1>=1" in str(blocked[0].get("err") or "")
+    from orchestrator.common.runtime_paths import rsi_r02_gateway_state_path
+    paused = json.loads(rsi_r02_gateway_state_path().read_text())
+    assert paused["reason"] == "batch_budget_reached"   # 费用类帽写持久暂停态
+
+    slots = ST.SlotBook(ctx)
+    assert slots.status("E-dev-02") == ST.SLOT_CANCELLED
+    assert slots.status("E-dev-03") == ST.SLOT_CANCELLED
+    rec = B.BillingBook(ctx).record("E-dev::E-dev-02")
+    assert rec.status == B.STATUS_SETTLED and rec.settled_usd == 0.0
+    assert rec.cost_status == B.COST_EXACT
+    camp = ST.CampaignState(ctx)
+    assert camp.paused and ST.EV_BUDGET_HIT in (camp.pause_reason() or "")
+    journal_codes = [e.get("code") for e in ST.Journal(ctx).events if e.get("code")]
+    assert ST.EV_UNKNOWN_SENT not in journal_codes

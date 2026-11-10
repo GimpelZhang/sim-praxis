@@ -218,3 +218,29 @@ def test_policy_recorded_as_not_supplier_guarantee(ctx):
     assert s["policy"]["claimed_as_supplier_guarantee"] is False
     assert s["policy"]["cap_usd"] == 100.0
     assert s["policy"]["reservation_usd"] == 1.5
+
+
+# ---- 发网前阻断释放（§7「发网前阻断单列零POST」） ----
+
+
+def test_release_pending_is_zero_settled_and_never_unknown(ctx):
+    book = _book(ctx)
+    book.reserve(call_id="c1", slot_id="s1")
+    rec = book.release(call_id="c1", reason="task_hard_cap")
+    assert rec.status == B.STATUS_SETTLED
+    assert rec.settled_usd == 0.0 and rec.cost_status == B.COST_EXACT
+    assert "PREFLIGHT_BLOCKED" in (rec.failure or "")
+    assert book.pause_reason() is None            # 零 POST 不触发费用暂停
+    s = book.summary()
+    assert s["settled_usd"] == 0.0 and s["unknown_call_ids"] == []
+    assert s["pending_usd"] == 0.0 and s["paused"] is False
+
+
+def test_release_requires_reason_and_pending_state(ctx):
+    book = _book(ctx)
+    book.reserve(call_id="c1", slot_id="s1")
+    with pytest.raises(B.BillingError):
+        book.release(call_id="c1", reason="   ")
+    book.release(call_id="c1", reason="ok")
+    with pytest.raises(B.BillingError):
+        book.release(call_id="c1", reason="again")   # 已结清，不得二次释放
