@@ -194,6 +194,38 @@ def test_candidate_loop_refuses_a_protocol_doc_with_rendered_gaps(ctx):
 # ---------------------------------------------------------------------------
 
 
+def test_local_producer_names_cover_every_actor(ctx):
+    """零付费判据的白名单必须等于三个本地 actor **实际**上报的名字。
+
+    票八 T3 首跑真被这条打红过：预演 actor 从 ``ProtocolStub`` 换成
+    ``ProbeActor`` 后，它如实上报 ``protocol_probe``，而
+    ``t3_control.zero_paid.only_stub_producers`` 还只认两个旧名字——容器里
+    跑了 9 实例 + 两链之后才在报告里判 red。把「调用一次、取回包里的
+    provider_model」做成断言，改名在单测就红，不必等容器。
+    """
+    import t3_control as T3C
+
+    from orchestrator.rsi_r02 import model_stub as MS
+
+    doc = _fixture(ctx, "P1").task_doc()
+    request = M.build_request(
+        system=M.build_system(doc, M.surface_from_doc(doc)),
+        task_brief="开始", turns=(), counter=lambda _t: 1)
+    policy = MS.StubPolicy(ladder=({"kp": 60.0, "kd": 8.0,
+                                    "max_force": 30.0, "steps": 300},))
+    actors = {
+        "model_stub": MS.ModelStub(public_doc=H.write_public_task(
+            ctx, "E-dev", family="E"), policy=policy),
+        "protocol_stub": PF.ProtocolStub(fixture=_fixture(ctx, "P1")),
+        "protocol_probe": PF.ProbeActor(),
+    }
+    for expected, actor in actors.items():
+        reply = actor(request)
+        assert reply.capture["provider_model"] == expected
+        assert expected in T3C.LOCAL_PRODUCERS
+    assert T3C.LOCAL_PRODUCERS == frozenset(actors)
+
+
 def test_probe_parses_every_instance_value_from_text_alone(ctx):
     fx = _fixture(ctx, "P1")
     doc = fx.task_doc()

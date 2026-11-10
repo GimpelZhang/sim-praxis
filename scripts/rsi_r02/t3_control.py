@@ -13,8 +13,9 @@
 3. **继承负控**：R0.1 ``controls.run_all`` 在当前代码状态重跑（晚登记/漏格/
    重复/错 run/伪数据/单位错/符号错/错误结论/低增益/旧反例），期望全部仍被拒。
 
-零付费证据：所有 POST 的 ``provider_model`` 必为 ``model_stub``/``protocol_stub``，
-``attempts_http=1``，且 R0.2 真实账本行数前后不变。
+零付费证据：所有 POST 的 ``provider_model`` 必属 ``LOCAL_PRODUCERS``（本地确定
+性 actor：``model_stub`` / ``protocol_stub`` / ``protocol_probe``），``attempts_http=1``，
+且 R0.2 真实账本行数前后不变。
 
 用法::
 
@@ -70,6 +71,17 @@ def _load_t0():
 T0 = _load_t0()  # 228 槽位表复用，不自造
 
 SCHEMA_REPORT = "simpraxis.rsi_r02.t3_control_report.v1"
+
+#: 本地确定性 actor 的 ``provider_model`` 取值（零付费的判据面）。
+#:
+#: 2026-11-10 票八：T3 预演的协议 actor 由握着 fixture 的 ``ProtocolStub`` 换成
+#: 只读渲染文本的 ``ProbeActor``，后者如实把自己报成 ``protocol_probe``——于是
+#: 白名单里两个旧名字不再覆盖实际生产者，``only_stub_producers`` 判 red（正确的
+#: 报警）。修法不是把新名字塞进集合就算完：本常量是**唯一来源**，
+#: ``tests/test_rsi_r02_hardening.py::test_local_producer_names_cover_every_actor``
+#: 逐个调用三个 actor 取实际 ``provider_model`` 与它比对，谁再改名都会被打红，
+#: 而不是等到 T3 跑完容器才发现零付费判据不成立。
+LOCAL_PRODUCERS = frozenset({"model_stub", "protocol_stub", "protocol_probe"})
 
 def default_source_campaign() -> Path:
     """生产 campaign 路径由环境派生，不写死时间戳（评审 m10）。
@@ -482,8 +494,8 @@ def main(argv: "list[str] | None" = None) -> int:
         "posts": producers["posts"],
         "by_provider_model": producers["by_provider_model"],
         "by_attempts_http": producers["by_attempts_http"],
-        "only_stub_producers": set(producers["by_provider_model"]) <= {
-            "model_stub", "protocol_stub"},
+        "only_stub_producers": set(producers["by_provider_model"]
+                                   ) <= LOCAL_PRODUCERS,
         "single_attempt_each": set(producers["by_attempts_http"]) <= {"1"},
         "production_ledger_before": ledger_before,
         "production_ledger_after": ledger_after,
