@@ -245,6 +245,24 @@ class MissingGatewayCredentialError(GatewayError):
     """凭据环境变量缺失（G-2）：不发网、不占整数 seq，只留 seq=null blocked 审计行。"""
 
 
+def preflight_mark(exc: BaseException) -> BaseException:
+    """给**发网前**抛出的异常打相位标记（``exc.preflight = True``）后原样返回。
+
+    为什么相位必须由抛出点声明：``NonRetryableError`` 与 ``GatewayPausedError``
+    在发网**之后**同样会抛（404/401/403/400/未分类 HTTP、429 配额熔断，见
+    ``_chat_loop``），而这两种情形在账本里已经有**整数 seq 的 ok=false 行**。
+    消费侧若按异常类型猜相位，就会把一次真实的付费 POST 记成「零 POST / $0」
+    （2026-11-10 票六评审 HIGH：会话侧 ``candidate.presend_exception_types``
+    曾按类型判定，方向与 T5 事故相反但同属证据伪造）。故此处只做一件事：
+    凡是**一个字节都还没发出去**的拒绝路径，抛出时打标；发网后的路径一律不打。
+    """
+    try:
+        setattr(exc, "preflight", True)
+    except Exception:  # noqa: BLE001 —— 属性不可写的异常对象宁可不标也不误标
+        pass
+    return exc
+
+
 class EmptyResponseError(GatewayError):
     """HTTP 200 但正文为空（content 缺失/仅 thinking，G-12）：重试耗尽后显式失败，
     禁止按 ok=true 记账。关联 2026-10-16 test_04 空答事故（空答诱发额外实呼而
@@ -602,25 +620,28 @@ def _validate_thinking(thinking: Any) -> None:
     if thinking is None:
         return
     if not isinstance(thinking, dict):
-        raise NonRetryableError(f"thinking 必须是 dict 或 None，收到 {type(thinking).__name__}")
+        raise preflight_mark(
+            NonRetryableError(f"thinking 必须是 dict 或 None，收到 {type(thinking).__name__}"))
     ttype = thinking.get("type")
     if ttype == "disabled":
         extra = set(thinking) - {"type"}
         if extra:
-            raise NonRetryableError(f"thinking disabled 不接受额外键：{sorted(extra)}")
+            raise preflight_mark(
+                NonRetryableError(f"thinking disabled 不接受额外键：{sorted(extra)}"))
         return
     if ttype == "enabled":
         budget = thinking.get("budget_tokens")
         if not (isinstance(budget, int) and not isinstance(budget, bool) and budget > 0):
-            raise NonRetryableError(
+            raise preflight_mark(NonRetryableError(
                 "thinking enabled 要求正整数 budget_tokens，"
-                f"收到 {budget!r}")
+                f"收到 {budget!r}"))
         extra = set(thinking) - {"type", "budget_tokens"}
         if extra:
-            raise NonRetryableError(f"thinking enabled 不接受额外键：{sorted(extra)}")
+            raise preflight_mark(
+                NonRetryableError(f"thinking enabled 不接受额外键：{sorted(extra)}"))
         return
-    raise NonRetryableError(
-        f"thinking.type 只接受 enabled/disabled，收到 {ttype!r}")
+    raise preflight_mark(NonRetryableError(
+        f"thinking.type 只接受 enabled/disabled，收到 {ttype!r}"))
 
 
 def _solid_png_b64(rgb: tuple[int, int, int] = (255, 0, 0), size: int = 32) -> str:
@@ -646,9 +667,9 @@ def _creds() -> tuple[str, str]:
     if not token:
         # G-2：专用类型——调用入口据此写 seq=null blocked 审计行
         # （missing_gateway_credential，未发网不占整数 seq），与 call_visual 对称。
-        raise MissingGatewayCredentialError(
+        raise preflight_mark(MissingGatewayCredentialError(
             "SIMPRAXIS_LLM_TOKEN/ANTHROPIC_AUTH_TOKEN 未注入："
-            "先 source scripts/00_env.sh")
+            "先 source scripts/00_env.sh"))
     base_url = (os.environ.get("SIMPRAXIS_LLM_BASE_URL")
                 or os.environ.get("ANTHROPIC_BASE_URL") or DEFAULT_BASE_URL)
     return token, base_url
@@ -757,7 +778,8 @@ class ModelGateway:
 
     def entry(self, stage: str) -> dict:
         if stage not in STAGES:
-            raise NonRetryableError(f"未知 stage {stage}，合法值：{STAGES}")
+            raise preflight_mark(
+                NonRetryableError(f"未知 stage {stage}，合法值：{STAGES}"))
         return self.config["stage_models"][stage]
 
     def model_id(self, stage: str) -> str | None:
@@ -786,14 +808,27 @@ class ModelGateway:
         blocked 审计行（G-10/G-14），GatewayPausedError/PauseStateCorruptError 照抛。"""
         try:
             paused = is_paused(stage, state_path=self._pause_state_path)
-        except PauseStateCorruptError:
+        except PauseStateCorruptError as exc:
             self._record_early_blocked(stage, "pause_state_corrupt：熔断状态文件损坏，人工核查")
-            raise
+            raise preflight_mark(exc)
         if paused:
             self._record_early_blocked(
                 stage,
                 f"paused_preflight：preflight 前命中暂停态 reason={paused.get('reason')}")
-            raise GatewayPausedError(paused)
+            raise preflight_mark(GatewayPausedError(paused))
+
+    def _preflight_billing(self, stage: str) -> None:
+        """账本预检（预留额度/暂停闸）；其抛出的异常一律视为**发网前**阻断。
+
+        单点包装：三个入口（call / call_visual / diag_thinking）共用，避免任何一处
+        漏标相位而被下游误记为「已发网」（2026-11-10 票六评审 HIGH）。
+        """
+        if self._billing is None:
+            return
+        try:
+            self._billing.preflight(stage)
+        except Exception as exc:  # noqa: BLE001 —— 原样重抛，只补相位标记
+            raise preflight_mark(exc)
 
     def _retry_wait(self, attempt: int, *, exc: "Exception | None" = None,
                     headers: Any = None) -> float:
@@ -833,24 +868,23 @@ class ModelGateway:
         model_id = self.model_id(stage)
         if model_id is None:
             anchor = str(self.entry(stage).get("open_question", ""))
-            raise StageUnresolvedError(stage, anchor)
+            raise preflight_mark(StageUnresolvedError(stage, anchor))
         # G-10/G-14：入口早检查（preflight 之前）命中暂停态/损坏件也写 seq=null
         # blocked 审计行，异常照抛；账外 validate/单测（无 billing）不写。
         self._early_pause_gate(stage)
         # 硬规则1两道守卫（均在 preflight 之前——编程错误不发网、不占 seq、不记账）：
         # (a) visual_rollout 是视觉专用阶段，禁止走文本入口，视觉唯一入口 call_visual；
         if stage == VISION_STAGE:
-            raise NonRetryableError(
-                "visual_rollout 禁止走文本 call()（硬规则1）；视觉请求只能走 call_visual()")
+            raise preflight_mark(NonRetryableError(
+                "visual_rollout 禁止走文本 call()（硬规则1）；视觉请求只能走 call_visual()"))
         # (b) macro/coding 消息体任意层级永不允许 image block（G-1：递归守卫）。
         if _messages_contain_image(messages):
-            raise NonRetryableError(
+            raise preflight_mark(NonRetryableError(
                 f"{stage} 阶段禁止图像 block（硬规则1，含嵌套 tool_result）；"
-                "视觉请求只能走 call_visual()")
+                "视觉请求只能走 call_visual()"))
         # (c) thinking 契约形状（攢批92 T8-D2）：编程错误不发网、不占 seq。
         _validate_thinking(thinking)
-        if self._billing is not None:
-            self._billing.preflight(stage)
+        self._preflight_billing(stage)
         completion = self._transport or litellm.completion
         # G-2：_creds() 移入 try 与 call_visual 对称；凭据缺失不发网，写 seq=null
         # blocked 审计行（missing_gateway_credential）后原样抛，不占整数 seq。
@@ -1064,11 +1098,10 @@ class ModelGateway:
         model_id = self.model_id(stage)
         if model_id is None:
             anchor = str(self.entry(stage).get("open_question", ""))
-            raise StageUnresolvedError(stage, anchor)
+            raise preflight_mark(StageUnresolvedError(stage, anchor))
         # G-10/G-14：与 call() 同一入口早检查（seq=null blocked 审计行 + 异常照抛）。
         self._early_pause_gate(stage)
-        if self._billing is not None:
-            self._billing.preflight(stage)
+        self._preflight_billing(stage)
         blocks = [
             {"type": "image",
              "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
@@ -1292,10 +1325,9 @@ class ModelGateway:
         model_id = self.model_id(stage)
         if model_id is None:
             anchor = str(self.entry(stage).get("open_question", ""))
-            raise StageUnresolvedError(stage, anchor)
+            raise preflight_mark(StageUnresolvedError(stage, anchor))
         self._early_pause_gate(stage)
-        if self._billing is not None:
-            self._billing.preflight(stage)
+        self._preflight_billing(stage)
         blocks = [{"type": "text",
                    "text": "D-8 thinking 接受性诊断探针：请只用一句话回答 "
                            "1+1 等于几？"}]

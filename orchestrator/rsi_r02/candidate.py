@@ -50,18 +50,24 @@ class CandidateError(RuntimeError):
 #: 账本熔断原因里属于「预算帽」的一类：它们同样是**发网前**拒绝（零 POST），
 #: 但语义上要落 ``BLOCKED_BUDGET`` 而不是中性的 ``PREFLIGHT_BLOCKED``（§10.2
 #: 「全局费用/资源帽触及 ⇒ BLOCKED_BUDGET，覆盖不足」）。
+#: 与 ``orchestrator.gateway.router.BUDGET_PAUSE_REASONS`` 逐项对齐（含
+#: ``consecutive_quota_errors``：连续 429 熔断后的**下一条**调用同样在发网前被
+#: 早检查拦下，属资源帽类）。两处各写一份是为避免候选层拖入 litellm；单测
+#: ``test_budget_reason_sets_stay_in_sync`` 逐项比对，防止再次漂移。
 BUDGET_PAUSE_REASONS = frozenset({
-    "task_hard_cap", "global_hard_cap", "batch_budget_reached"})
+    "task_hard_cap", "global_hard_cap", "batch_budget_reached",
+    "consecutive_quota_errors"})
 
 
 def presend_exception_types() -> "tuple[type[BaseException], ...]":
-    """网关**发网前**拒绝的异常族（零 POST、零费用；计划 §7 单列口径）。
+    """可能由网关**发网前**路径抛出的异常族（形状白名单，不单独判相位）。
 
-    这些类型全部在 ``ModelGateway.call`` 的 preflight 之前抛出——一个字节都没
-    发出、供应端无响应、费用为零。把它们并进「发送状态未知」会让一次纯粹的
-    本地拦截冒充 UNKNOWN_SENT（2026-11-10 T5 首启实测：task0 帽拦下第 5 次
-    调用，被记成 UNKNOWN，槽/预留/全局暂停全被污染）。延迟导入是因为网关模块
-    会拖入 litellm，而本模块的单测不应因此变重。
+    注意：这张表只是**必要条件**。同一个类型在发网后也会被抛出——``429`` 走
+    ``GatewayPausedError``，``400/401/403/404`` 与未分类 HTTP 走
+    ``NonRetryableError``，那时请求已经发出、供应端已经响应、费用未知。
+    **判相位必须用 :func:`is_presend_block` 的标记**，不能按类型猜：
+    2026-11-10 票六评审 HIGH 用真实网关复现了「发网后 400 被记成零 POST/$0」
+    的错误记账。延迟导入是因为网关模块会拖入 litellm，而本模块的单测不应因此变重。
     """
     from orchestrator.gateway.router import (
         GatewayPausedError, MissingGatewayCredentialError, NonRetryableError,
@@ -69,6 +75,19 @@ def presend_exception_types() -> "tuple[type[BaseException], ...]":
     return (GatewayPausedError, PauseStateCorruptError,
             MissingGatewayCredentialError, NonRetryableError,
             StageUnresolvedError)
+
+
+def is_presend_block(exc: BaseException) -> bool:
+    """该异常是否**确实**在发网前抛出（零 POST、零费用）。
+
+    判据是网关打的相位标记 ``exc.preflight is True``（``router.preflight_mark``
+    在每一个发网前出口统一打标），且类型在 :func:`presend_exception_types` 白名单
+    内。未打标记的同族异常一律按**已发网**处理（UNKNOWN_SENT），宁可贵记也不
+    把一次真实付费调用洗成零 POST。
+    """
+    if getattr(exc, "preflight", False) is not True:
+        return False
+    return isinstance(exc, presend_exception_types())
 
 
 def presend_code(exc: BaseException) -> "tuple[str, str]":
@@ -285,8 +304,9 @@ class CandidateLoop:
             try:
                 reply = self.call_model(request)
             except Exception as exc:  # noqa: BLE001
-                if isinstance(exc, presend_exception_types()):
-                    # 发网前拒绝：零 POST、零费用。单列，绝不冒充 UNKNOWN_SENT。
+                if is_presend_block(exc):
+                    # 发网前拒绝（网关已打相位标记）：零 POST、零费用。单列，
+                    # 绝不冒充 UNKNOWN_SENT；未打标记的同类异常走下面的已发网路径。
                     return self._presend_blocked(st, slot_id, call_id, exc)
                 failure = f"{type(exc).__name__}: {exc}"[:400]
                 self.billing.mark_unknown(call_id=call_id, failure=failure)
@@ -516,10 +536,10 @@ class CandidateLoop:
         """
         code, reason = presend_code(exc)
         detail = f"{type(exc).__name__}: {exc}"[:400]
-        self.billing.release(call_id=call_id,
-                             reason=f"{code} {reason} {detail}"[:900])
+        self.billing.release(call_id=call_id, code=code,
+                             reason=f"{reason} {detail}"[:900])
         self.slots.release_claimed(
-            slot_id, reason=f"PREFLIGHT_BLOCKED {code} {detail}"[:400])
+            slot_id, reason=f"{code} {detail}"[:400])
         self.journal.append(
             kind="result", trial_id=st.trial_id, action="post", slot_id=slot_id,
             ok=False, code=code, message=detail,

@@ -217,15 +217,18 @@ def test_campaign_close_blocks_restart(ctx):
 
 
 def test_disposition_matrix_covers_every_row():
+    """模块里每一个 ``EV_*`` 常量都必须在 §10.2 矩阵里有处置（自动枚举）。
+
+    旧版手抄一份列表，于是 ``EV_PREFLIGHT_BLOCKED`` 加了常量、矩阵没加，测试
+    照样绿——「矩阵外不得临场发明」的纪律反而没有机器守着（T6-D1）。
+    """
     events = {d.event for d in ST.DISPOSITIONS}
-    for evt in (ST.EV_APPROVAL_MISSING, ST.EV_SPEND_GUARANTEE_MISSING,
-                ST.EV_ASSET_MISMATCH, ST.EV_PROTOCOL_FAIL, ST.EV_MALFORMED_ACTION,
-                ST.EV_CALL_FAILED, ST.EV_INPUT_LIMIT, ST.EV_VALID_FAIL_CAP,
-                ST.EV_POLICY_VIOLATION, ST.EV_CONTAMINATION, ST.EV_ASSISTED,
-                ST.EV_UNKNOWN_SENT, ST.EV_COST_UNKNOWN,
-                ST.EV_TOOL_OUTCOME_UNKNOWN, ST.EV_FREEZE_INVALID,
-                ST.EV_BUDGET_HIT, ST.EV_ABORTED):
-        assert evt in events
+    declared = {name: getattr(ST, name) for name in dir(ST)
+                if name.startswith("EV_") and isinstance(getattr(ST, name), str)}
+    assert declared, "EV_* 常量枚举为空（测试自身失效）"
+    missing = sorted(v for v in declared.values() if v not in events)
+    assert missing == [], f"事件码未登记 §10.2 处置矩阵：{missing}"
+    assert len(events) == len(ST.DISPOSITIONS), "矩阵存在重复事件行"
     d = ST.disposition_for(ST.EV_UNKNOWN_SENT)
     assert d.campaign_action == "PAUSE_GLOBAL" and d.verdict == "UNKNOWN_SENT"
     assert ST.disposition_for(ST.EV_ASSISTED).trial_action == "ASSISTED"

@@ -147,6 +147,10 @@ DISPOSITIONS: "tuple[Disposition, ...]" = (
                 "TOOL_OUTCOME_UNKNOWN", "不重跑原实验冒原结果"),
     Disposition(EV_FREEZE_INVALID, "INVALID", "STOP_ALL", "FREEZE_INVALID",
                 "LOCK 语义改变：新协议不能混旧样本"),
+    Disposition(EV_PREFLIGHT_BLOCKED, "BLOCKED", "PAUSE_GLOBAL",
+                "BLOCKED_PREFLIGHT",
+                "发网前阻断（零 POST 零费用，§7 单列）：预留 $0 结清、已占槽 CANCELLED、"
+                "不取消剩余槽（非帽类），整 campaign 停至人工处置"),
     Disposition(EV_BUDGET_HIT, "CANCEL_REST", "CANCEL_REST", "BLOCKED_BUDGET",
                 "保留分母，不抬本 campaign 帽"),
     Disposition(EV_ABORTED, "ABORTED", "CANCEL_REST", "ABORTED",

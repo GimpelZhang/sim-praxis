@@ -528,7 +528,99 @@ def test_paid_e2e_preflight_block_is_zero_post_not_unknown(ctx, monkeypatch):
     rec = B.BillingBook(ctx).record("E-dev::E-dev-02")
     assert rec.status == B.STATUS_SETTLED and rec.settled_usd == 0.0
     assert rec.cost_status == B.COST_EXACT
+
     camp = ST.CampaignState(ctx)
     assert camp.paused and ST.EV_BUDGET_HIT in (camp.pause_reason() or "")
     journal_codes = [e.get("code") for e in ST.Journal(ctx).events if e.get("code")]
     assert ST.EV_UNKNOWN_SENT not in journal_codes
+
+
+def _failing_transport(error, calls):
+    """POST 已发出后才失败：transport 被真实调用一次，然后抛供应端错误。"""
+    def fake_completion(**kw):
+        calls.append(kw)
+        raise error
+    return fake_completion
+
+
+def test_paid_e2e_post_send_400_is_unknown_sent(ctx, monkeypatch):
+    """发网后 400 ⇒ UNKNOWN_SENT（占槽、预留保留、全局暂停），绝不是零 POST。
+
+    票六评审 HIGH 的端到端面：同一 ``NonRetryableError`` 类型在发网前后都会抛，
+    按类型判相位会把这次真实付费调用洗成 $0/EXACT，与账本整数 seq 的 ok=false
+    行直接矛盾。真实网关在此打的是「无相位标记」的异常，故必须走 UNKNOWN。
+    """
+    import litellm
+
+    _prepare(ctx, SG.dev_specs())
+    calls: "list[dict]" = []
+    _wire_real_gateway(monkeypatch, _failing_transport(
+        litellm.exceptions.BadRequestError(
+            message="bad request", model="test-model", llm_provider="anthropic"),
+        calls))
+    _approve("R02-T5-Eu1", task=1)
+    _approve("R02-T5-Du1", task=2)
+    _approve("R02-T5-Ru1", task=3)
+
+    caller_for, _counter = CI.make_phase_callers(
+        {"E": "R02-T5-Eu1", "D": "R02-T5-Du1", "R": "R02-T5-Ru1"},
+        tokenizer_path="unused", tokenizer_sha256="unused")
+    out = CI.run_phase(ctx, "dev", call_model_for=caller_for,
+                       counter=lambda t: 100, trial_factory=_factory)
+
+    assert len(calls) == 1                     # 请求确实发了出去
+    assert out["completed"] is False
+    first = out["results"][0]
+    assert first["outcome"] == "unknown_sent"
+    assert first["reason_code"] == ST.EV_UNKNOWN_SENT
+
+    rows = _ledger_rows()
+    call_rows = [r for r in rows if r.get("event") in (None, "call")]
+    assert len(call_rows) == 1
+    assert call_rows[0]["seq"] == 1 and call_rows[0]["ok"] is False
+    assert not [r for r in rows if r.get("event") == "preflight_blocked"]
+
+    rec = B.BillingBook(ctx).record("E-dev::E-dev-01")
+    assert rec.status == B.STATUS_UNKNOWN
+    assert rec.cost_status == B.COST_UNKNOWN and rec.settled_usd is None
+    assert ST.SlotBook(ctx).status("E-dev-01") == ST.SLOT_UNKNOWN
+
+
+def test_paid_e2e_post_send_429_is_unknown_sent(ctx, monkeypatch):
+    """发网后 429（配额熔断）⇒ UNKNOWN_SENT：熔断是**响应**，不是发网前拦截。
+
+    与 400 同理，``GatewayPausedError`` 在两处都会抛（发网前早检查 / 发网后
+    429 长熔断），判相位只能信网关标记。
+    """
+    import litellm
+
+    _prepare(ctx, SG.dev_specs())
+    calls: "list[dict]" = []
+    _wire_real_gateway(monkeypatch, _failing_transport(
+        litellm.exceptions.RateLimitError(
+            message="配额已用尽 quota exceeded", model="test-model",
+            llm_provider="anthropic"),
+        calls))
+    _approve("R02-T5-Eq1", task=1)
+    _approve("R02-T5-Dq1", task=2)
+    _approve("R02-T5-Rq1", task=3)
+
+    caller_for, _counter = CI.make_phase_callers(
+        {"E": "R02-T5-Eq1", "D": "R02-T5-Dq1", "R": "R02-T5-Rq1"},
+        tokenizer_path="unused", tokenizer_sha256="unused")
+    out = CI.run_phase(ctx, "dev", call_model_for=caller_for,
+                       counter=lambda t: 100, trial_factory=_factory)
+
+    assert len(calls) == 1
+    first = out["results"][0]
+    assert first["outcome"] == "unknown_sent"
+    assert first["reason_code"] == ST.EV_UNKNOWN_SENT
+
+    rows = _ledger_rows()
+    call_rows = [r for r in rows if r.get("event") in (None, "call")]
+    assert len(call_rows) == 1 and call_rows[0]["ok"] is False
+    assert not [r for r in rows if r.get("event") == "preflight_blocked"]
+
+    rec = B.BillingBook(ctx).record("E-dev::E-dev-01")
+    assert rec.status == B.STATUS_UNKNOWN and rec.cost_status == B.COST_UNKNOWN
+    assert ST.SlotBook(ctx).status("E-dev-01") == ST.SLOT_UNKNOWN

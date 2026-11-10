@@ -303,12 +303,19 @@ def test_gateway_caller_passes_system_and_capture():
 # ---- 发网前阻断（§7「发网前阻断单列零POST」；2026-11-10 T5 首启事故回归） ----
 
 
-def _presend(reason: str, **trigger: Any):
+def _paused(reason: str, **trigger: Any):
+    """构造一个真实的 ``GatewayPausedError``（**未打**相位标记）。"""
     from orchestrator.gateway.quota_ledger import GatewayPausedError
     return GatewayPausedError({"status": "PAUSED_WAITING_QUOTA",
                                "stage": "coding_debug", "reason": reason,
                                "scope": "task", "trigger": dict(trigger),
                                "resume_at_iso": None})
+
+
+def _presend(reason: str, **trigger: Any):
+    """发网前阻断：与真实网关一致，异常带 ``preflight=True`` 标记。"""
+    from orchestrator.gateway.router import preflight_mark
+    return preflight_mark(_paused(reason, **trigger))
 
 
 def test_budget_preflight_block_is_zero_post_not_unknown(ctx):
@@ -331,13 +338,13 @@ def test_budget_preflight_block_is_zero_post_not_unknown(ctx):
     assert out["posts_sent"] == 1 and out["turns"] == 1
     # 已占但零 POST 的槽：CANCELLED_WITH_REASON，不是 FAIL/UNKNOWN
     assert slots.status("E-dev-02") == ST.SLOT_CANCELLED
-    assert "PREFLIGHT_BLOCKED" in slots.get("E-dev-02")["reason"]
+    assert slots.get("E-dev-02")["reason"].startswith(ST.EV_BUDGET_HIT)
     assert slots.status("E-dev-03") == ST.SLOT_CANCELLED   # 帽触及⇒取消剩余槽
     # 预留按 $0 结清（零 POST 零费用），不挂 UNKNOWN
     rec = book.record("E1-dev::E-dev-02")
     assert rec.status == B.STATUS_SETTLED and rec.settled_usd == 0.0
     assert rec.cost_status == B.COST_EXACT
-    assert "PREFLIGHT_BLOCKED" in (rec.failure or "")
+    assert (rec.failure or "").startswith(f"{ST.EV_BUDGET_HIT}:")
     # 费用账没有 UNKNOWN、没有全局费用暂停
     assert book.pause_reason() is None
     assert "unknown" not in [r.status for r in book.records()]
@@ -350,6 +357,81 @@ def test_budget_preflight_block_is_zero_post_not_unknown(ctx):
     # campaign 停全部（§6.2 仪器/预算事件暂停一切）
     camp = ST.CampaignState(ctx)
     assert camp.paused and ST.EV_BUDGET_HIT in (camp.pause_reason() or "")
+
+
+def test_phase_marker_is_the_only_presend_witness():
+    """判相位只看网关标记，不按异常类型猜（票六评审 HIGH 的最小单测面）。"""
+    from orchestrator.gateway.router import NonRetryableError, preflight_mark
+    exc = NonRetryableError("HTTP 400 stage=coding_debug：bad request")
+    assert CD.is_presend_block(exc) is False          # 同类但未标记 ⇒ 已发网
+    assert CD.is_presend_block(preflight_mark(exc)) is True
+    # 标记不能把白名单外的异常洗成零 POST
+    foreign = preflight_mark(RuntimeError("boom"))
+    assert CD.is_presend_block(foreign) is False
+
+
+def test_budget_reason_sets_stay_in_sync():
+    """候选层与网关层的预算熔断 reason 集合必须逐项相等（防再次漂移）。"""
+    from orchestrator.gateway import router as R
+    assert CD.BUDGET_PAUSE_REASONS == R.BUDGET_PAUSE_REASONS
+
+
+def test_post_send_bad_request_is_unknown_sent_not_zero_post(ctx):
+    """发网后 400：请求已发出、供应端已响应，费用未知 ⇒ UNKNOWN_SENT/$0 禁。
+
+    票六评审 HIGH 的端到端复现：``NonRetryableError`` 与发网前的
+    ``StageUnresolvedError`` 同族，按类型判相位会把一次真实付费调用洗成
+    「零 POST / $0/EXACT」，与账本里那行整数 seq 的 ok=false 直接矛盾。
+    """
+    from orchestrator.gateway.router import NonRetryableError
+    loop, model, store, journal, slots, book = H.build_loop(
+        ctx, slot_ids=["E-dev-01", "E-dev-02"],
+        replies=[NonRetryableError("HTTP 400 stage=coding_debug：bad request")],
+        with_campaign_state=True)
+    out = loop.run()
+
+    assert out["outcome"] == "unknown_sent"
+    assert out["status"] == ST.TRIAL_UNKNOWN_SENT
+    assert out["reason_code"] == ST.EV_UNKNOWN_SENT
+    # 预留不释放：保持 UNKNOWN，不许 $0/EXACT
+    rec = book.record("E1-dev::E-dev-01")
+    assert rec.status == B.STATUS_UNKNOWN
+    assert rec.settled_usd is None and rec.cost_status == B.COST_UNKNOWN
+    assert slots.status("E-dev-01") == ST.SLOT_UNKNOWN
+    assert "HTTP 400" in (rec.failure or "")
+    # 费用侧暂停（UNKNOWN 不能续跑）
+    assert "UNKNOWN_SENT" in (book.pause_reason() or "")
+    # journal 只有 UNKNOWN_SENT，没有零 POST 的 PREFLIGHT_BLOCKED/BLOCKED_BUDGET
+    codes = [e.get("code") for e in journal.events if e.get("code")]
+    assert ST.EV_UNKNOWN_SENT in codes
+    assert ST.EV_PREFLIGHT_BLOCKED not in codes
+    assert ST.EV_BUDGET_HIT not in codes
+
+
+def test_post_send_429_is_unknown_sent(ctx):
+    """发网后 429：配额熔断是**响应**，不是发网前拦截 ⇒ UNKNOWN_SENT。"""
+    loop, model, store, journal, slots, book = H.build_loop(
+        ctx, slot_ids=["E-dev-01"],
+        replies=[_paused("consecutive_quota_errors")],
+        with_campaign_state=True)
+    out = loop.run()
+    assert out["outcome"] == "unknown_sent"
+    assert out["reason_code"] == ST.EV_UNKNOWN_SENT
+    rec = book.record("E1-dev::E-dev-01")
+    assert rec.status == B.STATUS_UNKNOWN and rec.cost_status == B.COST_UNKNOWN
+    assert slots.status("E-dev-01") == ST.SLOT_UNKNOWN
+
+
+def test_budget_block_records_its_event_code_in_billing(ctx):
+    """预算帽类零 POST 阻断在计费账上的前缀必须是 BLOCKED_BUDGET（不是中性码）。"""
+    loop, model, store, journal, slots, book = H.build_loop(
+        ctx, slot_ids=["E-dev-01"],
+        replies=[_presend("task_hard_cap", task=1, task_used=72, task_hard_cap=72)],
+        with_campaign_state=True)
+    loop.run()
+    rec = book.record("E1-dev::E-dev-01")
+    assert rec.status == B.STATUS_SETTLED and rec.settled_usd == 0.0
+    assert (rec.failure or "").startswith(f"{ST.EV_BUDGET_HIT}:")
 
 
 def test_neutral_preflight_block_keeps_unused_slots(ctx):

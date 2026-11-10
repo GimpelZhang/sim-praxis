@@ -392,7 +392,8 @@ class BillingBook:
             self._write(new)
             return new
 
-    def release(self, *, call_id: str, reason: str) -> Record:
+    def release(self, *, call_id: str, reason: str,
+                code: str = "PREFLIGHT_BLOCKED") -> Record:
         """发网前阻断（零 POST / 零费用）：释放预留并按 $0 结清，绝不记 UNKNOWN。
 
         计划 §7「发网前阻断单列零POST」：网关在 preflight 就拒绝时本次调用
@@ -400,6 +401,10 @@ class BillingBook:
         费用三态（预留长期挂着）与全局暂停（迫使后续全部 trial 停机）。故单列
         本入口，只允许 ``PENDING → SETTLED(0.0/EXACT)``，原因逐字保留在
         ``failure`` 供结案机判重算。
+
+        ``code`` 是 §10.2 的事件码（``PREFLIGHT_BLOCKED`` 或 ``BLOCKED_BUDGET``）；
+        曾把前缀写死成 ``PREFLIGHT_BLOCKED``，预算帽类阻断在账上顶着中性码，
+        与 trial/journal 侧不一致（2026-11-10 票六评审 LOW）。
         """
         if not str(reason or "").strip():
             raise BillingError("释放预留必须写明原因（发网前阻断的 reason_code）")
@@ -412,7 +417,7 @@ class BillingBook:
                          created_at_utc=rec.created_at_utc,
                          settled_at_utc=self._now(), settled_usd=0.0,
                          cost_status=COST_EXACT, usage=None,
-                         failure=f"PREFLIGHT_BLOCKED: {str(reason)[:800]}")
+                         failure=f"{str(code)[:40]}: {str(reason)[:800]}")
             self._write(new)
             return new
 
