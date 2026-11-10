@@ -496,6 +496,24 @@ def test_doc_gaps_catches_an_incomplete_analyze_contract():
     wrong_path["public"]["analyze"]["data"]["path"] = "/data/run_*.json"
     assert PF.doc_gaps(wrong_path) == ["public.analyze.data.path"]
 
+    # 打印行 / 产物路径 / 说明正文：删掉它们校验器仍会判负（候选照做也无用），
+    # 所以 doc_gaps 必须自己报 gap，否则「公开文档自足」是空话（评审 MINOR）。
+    no_line = copy.deepcopy(fx.task_doc())
+    no_line["public"]["analyze"]["prints_line"] = ""
+    assert PF.doc_gaps(no_line) == ["public.analyze.prints_line 缺失"]
+
+    no_out = copy.deepcopy(fx.task_doc())
+    no_out["public"]["analyze"]["output"] = "/out/other.json"
+    assert PF.doc_gaps(no_out) == ["public.analyze.output"]
+
+    no_note = copy.deepcopy(fx.task_doc())
+    no_note["public"]["analyze"]["note"] = "   "
+    assert PF.doc_gaps(no_note) == ["public.analyze.note 缺失"]
+
+    empty_desc = copy.deepcopy(fx.task_doc())
+    empty_desc["public"]["analyze"]["payload_fields"]["stat"] = ""
+    assert PF.doc_gaps(empty_desc) == ["public.analyze.payload_fields.stat.描述"]
+
 
 def test_system_text_renders_the_analyze_contract():
     """契约必须真的渲染进候选唯一能看见的那段文本，而不是只躺在 doc dict 里。"""

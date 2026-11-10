@@ -351,3 +351,34 @@ def test_protocol_pass_and_partial_are_distinguished(ctx):
         CO.PROTOCOL_PARTIAL
     _finish(store, specs["proto_P2"])
     assert CO.judge(CO.read_facts(ctx))["protocol"]["status"] == CO.PROTOCOL_OK
+
+
+def test_submitted_chain_with_verdict_fail_is_still_blocked(ctx):
+    """submit 结构上被收下 ≠ 协议成立：统计/nonce 判负必须照样阻断。
+
+    评审 HIGH 复现的形态：``candidate`` 在 submit 结构合法时就把 trial 置为终态
+    ``SUBMITTED``，``verify_run`` 的 nonce/统计判负发生在之后，而终态不允许互改。
+    以前 ``protocol_axis`` 只看 status，于是这种 §10.2 明列的「统计错」协议 FAIL
+    会被印成 ``PROTOCOL_OK / measurement=VALID``——正是本提交声称消灭的那类
+    「判决件与实际相反」。宿主把判负写成日志事件，判决必须按事件读。
+    """
+    _all_pass(ctx)
+    store = ST.StateStore(ctx)
+    specs = {s.trial_id: s for s in CO.protocol_specs()}
+    _finish(store, specs["proto_P1"])
+    _finish(store, specs["proto_P2"])
+    # 两链都已 SUBMITTED（真实路径：submit 被收下）；再补一条判负事件。
+    ST.Journal(ctx).append(
+        kind="result", trial_id="proto_P2", action="verify", ok=False,
+        code=ST.EV_PROTOCOL_FAIL, message="检查器不接受本轮 submit",
+        payload={"fixture_id": "P2", "problems": ["统计与分析产物不符"]})
+    facts = CO.read_facts(ctx)
+    assert all(t["status"] == ST.TRIAL_SUBMITTED for t in facts["trials"]
+               if t["phase"] == "protocol")
+    assert facts["journal"]["codes"]["protocol_fail"] == 1
+    verdict = CO.judge(facts)
+    assert verdict["protocol"]["status"] == CO.PROTOCOL_BLOCKED
+    assert verdict["protocol"]["failed"] == ["proto_P2"]
+    assert verdict["protocol"]["chains"]["proto_P2"]["verdict_fail"] is True
+    assert verdict["measurement"]["status"] == CO.MEAS_INCOMPLETE
+    assert "PROTOCOL_BLOCKED" in verdict["measurement"]["reasons"]

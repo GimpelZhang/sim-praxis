@@ -277,6 +277,17 @@ def doc_gaps(doc: Mapping[str, Any]) -> "list[str]":
     else:
         missing += [f"public.analyze.payload_fields.{k}"
                     for k in ANALYZE_PAYLOAD_FIELDS if k not in payload]
+        # 只校验键名不够：值为空串等于没告诉候选这个字段是什么（评审 MINOR）。
+        missing += [f"public.analyze.payload_fields.{k}.描述"
+                    for k in ANALYZE_PAYLOAD_FIELDS
+                    if k in payload and not str(payload.get(k) or "").strip()]
+    # 打印行与产物路径同样要守：删掉它们校验器仍判负，但 doc_gaps 会误报自足。
+    if not str(analyze.get("prints_line") or "").strip():
+        missing.append("public.analyze.prints_line 缺失")
+    if analyze.get("output") != ANALYZE_OUT_PATH:
+        missing.append("public.analyze.output")
+    if not str(analyze.get("note") or "").strip():
+        missing.append("public.analyze.note 缺失")
     data = analyze.get("data")
     if not isinstance(data, Mapping):
         missing.append("public.analyze.data 缺失")

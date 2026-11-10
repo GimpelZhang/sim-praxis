@@ -148,3 +148,54 @@ def test_batch_credential_requires_task_stage_and_coverage(ctx):
     _write_credential(ctx, approved=True)
     problems = T4.check_batch_credential(ctx, "R02-T4-1")["problems"]
     assert problems and problems[0].startswith("CREDENTIAL_MISSING")
+
+
+def test_verdict_fail_with_submitted_status_is_recorded_as_fact(ctx):
+    """submit 被收下但统计错 ⇒ trial 仍是 SUBMITTED，判负必须落成事件。
+
+    评审 HIGH 的真实形态：``candidate`` 在 submit 结构合法时立刻把 trial 置为终态
+    ``SUBMITTED``（终态不许互改），``verify_run`` 的统计/nonce 判负发生在之后。
+    若宿主只把 chain_ok 写进 g_d，closeout 只看 status 就会把这条 §10.2 明列的
+    「统计错」协议 FAIL 印成 ``PROTOCOL_OK / measurement=VALID``。本用例证明：
+    判负现在写进 journal（``code=PROTOCOL_FAIL``），closeout 按事件判 BLOCKED。
+    """
+    import dataclasses
+    import json as _json
+
+    from orchestrator.rsi_r02 import closeout as CO
+
+    class _BadStatStub(PF.ProtocolStub):
+        def __call__(self, request):
+            reply = super().__call__(request)
+            try:
+                doc = _json.loads(reply.text)
+            except ValueError:
+                return reply
+            if doc.get("action") == "submit":
+                doc["stat"] = float(doc.get("stat") or 0.0) + 1.0   # 统计错但不缺字段
+                return dataclasses.replace(reply, text=_json.dumps(
+                    doc, ensure_ascii=False, sort_keys=True))
+            return reply
+
+    fixture = PF.make_fixture(campaign_id=ctx.campaign_id, fixture_id="P1",
+                              slot_id="P-A-1", instance_id="E-dev")
+    stub = _BadStatStub(fixture=fixture)
+    rec = T4.run_chain(ctx, "P1", caller=stub, counter=lambda t: 100, gpus=False)
+
+    assert rec["chain_ok"] is False
+    # 关键：trial 状态看不出判负（submit 结构上被收下，candidate 已置终态）
+    assert rec["status"] == ST.TRIAL_SUBMITTED
+    assert any("统计与分析产物不符" in p or "stat" in p
+               for p in rec["verdict"]["problems"])
+
+    events = ST.Journal(ctx).for_trial("proto_P1")
+    fails = [e for e in events if e.get("code") == ST.EV_PROTOCOL_FAIL]
+    assert len(fails) == 1
+    assert fails[0]["action"] == "verify" and fails[0]["ok"] is False
+    assert fails[0]["payload"]["problems"] == rec["verdict"]["problems"]
+
+    verdict = CO.judge(CO.read_facts(ctx))
+    assert verdict["protocol"]["status"] == CO.PROTOCOL_BLOCKED
+    assert verdict["protocol"]["failed"] == ["proto_P1"]
+    assert verdict["measurement"]["status"] == CO.MEAS_INCOMPLETE
+    assert "PROTOCOL_BLOCKED" in verdict["measurement"]["reasons"]

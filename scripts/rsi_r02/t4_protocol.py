@@ -118,6 +118,20 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
     events = ST.Journal(ctx).for_trial(spec.trial_id)
     verdict = PF.verify_run(fixture, events=events, trial=runner,
                             post_budget=len(slot_ids))
+    if not verdict["ok"]:
+        # 判负必须**落成事实**，不能只活在 g_d 的 chain_ok 里（评审 HIGH）：
+        # submit 结构上被收下时 trial 已是终态 SUBMITTED，``StateStore.transition``
+        # 拒绝终态互改，所以这里不改状态而是写日志事件（code=PROTOCOL_FAIL），
+        # closeout 的协议轴按它判负——否则「统计错/nonce 错但 submit 被收下」这类
+        # §10.2 明列的协议 FAIL 会被印成 PROTOCOL_OK / measurement=VALID。
+        ST.Journal(ctx).append(
+            kind="result", trial_id=spec.trial_id, action="verify", ok=False,
+            code=ST.EV_PROTOCOL_FAIL,
+            message="协议链判负：检查器不接受本轮 submit（统计/nonce/run_ids 等）",
+            payload={"fixture_id": fixture.fixture_id,
+                     "trial_status": run_out.get("status"),
+                     "problems": list(verdict["problems"])})
+        events = ST.Journal(ctx).for_trial(spec.trial_id)
     slot_actions = T3C.slot_binding(events, book)
     slot_problems = T3C.slot_problems(slot_actions)
     slot_repairs = T3C.slot_repairs(slot_actions)

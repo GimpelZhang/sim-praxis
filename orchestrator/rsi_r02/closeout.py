@@ -154,8 +154,19 @@ def read_facts(ctx: C.CampaignContext) -> "dict[str, Any]":
         reasons.append(f"CAMPAIGN_PAUSED: {camp.pause_reason()}")
 
     events = journal.events
+    # 协议链判负**不一定**改 trial 状态：submit 结构上被收下时 candidate 已把 trial
+    # 置为终态 SUBMITTED，而 verify_run 的统计/nonce 判负发生在之后（评审 HIGH：
+    # 以前 closeout 只看 status，于是「submit 被收下但统计错」这类 §10.2 明列的
+    # 协议 FAIL 在判决件里完全不可见，会印成 PROTOCOL_OK/VALID）。宿主现在把判负
+    # 写进日志（code=PROTOCOL_FAIL，kind=result/action=verify），状态机语义不变，
+    # 判决按事件事实读。
+    proto_failed = {str(e.get("trial_id")) for e in events
+                    if e.get("code") == ST.EV_PROTOCOL_FAIL}
+    for _t in trials:
+        _t["protocol_verdict_fail"] = _t["trial_id"] in proto_failed
     codes = [str(e.get("code")) for e in events if e.get("code")]
     counts = {"events": len(events),
+              "protocol_fail": codes.count(ST.EV_PROTOCOL_FAIL),
               "unknown_sent": codes.count(ST.EV_UNKNOWN_SENT),
               "cost_unknown": codes.count(ST.EV_COST_UNKNOWN),
               "tool_outcome_unknown": codes.count(ST.EV_TOOL_OUTCOME_UNKNOWN),
@@ -265,15 +276,23 @@ def protocol_axis(facts: Mapping[str, Any]) -> "dict[str, Any]":
     ``None``。判负状态不只看 ``VALID_FAIL_CAP``——按 fail-closed 原则，**任何**
     非 ``TRIAL_SUBMITTED`` 的已启动状态都算链不成立（BLOCKED/INVALID 等同样阻断
     能力测量），并把该状态逐条留档，避免「只有一种失败被机器看见」。
+
+    另有一类**状态看不出来的判负**：submit 结构合法 ⇒ candidate 把 trial 置为终态
+    ``SUBMITTED``，随后 ``verify_run`` 才判 nonce/统计/run_ids 不符（§10.2 明列的
+    「统计错」协议 FAIL）。宿主把这类判负写成日志事件 ``code=PROTOCOL_FAIL``，
+    ``facts["trials"][i]["protocol_verdict_fail"]`` 就来自它；只看 status 会把
+    真实 FAIL 印成 ``PROTOCOL_OK``（评审 HIGH）。
     """
     chains = [t for t in facts["trials"] if t.get("phase") == "protocol"]
     detail = {t["trial_id"]: {"status": t.get("status"),
-                              "started": bool(t.get("started"))}
+                              "started": bool(t.get("started")),
+                              "verdict_fail": bool(t.get("protocol_verdict_fail"))}
               for t in chains}
     started = [t for t in chains if t.get("started")]
     if not started:
         return {"status": PROTOCOL_NOT_STARTED, "chains": detail}
-    failed = [t for t in started if t.get("status") != ST.TRIAL_SUBMITTED]
+    failed = [t for t in started if t.get("status") != ST.TRIAL_SUBMITTED
+              or t.get("protocol_verdict_fail")]
     if failed:
         return {"status": PROTOCOL_BLOCKED, "chains": detail,
                 "failed": [t["trial_id"] for t in failed]}
