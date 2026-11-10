@@ -491,9 +491,13 @@ def test_submit_is_never_described_as_repairable(ctx):
     # 协议链专属的结链核验必须逐字告知（否则候选以为缺 nonce 会被当场拒）
     assert "nonce" in terminal_submit and "stat_key" in terminal_submit
     assert "整条链直接判失败" in terminal_submit
-    # required_fields bullet 不得再声称 submit 缺字段会被当场拒绝
+    # required_fields bullet 不得再声称 submit 缺字段会被当场拒绝；但 claim/run_ids
+    # 是结构性字段，缺了**确实**在接收时被拒（root F reviewer F2）
     req = next(x for x in bullets if "唯一权威" in x)
-    assert "submit 缺字段**不会**在接收时被拒" in req
+    assert "submit 的 `claim` / `run_ids` 缺失或类型不符" in req
+    assert "同样会被拒（可改正）" in req
+    assert "缺失**不会**在接收时被拒" in req
+    assert "submit 缺字段**不会**在接收时被拒" not in req
     # 非协议文档同样必须说清终局语义（只是不谈结链核验）
     dev_doc = H.write_public_task(ctx, "E-dev", family="E")
     dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
@@ -565,16 +569,23 @@ def test_submit_without_nonce_terminates_the_trial(ctx):
 
 
 def test_blanket_repair_promise_carries_the_submit_exclusion(ctx):
-    """E-HIGH-1 的另一半：通用句不得再无条件覆盖 submit。"""
+    """E-HIGH-1 的另一半：通用句不得再无条件覆盖 submit。
+
+    2026-11-10 root F reviewer F2：原写法「除 submit 以外，格式类失败…不终止」把
+    submit 的**结构性**拒绝（缺 claim / run_ids）也说成终局，同样是假陈述。现改为
+    「submit 的结构性拒绝也在此列」+「唯一不可挽回的是 submit 被接收之后」。
+    """
     text = _rendered(ctx, "P1")[1]
     bullets = [x for x in text.splitlines() if x.startswith("* ")]
     general = next(x for x in bullets if "空回复会直接终止本 trial" in x)
-    assert "除 submit 以外" in general
+    assert "submit 的结构性拒绝也在此列" in general
+    assert "唯一不可挽回的是 submit 被接收之后" in general
     assert "不终止**本 trial" in general
     dev_doc = H.write_public_task(ctx, "E-dev", family="E")
     dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
-    assert "除 submit 以外" in next(x for x in dev.splitlines()
-                                   if "空回复会直接终止本 trial" in x)
+    dev_general = next(x for x in dev.splitlines()
+                       if "空回复会直接终止本 trial" in x)
+    assert "submit 的结构性拒绝也在此列" in dev_general
 
 
 def test_research_block_reaches_the_text_verbatim(ctx):
@@ -607,3 +618,87 @@ def test_research_block_reaches_the_text_verbatim(ctx):
     assert json.dumps(goal_doc["public"]["goal"], ensure_ascii=False,
                       sort_keys=True) in gt
     assert M.rendered_gaps(gt, goal_doc) == []
+
+
+def test_contract_retry_rule_does_not_promise_submit_repair(ctx):
+    """root F reviewer F1（HIGH）：合同串 ``retry_rule`` 曾把跳步 submit 写进可自修类。
+
+    该串经 ``build_system`` 的「公开接口：{json}」**逐字**进入候选读到的 system，
+    而宿主事实是：``_parse_submit`` 只在 claim/run_ids 形状不合时拒绝，被接收的
+    submit（含跳过 analyze、缺 analysis_ids/nonce/stat/stat_key）立刻终局。
+    合同串必须与 bullet 同口径，且只属于协议链文档。
+    """
+    doc = _fixture(ctx, "P1").task_doc()
+    rule = doc["public"]["interface"]["protocol"]["retry_rule"]
+    repairable = rule.partition("**可自修失败**")[2].partition(
+        "**submit 一旦被接收")[0]
+    assert "**除 submit 以外**的动作跳步或重排、重复登记" in repairable
+    assert "submit 一旦被接收就是终局" in rule
+    assert "提前提交" in rule and "结链核验" in rule
+    assert "`claim` / `run_ids` 缺失或类型不符仍会在接收时被拒" in rule
+    assert "分三类" in rule                       # 旧串「分两类」漏了 submit 这一态
+    text = _rendered(ctx, "P1")[1]
+    assert "submit 一旦被接收就是终局" in text
+    dev_doc = H.write_public_task(ctx, "E-dev", family="E")
+    dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
+    assert "submit 一旦被接收就是终局" not in dev  # 合同串是协议链专属
+
+
+def test_submit_structural_rejections_are_repairable_nonce_is_not(ctx):
+    """root F reviewer F2/F3：把「submit 缺字段不被拒」收窄到真实字段面。
+
+    字段级实测（``actions._parse_submit``）：缺 ``claim``、缺/空 ``run_ids``
+    ⇒ 接收时被拒（``ok=false``，可改正）；缺 ``analysis_ids``/``nonce``/``stat``/
+    ``stat_key`` ⇒ 接收通过并终局。行为级：让探针第一次 submit 丢掉 ``claim``，
+    宿主拒绝后它必须能在剩余预算内补交成功（这正是「结构性拒绝可自修」的定义）。
+    """
+    import dataclasses
+    import json as _json
+
+    from orchestrator.rsi_r01 import actions as AC
+    from orchestrator.rsi_r01 import schemas as S
+
+    surface = _real_surface()
+    base = {"schema": S.SCHEMA_ACTION, "action": "submit", "claim": "SUPPORTED",
+            "run_ids": ["run-a"], "analysis_ids": ["ana-a"],
+            "nonce": "n", "stat": 1.0, "stat_key": "max_abs_x"}
+    assert isinstance(AC.parse_action_obj(dict(base), surface), AC.Submit)
+    for drop, code in (("claim", AC.ActionCode.BAD_VALUE),
+                       ("run_ids", AC.ActionCode.MISSING_FIELD)):
+        obj = dict(base)
+        obj.pop(drop)
+        fail = AC.parse_action_obj(obj, surface)
+        assert isinstance(fail, AC.ActionFailure), (drop, fail)
+        assert fail.code == code, (drop, fail)
+    for drop in ("analysis_ids", "nonce", "stat", "stat_key"):
+        obj = dict(base)
+        obj.pop(drop)
+        assert isinstance(AC.parse_action_obj(obj, surface), AC.Submit), drop
+    assert isinstance(AC.parse_action_obj(dict(base, run_ids=[]), surface),
+                      AC.ActionFailure)
+    assert isinstance(AC.parse_action_obj(dict(base, mean_effect="x"), surface),
+                      AC.ActionFailure)
+
+    class _DropClaimOnce(PF.ProbeActor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.broken = False
+
+        def __call__(self, request):
+            reply = super().__call__(request)
+            try:
+                obj = _json.loads(reply.text)
+            except ValueError:
+                return reply
+            if obj.get("action") == "submit" and not self.broken:
+                self.broken = True
+                obj.pop("claim", None)
+                return dataclasses.replace(
+                    reply, text=_json.dumps(obj, ensure_ascii=False))
+            return reply
+
+    rec = T4.run_chain(ctx, "P1", caller=_DropClaimOnce(),
+                       counter=lambda t: 100, gpus=False)
+    assert rec["posts_sent"] == 5, rec
+    assert rec["chain_ok"] is True, rec
+    assert rec["status"] == ST.TRIAL_SUBMITTED, rec

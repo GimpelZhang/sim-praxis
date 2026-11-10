@@ -133,10 +133,11 @@ def action_schema_text(surface: AC.ActionSurface, *,
         "### 边界",
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
         "* 每次回复恰好一个动作。**空回复会直接终止本 trial**（按已响应的失败处理，"
-        "不隐式重试）。**除 submit 以外**，格式类失败（JSON 写坏、缺字段、类型不符）"
+        "不隐式重试）。格式类失败（JSON 写坏、缺字段、类型不符）"
         "以及会被宿主拒绝的动作（重复登记、重复跑同一格、登记内容不合规、引用不存在的 "
         "run_id / analysis_id）都以 `ok=false` 返回、**不终止**本 trial，你可以在剩余"
-        "预算内改正。",
+        "预算内改正（submit 的结构性拒绝也在此列，见下一条）；唯一不可挽回的是 "
+        "submit 被接收之后——它立刻结束本 trial。",
         # 2026-11-10 root E reviewer HIGH：上面那句原先无例外，而 ``submit`` 完全不同——
         # ``rsi_r01.actions._parse_submit`` 不查 nonce/stat/stat_key（只查 claim、
         # run_ids、analysis_ids 的形状，analysis_ids 缺省为 []），``trial._submit``
@@ -145,11 +146,13 @@ def action_schema_text(surface: AC.ActionSurface, *,
         # 实测（零付费重放）：submit 去掉 nonce/stat 仍 4 POST 全收、status=SUBMITTED、
         # 判决面 BLOCKED_PROTOCOL；跳过 analyze 提前 submit 也照样被接受并终态。
         # 故必须把 submit 单独说成终局动作，并要求它自查。
-        "* **例外：submit 是终局动作**——只要结构合法（claim 合法、run_ids / analysis_ids "
-        "是字符串数组且引用的编号真实存在），宿主就接受它并**立刻结束本 trial**，此后"
-        "没有任何改正机会；提前提交（例如跳过 analyze）也一样会被接受。"
+        "* **例外：submit 是终局动作**——只要结构合法（`claim` 属于允许值、`run_ids` "
+        "是非空且全为字符串的数组、`analysis_ids` 是字符串数组、引用的编号真实存在，"
+        "可选的 `mean_effect`/`z` 必须是数值），宿主就接受它并**立刻结束本 trial**，"
+        "此后没有任何改正机会；提前提交（例如跳过 analyze）也一样会被接受。"
         + ("本链对 submit 的核验发生在**结链时**：`nonce` 必须逐字等于公开合同给出的值、"
-           "`stat` 必须等于你 analyze 打印的数值、`stat_key` 必须逐字相符、动作序列必须"
+           "`stat` 必须等于你 analyze 打印的数值（宿主会用真实数据独立重算并逐位比对）、"
+           "`stat_key` 必须逐字相符、动作序列必须"
            "恰好是 preregister→run_experiment→analyze→submit 各一次——**任何一项不符，"
            "整条链直接判失败**。请在 submit 之前逐项自查。"
            if protocol else
@@ -173,13 +176,18 @@ def action_schema_text(surface: AC.ActionSurface, *,
              "预算内改正。但本链成功的动作序列必须**恰好**是 preregister→run_experiment"
              "→analyze→submit 各一次、顺序不变——多一次或少一次都判整条链失败。")]
           if protocol else []),
-        # 「required_fields 是唯一权威」只在文档真的带这两块时才有指向对象。
-        # 「缺字段都会被拒」原先无例外，而 submit 的 nonce/stat/stat_key 并不在接收时
-        # 被查——它们由 ``verify_run`` 在结链时判（root E reviewer E-HIGH-1 的另一半）。
+        # 2026-11-10 root F reviewer F2（MED）：本句原写「submit 缺字段**不会**在接收时
+        # 被拒…没有改正机会」，对 claim/run_ids 是假的——``_parse_submit`` 先查
+        # claim ∈ 允许值（BAD_VALUE）、再查 run_ids 非空字符串数组（MISSING_FIELD），
+        # 二者都走 ``TrialRejected`` ⇒ ``ok=false`` **可改正**；只有 analysis_ids /
+        # nonce / stat / stat_key 不在接收面校验、随被接收的 submit 一并终局。
         *([("* 任务说明里的 required_fields 是字段要求的**唯一权威**，请照抄字段名，"
              "不要自创字段。preregister / run_experiment / analyze 缺字段或类型不符会被拒"
-             "并返回 `ok=false`（可改正）；submit 缺字段**不会**在接收时被拒，而是由结链"
-             "核验判失败——submit 没有改正机会。")]
+             "并返回 `ok=false`（可改正）；submit 的 `claim` / `run_ids` 缺失或类型不符"
+             "同样会被拒（可改正），但 `analysis_ids` / `nonce` / `stat` / `stat_key` "
+             "缺失**不会**在接收时被拒（`analysis_ids` 类型不符仍会被拒）——submit 一旦"
+             "被接收就立刻终局，这些字段只在结链"
+             "核验时判失败，没有改正机会。")]
           if (has_prereg or has_submit) else []),
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
         "数值必须来自你本次实验的真实观测。",

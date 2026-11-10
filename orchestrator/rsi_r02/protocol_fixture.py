@@ -231,13 +231,28 @@ class ProtocolFixture:
                                  "（json 字段见 public.analyze.payload_fields，数据见 "
                                  "public.analyze.data）；submit 必须逐字引用 nonce、"
                                  "STDOUT 里的 stat 与本轮 run_id/analysis_id"),
+                        # 2026-11-10 root F reviewer F1（HIGH）：本串原写「可自修失败
+                        # （…以及动作跳步或重排、重复登记——那一次被拒…你可在剩余预算
+                        # 内改正）」，没有 submit 例外。而宿主对 submit 完全不同：
+                        # ``actions._parse_submit`` 只在 claim/run_ids 形状不合时拒绝，
+                        # ``trial._submit`` 查引用存在即 ok=True，``candidate.py:440-450``
+                        # 随即 TRIAL_SUBMITTED——**跳过 analyze 的 submit 不被拒**，
+                        # 缺 analysis_ids/nonce/stat/stat_key 也不被拒，直接被接收并终局。
+                        # 旧串等于承诺了一个不存在的改正机会，与同页新增的
+                        # 「例外：submit 是终局动作」自相矛盾。
                         "retry_rule": (
                             "每次**已发网并收到回复**的动作计一次 POST（本链上限 "
                             "posts_budget；发网前被拒的请求不占 POST）。"
-                            "分两类：**可自修失败**（JSON 解析失败、缺字段、类型不符，"
-                            "以及动作跳步或重排、重复登记——那一次被拒且已计一次 POST）"
-                            "的回包会说明原因，你可在剩余预算内改正，动作顺序要求不变；"
-                            "**策略违规是终态**（params 含未授权键、数值越界），"
+                            "分三类：**可自修失败**（JSON 解析失败、缺字段、类型不符，"
+                            "以及**除 submit 以外**的动作跳步或重排、重复登记——那一次"
+                            "被拒且已计一次 POST）的回包会说明原因，你可在剩余预算内"
+                            "改正，动作顺序要求不变；**submit 一旦被接收就是终局**——"
+                            "`claim` 合法且 `run_ids` 是非空字符串数组时宿主立即结束本 "
+                            "trial，**没有任何**改正机会，提前提交（如跳过 analyze）、"
+                            "缺 `analysis_ids` / `nonce` / `stat` / `stat_key` 都不会在"
+                            "接收时被拒，只会让整条链在结链核验时判失败（但 `claim` / "
+                            "`run_ids` 缺失或类型不符仍会在接收时被拒，属上面的可自修"
+                            "类）；**策略违规是终态**（params 含未授权键、数值越界），"
                             "本次协议链立即终止，不再接受任何动作。"
                             "无论哪类，成功的动作序列必须恰好等于动作顺序、每步一次。"),
                     },
