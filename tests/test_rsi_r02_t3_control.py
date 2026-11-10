@@ -145,3 +145,32 @@ def test_publish_refuses_missing_evidence(tmp_path):
     import pytest
     with pytest.raises(T3P.PublishError, match="closeout_rehearsal.json"):
         T3P.publish(control=ctrl, prod=prod)
+
+
+# ---- 自修余量槽（2026-11-10「开新票据」） ---------------------------------
+
+def test_repair_slot_accepts_any_action_and_drift_is_recorded_not_fatal():
+    """必做槽收到别的动作 → 记 repair（可自修），不进 problems。"""
+    events = [_post("P-A-1"), _dispatched("run_experiment", "P-A-1"),
+              _post("P-A-2"), _dispatched("preregister", "P-A-2"),
+              _post("P-A-5"), _dispatched("run_experiment", "P-A-5")]
+    book = _Book({"P-A-1": {"required_action": "preregister"},
+                  "P-A-2": {"required_action": "run_experiment"},
+                  "P-A-5": {"required_action": None}})
+    rows = T3C.slot_binding(events, book)
+    assert [r["repair"] for r in rows] == [True, True, False]
+    assert rows[2]["ok"] is True and rows[2]["required_action"] is None
+    assert T3C.slot_problems(rows) == []
+    assert len(T3C.slot_repairs(rows)) == 2
+
+
+def test_unknown_slot_or_missing_dispatch_is_a_hard_error():
+    """未知槽 / POST 无分派结果是宿主侧硬错误（不是可自修的模型漂移）。"""
+    events = [_post("P-A-9"),
+              _post("P-A-1"), _dispatched("preregister", "P-A-1")]
+    book = _Book({"P-A-1": {"required_action": "preregister"}})
+    rows = T3C.slot_binding(events, book)
+    assert rows[0]["slot_known"] is False and rows[0]["hard_error"] is True
+    assert rows[1]["hard_error"] is False
+    assert T3C.slot_problems(rows) and "P-A-9" in T3C.slot_problems(rows)[0]
+    assert T3C.slot_repairs(rows) == []

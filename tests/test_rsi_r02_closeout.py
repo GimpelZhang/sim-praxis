@@ -294,3 +294,20 @@ def test_write_facts_writes_private_files(ctx):
         assert path.stat().st_mode & 0o777 == 0o600
         json.loads(path.read_text(encoding="utf-8"))
     assert out["judgement"]["capability"]["status"] == CO.CAP_CEILING
+
+
+# ---- D-T4-3：协议 trial 必须在事实与三轴里可见 ---------------------------
+
+def test_facts_include_protocol_trials_but_not_in_gv(ctx):
+    from orchestrator.rsi_r02 import closeout as CO2
+
+    _all_pass(ctx)
+    facts = CO2.read_facts(ctx)
+    proto = [t for t in facts["trials"] if t["phase"] == "protocol"]
+    assert {t["trial_id"] for t in proto} == {"proto_P1", "proto_P2"}
+    assert all(t["started"] is False for t in proto)   # 本用例没跑协议链
+    # 协议行不得影响 G-V：dev 三族仍各自命中自己的 trial
+    gate = CO2.dev_gate(facts)
+    assert gate["passed"] is True
+    verdict = CO2.judge(facts)
+    assert verdict["capability"]["status"] == CO2.CAP_CEILING

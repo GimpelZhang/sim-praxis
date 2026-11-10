@@ -46,7 +46,9 @@ def _obs(ctx, instance_id="E-dev", run_id="run_abc"):
 
 def test_unstarted_trials_are_not_run_with_reason(ctx):
     doc = G.collect(ctx)
-    assert len(doc["trials"]) == 9
+    # 9 个能力 trial + 2 条协议链（D-T4-3：协议 trial 也必须有事实行）
+    assert len(doc["trials"]) == 11
+    assert {t["phase"] for t in doc["trials"]} == {"dev", "validation", "protocol"}
     assert all(t["effective_status"] == G.NOT_RUN for t in doc["trials"])
     assert doc["denominators"] == {
         "assigned_by_family": {"E": 3, "D": 3, "R": 3},

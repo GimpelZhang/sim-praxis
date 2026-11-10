@@ -1,6 +1,6 @@
 """RSI-R0.2 协议 fixture 与协议检查器（计划 §6.1，T3 预演 / T4 准入）。
 
-两条 fixture（P1/P2）各自是一条**四轮真实链**：preregister → run_experiment →
+两条 fixture（P1/P2）各自是一条**真实链**：preregister → run_experiment →
 analyze → submit。它们只使用公开信息（复用 E-dev 的公开场景参数与动作面；
 **不读**其私有 tolerance / fault / reference_gains），判据是这里写死的协议
 检查器，不是任务判据。
@@ -34,6 +34,40 @@ FIXTURE_IDS = ("P1", "P2")
 ACTION_ORDER = ("preregister", "run_experiment", "analyze", "submit")
 STAT_KEY = "max_abs_x"
 PROTO_LINE = "PROTO_STAT "
+
+#: 判据侧（rsi_r01）真实要求的必填字段——文档必须逐一覆盖它们，不许只写一部分。
+PREREG_REQUIRED = ("question", "h", "cells", "metric", "formula_version",
+                   "delta", "censoring_rule", "analysis_procedure", "stop_rule")
+SUBMIT_REQUIRED = ("claim", "run_ids", "analysis_ids", "nonce", "stat",
+                   "stat_key")
+
+#: preregister 的 plan 必填字段与约束（逐字写进公开文档；判据取自
+#: ``rsi_r01.actions._parse_prereg`` 与 ``rsi_r01.evaluator.check_prereg``，
+#: 单测 ``test_task_doc_declares_exactly_the_validator_required_fields``
+#: 会与 ``evaluator.PREREG_REQUIRED_FIELDS`` 交叉比对，防止文档与判据漂移）。
+PREREG_FIELD_SPEC: "dict[str, str]" = {
+    "question": "字符串：本次实验要回答的单一问题",
+    "h": "整数 +1 或 −1（方向性假设）",
+    "cells": ("非空数组：每项一个对象，键取 interface.keys（本 fixture 计划 1 格，"
+              "参数见 prereg.values）"),
+    "metric": "字符串：观测量名（本 fixture 取 interface.protocol.stat_key）",
+    "formula_version": "字符串：统计公式版本标识",
+    "delta": f"数值：必须逐字等于 {float(S.DELTA)}（预规定最小效应）",
+    "censoring_rule": "字符串：删失规则",
+    "analysis_procedure": ("字符串：分析步骤；须写明将打印 "
+                           f"{PROTO_LINE}<json> 行"),
+    "stop_rule": "字符串：停止规则",
+}
+
+#: submit 的必填字段（判据取自 ``_parse_submit`` 与 ``verify_run``）。
+SUBMIT_FIELD_SPEC: "dict[str, str]" = {
+    "claim": "字符串：SUPPORTED / REFUTED / INCONCLUSIVE（大写，逐字）",
+    "run_ids": "非空数组：本轮 run_experiment 返回的 run_id，逐字",
+    "analysis_ids": "数组：本轮 analyze 返回的 analysis_id，逐字且仅一个",
+    "nonce": "字符串：逐字等于 interface.protocol.nonce",
+    "stat": "数值：逐字等于 analyze 打印的 PROTO_STAT 行里的 stat",
+    "stat_key": "字符串：逐字等于 interface.protocol.stat_key",
+}
 
 #: 两条链各自的实验参数（公开、可核验；两链不同以证明结果非静态复读）。
 FIXTURE_PARAMS: "dict[str, dict[str, Any]]" = {
@@ -97,7 +131,15 @@ class ProtocolFixture:
                 "note": "nonce 为反静态复读标记（确定性派生），非能力样本"}
 
     def task_doc(self) -> "dict[str, Any]":
-        """候选可见的公开任务文档（协议合同放在 interface 里，逐字可见）。"""
+        """候选可见的公开任务文档（协议合同放在 interface 里，逐字可见）。
+
+        **R0.2 T4 首跑的教训**（2026-11-10，G-D FAIL）成文于此：系统提示写着
+        「plan 的字段要求见任务说明」，而本文档当时没有任何字段要求——候选只能
+        用自造字段提交，第 1 轮即被判缺字段。修复方式不是放宽判据，而是让公开
+        材料**自己说清楚**：``prereg``/``submit`` 两个块逐字列出必填字段、类型
+        约束与固定值（``delta``）。确定性 actor 也改为从本文档读取字段名来构造
+        动作，于是「公开信息是否充分」这一步不再是空转。
+        """
         return {
             "schema": "simpraxis.rsi_r02.protocol_task.v1",
             "instance_id": self.instance_id,
@@ -105,6 +147,19 @@ class ProtocolFixture:
             "public": {
                 "goal": (f"协议准入 fixture {self.fixture_id}：按四动作链完成一次公开实验，"
                          f"不得跳步或重排"),
+                "prereg": {
+                    "note": ("preregister 的 plan 对象必须逐字包含下列全部字段；"
+                             "第一次实验之前提交，成功后不得重复登记。"),
+                    "required_fields": dict(PREREG_FIELD_SPEC),
+                    "delta_fixed": float(S.DELTA),
+                    "cells_rule": ("cells 为非空数组，每项是对象，键取 interface.keys；"
+                                   "本 fixture 只需计划 1 格，取 values 里的参数。"),
+                    "values": dict(self.params),
+                },
+                "submit": {
+                    "note": "submit 必须逐字回引本轮真实标识与统计，不得自述。",
+                    "required_fields": dict(SUBMIT_FIELD_SPEC),
+                },
                 "interface": {
                     "kind": "push_control",
                     "keys": sorted(self.params),
@@ -118,12 +173,95 @@ class ProtocolFixture:
                         "action_order": list(ACTION_ORDER),
                         "stat_key": self.stat_key,
                         "analyze_line": PROTO_LINE,
+                        "posts_budget": 6,
                         "bind": ("analyze 源码必须打印 PROTO_STAT <json>；submit 必须"
                                  "逐字引用 nonce、STDOUT 里的 stat 与本轮 run_id/analysis_id"),
+                        "retry_rule": ("每次动作计一次 POST（本链上限 posts_budget）；"
+                                       "被判负的那次不改变动作顺序要求，修正后重发即可"),
                     },
                 },
             },
         }
+
+
+#: 每链第一个槽（= 公开文档里 nonce 的派生输入之一）；与 t0 槽位表一致。
+_FIRST_SLOT = {"P1": "P-A-1", "P2": "P-B-1"}
+
+
+def doc_gaps(doc: Mapping[str, Any]) -> "list[str]":
+    """公开文档是否自足：逐字覆盖 prereg/submit 判据侧要求的全部字段。
+
+    这是「公开信息充分性」的机判形式——判据侧（``PREREG_REQUIRED`` /
+    ``SUBMIT_REQUIRED``）要什么，公开文档就必须声明什么。返回缺失项清单，
+    空列表才算自足。``ProtocolStub._plan_from_doc`` 用同一组常量，故控制预演
+    与契约检查不会各说各话。
+    """
+    pub = (doc or {}).get("public") or {}
+    missing: "list[str]" = []
+    prereg = (pub.get("prereg") or {}).get("required_fields")
+    if not isinstance(prereg, Mapping):
+        missing.append("public.prereg.required_fields 缺失")
+    else:
+        missing += [f"public.prereg.required_fields.{k}"
+                    for k in PREREG_REQUIRED if k not in prereg]
+    submit = (pub.get("submit") or {}).get("required_fields")
+    if not isinstance(submit, Mapping):
+        missing.append("public.submit.required_fields 缺失")
+    else:
+        missing += [f"public.submit.required_fields.{k}"
+                    for k in SUBMIT_REQUIRED if k not in submit]
+    return missing
+
+
+def contract_payload(*, campaign_id: str) -> "dict[str, Any]":
+    """``contract/protocol_contract.json`` 的内容（D-T4-2：以前从未物化）。
+
+    冻结面需要一份**可机读**的协议合同：动作顺序、每链槽数、必填字段表、
+    两链公开文档的 sha256 与自足性检查结果。它在 T0 落盘、被 LOCK 逐件钉哈希，
+    于是「候选看到的那份文档是否自足」变成签署过的断言，而不是事后再解释。
+    """
+    per_chain: "dict[str, Any]" = {}
+    for fid in FIXTURE_IDS:
+        fx = make_fixture(campaign_id=campaign_id, fixture_id=fid,
+                          slot_id=_FIRST_SLOT[fid])
+        doc = fx.task_doc()
+        blob = json.dumps(doc, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":")).encode("utf-8")
+        per_chain[fid] = {
+            "slot_id": _FIRST_SLOT[fid],
+            "nonce": fx.nonce,
+            "task_doc_sha256": hashlib.sha256(blob).hexdigest(),
+            "doc_gaps": doc_gaps(doc),
+        }
+    return {
+        "schema": "simpraxis.rsi_r02.protocol_contract.v1",
+        "campaign_id": campaign_id,
+        "action_order": list(ACTION_ORDER),
+        "slots_per_chain": 6,
+        "required_actions": len(ACTION_ORDER),
+        "repair_slots_per_chain": 6 - len(ACTION_ORDER),
+        "total_posts_cap": 6 * len(FIXTURE_IDS),
+        "doc_must_be_self_sufficient": True,
+        "prereg_required": list(PREREG_REQUIRED),
+        "submit_required": list(SUBMIT_REQUIRED),
+        "chains": per_chain,
+        "note": ("坏 JSON/缺字段/不合法 prereg 属帽内可见错误，可在余量槽自修、"
+                 "各计一次 POST；成功动作序列必须恰好等于 action_order。"),
+    }
+
+
+def check_contract(payload: Mapping[str, Any], *, campaign_id: str) -> "list[str]":
+    """合同自查：重算一次并逐项比对（漂移即返回problems，不静默）。"""
+    problems: "list[str]" = []
+    live = contract_payload(campaign_id=campaign_id)
+    for key in ("action_order", "slots_per_chain", "required_actions",
+                "repair_slots_per_chain", "total_posts_cap", "chains"):
+        if (payload or {}).get(key) != live[key]:
+            problems.append(f"协议合同与实机不符：{key}")
+    for fid, chain in (live["chains"] or {}).items():
+        if chain.get("doc_gaps"):
+            problems.append(f"{fid} 公开文档不自足：{chain['doc_gaps']}")
+    return problems
 
 
 def make_fixture(*, campaign_id: str, fixture_id: str, slot_id: str,
@@ -182,14 +320,7 @@ class ProtocolStub:
         res = self.results
         if not res:
             return {"schema": S.SCHEMA_ACTION, "action": "preregister",
-                    "plan": {"question": f"协议 fixture {self.fixture.fixture_id}",
-                             "h": 1, "cells": [dict(self.fixture.params)],
-                             "metric": "final_distance_m",
-                             "formula_version": "rsi_r01.push.v1",
-                             "delta": float(S.DELTA),
-                             "censoring_rule": "不适用",
-                             "analysis_procedure": "单次公开实验 + stdout 统计",
-                             "stop_rule": "四动作链完成即停"}}
+                    "plan": self._plan_from_doc()}
         if res[0].get("action") != "preregister" or not res[0].get("ok"):
             raise ProtocolError(f"登记未成功：{res[0]}")
         run = [r for r in res if r.get("action") == "run_experiment" and r.get("ok")]
@@ -212,6 +343,42 @@ class ProtocolStub:
                 "nonce": self.fixture.nonce,
                 "stat": payload.get("stat"),
                 "stat_key": self.fixture.stat_key}
+
+    def _plan_from_doc(self) -> "dict[str, Any]":
+        """从**公开文档**构造合法 plan：文档没写全就报错，而不是偷偷知道。
+
+        T4 首跑的根因是确定性 actor 把合法 plan 硬编码，于是「公开信息充分性」
+        预演永远通过。现在字段名必须由文档 ``public.prereg.required_fields``
+        逐一声明，缺一个即 ``ProtocolError``——预演失败会在 LOCK 之前暴露，
+        而不是花真实 POST 才暴露。
+        """
+        pub = self.fixture.task_doc().get("public") or {}
+        spec = pub.get("prereg") or {}
+        declared = spec.get("required_fields")
+        if not isinstance(declared, Mapping):
+            raise ProtocolError("公开文档缺 prereg.required_fields：候选无从得知必填字段")
+        absent = [k for k in PREREG_REQUIRED if k not in declared]
+        if absent:
+            raise ProtocolError(f"公开文档未声明必填 plan 字段 {absent}")
+        submit_spec = (pub.get("submit") or {}).get("required_fields")
+        if not isinstance(submit_spec, Mapping):
+            raise ProtocolError("公开文档缺 submit.required_fields")
+        absent_submit = [k for k in SUBMIT_REQUIRED if k not in submit_spec]
+        if absent_submit:
+            raise ProtocolError(f"公开文档未声明必填 submit 字段 {absent_submit}")
+        values = spec.get("values") or dict(self.fixture.params)
+        return {
+            "question": f"协议 fixture {self.fixture.fixture_id}：给定参数下 {self.fixture.stat_key} 是多少",
+            "h": 1,
+            "cells": [dict(values)],
+            "metric": self.fixture.stat_key,
+            "formula_version": "rsi_r02.protocol.v1",
+            "delta": float(spec.get("delta_fixed", S.DELTA)),
+            "censoring_rule": "无删失；实验失败或未产生观测记 INCONCLUSIVE",
+            "analysis_procedure": (f"读取本轮 run 的 x 序列取 max|x|，"
+                                   f"打印 {PROTO_LINE}<json> 行"),
+            "stop_rule": "四动作链完成即停",
+        }
 
 
 def _turn_count(messages: Sequence[Mapping[str, str]]) -> int:
@@ -300,8 +467,14 @@ def recovered_runs(trusted_dir: "str | Path", trial_id: str,
 
 
 def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
-               trial: Any) -> "dict[str, Any]":
-    """按冻结顺序检查四动作链 + nonce/统计绑定；统计由宿主独立重算。"""
+               trial: Any, post_budget: int = 4) -> "dict[str, Any]":
+    """检查四动作链 + nonce/统计绑定；统计由宿主独立重算。
+
+    ``post_budget`` 是本链允许消耗的 POST 上限（plan/protocol 的槽数）。默认 4＝
+    无自修余量（确定性 actor 的控制链）；付费链按预注册传更大值，坏 JSON /
+    缺字段 / 不合法 prereg 各占一次 POST、可在余量内自修——但**成功动作序列**
+    仍必须恰好等于 ``ACTION_ORDER``（多一次或少一次都算链 FAIL）。
+    """
     problems: "list[str]" = []
     evidence: "dict[str, Any]" = {"fixture_id": fixture.fixture_id,
                                   "nonce": fixture.nonce}
@@ -315,10 +488,12 @@ def verify_run(fixture: ProtocolFixture, *, events: Sequence[Mapping[str, Any]],
             and e.get("action") not in (None, "post")]
     evidence["n_posts"] = len(results)
     evidence["actions"] = [str(a.get("action")) for a in acts]
-    if len(results) != 4:
-        problems.append(f"POST 数必须是 4，实际 {len(results)}")
-    if tuple(evidence["actions"][:4]) != ACTION_ORDER:
-        problems.append(f"动作顺序不符：{evidence['actions']} != {list(ACTION_ORDER)}")
+    if not 4 <= len(results) <= max(4, int(post_budget)):
+        problems.append(f"POST 数须在 4..{max(4, int(post_budget))} 之间"
+                        f"（四个必做动作 + 自修余量），实际 {len(results)}")
+    if tuple(evidence["actions"]) != ACTION_ORDER:
+        problems.append(f"动作顺序不符（成功动作须恰为 {list(ACTION_ORDER)}）："
+                        f"{evidence['actions']}")
 
     parsed: "list[dict[str, Any]]" = []
     for text in texts:

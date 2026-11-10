@@ -62,6 +62,26 @@ def _trial_facts(store: ST.StateStore, spec: SG.TrialSpec) -> "dict[str, Any]":
     return base
 
 
+#: 协议链每链的槽数（4 必做 + 2 自修余量）；只用于**读事实**的 spec 复原。
+PROTO_SLOTS_PER_CHAIN = 6
+_PROTO_SLOT_PREFIX = {"P1": "P-A-", "P2": "P-B-"}
+
+
+def protocol_specs() -> "tuple[SG.TrialSpec, ...]":
+    """协议链的 trial spec —— closeout 事实里必须看得见协议 trial。
+
+    D-T4-3：本函数加入前，``read_facts`` 只列 dev/validation spec，协议链在
+    事实与三轴里彻底不可见，T4 失败时 measurement 的理由只写
+    ``NO_TRIAL_STARTED``（而协议 trial 其实真的花过 POST）。槽账与 journal
+    都认这些 trial，事实读取也必须认，否则三轴是在对一份残缺名单作判。
+    """
+    return tuple(
+        SG.TrialSpec(trial_id=f"proto_{fid}", instance_id="E-dev", family="E",
+                     phase="protocol", slot_prefix=prefix,
+                     post_cap=PROTO_SLOTS_PER_CHAIN)
+        for fid, prefix in _PROTO_SLOT_PREFIX.items())
+
+
 def _billing_facts(ctx: C.CampaignContext) -> "dict[str, Any]":
     try:
         return B.BillingBook(ctx).summary()
@@ -85,7 +105,7 @@ def read_facts(ctx: C.CampaignContext) -> "dict[str, Any]":
                  "phase_counts": _phase_counts(slot_book)}
 
     store = ST.StateStore(ctx)
-    specs = (*SG.dev_specs(), *SG.validation_specs())
+    specs = (*SG.dev_specs(), *SG.validation_specs(), *protocol_specs())
     trials = [_trial_facts(store, spec) for spec in specs]
 
     journal = ST.Journal(ctx)
@@ -224,7 +244,9 @@ def measurement_axis(facts: Mapping[str, Any]) -> "dict[str, Any]":
 
 def dev_gate(facts: Mapping[str, Any]) -> "dict[str, Any]":
     """G-V：三族开发 trial 都有效、独立、且在各自层通过。"""
-    by_id = {t["instance_id"]: t for t in facts["trials"]}
+    # 只看 dev 相：协议 trial 也借用 ``E-dev`` 这个 instance_id（同一公开实例、
+    # 同一动作面），不过滤会把真正的开发 trial 覆盖成 None，G-V 直接误判未通过。
+    by_id = {t["instance_id"]: t for t in facts["trials"] if t["phase"] == "dev"}
     detail: "dict[str, Any]" = {}
     ok = True
     for spec in SG.dev_specs():

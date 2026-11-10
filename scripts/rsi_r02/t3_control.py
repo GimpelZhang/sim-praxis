@@ -67,7 +67,7 @@ def _load_t0():
     return mod
 
 
-T0 = _load_t0()  # 224 槽位表复用，不自造
+T0 = _load_t0()  # 228 槽位表复用，不自造
 
 SCHEMA_REPORT = "simpraxis.rsi_r02.t3_control_report.v1"
 
@@ -233,14 +233,36 @@ def slot_binding(events: "list[dict[str, Any]]", book: "ST.SlotBook"
     for evt in posts:
         sid = str(evt.get("slot_id") or "")
         try:
-            required = str(book.get(sid).get("required_action"))
+            required = book.get(sid).get("required_action")
+            known = True
         except ST.StateError:
-            required = None
+            required, known = None, False
         actual = dispatched.get(sid, "")
+        # 自修余量槽（required_action=None）接任何动作都算正当；必做槽收到别的
+        # 动作是**可自修的漂移**（结构化错误 + 一次 POST），单独记 ``repair``，
+        # 不再一票否决——链的最终判据是成功动作序列恰好等于 ACTION_ORDER。
+        # 真正的硬错误是：槽不在账上、或 POST 没有任何分派结果（宿主自身故障）。
+        matched = required in (None, "") or (known and str(required) == actual)
         out.append({"slot_id": sid, "required_action": required,
-                    "actual_action": actual,
-                    "ok": required is None or required == actual})
+                    "actual_action": actual, "slot_known": known,
+                    "ok": bool(matched),
+                    "repair": bool(known and not matched and actual),
+                    "hard_error": (not known) or not actual})
     return out
+
+
+def slot_problems(rows: "list[dict[str, Any]]") -> "list[str]":
+    """硬错误→ problems；漂移（repair）只进审计记录，不否决链。"""
+    return [f"SLOT_HARD_ERROR: {a['slot_id']} known={a['slot_known']} "
+            f"actual={a['actual_action']!r}"
+            for a in rows if a["hard_error"]]
+
+
+def slot_repairs(rows: "list[dict[str, Any]]") -> "list[str]":
+    """必做槽上发生的自修漂移：留痕但不判负（§10.2「帽内可自修，计一次 POST」）。"""
+    return [f"SLOT_REPAIR: {a['slot_id']} required={a['required_action']} "
+            f"actual={a['actual_action']}"
+            for a in rows if a["repair"]]
 
 
 def run_protocol(ctx: C.CampaignContext, *, counter: Any, gpus: bool
@@ -273,21 +295,19 @@ def run_protocol(ctx: C.CampaignContext, *, counter: Any, gpus: bool
                                             spec.trial_id, problems)
         # Journal 在构造时缓存事件：必须**跑完之后**重新构造才能看到本 trial 的事件
         events = ST.Journal(ctx).for_trial(spec.trial_id)
-        verdict = PF.verify_run(fixture, events=events, trial=runner)
+        verdict = PF.verify_run(fixture, events=events, trial=runner,
+                                post_budget=len(slot_ids) or 4)
         slot_actions = slot_binding(events, book)
-        # 评审 m5：required_action 只记录不对照等于没绑——槽不是随便领的，
-        # 实做动作与槽要求的动作不符就必须计入 problems（不静默）。
-        slot_problems = [f"SLOT_ACTION_MISMATCH: {a['slot_id']} "
-                         f"required={a['required_action']} "
-                         f"actual={a['actual_action']}"
-                         for a in slot_actions if not a["ok"]]
+        # 评审 m5 的映射仍在：槽不是随便领的，实做动作逐槽对照 required_action；
+        # 自修余量开后，漂移进 ``slot_repairs`` 留痕，硬错误（未知槽/无分派）才判负。
         counts = book.counts()
         out.append({"fixture": fixture.as_dict(), "trial_id": spec.trial_id,
                     "outcome": run_out.get("outcome"),
                     "status": run_out.get("status"),
                     "posts_sent": run_out.get("posts_sent"),
                     "slot_binding": slot_actions,
-                    "slot_problems": slot_problems,
+                    "slot_problems": slot_problems(slot_actions),
+                    "slot_repairs": slot_repairs(slot_actions),
                     "verdict": verdict,
                     "slots_after": counts})
     return out

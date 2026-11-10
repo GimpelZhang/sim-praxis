@@ -284,3 +284,80 @@ def test_recovered_cell_is_rederived_from_manifest_params(tmp_path):
     assert runs[0].cell is None
     assert any(p.startswith("CELL_UNRESOLVED: run_r1.manifest.json")
                for p in problems)
+
+
+# ---- 公开文档自足性 / 自修余量（2026-11-10 用户裁决「开新票据重做协议链」） ----
+
+
+def test_task_doc_declares_exactly_the_validator_required_fields():
+    """文档与判据共用同一份必填清单：不许多也不许少（T4 首跑根因的回归闸）。"""
+    from orchestrator.rsi_r01 import evaluator as EV
+
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P1", slot_id="s1")
+    doc = fx.task_doc()
+    assert PF.doc_gaps(doc) == []
+    assert set(doc["public"]["prereg"]["required_fields"]) == set(PF.PREREG_REQUIRED)
+    assert set(doc["public"]["submit"]["required_fields"]) == set(PF.SUBMIT_REQUIRED)
+    # 判据侧的真实必填清单（不是 fixture 自己编的）
+    assert set(PF.PREREG_REQUIRED) == set(EV.PREREG_REQUIRED_FIELDS)
+
+
+def test_plan_built_only_from_public_doc_passes_real_validator():
+    """只读公开文档就能构造出判据接受的 plan —— 这就是「公开信息充分」。"""
+    from orchestrator.rsi_r01 import evaluator as EV
+
+    fx = PF.make_fixture(campaign_id="c1", fixture_id="P2", slot_id="s1")
+    plan = PF.ProtocolStub(fixture=fx)._plan_from_doc()
+    assert set(plan) == set(PF.PREREG_REQUIRED)
+    assert EV.check_prereg(plan) == []
+    assert frozenset(plan["cells"][0]) == frozenset(fx.params)
+
+
+class _LeanDocFixture(PF.ProtocolFixture):
+    """公开文档漏一个必填字段的 fixture（模拟「文档不自足」）。"""
+
+    def task_doc(self):
+        doc = super().task_doc()
+        doc["public"]["prereg"]["required_fields"].pop("stop_rule")
+        return doc
+
+
+def test_stub_refuses_to_plan_when_doc_withholds_a_field():
+    lean = _LeanDocFixture(fixture_id="P1", instance_id="E-dev", slot_id="s1",
+                           nonce="n" * 16, params={"kp": 1.0})
+    with pytest.raises(PF.ProtocolError) as ei:
+        PF.ProtocolStub(fixture=lean)._plan_from_doc()
+    assert "stop_rule" in str(ei.value)
+    assert PF.doc_gaps(lean.task_doc()) == [
+        "public.prereg.required_fields.stop_rule"]
+
+
+def test_contract_payload_is_self_sufficient_and_detects_drift():
+    payload = PF.contract_payload(campaign_id="c1")
+    assert payload["slots_per_chain"] == 6
+    assert payload["repair_slots_per_chain"] == 2
+    assert payload["total_posts_cap"] == 12
+    assert all(not ch["doc_gaps"] for ch in payload["chains"].values())
+    assert PF.check_contract(payload, campaign_id="c1") == []
+    tampered = copy.deepcopy(payload)
+    tampered["chains"]["P1"]["task_doc_sha256"] = "0" * 64
+    assert PF.check_contract(tampered, campaign_id="c1")
+    # nonce 依 campaign 派生：换 campaign 必漂移，不会被静默放过
+    assert PF.check_contract(payload, campaign_id="c2")
+
+
+def test_repair_post_then_full_chain_passes_with_budget(ctx):
+    """帽内自修：多发一次（坏 plan）仍应通过，只要成功动作序列完整。"""
+    fixture, _out, trial, events = _run_chain(ctx, fixture_id="P1")
+    verdict = PF.verify_run(fixture, events=events, trial=trial, post_budget=6)
+    assert verdict["ok"], verdict["problems"]
+    extra = copy.deepcopy(events)
+    # 在最前面插一条失败 POST（缺字段的 plan），模拟真实模型的第一次错答
+    bad = {"kind": "result", "action": "post", "ok": False,
+           "payload": {"assistant_text": '{"schema": "x", "action": "preregister"}'}}
+    verdict2 = PF.verify_run(fixture, events=[bad, *extra], trial=trial,
+                             post_budget=6)
+    assert verdict2["ok"], verdict2["problems"]
+    assert verdict2["evidence"]["n_posts"] == 5
+    # 同样的证据在默认 4 槽预算下必须判负（T3 控制链语义不放宽）
+    assert not PF.verify_run(fixture, events=[bad, *extra], trial=trial)["ok"]

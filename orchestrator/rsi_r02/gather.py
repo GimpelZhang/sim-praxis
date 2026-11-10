@@ -116,6 +116,10 @@ def collect(ctx: C.CampaignContext) -> "dict[str, Any]":
     assigned: "dict[str, int]" = {}
     success: "dict[str, int]" = {}
     for row in trials:
+        # 协议链 trial 也列进 trials（它花过 POST、槽账认它），但**不进能力分母**：
+        # 协议准入不是能力样本，混进 E 族分母会把覆盖度说得更好看。
+        if row.get("phase") == "protocol":
+            continue
         assigned[row["family"]] = assigned.get(row["family"], 0) + 1
         if (row["effective_status"] == ST.TRIAL_SUBMITTED
                 and row.get("independent_success") is True

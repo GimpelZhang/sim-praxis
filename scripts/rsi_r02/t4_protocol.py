@@ -1,15 +1,18 @@
-"""RSI-R0.2 T4：八次 POST 同路径协议准入（真实付费，AC22 / G-D）。
+"""RSI-R0.2 T4：十二槽 POST 同路径协议准入（真实付费，AC22 / G-D）。
 
-两条协议 fixture（P1/P2）各四轮真实链：preregister → run_experiment →
-analyze → submit。**与 T3 控制唯一的区别是决策源**：这里用网关真实模型
+两条协议 fixture（P1/P2）各一条真实链：preregister → run_experiment →
+analyze → submit；每链 4 个必做槽 + 2 个自修余量槽（2026-11-10 用户裁决
+「开新票据重做协议链」：首跑 4 槽零余量，坏 plan 一错就触帽）。**与 T3 控制唯一的区别是决策源**：这里用网关真实模型
 （``cli.make_paid_caller``），分派/容器/观测/分析/submit/状态/journal/
 槽账/计费全走同一条 ``cli.run_trial``。协议检查器（``protocol_fixture.verify_run``）
 与控制跑用的是同一个，判据不因付费而放宽。
 
 纪律（§6.1）：
 
-* 每链恰好 4 次发送；模型错 JSON / 错动作 / 空答 / 统计错 ⇒ 该链 FAIL，
-  **不补发修正调用**（剩余槽取消，G-D 失败，T5/T6 取消）。
+* 每链最多 6 次发送（同一次 trial 内，不是旁路补发）：坏 JSON / 缺字段 /
+  不合法 prereg 属**帽内可见错误**，候选可自修，各占一次 POST；但成功动作序列
+  必须恰好 preregister→run_experiment→analyze→submit，多一次少一次都算 FAIL。
+  链 FAIL 后剩余槽取消，G-D 失败，T5/T6 取消，不重测。
 * 付费前先过最终 LOCK（``lock.verify``，AC21）与 G-P 批准件覆盖本批。
 * 本地计数与完整请求字节逐 POST 记录；供应端 usage **只记录不自证**。
 """
@@ -40,7 +43,9 @@ import t3_control as T3C  # noqa: E402  —— 槽位绑定/协议判据与 T3 �
 
 SCHEMA_REPORT = "simpraxis.rsi_r02.t4_protocol_report.v1"
 SCHEMA_CHAIN = "simpraxis.rsi_r02.t4_protocol_chain.v1"
-TOTAL_POSTS = 8
+#: 每链 4 个必做动作 + 2 个自修余量 ⇒ 两条链的发送区间 [8, 12]。
+MIN_POSTS = 8
+TOTAL_POSTS = 12
 # G-P 核验用的本批货币帽**不许由命令行缩小**（评审 LOW-3：调用方传小值会弱化
 # 「批准件必须覆盖整批」的核验）。与 ``TOTAL_POSTS`` 同法：内部常量，非参数。
 CAP_USD = 100.0
@@ -84,12 +89,13 @@ def _usage_rows(events: "list[Mapping[str, Any]]") -> "list[dict[str, Any]]":
 
 def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
               counter: Any, gpus: bool) -> "dict[str, Any]":
-    """跑一条协议链（恰好 4 次发送）；返回证据记录，不做任何补发。"""
+    """跑一条协议链（4 必做 + 2 自修余量）；返回证据记录，不做任何补发。"""
     book = ST.SlotBook(ctx)
     prefix = T3C.PROTO_SLOT_PREFIX[fixture_id]
     slot_ids = sorted(book.ids(prefix=prefix))
-    if len(slot_ids) != 4:
-        raise SystemExit(f"{fixture_id} 期望 4 个协议槽，实际 {len(slot_ids)}：{slot_ids}")
+    if len(slot_ids) != 6:
+        raise SystemExit(f"{fixture_id} 期望 6 个协议槽（4 必做 + 2 余量），"
+                         f"实际 {len(slot_ids)}：{slot_ids}")
     fixture = PF.make_fixture(campaign_id=ctx.campaign_id,
                               fixture_id=fixture_id, slot_id=slot_ids[0],
                               instance_id="E-dev")
@@ -106,12 +112,11 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
         runner.runs = PF.recovered_runs(runner.store.trusted_dir,
                                         spec.trial_id, problems)
     events = ST.Journal(ctx).for_trial(spec.trial_id)
-    verdict = PF.verify_run(fixture, events=events, trial=runner)
+    verdict = PF.verify_run(fixture, events=events, trial=runner,
+                            post_budget=len(slot_ids))
     slot_actions = T3C.slot_binding(events, book)
-    slot_problems = [f"SLOT_ACTION_MISMATCH: {a['slot_id']} "
-                     f"required={a['required_action']} "
-                     f"actual={a['actual_action']}"
-                     for a in slot_actions if not a["ok"]]
+    slot_problems = T3C.slot_problems(slot_actions)
+    slot_repairs = T3C.slot_repairs(slot_actions)
     posts = _usage_rows(events)
     return {
         "schema": SCHEMA_CHAIN,
@@ -124,11 +129,12 @@ def run_chain(ctx: C.CampaignContext, fixture_id: str, *, caller: Any,
         "posts": posts,
         "slot_binding": slot_actions,
         "slot_problems": slot_problems,
+        "slot_repairs": slot_repairs,
         "verdict": verdict,
         "slots_after": book.counts(),
         "chain_ok": bool(verdict["ok"] and not slot_problems
                          and run_out.get("status") == ST.TRIAL_SUBMITTED
-                         and len(posts) == 4),
+                         and 4 <= len(posts) <= len(slot_ids)),
     }
 
 
@@ -200,7 +206,23 @@ def main(argv: "list[str] | None" = None) -> int:
                           "problems": lock_v["problems"]}, ensure_ascii=False))
         return 2
 
-    # G-P：批准件必须覆盖本批 8 次发送与货币帽。
+    # D-T4-2 的运行时守卫：协议合同必须与实机重算一致、公开文档必须自足。
+    # 合同本身已由 LOCK 钉哈希，这一步查的是它与**当前代码**的关系——不一致就
+    # 说明冻结面与实机脱节，零 POST 拒绝（比在付费后才解释便宜得多）。
+    contract_path = ctx.relative("contract/protocol_contract.json")
+    try:
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(json.dumps({"refused": "PROTOCOL_CONTRACT", "problems": [str(exc)]},
+                         ensure_ascii=False))
+        return 2
+    contract_problems = PF.check_contract(contract, campaign_id=ctx.campaign_id)
+    if contract_problems:
+        print(json.dumps({"refused": "PROTOCOL_CONTRACT",
+                          "problems": contract_problems}, ensure_ascii=False))
+        return 2
+
+    # G-P：批准件必须覆盖本批 12 次发送（4 必做 + 2 余量，两链）与货币帽。
     CLI.require_gp_approval(ctx, posts=TOTAL_POSTS, cap_usd=CAP_USD)
     if not args.tokenizer_sha256:
         print(json.dumps({"refused": "缺 --tokenizer-sha256"}, ensure_ascii=False))
@@ -239,7 +261,8 @@ def main(argv: "list[str] | None" = None) -> int:
         "lock_sha256": lock_v.get("lock_sha256"),
         "chains": [{k: ch[k] for k in ("trial_id", "status", "posts_recorded",
                                        "chain_ok", "verdict", "slot_binding",
-                                       "slot_problems")} for ch in chains],
+                                       "slot_problems", "slot_repairs")}
+                              for ch in chains],
         "posts_total": sum(ch["posts_recorded"] for ch in chains),
         "provider_models": sorted({str(p["provider_reported"]["provider_model"])
                                    for ch in chains for p in ch["posts"]}),
@@ -248,7 +271,8 @@ def main(argv: "list[str] | None" = None) -> int:
         "local_counts": local_counts,
         "g_d_ok": (len(chains) == len(PF.FIXTURE_IDS)
                    and all(ch["chain_ok"] for ch in chains)
-                   and sum(ch["posts_recorded"] for ch in chains) == TOTAL_POSTS
+                   and MIN_POSTS <= sum(ch["posts_recorded"]
+                                           for ch in chains) <= TOTAL_POSTS
                    and all(a == 1 for a in
                            [p["provider_reported"]["attempts_http"]
                             for ch in chains for p in ch["posts"]])),

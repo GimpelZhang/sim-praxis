@@ -2,7 +2,7 @@
 
 三层各管一件事，互不伪装：
 
-* :class:`SlotBook` —— 224 个试次槽的**状态机**（UNUSED→SENT→OK/FAIL/UNKNOWN，
+* :class:`SlotBook` —— 228 个试次槽的**状态机**（UNUSED→SENT→OK/FAIL/UNKNOWN，
   或 UNUSED→CANCELLED_WITH_REASON）。发网前阻断（preflight_blocked）不占槽；
   UNKNOWN_SENT 占槽且永不回收（§10.2）。
 * :class:`Journal` —— 只追加的链式事件日志（``trials/journal.jsonl``，0600）。
@@ -168,7 +168,7 @@ def disposition_for(event: str) -> Disposition:
 
 
 class SlotBook:
-    """224 槽状态机；每次转移原子重写 ``quota/slots.json``（flock 串行化）。"""
+    """228 槽状态机；每次转移原子重写 ``quota/slots.json``（flock 串行化）。"""
 
     def __init__(self, ctx: C.CampaignContext):
         self.ctx = ctx

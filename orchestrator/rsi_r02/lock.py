@@ -65,6 +65,10 @@ EVIDENCE_FILES = {
     "spend_contract": "contract/spend_contract.json",
     "task_contract": "contract/task_contract.json",
     "asset_reuse": "contract/asset_reuse.json",
+    # D-T4-2：协议合同（动作顺序/槽数/必填字段表/公开文档 sha256 与自足性）
+    # 以前只写在 docstring 里、从未物化，于是「候选看到的文档是否自足」无从
+    # 签署。现在它是冻结面的一件证据，缺件即 ``证据缺件，不得签``。
+    "protocol_contract": "contract/protocol_contract.json",
 }
 _UNHASHED = ("signatures", "lock_sha256", "created_utc", "frozen_utc")
 

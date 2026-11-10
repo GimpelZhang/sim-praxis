@@ -91,11 +91,12 @@ def action_schema_text(surface: AC.ActionSurface) -> str:
         f'每条动作必须带 "schema": "{S.SCHEMA_ACTION}"。',
         "可用动作与必填字段：",
         '1) {"schema":..., "action":"preregister", "plan":{...}} —— 必须在第一个实验之前，'
-        "且只能一次；plan 的字段要求见任务说明。",
+        "成功后不得重复；plan 的必填字段逐字见任务说明 public.prereg.required_fields。",
         '2) {"schema":..., "action":"run_experiment", "params":{参数名:数值}}',
         '3) {"schema":..., "action":"analyze", "source":"<python源码>", "run_ids":["<run_id>",...]}',
         '4) {"schema":..., "action":"submit", "claim":"SUPPORTED|REFUTED|INCONCLUSIVE", '
-        '"run_ids":[...], "analysis_ids":[...], "mean_effect":数值, "z":数值}',
+        '"run_ids":[...], "analysis_ids":[...], "nonce":"<逐字>", "stat":数值} —— '
+        "必填字段逐字见任务说明 public.submit.required_fields。",
         "",
         f"参数合法区间：{json.dumps(bounds, ensure_ascii=False, sort_keys=True)}",
         f"固定参数：{json.dumps(fixed, ensure_ascii=False, sort_keys=True)}",
@@ -104,6 +105,8 @@ def action_schema_text(surface: AC.ActionSurface) -> str:
         "### 边界",
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
         "* 每次回复恰好一个动作；动作失败会以结构化错误返回，你可以在剩余预算内自行修正。",
+        "* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符都会被拒，"
+        "请照抄字段名，不要自创字段。",
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
         "数值必须来自你本次实验的真实观测。",
         "* submit 的数字必须由你之前的 analyze 结果给出，并逐字引用 run_id / analysis_id。",

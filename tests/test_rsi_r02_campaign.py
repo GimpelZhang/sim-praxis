@@ -161,9 +161,10 @@ def test_dynamic_env_drift_does_not_redirect_writes(repo, docs, tmp_path, monkey
 def test_namespace_caps_and_hard_cap():
     ns = QL.RSI_R02_NAMESPACE
     assert ns.phase == QL.LEDGER_RSI_R02 == 2902
-    assert dict(ns.task_caps) == {0: 8, 1: 72, 2: 72, 3: 72}
-    assert ns.hard_cap == 224
-    assert sum(ns.task_caps.values()) == ns.hard_cap == 224
+    # 协议帽 12 = 2 链 ×（4 必做 + 2 自修余量），2026-11-10 用户裁决「开新票据」
+    assert dict(ns.task_caps) == {0: 12, 1: 72, 2: 72, 3: 72}
+    assert ns.hard_cap == 228
+    assert sum(ns.task_caps.values()) == ns.hard_cap == 228
     assert ns.normal_budget == ns.hard_cap
     assert ns.in_sealed_set() and ns.uses_batch_occupancy()
     assert ns.in_sealed_set_for_read()
@@ -307,25 +308,25 @@ def test_attach_accepts_early_stop_only_root(repo, docs, tmp_path):
     assert again.created_at_utc == ctx.created_at_utc
 
 
-# ---- AC04：224 槽位表可执行且与计划表一致 ----
+# ---- AC04：228 槽位表可执行且与计划表一致（协议 12＝带自修余量） ----
 
 
 def test_slots_arithmetic_matches_plan():
     t0 = _load_t0()
     slots = t0.build_slots()
-    assert slots["counts"]["total"] == 224
-    assert slots["counts"]["by_phase"] == {"protocol": 8, "dev": 72,
+    assert slots["counts"]["total"] == 228
+    assert slots["counts"]["by_phase"] == {"protocol": 12, "dev": 72,
                                            "validation": 144}
     assert slots["counts"]["by_family"] == {"E": 72, "D": 72, "R": 72}
     ids = [s["slot_id"] for s in slots["slots"]]
-    assert len(ids) == len(set(ids)) == 224
-    # 每条协议链四轮动作次序固定（§6.1）
+    assert len(ids) == len(set(ids)) == 228
+    # 每条协议链：四轮必做动作次序固定（§6.1）+ 两个自修余量槽（required=None）
     per_chain = [[s for s in slots["slots"]
                   if s["phase"] == "protocol" and s["chain"] == chain]
                  for chain in ("A", "B")]
     for chain_slots in per_chain:
         assert [s["required_action"] for s in chain_slots] == [
-            "preregister", "run_experiment", "analyze", "submit"]
+            "preregister", "run_experiment", "analyze", "submit", None, None]
     # 验证顺序固定 E1,D1,R1,E2,D2,R2（§6.3）
     order = []
     for s in slots["slots"]:

@@ -46,7 +46,7 @@ from orchestrator.rsi_r02 import closeout as CO  # noqa: E402
 from orchestrator.rsi_r02 import stages as SG  # noqa: E402
 from orchestrator.rsi_r02 import state as ST  # noqa: E402
 
-import t3_control as T3C  # noqa: E402  （复用来源 campaign 与 224 槽位表）
+import t3_control as T3C  # noqa: E402  （复用来源 campaign 与 228 槽位表）
 
 SCHEMA_REPORT = "simpraxis.rsi_r02.t3_closeout_rehearsal.v1"
 
@@ -189,7 +189,7 @@ def case_protocol_fail(base: Path, cid: str, **kw: Any) -> "dict[str, Any]":
     return {"process": "COMPLETE", "measurement": "INCOMPLETE",
             "capability": "NOT_MEASURED",
             "reasons_include": {"measurement": ["NO_TRIAL_STARTED"]},
-            "slots_cancelled_min": 224}
+            "slots_cancelled_min": 228}
 
 
 def case_unknown_sent(base: Path, cid: str, **kw: Any) -> "dict[str, Any]":

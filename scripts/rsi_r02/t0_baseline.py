@@ -1,4 +1,4 @@
-"""RSI-R0.2 T0：授权/基线/资产复用/暴露面/224 槽位/旧根封存（零付费、零网络）。
+"""RSI-R0.2 T0：授权/基线/资产复用/暴露面/228 槽位/旧根封存（零付费、零网络）。
 
 计划 §3.3、§5.1、§7、§8-T0。本脚本只读旧根，产物全部落在新 campaign 根内
 （0700/0600）；不触网、不调模型、不改共享模型配置。
@@ -37,7 +37,8 @@ from orchestrator.common.runtime_paths import (  # noqa: E402
     rsi_r02_campaign_id,
     rsi_r02_root,
 )
-from orchestrator.rsi_r02 import campaign as C  # noqa: E402
+from orchestrator.rsi_r02 import campaign as C
+from orchestrator.rsi_r02 import protocol_fixture as PF  # noqa: E402
 
 #: R0.2 绑定的引擎版本（硬规则 8 的 pinned 集；真值以实测解释器为准）。
 PINNED = {
@@ -59,15 +60,21 @@ DEFAULT_SOURCE_CAMPAIGN = Path(
 VALIDATION_ORDER = ("E-val-1", "D-val-1", "R-val-1", "E-val-2", "D-val-2", "R-val-2")
 DEV_ORDER = ("E-dev", "D-dev", "R-dev")          # §6.2 E-dev→D-dev→R-dev
 PROTOCOL_CHAINS = ("A", "B")
+#: 每链 4 个必做动作 + 2 个**自修余量槽**（2026-11-10 用户裁决「开新票据重做协议链」：
+#: 首跑 P1 在 plan 字段缺失上耗掉 4 槽后链 FAIL，根因之一是"零余量"设计——坏 JSON /
+#: 缺字段 / prereg 不合法都算一次 POST，修正却无槽可用）。余量槽 required_action=None：
+#: 任何动作都可落槽，但**不豁免**动作顺序与最终 submit 契约（verify_run 判据不变）。
 PROTOCOL_ROUNDS = (
     ("1", "preregister"),
     ("2", "run_experiment"),
     ("3", "analyze"),
     ("4", "submit"),
+    ("5", None),
+    ("6", None),
 )
 PER_TRIAL_CAP = 24
 FAMILY_CAP = 72
-PROTOCOL_CAP = 8
+PROTOCOL_CAP = 12
 
 #: 本 campaign 的实现面文件（LOCK 前置清单的一部分；后续 Task 追加）。
 CODE_FILES = (
@@ -135,7 +142,7 @@ def stage_models(path: Path) -> "dict[str, Any]":
 
 
 def build_slots() -> "dict[str, Any]":
-    """224 槽位表（§7：协议 8 + 开发 3×24 + 验证 6×24）。
+    """228 槽位表（§7 预算表自修余量版：协议 12 = 2×(4+2) + 开发 3×24 + 验证 6×24）。
 
     槽位是**分配表**，不是已花额度：初始 status=UNUSED。发网前阻断（preflight_
     blocked）不占槽；UNKNOWN_SENT 占槽（§10.2）；未用额度作废不挪用。
@@ -187,7 +194,7 @@ def build_slots() -> "dict[str, Any]":
         if s["phase"] != "protocol":
             by_family[s["family"]] = by_family.get(s["family"], 0) + 1
     total = len(slots)
-    if total != 224 or counts != {"protocol": 8, "dev": 72, "validation": 144}:
+    if total != 228 or counts != {"protocol": 12, "dev": 72, "validation": 144}:
         raise SystemExit(f"槽位表自检失败：total={total} counts={counts}")
     if any(v != FAMILY_CAP for v in by_family.values()):
         raise SystemExit(f"槽位表族帽自检失败：{by_family}")
@@ -408,6 +415,10 @@ def main(argv: "list[str] | None" = None) -> int:
 
     written = {
         "baseline": str(C.write_json(ctx, "contract/baseline.json", baseline)),
+        # D-T4-2：协议合同必须在冻结前真的落盘，且被 LOCK 逐件钉哈希。
+        "protocol_contract": str(C.write_json(
+            ctx, "contract/protocol_contract.json",
+            PF.contract_payload(campaign_id=ctx.campaign_id))),
         "asset_reuse": str(C.write_json(ctx, "contract/asset_reuse.json", asset_reuse)),
         "exposure_map": str(C.write_json(ctx, "contract/exposure_map.json", exposure)),
         "slots": str(C.write_json(ctx, "quota/slots.json", slots)),

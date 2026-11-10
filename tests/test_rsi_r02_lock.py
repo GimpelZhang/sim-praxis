@@ -12,13 +12,15 @@ import json
 import pytest
 
 from orchestrator.rsi_r02 import lock as L
+from orchestrator.rsi_r02 import protocol_fixture as PF
 from tests import rsi_r02_helpers as H
 
 EVIDENCE = ("contract/spend_contract.json", "contract/task_contract.json",
             "contract/asset_reuse.json", "t3_control/report.json",
             "t3_control/closeout_rehearsal.json",
             "t3_control/records/proto_P1.json",
-            "t3_control/records/proto_P2.json")
+            "t3_control/records/proto_P2.json",
+            "contract/protocol_contract.json")
 
 YAML = """stage_models:
   macro_ideation: {model_id: macro-x}
@@ -69,6 +71,9 @@ def _evidence(ctx, *, skip=()):
             continue
         if rel == "contract/spend_contract.json":
             ctx.write_json(rel, _spend_contract())
+        elif rel == "contract/protocol_contract.json":
+            # 真件（非占位）：协议合同由 T0 物化、被 LOCK 钉哈希（D-T4-2）。
+            ctx.write_json(rel, PF.contract_payload(campaign_id=ctx.campaign_id))
         else:
             ctx.write_json(rel, {"rel": rel})
 
@@ -95,7 +100,7 @@ def test_candidate_is_self_consistent_and_pins_manifests(ctx, tmp_path):
     assert set(doc["evidence"]) == {"t3_control_report", "t3_closeout_rehearsal",
                                     "protocol_P1", "protocol_P2",
                                     "spend_contract", "task_contract",
-                                    "asset_reuse"}
+                                    "asset_reuse", "protocol_contract"}
 
 
 def test_dependency_closure_follows_shared_imports(ctx, tmp_path):
