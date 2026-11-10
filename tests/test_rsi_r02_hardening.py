@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -129,6 +130,9 @@ def test_order_and_duplicate_are_not_promised_as_terminal(ctx):
     repairable = next(x for x in bullets if "动作跳步或重排" in x)
     assert "不是终态" in repairable
     assert "POST" in repairable           # 明确告知代价：已经计掉一次
+    # 2026-11-10 root E reviewer E-HIGH-1：submit 是例外——它在槽位错配时仍被宿主
+    # 接受并终态（实测：跳过 analyze 提前 submit ⇒ 3 POST、status=SUBMITTED）。
+    assert "submit 除外" in repairable
     # 合同侧 retry_rule 同口径
     rule = doc["public"]["interface"]["protocol"]["retry_rule"]
     head, _, tail = rule.partition("**策略违规是终态**")
@@ -463,3 +467,143 @@ def test_retry_rule_counts_only_sent_posts(ctx):
     assert "已发网" in rule
     assert "发网前被拒的请求不占 POST" in rule
     assert "每次动作计一次 POST" not in rule
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-10 root E reviewer 车道：submit 的终局语义 / 非协议文档不得印 nonce
+# ---------------------------------------------------------------------------
+
+
+def test_submit_is_never_described_as_repairable(ctx):
+    """E-HIGH-1：submit 一旦被接受就结束 trial，文本必须**明说**，不许并入可改正类。
+
+    实测（零付费重放，见 ``test_submit_without_nonce_terminates_the_trial``）：
+    ``actions._parse_submit`` 不查 nonce/stat/stat_key，``trial._submit`` 只查引用
+    是否存在就 ``ok=True``，``candidate`` 随即终态——与「缺字段…都会以 ok=false
+    返回、可以改正」相反。修复前 root E 的候选读到的正是那句不实承诺。
+    """
+    proto = _rendered(ctx, "P1")[1]
+    bullets = [x for x in proto.splitlines() if x.startswith("* ")]
+    terminal_submit = next(x for x in bullets if "submit 是终局动作" in x)
+    assert "立刻结束本 trial" in terminal_submit
+    assert "没有任何改正机会" in terminal_submit
+    assert "提前提交" in terminal_submit
+    # 协议链专属的结链核验必须逐字告知（否则候选以为缺 nonce 会被当场拒）
+    assert "nonce" in terminal_submit and "stat_key" in terminal_submit
+    assert "整条链直接判失败" in terminal_submit
+    # required_fields bullet 不得再声称 submit 缺字段会被当场拒绝
+    req = next(x for x in bullets if "唯一权威" in x)
+    assert "submit 缺字段**不会**在接收时被拒" in req
+    # 非协议文档同样必须说清终局语义（只是不谈结链核验）
+    dev_doc = H.write_public_task(ctx, "E-dev", family="E")
+    dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
+    dev_bullets = [x for x in dev.splitlines() if x.startswith("* ")]
+    assert any("submit 是终局动作" in x for x in dev_bullets)
+    assert "整条链" not in dev                        # 不把协议判据说给 dev
+
+
+def test_dev_docs_do_not_print_nonce_in_the_action_shape(ctx):
+    """E-LOW-1：dev/validation 文档没有 nonce，动作形状不得印它。"""
+    dev_doc = H.write_public_task(ctx, "E-dev", family="E")
+    dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
+    shape = next(x for x in dev.splitlines() if x.startswith('4) {"schema"'))
+    assert "nonce" not in shape and "stat_key" not in shape
+    proto_shape = next(x for x in _rendered(ctx, "P1")[1].splitlines()
+                       if x.startswith('4) {"schema"'))
+    assert '"nonce":"<逐字>"' in proto_shape and '"stat_key":"<逐字>"' in proto_shape
+
+
+def test_submit_without_nonce_terminates_the_trial(ctx):
+    """行为级钉子：文本承诺的终局语义必须与真实链条一致（不是单测自说自话）。
+
+    两条重放都零付费：(1) submit 去掉 nonce/stat；(2) 跳过 analyze 提前 submit。
+    两者都必须是 4/3 POST 被收下、status=SUBMITTED（终态）、判决面 BLOCKED_PROTOCOL
+    ——这正是文本现在写明的事实。若哪天宿主改成「拒绝缺字段并给改正机会」，
+    这条测试会红，逼着文本一起改。
+    """
+    import dataclasses
+    import json as _json
+
+    class _DropNonce(PF.ProbeActor):
+        def __call__(self, request):
+            reply = super().__call__(request)
+            try:
+                doc = _json.loads(reply.text)
+            except ValueError:
+                return reply
+            if doc.get("action") == "submit":
+                doc.pop("nonce", None)
+                doc.pop("stat", None)
+                return dataclasses.replace(
+                    reply, text=_json.dumps(doc, ensure_ascii=False))
+            return reply
+
+    class _EarlySubmit(PF.ProbeActor):
+        def __call__(self, request):
+            reply = super().__call__(request)
+            try:
+                doc = _json.loads(reply.text)
+            except ValueError:
+                return reply
+            if doc.get("action") == "analyze":
+                return dataclasses.replace(reply, text=_json.dumps({
+                    "schema": doc.get("schema"), "action": "submit",
+                    "claim": "SUPPORTED", "run_ids": doc.get("run_ids") or [],
+                    "analysis_ids": [], "nonce": "x", "stat": 0.0},
+                    ensure_ascii=False))
+            return reply
+
+    for fid, actor, expected_posts in (("P1", _DropNonce, 4),
+                                       ("P2", _EarlySubmit, 3)):
+        rec = T4.run_chain(ctx, fid, caller=actor(), counter=lambda t: 100,
+                           gpus=False)
+        assert rec["chain_ok"] is False, rec
+        assert rec["status"] == ST.TRIAL_SUBMITTED, rec
+        assert rec["posts_sent"] == expected_posts, rec
+    verdict = CO.judge(CO.read_facts(ctx))
+    assert verdict["protocol"]["status"] == CO.PROTOCOL_BLOCKED
+
+
+def test_blanket_repair_promise_carries_the_submit_exclusion(ctx):
+    """E-HIGH-1 的另一半：通用句不得再无条件覆盖 submit。"""
+    text = _rendered(ctx, "P1")[1]
+    bullets = [x for x in text.splitlines() if x.startswith("* ")]
+    general = next(x for x in bullets if "空回复会直接终止本 trial" in x)
+    assert "除 submit 以外" in general
+    assert "不终止**本 trial" in general
+    dev_doc = H.write_public_task(ctx, "E-dev", family="E")
+    dev = M.build_system(dev_doc, M.surface_from_doc(dev_doc))
+    assert "除 submit 以外" in next(x for x in dev.splitlines()
+                                   if "空回复会直接终止本 trial" in x)
+
+
+def test_research_block_reaches_the_text_verbatim(ctx):
+    """E-MED-1：R 族公开文档的 research 整块必须落进文本。
+
+    ``evaluator.check_prereg`` 对 R 族按 ``research.damping_levels ×
+    initial_angles`` 做四格集合相等，旧渲染只印 h/band/window，把这些判据轴丢在
+    纸面之外；``rendered_gaps`` 又在非协议文档上直接返回空，两道闸一起漏。现在
+    整块 canonical JSON 渲染 + 逐字在场断言（非协议文档也查）。
+    """
+    doc = H.write_public_task(ctx, "R-dev", family="R")
+    doc["public"].pop("goal", None)
+    doc["public"]["research"] = {
+        "h": 1, "question": "阻尼摆问题", "window_s": 4.0,
+        "band": {"theta_rad": 0.05, "omega_rad_s": 0.05, "strict": True},
+        "damping_levels": [0.15, 0.45], "initial_angles": [0.8, -0.8], "delta": 0.1,
+    }
+    text = M.build_system(doc, M.surface_from_doc(doc))
+    assert json.dumps(doc["public"]["research"], ensure_ascii=False,
+                      sort_keys=True) in text
+    assert "目标：阻尼摆问题" in text           # 没有 goal 时用问题，不印 None
+    assert M.rendered_gaps(text, doc) == []
+    stripped = "\n".join(x for x in text.splitlines()
+                         if not x.startswith("公开研究设定："))
+    assert "public.research" in M.rendered_gaps(stripped, doc)
+    # goal 是对象时同样整块渲染（E/D 族）
+    goal_doc = H.write_public_task(ctx, "E-dev", family="E")
+    goal_doc["public"]["goal"] = {"type": "x", "target": [0.5, 0.0]}
+    gt = M.build_system(goal_doc, M.surface_from_doc(goal_doc))
+    assert json.dumps(goal_doc["public"]["goal"], ensure_ascii=False,
+                      sort_keys=True) in gt
+    assert M.rendered_gaps(gt, goal_doc) == []

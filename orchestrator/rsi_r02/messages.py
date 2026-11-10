@@ -115,7 +115,11 @@ def action_schema_text(surface: AC.ActionSurface, *,
         '2) {"schema":..., "action":"run_experiment", "params":{参数名:数值}}',
         '3) {"schema":..., "action":"analyze", "source":"<python源码>", "run_ids":["<run_id>",...]}',
         '4) {"schema":..., "action":"submit", "claim":"SUPPORTED|REFUTED|INCONCLUSIVE", '
-        '"run_ids":[...], "analysis_ids":[...], "nonce":"<逐字>", "stat":数值}'
+        '"run_ids":[...], "analysis_ids":[...]'
+        # nonce/stat/stat_key 只有协议链会核验（``protocol_fixture.verify_run``）；
+        # dev/validation 文档没有 nonce，把它们印出来等于给候选一个不存在的必填项
+        # （root E reviewer E-LOW-1）。
+        + (', "nonce":"<逐字>", "stat":数值, "stat_key":"<逐字>"}' if protocol else '}')
         + (" —— 必填字段逐字见任务说明 public.submit.required_fields。"
            if has_submit else ""),
         "",
@@ -129,10 +133,27 @@ def action_schema_text(surface: AC.ActionSurface, *,
         "### 边界",
         "* 你没有网络、仓库、知识库、私有真值或其他试次的访问权；只能使用本对话给出的公开信息。",
         "* 每次回复恰好一个动作。**空回复会直接终止本 trial**（按已响应的失败处理，"
-        "不隐式重试）。**格式类失败**（JSON 写坏、缺字段、类型不符）以及会被宿主拒绝"
-        "但可改正的动作（重复登记、重复跑同一格、登记内容不合规、引用不存在的 "
+        "不隐式重试）。**除 submit 以外**，格式类失败（JSON 写坏、缺字段、类型不符）"
+        "以及会被宿主拒绝的动作（重复登记、重复跑同一格、登记内容不合规、引用不存在的 "
         "run_id / analysis_id）都以 `ok=false` 返回、**不终止**本 trial，你可以在剩余"
         "预算内改正。",
+        # 2026-11-10 root E reviewer HIGH：上面那句原先无例外，而 ``submit`` 完全不同——
+        # ``rsi_r01.actions._parse_submit`` 不查 nonce/stat/stat_key（只查 claim、
+        # run_ids、analysis_ids 的形状，analysis_ids 缺省为 []），``trial._submit``
+        # 只查引用的编号是否存在就 ``ok=True``，``candidate.py:440-450`` 随即把
+        # status 置 TRIAL_SUBMITTED 并返回——**trial 到此结束，候选再也拿不到改正机会**。
+        # 实测（零付费重放）：submit 去掉 nonce/stat 仍 4 POST 全收、status=SUBMITTED、
+        # 判决面 BLOCKED_PROTOCOL；跳过 analyze 提前 submit 也照样被接受并终态。
+        # 故必须把 submit 单独说成终局动作，并要求它自查。
+        "* **例外：submit 是终局动作**——只要结构合法（claim 合法、run_ids / analysis_ids "
+        "是字符串数组且引用的编号真实存在），宿主就接受它并**立刻结束本 trial**，此后"
+        "没有任何改正机会；提前提交（例如跳过 analyze）也一样会被接受。"
+        + ("本链对 submit 的核验发生在**结链时**：`nonce` 必须逐字等于公开合同给出的值、"
+           "`stat` 必须等于你 analyze 打印的数值、`stat_key` 必须逐字相符、动作序列必须"
+           "恰好是 preregister→run_experiment→analyze→submit 各一次——**任何一项不符，"
+           "整条链直接判失败**。请在 submit 之前逐项自查。"
+           if protocol else
+           "提交后宿主会按你的真实数据复核结论；结论与数据不符，本 trial 的结论判为不成立。"),
         "* **策略违规是终态，没有修正机会**：params 里出现上面白名单之外的键、数值越界，"
         "本次实验链立即终止，后续动作一律不再接受。",
         # 2026-11-10 root D reviewer HIGH：本句原为「…自行修正——但仅限这一类」，
@@ -147,13 +168,19 @@ def action_schema_text(surface: AC.ActionSurface, *,
         # ≤8 次分析），把它们无条件印进 system 会给出不实承诺——票八 root C 的
         # reviewer 实测 E-dev（无 protocol 块）也出现该句，而 T3 的 D-dev 成功跑了
         # 6 次 run_experiment 且 judge_pass=true。故只在带 protocol 块的文档里渲染。
-        *([("* **动作跳步或重排、重复登记不是终态**：那一次动作会被拒，并且**已经"
-             "计掉一次 POST**；你可以在剩余预算内改正。但本链成功的动作序列必须"
-             "**恰好**是 preregister→run_experiment→analyze→submit 各一次、顺序"
-             "不变——多一次或少一次都判整条链失败。")] if protocol else []),
+        *([("* **动作跳步或重排、重复登记不是终态**（submit 除外，它见上一条）：那一次"
+             "动作会被宿主拒绝并返回 `ok=false`，但**已经计掉一次 POST**；你可以在剩余"
+             "预算内改正。但本链成功的动作序列必须**恰好**是 preregister→run_experiment"
+             "→analyze→submit 各一次、顺序不变——多一次或少一次都判整条链失败。")]
+          if protocol else []),
         # 「required_fields 是唯一权威」只在文档真的带这两块时才有指向对象。
-        *([("* 任务说明里的 required_fields 是字段要求的**唯一权威**：缺字段/类型不符"
-             "都会被拒，请照抄字段名，不要自创字段。")] if (has_prereg or has_submit) else []),
+        # 「缺字段都会被拒」原先无例外，而 submit 的 nonce/stat/stat_key 并不在接收时
+        # 被查——它们由 ``verify_run`` 在结链时判（root E reviewer E-HIGH-1 的另一半）。
+        *([("* 任务说明里的 required_fields 是字段要求的**唯一权威**，请照抄字段名，"
+             "不要自创字段。preregister / run_experiment / analyze 缺字段或类型不符会被拒"
+             "并返回 `ok=false`（可改正）；submit 缺字段**不会**在接收时被拒，而是由结链"
+             "核验判失败——submit 没有改正机会。")]
+          if (has_prereg or has_submit) else []),
         "* analyze 的源码在受限容器内运行（无网络、只读根、CPU 限制），只能写 analysis.json；"
         "数值必须来自你本次实验的真实观测。",
         "* submit 的数字必须由你之前的 analyze 结果给出，并逐字引用 run_id / analysis_id。",
@@ -167,12 +194,21 @@ def build_system(public_doc: Mapping[str, Any], surface: AC.ActionSurface) -> st
         "",
         "### 任务",
         f"实例：{public_doc.get('instance_id')}（族：{public_doc.get('family')}）",
-        f"目标：{pub.get('goal')}",
     ]
+    # 目标/研究设定必须**整块**落到文本里，不许手挑几个字段（root E reviewer
+    # E-MED-1）：R 族公开文档带 damping_levels/initial_angles，而
+    # ``evaluator.check_prereg`` 恰好按这两条轴做四格集合相等——旧渲染只印
+    # h/band/window，把判据要用的公开数据丢在纸面外，还印出 ``目标：None``。
+    goal = pub.get("goal")
     research = pub.get("research")
+    if goal is not None:
+        head.append("目标：" + (json.dumps(goal, ensure_ascii=False, sort_keys=True)
+                               if isinstance(goal, Mapping) else str(goal)))
+    elif isinstance(research, Mapping) and research.get("question"):
+        head.append(f"目标：{research['question']}")
     if research:
-        head.append(f"公开研究假设 h={research.get('h')}："
-                    f"阻尼区间 {research.get('band')}，窗口 {research.get('window_s')} s")
+        head.append("公开研究设定：" + json.dumps(research, ensure_ascii=False,
+                                                 sort_keys=True))
     iface = pub.get("interface") or {}
     head.append(f"公开接口：{json.dumps(iface, ensure_ascii=False, sort_keys=True)}")
     # 公开文档里的字段表必须**真的渲染进 system**：候选唯一的输入通道就是这份
@@ -301,14 +337,27 @@ def rendered_gaps(rendered: str, public_doc: Mapping[str, Any],
     iface = pub.get("interface") or {}
     proto = iface.get("protocol") or {}
     gaps: "list[str]" = []
-    if not proto:
-        # 非协议 trial（开发/能力族）的文档本来就没有协议块：本检查不适用。
-        # 「协议文档丢了协议块」由 protocol_fixture.doc_gaps 在合同/预演期拦下。
-        return gaps
 
     def need(value: Any, label: str) -> None:
         if not any(_present(rendered, s) for s in _spellings(value)):
             gaps.append(label)
+
+    # 2026-11-10 root E reviewer E-MED-1：``goal``/``research`` 这两块**不属协议
+    # 专属**，dev/validation 文档同样带着，而且 ``evaluator.check_prereg`` 会按
+    # R 族 ``research.damping_levels × initial_angles`` 做四格集合相等——旧实现在
+    # 非协议文档上直接 ``return gaps``（空），于是「文档里有、渲染丢掉了」这件事
+    # 在 dev/validation 上完全没有闸。两者都按**整块 canonical JSON** 比对：渲染
+    # 用的就是同一串字节，逐字在场才算过。
+    if isinstance(pub.get("goal"), Mapping) and pub.get("goal"):
+        need(json.dumps(pub["goal"], ensure_ascii=False, sort_keys=True),
+             "public.goal")
+    if isinstance(pub.get("research"), Mapping) and pub.get("research"):
+        need(json.dumps(pub["research"], ensure_ascii=False, sort_keys=True),
+             "public.research")
+    if not proto:
+        # 其余条目是协议专属（nonce/stat_key/analyze_line/action_order 等）；
+        # 「协议文档丢了协议块」由 protocol_fixture.doc_gaps 在合同/预演期拦下。
+        return gaps
 
     need(public_doc.get("instance_id"), "instance_id")
     # 固定参数行也属「候选可用判据」：宿主自动注入它的值，写进 params 却是终态
