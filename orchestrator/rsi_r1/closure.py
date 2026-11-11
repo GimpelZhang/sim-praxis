@@ -51,7 +51,8 @@ STUDIES = ("A", "B")
 #: 与 ``evidence_pack/`` 默认**不进包**：前两者含候选不可见材料/大体积原始帧，
 #: 后者是包自身。
 PACK_PREFIXES = ("contract", "state", "confirm", "judge", "replay", "claim",
-                 "deliverable", "quota", "human_events", "protocol", "closeout")
+                 "deliverable", "quota", "human_events", "protocol", "closeout",
+                 "research_packets")
 
 MAX_PACK_FILE_BYTES = 10 * 1024 * 1024
 

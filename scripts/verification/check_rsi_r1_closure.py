@@ -46,6 +46,19 @@ PROPOSITIONS = ("decrease_gt", "increase_gt", "equivalent")
 LANE_TASK_ID = {"probe": 0, "practice": 1, "study_A": 2, "study_B": 3,
                 "repair_reserve": 4}
 
+#: Plan §11.1 四轴 + R1 结论的判定面（独立字面量，不从生产代码 import）。
+AXIS_LEGAL = {
+    "process": ("COMPLETE", "CLOSEOUT_INCOMPLETE"),
+    "measurement": ("VALID", "INVALID_INSTRUMENT", "CONTAMINATED", "INCOMPLETE"),
+    "study_execution": ("NOT_STARTED", "COMPLETED", "VALID_FAIL", "BLOCKED",
+                        "ASSISTED"),
+    "claim": ("NONE", "SUPPORTED", "REFUTED", "INCONCLUSIVE", "CLAIM_INVALID"),
+    "r1": ("NOT_MEASURED", "INCOMPLETE_COVERAGE", "NOT_ESTABLISHED",
+           "MINIMAL_RESEARCH_LOOP_ESTABLISHED"),
+}
+STUDY_ARTIFACT_RELS = ("confirm/manifest_{s}.json", "judge/report_{s}.json",
+                       "replay/comparison_{s}.json")
+
 
 def canonical_json(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True,
@@ -296,6 +309,193 @@ class Checker:
             else:
                 self.add(f"D-{study}-SUPPORTED", True, f"声明 {claim}（不作完成）")
 
+    # -- T9 closeout（AC34–36）-------------------------------------------
+    def study_started_independently(self) -> bool:
+        """盘面清点（不读任何 readout 声明）：任一研究产物存在即算启动。"""
+        for study in STUDIES:
+            for rel in STUDY_ARTIFACT_RELS:
+                if (self.root / rel.format(s=study)).is_file():
+                    return True
+        return (self.root / "protocol" / "report_practice.json").is_file()
+
+    def check_closeout(self, rows) -> "dict | None":
+        readout = self.load("closeout/readout.json", required=False)
+        if not isinstance(readout, dict):
+            return None
+        body = dict(readout)
+        anchor = body.pop("document_sha256", None)
+        got = sha256_text(canonical_json(body))
+        self.add("X-ANCHOR", isinstance(anchor, str) and got == anchor,
+                 f"独立重算 {got[:16]}… vs 登记 {str(anchor)[:16]}…")
+
+        axes = readout.get("axes") or {}
+        self.add("X-AXES-LEGAL",
+                 all(axes.get(k) in AXIS_LEGAL[k] for k in AXIS_LEGAL),
+                 f"axes={axes}")
+        reasons = readout.get("process_reasons") or []
+        self.add("X-PROCESS",
+                 (axes.get("process") == "COMPLETE") == (len(reasons) == 0),
+                 f"process={axes.get('process')} 但 reasons={len(reasons)} 条")
+
+        # §11.1 优先级：研究未启动 ⇒ 其余三轴必须是最弱值；反之不得声称未启动。
+        execu, meas = axes.get("study_execution"), axes.get("measurement")
+        claim, r1 = axes.get("claim"), axes.get("r1")
+        if execu == "NOT_STARTED":
+            self.add("X-AXES-PRECEDENCE",
+                     meas == "INCOMPLETE" and claim == "NONE"
+                     and r1 == "NOT_MEASURED",
+                     f"NOT_STARTED 要求 (INCOMPLETE, NONE, NOT_MEASURED)，"
+                     f"实为 ({meas}, {claim}, {r1})")
+        else:
+            self.add("X-AXES-PRECEDENCE",
+                     meas != "INCOMPLETE" or r1 != "MINIMAL_RESEARCH_LOOP_ESTABLISHED",
+                     f"measurement=INCOMPLETE 不得配 {r1}")
+            self.add("X-AXES-STRONG",
+                     not (meas == "INCOMPLETE"
+                          and r1 in ("NOT_ESTABLISHED",
+                                     "MINIMAL_RESEARCH_LOOP_ESTABLISHED")),
+                     f"measurement=INCOMPLETE 不得给出 r1={r1}")
+        self.add("X-AXES-R1-STRONGEST",
+                 not (r1 == "MINIMAL_RESEARCH_LOOP_ESTABLISHED"
+                      and (execu != "COMPLETED" or meas != "VALID")),
+                 f"最强结论要求 COMPLETED+VALID，实为 ({execu}, {meas})")
+        self.add("X-AXES-R1-COMPLETE",
+                 not (r1 == "NOT_ESTABLISHED" and execu != "COMPLETED"),
+                 f"NOT_ESTABLISHED 要求 study_execution=COMPLETED，实为 {execu}")
+        self.add("X-AXES-COVERAGE",
+                 not (r1 == "INCOMPLETE_COVERAGE" and execu == "NOT_STARTED"),
+                 "研究未启动只能记 NOT_MEASURED")
+
+        # 独立重算账本事实（不信 readout.ledger）
+        calls = [r for r in rows if r.get("event", "call") == "call"]
+        facts = {
+            "rows": len(rows),
+            "calls": len(calls),
+            "ok": sum(1 for r in calls if r.get("ok") is True),
+            "failed": sum(1 for r in calls if r.get("ok") is False),
+            "events": len(rows) - len(calls),
+            "tokens_in": sum(int(r.get("tokens_in") or 0) for r in calls),
+            "tokens_out": sum(int(r.get("tokens_out") or 0) for r in calls),
+        }
+        claimed = readout.get("ledger") or {}
+        for key in ("rows", "calls", "ok", "failed", "events"):
+            self.add(f"X-LEDGER-{key}", int(claimed.get(key, -1)) == facts[key],
+                     f"读out={claimed.get(key)} 独立={facts[key]}")
+        tok = claimed.get("tokens") or {}
+        self.add("X-LEDGER-TOKENS",
+                 int(tok.get("in", -1)) == facts["tokens_in"]
+                 and int(tok.get("out", -1)) == facts["tokens_out"],
+                 f"tokens={tok} 独立 in/out={facts['tokens_in']}/{facts['tokens_out']}")
+
+        # 人工时长：独立数事件行，不许把「未记录」写成 0 完整。
+        human = readout.get("human") or {}
+        ev_path = self.root / "human_events" / "events.jsonl"
+        n_ev = (sum(1 for ln in ev_path.read_text(encoding="utf-8").splitlines()
+                    if ln.strip()) if ev_path.is_file() else 0)
+        self.add("X-HUMAN-N", int(human.get("n_events", -1)) == n_ev,
+                 f"读out={human.get('n_events')} 独立={n_ev}")
+        self.add("X-HUMAN-COMPLETE",
+                 not (human.get("complete") is True
+                      and human.get("unknown_events")),
+                 "complete=true 不得同时有未闭合事件")
+        oob = human.get("out_of_band") or {}
+        self.add("X-HUMAN-OUT-OF-BAND",
+                 isinstance(oob, dict)
+                 and oob.get("machine_timed") == (n_ev > 0)
+                 and isinstance(oob.get("decisions_on_record"), dict),
+                 "盘外裁决必须单列且不得冒充机器计时")
+
+        # 旧根 hash 保护（AC36）：按盘上字节独立重算。
+        old = readout.get("old_root") or {}
+        if old.get("present"):
+            src = Path(str(old.get("source_root") or ""))
+            ledger = src / "quota" / "ledger.jsonl"
+            if not ledger.is_file():
+                self.add("X-OLD-ROOT-READ", False, f"旧根账本不可读：{ledger}")
+            else:
+                got_sha = hashlib.sha256(ledger.read_bytes()).hexdigest()
+                self.add("X-OLD-ROOT-UNCHANGED",
+                         got_sha == old.get("declared_source_sha256"),
+                         f"现值 {got_sha[:16]}… vs 登记 "
+                         f"{str(old.get('declared_source_sha256'))[:16]}…")
+                self.add("X-OLD-ROOT-MIRROR",
+                         got_sha == old.get("observed_sha256")
+                         and old.get("unchanged") is True,
+                         "readout 的 unchanged/observed 与独立重算不一致")
+
+        # 启动与否只认盘面事实，与声明矛盾即 FAIL。
+        started = self.study_started_independently()
+        self.add("X-INVENTORY", started == (execu != "NOT_STARTED"),
+                 f"盘面 started={started} 声明 study_execution={execu}")
+        for study in STUDIES:
+            present = [rel.format(s=study) for rel in STUDY_ARTIFACT_RELS
+                       if (self.root / rel.format(s=study)).is_file()]
+            if not started:
+                self.add(f"X-STUDY-ARTIFACTS-{study}", not present,
+                         f"研究未启动但 {study} 有产物: {present}")
+            # 已启动但某 study 无产物是**部分覆盖**（BLOCKED/INCOMPLETE_COVERAGE），
+            # 不是伪造；完成声明由 D-*-SUPPORTED 管，这里不重复判死。
+
+        for study in STUDIES:
+            doc = self.load(f"research_packets/{study}/status.json",
+                            required=False)
+            want = "STARTED" if started else "NOT_STARTED"
+            self.add(f"X-PACKET-{study}",
+                     isinstance(doc, dict) and doc.get("status") == want,
+                     f"status={None if not isinstance(doc, dict) else doc.get('status')}"
+                     f" 期望 {want}")
+
+        deliverable = self.load("deliverable/closure.json", required=False)
+        if not isinstance(deliverable, dict):
+            self.add("X-DELIVERABLE", False, "缺 deliverable/closure.json")
+        elif not started:
+            for study in STUDIES:
+                got_claim = ((deliverable.get("studies") or {}).get(study)
+                             or {}).get("claim")
+                self.add(f"X-DELIVERABLE-{study}",
+                         got_claim in ("BLOCKED", "VALID_FAIL", "NOT_STARTED",
+                                       "NONE"),
+                         f"研究未启动却声明 {got_claim}")
+
+        # 失败谱系：登记项的证据必须在盘上；协议失败必须有对应条目。
+        failure_map = self.load("closeout/failure_map.json", required=False)
+        entries = (failure_map or {}).get("entries") if isinstance(failure_map,
+                                                                  dict) else None
+        self.add("X-FAILURE-MAP", isinstance(entries, list),
+                 "缺/不可读 closeout/failure_map.json")
+        missing, stages = [], set()
+        for entry in entries or []:
+            stages.add(str(entry.get("stage")))
+            for rel in entry.get("evidence") or []:
+                p = Path(str(rel))
+                if not p.is_absolute():
+                    p = self.root / p
+                if not p.exists():
+                    missing.append(str(rel))
+        self.add("X-FAILURE-EVIDENCE", not missing, f"缺件: {missing[:5]}")
+        for name in ("probe", "practice"):
+            report = self.root / "protocol" / f"report_{name}.json"
+            if not report.is_file():
+                continue
+            try:
+                verdict = json.loads(report.read_text(encoding="utf-8")).get(
+                    "verdict")
+            except (OSError, json.JSONDecodeError):
+                verdict = None
+            if verdict and verdict != "PASS":
+                self.add(f"X-FAILURE-REGISTERED-{name}",
+                         f"protocol/{name}" in stages,
+                         f"报告 verdict={verdict} 但 failure_map 无该阶段条目")
+
+        self.add("X-SHADOW-PRESENT",
+                 (self.root / "closeout" / "shadow_proposals.jsonl").is_file(),
+                 "closeout/shadow_proposals.jsonl 必须存在（可为空）")
+        self.add("X-R2-READINESS",
+                 (self.root / "closeout" / "r2_readiness.json").is_file()
+                 and isinstance(readout.get("r2_readiness_relpath"), str),
+                 "缺 closeout/r2_readiness.json 或其登记")
+        return {"started": started}
+
     def verify_pack(self, pack: Path) -> None:
         manifest_path = pack / "evidence_manifest.json"
         if not manifest_path.exists():
@@ -338,17 +538,27 @@ class Checker:
         rows = self.ledger_rows()
         self.check_budget(budget, rows)
         self.check_carryover(rows)
+        # T9：有 closeout/readout.json 就按「结案口径」判——研究未启动时
+        # 研究产物**应当缺席**，缺件不是错误；矛盾声明才是。
+        close = self.check_closeout(rows) if (
+            self.root / "closeout" / "readout.json").exists() else None
+        started = bool(close and close.get("started"))
         judge_ok, replay_ok, statuses = {}, {}, {}
-        for study in STUDIES:
-            manifest = self.load(f"confirm/manifest_{study}.json")
-            expected = self.check_manifest(study, manifest)
-            report = self.load(f"judge/report_{study}.json")
-            statuses[study] = self.check_judge(study, report, expected)
-            layers = (report or {}).get("layers") or {}
-            judge_ok[study] = ((report or {}).get("verdict") == "JUDGE_OK"
-                               and bool(layers.get("evidence_valid")))
-            comparison = self.load(f"replay/comparison_{study}.json")
-            replay_ok[study] = self.check_replay(study, comparison, expected)
+        if close is None or started:
+            for study in STUDIES:
+                artifacts = [rel.format(s=study) for rel in STUDY_ARTIFACT_RELS
+                             if (self.root / rel.format(s=study)).is_file()]
+                if close is not None and not artifacts:
+                    continue  # 该 study 未产出：按部分覆盖结案，不按缺件判死
+                manifest = self.load(f"confirm/manifest_{study}.json")
+                expected = self.check_manifest(study, manifest)
+                report = self.load(f"judge/report_{study}.json")
+                statuses[study] = self.check_judge(study, report, expected)
+                layers = (report or {}).get("layers") or {}
+                judge_ok[study] = ((report or {}).get("verdict") == "JUDGE_OK"
+                                   and bool(layers.get("evidence_valid")))
+                comparison = self.load(f"replay/comparison_{study}.json")
+                replay_ok[study] = self.check_replay(study, comparison, expected)
         deliverable_path = self.root / "deliverable" / "closure.json"
         if deliverable_path.exists():
             self.check_deliverable(self.load("deliverable/closure.json",
@@ -358,6 +568,8 @@ class Checker:
         verdict = "PASS" if not self.problems else "FAIL"
         return {"schema": SCHEMA, "schema_version": 1,
                 "root": str(self.root.resolve()),
+                "closeout_present": close is not None,
+                "studies_started": started,
                 "validator_source_sha256": hashlib.sha256(
                     Path(__file__).read_bytes()).hexdigest(),
                 "run_at_utc": datetime.now(timezone.utc).strftime(

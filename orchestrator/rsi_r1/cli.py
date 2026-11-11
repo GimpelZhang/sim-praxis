@@ -46,6 +46,8 @@ from orchestrator.common.runtime_paths import (
 from orchestrator.gateway import quota_ledger as QL
 from orchestrator.rsi_r1 import assembly as ASM
 from orchestrator.rsi_r1 import calibration as CAL
+from orchestrator.rsi_r1 import closeout as CLOSEOUT
+from orchestrator.rsi_r1 import closure as CLOSURE
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import gateway_transport as GT
 from orchestrator.rsi_r1 import lock as LK
@@ -725,6 +727,105 @@ def cmd_repair_authorize(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# closeout（T9，离线）
+# ---------------------------------------------------------------------------
+
+def cmd_closeout(args: argparse.Namespace) -> int:
+    """T9 离线结案：只读盘面写 readout/failure_map/r2_readiness/包与交付件。
+
+    AC35 要求「无 env/授权/LOCK/部分 batch 可出 missing 报告」：给 ``--root``
+    时按显式根装配上下文（不读 env），否则沿用 export 的 campaign 根。全程
+    **不触网、不调用模型、不启动容器**；``docker ps -a`` 只读探针失败不阻断。
+    """
+    envelope, ctx = _closeout_ctx(args)
+    image_pin = None
+    if ctx.exists(LK.LOCK_RELPATH):
+        image_pin = ((ctx.read_json(LK.LOCK_RELPATH) or {}).get("image") or {}).get("pin")
+    readout = CLOSEOUT.build(ctx, image_pin=image_pin, notes=list(args.note or []))
+    axes = readout["axes"]
+    print(f"closeout ok  envelope={envelope}  root={readout['campaign_root']}")
+    print(f"  axes: process={axes['process']} measurement={axes['measurement']} "
+          f"study_execution={axes['study_execution']} claim={axes['claim']} "
+          f"r1={axes['r1']}")
+    print(f"  posts used={readout['ledger']['calls']} "
+          f"(ok={readout['ledger']['ok']} failed={readout['ledger']['failed']}) "
+          f"hard_cap={readout['budget']['hard_cap']}")
+    print(f"  document_sha256={readout['document_sha256']}")
+    if readout["process_reasons"]:
+        print("  process_reasons:")
+        for reason in readout["process_reasons"]:
+            print(f"    - {reason}")
+    print(f"  readout={ctx.relative(CLOSEOUT.READOUT_RELPATH)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# pack / judge（T9 离线复验）
+# ---------------------------------------------------------------------------
+
+def _envelope_from_root(root: Path) -> str:
+    """从盘面自证 envelope_id：``contract/envelope.json`` 优先，退回 ``scope.json``。
+
+    Plan §10 的离线结案命令只给 ``--root``（不含 ``--envelope``）：结案时入参
+    不能成为「知道 genesis id」的前提，否则 AC35 在 env/票据缺失时仍会被卡住。
+    """
+    for rel in ("contract/envelope.json", "contract/scope.json"):
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise C.ContractError(f"{rel} 不可读：{exc}") from None
+        value = doc.get("envelope_id") if isinstance(doc, dict) else None
+        if isinstance(value, str) and value:
+            return value
+    raise C.ContractError(
+        f"无法从 {root}/contract/ 推断 envelope_id（envelope.json/scope.json 均缺）")
+
+
+def _closeout_ctx(args: argparse.Namespace):
+    root = getattr(args, "root", None)
+    if root:
+        root_path = Path(root).expanduser()
+        envelope = args.envelope or _envelope_from_root(root_path)
+        envelope = C.require_safe_id(envelope, where="--envelope")
+        return envelope, runtime.adopt_context(envelope, root_path)
+    if not args.envelope:
+        raise C.ContractError("未给 --root 时必须显式给 --envelope（无法从 env 外推断根）")
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    return envelope, runtime.load_context(envelope)
+
+
+def cmd_pack(args: argparse.Namespace) -> int:
+    """把产物逐件复制进 ``evidence_pack/`` 并写逐件 sha256 的 manifest（离线）。"""
+    envelope, ctx = _closeout_ctx(args)
+    dest = Path(args.dest).expanduser() if args.dest else None
+    manifest = CLOSURE.build_evidence_pack(ctx, dest=dest,
+                                           repo_root=args.repo_root)
+    print(f"pack ok  envelope={envelope}  n_files={manifest['n_files']}  "
+          f"total_bytes={manifest['total_bytes']}")
+    print(f"  pack={dest or ctx.relative('evidence_pack')}")
+    return 0
+
+
+def cmd_judge(args: argparse.Namespace) -> int:
+    """跑独立复算器（第二遍由外部进程执行），可选同时核对证据包。"""
+    envelope, ctx = _closeout_ctx(args)
+    pack = None if args.verify_pack else False
+    judged = CLOSURE.run_closure_judge(
+        ctx, repo_root=args.repo_root, pack=pack,
+        report=Path(args.report).expanduser() if args.report else None)
+    print(f"judge {judged.get('verdict')}  rc={judged.get('returncode')}  "
+          f"envelope={envelope}")
+    print(f"  problems={len(judged.get('problems') or [])}")
+    for problem in (judged.get("problems") or [])[:10]:
+        print(f"    - {problem}")
+    print(f"  report={judged.get('report_path')}")
+    return 0 if judged.get("ok") else 1
+
+
+# ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
 
@@ -943,6 +1044,38 @@ def build_parser() -> argparse.ArgumentParser:
     pra.add_argument("--note", default=None, help="授权件备注")
     pra.set_defaults(func=cmd_repair_authorize)
 
+    pco = sub.add_parser(
+        "closeout",
+        help="T9 离线结案（AC34–36）：readout/failure_map/R2 提案/包，不触网不跑容器")
+    pco.add_argument("--envelope", default=None,
+                       help="campaign id（给 --root 时可缺省，从 contract/ 推断）")
+    pco.add_argument("--root", default=None,
+                     help="campaign 根（缺省读 export；AC35 离线结案时显式给出，免 env）")
+    pco.add_argument("--note", action="append", default=[],
+                     help="写入 readout.notes 的备注（可多次）")
+    pco.set_defaults(func=cmd_closeout)
+
+    ppk = sub.add_parser(
+        "pack", help="T9：把产物复制进 evidence_pack/ 并写逐件 sha256 manifest（离线）")
+    ppk.add_argument("--envelope", default=None,
+                       help="campaign id（给 --root 时可缺省，从 contract/ 推断）")
+    ppk.add_argument("--root", default=None, help="campaign 根（缺省读 export）")
+    ppk.add_argument("--dest", default=None, help="包目录（缺省 <root>/evidence_pack）")
+    ppk.add_argument("--repo-root", default=None, help="复算器所在仓库根")
+    ppk.set_defaults(func=cmd_pack)
+
+    pjd = sub.add_parser(
+        "judge", help="T9：跑独立复算器（外部进程），可选核对证据包")
+    pjd.add_argument("--envelope", default=None,
+                       help="campaign id（给 --root 时可缺省，从 contract/ 推断）")
+    pjd.add_argument("--root", default=None, help="campaign 根（缺省读 export）")
+    pjd.add_argument("--verify-pack", action="store_true",
+                     help="同时按 manifest 核对 <root>/evidence_pack")
+    pjd.add_argument("--report", default=None,
+                     help="判决件输出路径（缺省 <root>/judge/closure_judge.json）")
+    pjd.add_argument("--repo-root", default=None, help="复算器所在仓库根")
+    pjd.set_defaults(func=cmd_judge)
+
     return p
 
 
@@ -954,8 +1087,10 @@ def main(argv: "list[str] | None" = None) -> int:
     except (CliError, C.ContractError, PREREG.PreregError,
             SCENES.SceneError, OBS.ObservationError,
             CAL.CalibrationError, LK.LockError, PT.ProtocolError,
-            RPR.RepairError, GT.TransportError, ASM.AssemblyError,
-            QL.QuotaError, ST.StateError) as exc:
+            RPR.RepairError, CLOSEOUT.CloseoutError, CLOSURE.ClosureError,
+            runtime.CampaignError,
+            GT.TransportError, ASM.AssemblyError, QL.QuotaError,
+            ST.StateError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

@@ -181,6 +181,45 @@ def load_context(envelope_id: str) -> CampaignContext:
     return ctx
 
 
+def adopt_context(envelope_id: str, root: "str | Path") -> CampaignContext:
+    """按**显式根路径**装配已初始化 campaign 的上下文（不读 env）。
+
+    AC35「任意退出可离线结案」要求结案工具在 env 缺失/损坏时仍可运行：
+    此处只用盘面自证——根必须存在、非符号链接、解析后不漂移、含
+    ``contract/scope.json``，且 ``contract/envelope.json`` 若存在其
+    ``envelope_id`` 必须与入参一致。写守卫（旧根保护集）与 load_context 同源。
+    """
+    path = Path(root)
+    if not path.is_absolute():
+        raise CampaignRootRefused(f"closeout 根必须是绝对路径：{root}")
+    if path.is_symlink():
+        raise CampaignRootRefused(f"closeout 根是符号链接，拒绝：{path}")
+    if not path.is_dir():
+        raise CampaignRootRefused(f"closeout 根不存在或不是目录：{path}")
+    resolved = _resolved(path)
+    if resolved != path:
+        raise CampaignRootRefused(f"closeout 根解析后漂移：{path} -> {resolved}")
+    if not (resolved / "contract" / "scope.json").is_file():
+        raise CampaignError(f"campaign 未初始化：{resolved}/contract/scope.json 不存在")
+    envelope_path = resolved / "contract" / "envelope.json"
+    if envelope_path.is_file():
+        try:
+            envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CampaignError(f"contract/envelope.json 不可读：{exc}") from None
+        declared = envelope.get("envelope_id") if isinstance(envelope, dict) else None
+        if declared is not None and declared != envelope_id:
+            raise CampaignRootRefused(
+                f"根内 envelope_id={declared!r} 与入参 {envelope_id!r} 不一致")
+    protected = protected_roots_tuple()
+    for name, prot in protected:
+        if resolved == prot or _is_within(resolved, prot):
+            raise CampaignRootRefused(
+                f"closeout 根落进旧根 {name}（{prot}）：旧实验只读，拒绝")
+    return CampaignContext(envelope_id=envelope_id, root=resolved,
+                           protected_roots=protected)
+
+
 def context_from_doc(doc: Mapping[str, Any]) -> CampaignContext:
     """从持久化的 envelope 文档恢复上下文（不读 env 的根）。"""
     envelope = doc["envelope_id"]
