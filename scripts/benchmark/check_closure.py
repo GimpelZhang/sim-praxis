@@ -100,6 +100,14 @@ AUTHORIZED_PUSH_HEADS = (
     # ``82a1427`` / ``065231b`` / ``0796027`` / ``f19889a`` 先例：只登记**已推
     # 上去的**那个完整 sha，集合仍是精确集合，未登记的新 sha 照样判红。
     "0066878f60018628cae1cbd88658b4034c5fb7f4",
+    # *锁内适配*（RSI-R1 T1b，2026-11-11）：RSI-R0.2 结案批（root F/G 修复
+    # 等，``1235d7a``/``2f4a581``）已随 R0.2 结案窗口经人工 STOP 门推送，
+    # 远端前移至 ``2f4a581``（R0.2 Complete L1917/L1982 记录的结案 HEAD 与本
+    # 推送头同值）。同 ``5895fe0`` / ``82a1427`` / ``065231b`` / ``0796027`` /
+    # ``f19889a`` / ``0066878`` 先例：只登记**已推上去的**完整 sha，集合仍是
+    # 精确集合；不登记则 Phase 2.8.1 的两条基线守卫（F2 与 p280 终判）在干净
+    # 树上恒红。取值来自 ``git rev-parse origin/main`` 的完整 40 hex，非构造。
+    "2f4a581a1af0b82f8db59c1db35c6545148e2fe8",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
