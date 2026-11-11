@@ -333,6 +333,16 @@ def test_execute_batch_rejects_tampered_spec_before_any_run() -> None:
     assert exc.value.code == "SPEC_TAMPERED"
 
 
+def test_backend_infra_error_code_is_ascii_only() -> None:
+    """机器码只认 ASCII 全大写前缀；CJK 也满足 isalpha/isupper，不得被当成码。"""
+    assert E.BackendInfraError("容器退出码 137").code == "INFRA_FAILURE"
+    assert E.BackendInfraError("容器退出码: 容器退出码 137").code == "INFRA_FAILURE"
+    assert E.BackendInfraError("RAW_SHA_MISMATCH x").code == "RAW_SHA_MISMATCH"
+    assert E.BackendInfraError("RAW_EXISTS: /x/y 已存在").code == "RAW_EXISTS"
+    assert E.BackendInfraError("raw_sha_mismatch x").code == "INFRA_FAILURE"
+    assert E.BackendInfraError("容器退出码 RAW_SHA_MISMATCH").code == "INFRA_FAILURE"
+
+
 def test_execute_batch_infra_failure_blocks_without_padding() -> None:
     specs = _three_specs()
     book = E.ResourceBook(max_runs=10, max_steps=10 ** 6)

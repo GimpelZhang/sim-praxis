@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from orchestrator.rsi_r1 import rubric as R
 
@@ -179,3 +179,43 @@ def metrics_for(record: Mapping[str, Any], *, study_id: str,
             raise MetricError("PARAM_INVALID", f"B 需要 amplitude_rad，多余 {sorted(unknown)}")
         return compute_study_b(record, amplitude_rad=kwargs["amplitude_rad"])
     raise MetricError("STUDY_UNKNOWN", repr(study_id))
+
+
+def tracking_period_and_envelope(
+        times: "Sequence[float]", values: "Sequence[float]", *,
+        window_start_s: float, window_end_s: float) -> "dict[str, float] | None":
+    """驱动窗口内响应的**相位不敏感**统计（T1b v2 的第二证据）。
+
+    - ``period_s``：去均值后向上过零点时间间隔的中位数（线性插值过零）；
+    - ``envelope``：窗口内 (max−min)/2。
+
+    只用连续量、不引用目标函数，因此对相位漂移不敏感、对频率/增益错误敏感。
+    窗口内向上过零少于 2 个 ⇒ 不可辨识，返回 ``None``（调用方按失败处理）。
+    """
+    ts: "list[float]" = []
+    ys: "list[float]" = []
+    for t, v in zip(times, values):
+        tf = float(t)
+        if window_start_s <= tf <= window_end_s:
+            ts.append(tf)
+            ys.append(float(v))
+    if len(ts) < 8:
+        return None
+    mean = sum(ys) / len(ys)
+    dev = [y - mean for y in ys]
+    envelope = (max(ys) - min(ys)) / 2.0
+    crossings: "list[float]" = []
+    for k in range(1, len(dev)):
+        if dev[k - 1] <= 0.0 < dev[k]:
+            t0, t1 = ts[k - 1], ts[k]
+            y0, y1 = dev[k - 1], dev[k]
+            crossings.append(t0 + (t1 - t0) * (-y0) / (y1 - y0))
+    if len(crossings) < 2:
+        return None
+    intervals = sorted(b - a for a, b in zip(crossings, crossings[1:]))
+    m = len(intervals)
+    period = intervals[m // 2] if m % 2 else 0.5 * (intervals[m // 2 - 1] + intervals[m // 2])
+    if not (period > 0.0) or not math.isfinite(period) or not math.isfinite(envelope):
+        return None
+    return {"period_s": period, "envelope": envelope,
+            "upward_crossings": len(crossings)}

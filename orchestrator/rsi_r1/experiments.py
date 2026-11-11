@@ -522,11 +522,13 @@ def allocate_confirm(plan: C.ResearchPlan, keeper_seed: Any) -> ConfirmManifest:
 class BackendInfraError(RuntimeError):
     """基础设施失败：整批 BLOCKED，不补样本。
 
-    机器码取自消息的首个 token（**必须全大写**，如 ``"RAW_SHA_MISMATCH ..."``）；
-    没有大写前缀时退回 ``INFRA_FAILURE``。``RunOutcome.error_code`` 用它。
+    机器码取自消息的首个 token（**必须 ASCII 全大写**，如 ``"RAW_SHA_MISMATCH ..."``）；
+    没有这种前缀时退回 ``INFRA_FAILURE``。``RunOutcome.error_code`` 用它。
+    注意 CJK 也满足 ``str.isalpha()/isalnum()/isupper()``，故必须显式限定 ASCII 字母表。
     """
 
     code = "INFRA_FAILURE"
+    _CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
     def __init__(self, detail: str = "", *, code: "str | None" = None) -> None:
         super().__init__(detail)
@@ -534,8 +536,7 @@ class BackendInfraError(RuntimeError):
             self.code = code
             return
         token = str(detail).split(" ", 1)[0].rstrip(":").strip()
-        if (token and token[0].isalpha() and token == token.upper()
-                and token.replace("_", "").isalnum()):
+        if self._CODE_RE.match(token):
             self.code = token
 
 

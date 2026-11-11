@@ -153,6 +153,100 @@ CHECK_FAMILIES: "tuple[tuple[str, str, int], ...]" = (
 
 _INTEGRITY_PREFIXES = ("GLOBAL-",)
 
+# ---------------------------------------------------------------------------
+# 设计版本（v2 = 2026-11-11 用户批准的两条仪器定义修正；缺口见
+# contract/calibration_gap_analysis.md）
+#
+# 修正原则：只改「证明 v0 在首次 mj_step 前写入」的暴露门与 B oracle 容差，
+# 矩阵/场景/seed/其余门一律不变。v2 的等价约束都不弱于 v1：
+#   * A：首步位移门直接证明初速通道；位移 ∝ v0² 的 oracle 门等价 v0 误差 ≤1.5%；
+#   * B：abs 0.01 + 1% rel 在 b06 上等价参数级一致 ≤0.35%，并新增周期/包络
+#     第二证据（相位不敏感），防相对容差掩盖真实相位/增益错误。
+# ---------------------------------------------------------------------------
+
+PREREG_SCHEMA_V2 = f"{C.SCHEMA_PREFIX}.calibration_prereg.v2"
+REPORT_SCHEMA_V2 = f"{C.SCHEMA_PREFIX}.calibration_report.v2"
+ORACLE_SCHEMA_V2 = f"{C.SCHEMA_PREFIX}.calibration_oracle.v2"
+PREREG_RELPATH_V2 = "contract/calibration_prereg_v2.json"
+REPORT_RELPATH_V2 = "contract/calibration_report_v2.json"
+REPORT_MD_RELPATH_V2 = "contract/calibration_report_v2.md"
+ORACLE_RELPATH_V2 = "private/calibration_private/oracle_v2.py"
+GAP_RELPATH = "contract/calibration_gap_analysis.md"
+BATCH_A_V2 = "calibration_a_v2"
+BATCH_B_V2 = "calibration_b_v2"
+
+#: v2 暴露门：首步位移必须等于 v0·dt（qvel 在首次 mj_step 前写入）。
+V0_FIRST_STEP_DISP_TOL_M = Decimal("1e-5")
+#: v2 B oracle：尺度感知容差与相位不敏感第二证据。
+B_ORACLE_REL_TOL = Decimal("0.01")
+B_ORACLE_PHASE_BLOCKS = ("b01", "b02", "b06")
+B_PERIOD_REL_TOL = Decimal("0.01")
+B_ENVELOPE_REL_TOL = Decimal("0.02")
+
+_V2_FAMILIES = []
+for _fam, _desc, _count in CHECK_FAMILIES:
+    if _fam == "A-EXPO-V0":
+        _desc = "每 A run 首步位移 |x[0]−x0−v0·dt| ≤ 1e-5 m（qvel 先于首次 mj_step）"
+    _V2_FAMILIES.append((_fam, _desc, _count))
+    if _fam == "B-ORACLE":
+        _V2_FAMILIES.append((
+            "B-ORACLE-PHASE",
+            "欠阻尼 block 周期误差 ≤1% 且包络幅值差 ≤2%（相位不敏感第二证据）", 3))
+    if _fam == "GLOBAL-BUDGET":
+        _V2_FAMILIES.append((
+            "GLOBAL-PRIOR-ATTEMPT",
+            "v1 预注册/报告/raw 与缺口件逐字节未变（历史不可改写）", 1))
+V2_CHECK_FAMILIES: "tuple[tuple[str, str, int], ...]" = tuple(_V2_FAMILIES)
+del _V2_FAMILIES
+
+DESIGN_V1: Mapping[str, Any] = {
+    "key": "v1",
+    "version": 1,
+    "prereg_schema": PREREG_SCHEMA,
+    "report_schema": REPORT_SCHEMA,
+    "prereg_relpath": PREREG_RELPATH,
+    "report_relpath": REPORT_RELPATH,
+    "report_md_relpath": REPORT_MD_RELPATH,
+    "oracle_relpath": ORACLE_RELPATH,
+    "oracle_schema": ORACLE_SCHEMA,
+    "batch_a": "calibration_a",
+    "batch_b": "calibration_b",
+    "families": CHECK_FAMILIES,
+    "v0_gate": "first5_velocity",
+    "underdamped_blocks": (),
+    "b_oracle_rel": Decimal("0"),
+    "prior_attempt_required": False,
+}
+
+DESIGN_V2: Mapping[str, Any] = {
+    "key": "v2",
+    "version": 2,
+    "prereg_schema": PREREG_SCHEMA_V2,
+    "report_schema": REPORT_SCHEMA_V2,
+    "prereg_relpath": PREREG_RELPATH_V2,
+    "report_relpath": REPORT_RELPATH_V2,
+    "report_md_relpath": REPORT_MD_RELPATH_V2,
+    "oracle_relpath": ORACLE_RELPATH_V2,
+    "oracle_schema": ORACLE_SCHEMA_V2,
+    "batch_a": BATCH_A_V2,
+    "batch_b": BATCH_B_V2,
+    "families": V2_CHECK_FAMILIES,
+    "v0_gate": "first_step_displacement",
+    "underdamped_blocks": B_ORACLE_PHASE_BLOCKS,
+    "b_oracle_rel": B_ORACLE_REL_TOL,
+    "prior_attempt_required": True,
+}
+
+DESIGNS: Mapping[str, Mapping[str, Any]] = {"v1": DESIGN_V1, "v2": DESIGN_V2}
+
+
+def design_for(version: "int | str") -> Mapping[str, Any]:
+    key = f"v{version}" if isinstance(version, int) else str(version)
+    try:
+        return DESIGNS[key]
+    except KeyError:
+        raise CalibrationError("DESIGN_UNKNOWN", repr(version)) from None
+
 
 class CalibrationError(RuntimeError):
     """校准前置件/完整性失败（fail-closed；不降级为「报告里记一笔」）。"""
@@ -222,7 +316,8 @@ def oracle_sha256(path: "Path | str") -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
-def load_oracle(path: "Path | str") -> Any:
+def load_oracle(path: "Path | str",
+                schema: str = ORACLE_SCHEMA) -> Any:
     p = Path(path)
     if not p.is_file():
         raise CalibrationError("ORACLE_MISSING", f"{p} 不存在（闭源参考缺失）")
@@ -234,14 +329,14 @@ def load_oracle(path: "Path | str") -> Any:
     for attr in ("ORACLE_SCHEMA", "study_a_oracle", "study_b_rmse"):
         if not hasattr(mod, attr):
             raise CalibrationError("ORACLE_INTERFACE", f"oracle 缺 {attr}")
-    if mod.ORACLE_SCHEMA != ORACLE_SCHEMA:
+    if mod.ORACLE_SCHEMA != schema:
         raise CalibrationError("ORACLE_INTERFACE",
-                               f"oracle schema {mod.ORACLE_SCHEMA!r}")
+                               f"oracle schema {mod.ORACLE_SCHEMA!r}（期望 {schema}）")
     return mod
 
 
-def _oracle_path(ctx: Any) -> Path:
-    return ctx.relative(ORACLE_RELPATH)
+def _oracle_path(ctx: Any, design: Mapping[str, Any] = DESIGN_V1) -> Path:
+    return ctx.relative(design["oracle_relpath"])
 
 
 def _assert_oracle_private(ctx: Any, path: Path, sha: str) -> None:
@@ -251,6 +346,102 @@ def _assert_oracle_private(ctx: Any, path: Path, sha: str) -> None:
         raise CalibrationError("ORACLE_NOT_PRIVATE", f"{p} 不在 campaign private/ 下")
     if oracle_sha256(path) != sha:
         raise CalibrationError("ORACLE_DRIFT", "oracle sha256 与预注册不符")
+
+
+# ---------------------------------------------------------------------------
+# v2 前次尝试取证 + oracle 等价性
+# ---------------------------------------------------------------------------
+
+#: v1 尝试必须逐字节留存的件（缺口分析 + 预注册 + 报告 + v1 oracle）。
+PRIOR_ATTEMPT_FILES = (
+    "contract/calibration_prereg.json",
+    "contract/calibration_report.json",
+    "contract/calibration_report.md",
+    "contract/calibration_gap_analysis.md",
+    "private/calibration_private/oracle.py",
+)
+PRIOR_ATTEMPT_RAW_BATCHES = ("calibration_a", "calibration_b")
+
+
+def prior_attempt_manifest(ctx: Any) -> "dict[str, Any]":
+    """v1 尝试的逐件 sha256 清单（文件 + 全部 raw）；缺件即拒绝签发 v2。"""
+    files: "dict[str, str]" = {}
+    for rel in PRIOR_ATTEMPT_FILES:
+        if not ctx.exists(rel):
+            raise CalibrationError("PRIOR_ATTEMPT_MISSING", f"{rel} 不存在")
+        files[rel] = hashlib.sha256(ctx.relative(rel).read_bytes()).hexdigest()
+    obs = ctx.subdir("observations")
+    raws: "dict[str, str]" = {}
+    for batch in PRIOR_ATTEMPT_RAW_BATCHES:
+        base = obs / batch
+        if not base.is_dir():
+            raise CalibrationError("PRIOR_ATTEMPT_MISSING", f"observations/{batch}/ 缺失")
+        for p in sorted(base.iterdir()):
+            if p.is_file():
+                raws[f"observations/{batch}/{p.name}"] = hashlib.sha256(
+                    p.read_bytes()).hexdigest()
+    if not raws:
+        raise CalibrationError("PRIOR_ATTEMPT_MISSING", "v1 raw 为空")
+    return {
+        "files": dict(sorted(files.items())),
+        "raws": dict(sorted(raws.items())),
+        "files_sha256": C.canonical_sha256(dict(sorted(files.items()))),
+        "raws_sha256": C.canonical_sha256(dict(sorted(raws.items()))),
+        "n_files": len(files),
+        "n_raws": len(raws),
+    }
+
+
+def verify_prior_attempt(ctx: Any,
+                         recorded: Mapping[str, Any]) -> "dict[str, Any]":
+    """重算 v1 清单并与预注册登记件逐项比对；任何漂移即 PRIOR_ATTEMPT_DRIFT。"""
+    now = prior_attempt_manifest(ctx)
+    for section in ("files", "raws"):
+        old = dict(recorded.get(section) or {})
+        new = dict(now[section])
+        if old != new:
+            missing = sorted(set(old) - set(new))
+            added = sorted(set(new) - set(old))
+            changed = sorted(k for k in set(old) & set(new) if old[k] != new[k])
+            raise CalibrationError(
+                "PRIOR_ATTEMPT_DRIFT",
+                f"{section}: missing={missing[:3]} added={added[:3]} changed={changed[:3]}")
+    for key in ("files_sha256", "raws_sha256"):
+        if recorded.get(key) != now[key]:
+            raise CalibrationError("PRIOR_ATTEMPT_DRIFT", key)
+    return now
+
+
+def assert_oracle_v2_equivalence(ctx: Any, *,
+                                 design_v1: Mapping[str, Any] = DESIGN_V1,
+                                 design_v2: Mapping[str, Any] = DESIGN_V2) -> "dict[str, Any]":
+    """v2 oracle 的 B 参考必须与 v1 逐位相等（≤1e-12）；不等即拒绝签发 v2。"""
+    p1 = _oracle_path(ctx, design_v1)
+    p2 = _oracle_path(ctx, design_v2)
+    o1 = load_oracle(p1, schema=design_v1["oracle_schema"])
+    o2 = load_oracle(p2, schema=design_v2["oracle_schema"])
+    out: "dict[str, float]" = {}
+    for e in calibration_matrix():
+        if e["study"] != "B":
+            continue
+        params = e["params"]
+        kw = dict(inertia_ratio=float(params["inertia_ratio"]),
+                  amplitude_rad=float(params["target_amplitude_rad"]),
+                  freq_hz=float(params["target_freq_hz"]),
+                  tc_s=float(params["tc_s"]), dt_s=float(params["dt_s"]),
+                  controller=params["controller"], kp=float(params["kp"]),
+                  kd=float(params["kd"]), duration_s=float(S.DURATION_S),
+                  window_start_s=float(R.TRACKING_WINDOW_START_S),
+                  window_end_s=float(R.TRACKING_WINDOW_END_S))
+        a = float(o1.study_b_rmse(**kw)["normalized_rmse"])
+        b = float(o2.study_b_rmse(**kw)["normalized_rmse"])
+        out[e["block_id"]] = abs(a - b)
+    worst = max(out.values()) if out else float("inf")
+    if not (worst <= 1e-12):
+        raise CalibrationError("ORACLE_EQUIVALENCE", f"max|ΔRMSE|={worst!r} > 1e-12")
+    return {"per_block_abs_diff": dict(sorted(out.items())),
+            "max_abs_diff": worst,
+            "v1_sha256": oracle_sha256(p1), "v2_sha256": oracle_sha256(p2)}
 
 
 # ---------------------------------------------------------------------------
@@ -293,18 +484,22 @@ def _matrix_doc(entries, specs) -> "list[dict[str, Any]]":
 
 def build_calibration_prereg(*, ctx: Any, oracle_path: "Path | str",
                              registered_at_utc: "str | None" = None,
-                             reviewer: str = "maintainer-side (non-blind)") -> "dict[str, Any]":
+                             reviewer: str = "maintainer-side (non-blind)",
+                             design: Mapping[str, Any] = DESIGN_V1,
+                             supersedes: "Mapping[str, Any] | None" = None,
+                             prior_attempt: "Mapping[str, Any] | None" = None
+                             ) -> "dict[str, Any]":
     """构造校准预注册（纯函数；不写盘）。"""
     entries = calibration_matrix()
     specs = specs_for_matrix(entries)
     matrix = _matrix_doc(entries, specs)
-    oracle = load_oracle(oracle_path)
+    oracle = load_oracle(oracle_path, schema=design["oracle_schema"])
     now = registered_at_utc or utc_now_iso_z()
     a_runs = sum(1 for r in matrix if r["study"] == "A")
     b_runs = sum(1 for r in matrix if r["study"] == "B")
     doc = {
-        "schema": PREREG_SCHEMA,
-        "schema_version": 1,
+        "schema": design["prereg_schema"],
+        "schema_version": design["version"],
         "envelope_id": ctx.envelope_id,
         "registered_at_utc": now,
         "purpose": ("T1b 校准：只验证参数接线/观测函数/暴露/负控/灵敏度/复跑；"
@@ -326,28 +521,41 @@ def build_calibration_prereg(*, ctx: Any, oracle_path: "Path | str",
                 "A 灵敏度：μ=0.15 vs 0.6 的闭式位移差约 0.041 m，远大于 0.01 m 门",
                 "B：Tc/dt 全为整数整除；Kp=20、A=0.4、f=2 的 b08 必然触 ±2 Nm 限幅",
                 "B oracle 为同积分族 16× 细网格参考，只检查仪器一致性，不给最优参数",
-            ],
+            ] + ([
+                "v2 依据（缺口见 contract/calibration_gap_analysis.md）：v1 的 A 前 5 步"
+                "速度门实测到的是 MuJoCo 每步摩擦约束冲量量化（首步≈2.2×μg·dt、随后"
+                "数步为 0 的平台、与质量无关），不是初速通道；v1 的 B 0.01 绝对容差在"
+                "欠阻尼 b06 上等价于要求 Δkp≈0.14% 的参数级一致，低于两种积分器结构差",
+                "v2 A 门：首步位移 |x[0]−x0−v0·dt| ≤1e-5 m，直接证明 qvel 在首次 mj_step 前"
+                "写入（v1 全部 19 个 raw 离线复核最大 3.72e-6 m）；A-ORACLE-DISP 保留，"
+                "位移 ∝ v0² ⇒ 3% 位移容差等价 v0 误差 ≤1.5%，不弱于 v1 的 0.01 m/s 门",
+                "v2 B 门：abs 0.01 + 1%·|ref|（b06 门 0.02596 vs 实测 0.010557），并对"
+                "b01/b02/b06 增报周期 ≤1% 与包络 ≤2%（相位不敏感；实测 b06 0.096%/0.62%），"
+                "饱和 block 保留饱和计数一致性；矩阵/场景/seed 不变",
+            ] if design["version"] >= 2 else []),
             "no_leakage": ("矩阵为非正式固定组合，不复用为未来确认 seed；oracle 只在 "
                            "private/calibration_private/，候选不可挂载"),
             "verdict": "APPROVE_FOR_CALIBRATION",
         },
         "matrix": matrix,
         "checks": [{"family": fam, "description": desc, "count": count}
-                   for fam, desc, count in CHECK_FAMILIES],
+                   for fam, desc, count in design["families"]],
         "exposure_gates": {
             "contact_min_fraction": str(CONTACT_MIN_FRACTION),
             "contact_max_gap_steps": CONTACT_MAX_GAP_STEPS,
             "force_balance_rel": str(FORCE_BALANCE_REL),
             "z_excursion_max_m": str(Z_EXCURSION_MAX_M),
-            "v0_tol_mps": str(V0_TOL_MPS),
-            "v0_check_samples": V0_CHECK_SAMPLES,
+            **({"v0_tol_mps": str(V0_TOL_MPS),
+                "v0_check_samples": V0_CHECK_SAMPLES}
+               if design["v0_gate"] == "first5_velocity" else
+               {"v0_first_step_disp_tol_m": str(V0_FIRST_STEP_DISP_TOL_M)}),
             "min_moved_m": str(MIN_MOVED_M),
             "note": ("仪器健全性边距，不扩 rubric δ；默认值由 T1b 前的仪器探测实测"
                      "（接触占比 ≥0.9957、最大间隙 ≤8 步、力平衡 ≤0.43%、z ≤64 µm）"
                      "留 2–20× 余量后事前登记"),
         },
         "oracle": {
-            "relpath": ORACLE_RELPATH,
+            "relpath": design["oracle_relpath"],
             "sha256": oracle_sha256(oracle_path),
             "schema": oracle.ORACLE_SCHEMA,
             "reference_a": "闭式匀减速解（解析）",
@@ -357,6 +565,11 @@ def build_calibration_prereg(*, ctx: Any, oracle_path: "Path | str",
                 "a_displacement_rel": str(A_ORACLE_REL_TOL),
                 "a_stop_time_abs_s": str(A_ORACLE_STOP_TOL_S),
                 "b_normalized_rmse_abs": str(B_ORACLE_ABS_TOL),
+                **({"b_normalized_rmse_rel": str(design["b_oracle_rel"]),
+                    "b_period_rel": str(B_PERIOD_REL_TOL),
+                    "b_envelope_rel": str(B_ENVELOPE_REL_TOL),
+                    "b_phase_blocks": list(design["underdamped_blocks"])}
+                   if design["version"] >= 2 else {}),
                 "b_target_abs_rad": str(B_TARGET_TOL_RAD),
             },
             "replay_tolerances": {k: {"abs": str(a), "rel": str(r)}
@@ -384,40 +597,56 @@ def build_calibration_prereg(*, ctx: Any, oracle_path: "Path | str",
                                       "DESIGN_NOT_READY（不得把损帽当结论）"),
         },
     }
+    if design["version"] >= 2:
+        if design["prior_attempt_required"] and (not supersedes or not prior_attempt):
+            raise CalibrationError(
+                "PRIOR_ATTEMPT_MISSING",
+                "v2 预注册必须携带被取代件的 sha 与历史件清单")
+        doc["design_version"] = design["version"]
+        doc["supersedes"] = dict(supersedes or {})
+        doc["prior_attempt"] = dict(prior_attempt or {})
     doc["document_sha256"] = _document_sha(doc)
     return doc
 
 
-def _raw_paths(ctx: Any) -> "list[Path]":
+def _raw_paths(ctx: Any, design: Mapping[str, Any] = DESIGN_V1) -> "list[Path]":
     root = ctx.subdir("observations")
     if not root.exists():
         return []
-    return sorted(root.glob("**/*.jsonl"))
+    if design["version"] == 1:
+        return sorted(root.glob("**/*.jsonl"))
+    out: "list[Path]" = []
+    for batch in (design["batch_a"], design["batch_b"]):
+        out.extend(sorted((root / batch).glob("*.jsonl")))
+    return sorted(out)
 
 
-def write_calibration_prereg(ctx: Any, doc: Mapping[str, Any]) -> Path:
+def write_calibration_prereg(ctx: Any, doc: Mapping[str, Any],
+                             design: Mapping[str, Any] = DESIGN_V1) -> Path:
     """写预注册；已有同内容件则幂等复用；漂移/晚于 raw 一律拒绝。"""
-    rel = PREREG_RELPATH
+    rel = design["prereg_relpath"]
     if ctx.exists(rel):
         existing = ctx.read_json(rel)
-        if existing.get("schema") != PREREG_SCHEMA:
+        if existing.get("schema") != design["prereg_schema"]:
             raise CalibrationError("PREREG_SCHEMA", "已有件 schema 不符")
         if existing.get("document_sha256") != doc.get("document_sha256"):
             raise CalibrationError(
                 "PREREG_DRIFT", "已有预注册与待写件不一致；不得静默覆盖（重开 campaign）")
         return ctx.relative(rel)
-    if _raw_paths(ctx):
-        raise CalibrationError("RAW_BEFORE_PREREG", "observations/ 已有 raw，拒绝补注册")
+    if _raw_paths(ctx, design):
+        raise CalibrationError("RAW_BEFORE_PREREG",
+                               f"{design['batch_a']}/{design['batch_b']} 已有 raw，拒绝补注册")
     ctx.write_json(rel, dict(doc))
     return ctx.relative(rel)
 
 
-def load_calibration_prereg(ctx: Any) -> "dict[str, Any]":
-    rel = PREREG_RELPATH
+def load_calibration_prereg(ctx: Any,
+                            design: Mapping[str, Any] = DESIGN_V1) -> "dict[str, Any]":
+    rel = design["prereg_relpath"]
     if not ctx.exists(rel):
-        raise CalibrationError("PREREG_MISSING", "先写 calibration_prereg.json")
+        raise CalibrationError("PREREG_MISSING", f"先写 {rel}")
     doc = ctx.read_json(rel)
-    if doc.get("schema") != PREREG_SCHEMA:
+    if doc.get("schema") != design["prereg_schema"]:
         raise CalibrationError("PREREG_SCHEMA", f"{doc.get('schema')!r}")
     if doc.get("document_sha256") != _document_sha(doc):
         raise CalibrationError("PREREG_SELFTEST", "document_sha256 不自洽")
@@ -588,7 +817,8 @@ def _contact_stats(record: Mapping[str, Any]) -> "tuple[float, int]":
 
 
 def _study_a_checks(entry, record, record_meta, metric, oracle_doc,
-                    checks: "list[dict[str, Any]]") -> "dict[str, Any]":
+                    checks: "list[dict[str, Any]]",
+                    design: Mapping[str, Any] = DESIGN_V1) -> "dict[str, Any]":
     run_id = record["run_id"]
     params = record["params_applied"]
     mass = float(params["mass_kg"])
@@ -609,10 +839,21 @@ def _study_a_checks(entry, record, record_meta, metric, oracle_doc,
     z_exc = max(abs(float(row[2]) - z0) for row in record["qpos"])
     _check(checks, f"A-EXPO-Z-{run_id}", z_exc <= float(Z_EXCURSION_MAX_M),
            f"max|z-z0|={z_exc:.3e}", {"z_excursion_m": z_exc})
-    vx = [float(row[0]) for row in record["qvel"]]
-    v0_err = max(abs(vx[i] - v0) for i in range(min(V0_CHECK_SAMPLES, len(vx))))
-    _check(checks, f"A-EXPO-V0-{run_id}", v0_err <= float(V0_TOL_MPS),
-           f"max|vx-v0|={v0_err:.4f}", {"v0_error_mps": v0_err})
+    if design["v0_gate"] == "first_step_displacement":
+        # v2：首步位移必须恰为 v0·dt（证明 qvel 先于首次 mj_step 写入）。
+        dt = float(record["time_s"][1]) - float(record["time_s"][0])
+        dx = float(record["qpos"][0][0]) - float(record_meta["initial_x_m"])
+        pred = v0 * dt
+        v0_err = abs(dx - pred)
+        _check(checks, f"A-EXPO-V0-{run_id}", v0_err <= float(V0_FIRST_STEP_DISP_TOL_M),
+               f"|dx-v0·dt|={v0_err:.2e} m (dx={dx:.9f}, v0·dt={pred:.9f})",
+               {"v0_first_step_disp_error_m": v0_err, "dx_m": dx, "v0_dt_m": pred,
+                "dt_s": dt})
+    else:
+        vx = [float(row[0]) for row in record["qvel"]]
+        v0_err = max(abs(vx[i] - v0) for i in range(min(V0_CHECK_SAMPLES, len(vx))))
+        _check(checks, f"A-EXPO-V0-{run_id}", v0_err <= float(V0_TOL_MPS),
+               f"max|vx-v0|={v0_err:.4f}", {"v0_error_mps": v0_err})
     disp = float(metric.values[M.DISPLACEMENT])
     _check(checks, f"A-MOVED-{run_id}", abs(disp) >= float(MIN_MOVED_M),
            f"|disp|={abs(disp):.5f}", {"displacement_m": disp})
@@ -644,7 +885,8 @@ def _study_a_checks(entry, record, record_meta, metric, oracle_doc,
 
 
 def _study_b_checks(entry, record, metric, oracle_doc,
-                    checks: "list[dict[str, Any]]") -> "dict[str, Any]":
+                    checks: "list[dict[str, Any]]",
+                    design: Mapping[str, Any] = DESIGN_V1) -> "dict[str, Any]":
     run_id = record["run_id"]
     params = record["params_applied"]
     dt = float(params["dt_s"])
@@ -674,13 +916,60 @@ def _study_b_checks(entry, record, metric, oracle_doc,
         window_end_s=float(R.TRACKING_WINDOW_END_S))
     sim = float(metric.values[M.TRACKING_RMSE])
     diff = abs(sim - oracle["normalized_rmse"])
-    _check(checks, f"B-ORACLE-{run_id}", diff <= float(B_ORACLE_ABS_TOL),
-           f"sim={sim:.6f} oracle={oracle['normalized_rmse']:.6f} diff={diff:.2e}",
-           {"sim": sim, "oracle": oracle["normalized_rmse"], "diff": diff})
+    tol = float(B_ORACLE_ABS_TOL) + float(design["b_oracle_rel"]) * abs(
+        float(oracle["normalized_rmse"]))
+    _check(checks, f"B-ORACLE-{run_id}", diff <= tol,
+           f"sim={sim:.6f} oracle={oracle['normalized_rmse']:.6f} diff={diff:.2e} tol={tol:.5f}",
+           {"sim": sim, "oracle": oracle["normalized_rmse"], "diff": diff, "tol": tol})
+    if entry["block_id"] in design["underdamped_blocks"]:
+        _b_phase_check(entry, record, oracle_doc, checks)
     return {"run_id": run_id, "study": "B", "role": entry["role"],
             "block_id": entry["block_id"], "condition_id": entry["condition_id"],
             "params": dict(params), "metrics": metric.to_dict(),
             "oracle": oracle}
+
+
+def _b_phase_check(entry, record, oracle_doc,
+                   checks: "list[dict[str, Any]]") -> None:
+    """v2 第二证据：欠阻尼 block 的周期与包络（相位不敏感）。"""
+    run_id = record["run_id"]
+    params = record["params_applied"]
+    trace_fn = getattr(oracle_doc, "study_b_trace", None)
+    if trace_fn is None:
+        _check(checks, f"B-ORACLE-PHASE-{run_id}", False,
+               "oracle 缺 study_b_trace（v2 需参考轨迹）")
+        return
+    kw = dict(inertia_ratio=float(params["inertia_ratio"]),
+              amplitude_rad=float(params["target_amplitude_rad"]),
+              freq_hz=float(params["target_freq_hz"]),
+              tc_s=float(params["tc_s"]), dt_s=float(params["dt_s"]),
+              controller=params["controller"], kp=float(params["kp"]),
+              kd=float(params["kd"]), duration_s=float(S.DURATION_S))
+    start = float(R.TRACKING_WINDOW_START_S)
+    end = float(R.TRACKING_WINDOW_END_S)
+    sim_stats = M.tracking_period_and_envelope(
+        record["time_s"], [float(row[0]) for row in record["qpos"]],
+        window_start_s=start, window_end_s=end)
+    ref = trace_fn(**kw)
+    ref_stats = M.tracking_period_and_envelope(
+        ref["time_s"], ref["q"], window_start_s=start, window_end_s=end)
+    if sim_stats is None or ref_stats is None:
+        _check(checks, f"B-ORACLE-PHASE-{run_id}", False,
+               "周期/包络不可辨识（窗口内向上过零 <2）")
+        return
+    period_rel = (abs(sim_stats["period_s"] - ref_stats["period_s"])
+                  / ref_stats["period_s"])
+    env_rel = (abs(sim_stats["envelope"] - ref_stats["envelope"])
+               / ref_stats["envelope"])
+    ok = (period_rel <= float(B_PERIOD_REL_TOL)
+          and env_rel <= float(B_ENVELOPE_REL_TOL))
+    _check(checks, f"B-ORACLE-PHASE-{run_id}", ok,
+           f"period_rel={period_rel:.4f} envelope_rel={env_rel:.4f}",
+           {"period_rel": period_rel, "envelope_rel": env_rel,
+            "sim_period_s": sim_stats["period_s"],
+            "reference_period_s": ref_stats["period_s"],
+            "sim_envelope": sim_stats["envelope"],
+            "reference_envelope": ref_stats["envelope"]})
 
 
 def _a_group_checks(runs_doc, checks) -> None:
@@ -772,16 +1061,21 @@ def _replay_checks(runs_doc, checks) -> None:
                f"Δrmse={d:.2e}", {"rmse_diff": d})
 
 
-def _validate_check_registry(checks) -> None:
+def _validate_check_registry(
+        checks,
+        families: "tuple[tuple[str, str, int], ...] | None" = None) -> None:
+    families = CHECK_FAMILIES if families is None else families
     counts: "dict[str, int]" = {}
-    families = [fam for fam, _, _ in CHECK_FAMILIES]
+    # 家族名互为前缀（B-ORACLE / B-ORACLE-PHASE）⇒ 必须最长匹配优先，
+    # 否则 B-ORACLE-PHASE-* 会被记到 B-ORACLE 名下（实得 12 vs 期望 9）。
+    names = sorted((fam for fam, _, _ in families), key=len, reverse=True)
     for c in checks:
-        fam = next((f for f in families
+        fam = next((f for f in names
                     if c["id"] == f or c["id"].startswith(f + "-")), None)
         if fam is None:
             raise CalibrationError("CHECK_UNREGISTERED", c["id"])
         counts[fam] = counts.get(fam, 0) + 1
-    for fam, _desc, count in CHECK_FAMILIES:
+    for fam, _desc, count in families:
         if counts.get(fam, 0) != count:
             raise CalibrationError(
                 "CHECK_COUNT", f"{fam} 期望 {count} 实得 {counts.get(fam, 0)}")
@@ -800,18 +1094,51 @@ def _verdict(checks) -> str:
 # 运行
 # ---------------------------------------------------------------------------
 
+def collect_run_checks(*, a_entries, a_specs, ev_a, a_metas,
+                       b_entries, b_specs, ev_b, oracle,
+                       design: Mapping[str, Any] = DESIGN_V1
+                       ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]]]":
+    """逐 run + 分组 + 复跑 + 饱和计数检查（生产路径与离线测试共用同一实现）。
+
+    ``design`` 必须一路透传到 study 检查：v2 的暴露门 / 尺度感知容差 / 相位第二
+    证据都由它切换（T1b-v2 abort 即因漏传而在 v2 预注册下跑了 v1 语义）。
+    """
+    checks: "list[dict[str, Any]]" = []
+    runs_doc: "list[dict[str, Any]]" = []
+    for e, spec in zip(a_entries, a_specs):
+        record = _record_of(ev_a, spec.run_id)
+        meta = a_metas[spec.run_id]
+        metric = M.compute_study_a(record, initial_x_m=meta["initial_x_m"])
+        runs_doc.append(_study_a_checks(e, record, meta, metric, oracle, checks,
+                                        design=design))
+    for e, spec in zip(b_entries, b_specs):
+        record = _record_of(ev_b, spec.run_id)
+        metric = M.compute_study_b(
+            record,
+            amplitude_rad=float(record["params_applied"]["target_amplitude_rad"]))
+        runs_doc.append(_study_b_checks(e, record, metric, oracle, checks,
+                                        design=design))
+    _a_group_checks(runs_doc, checks)
+    _b_group_checks(runs_doc, checks)
+    _replay_checks(runs_doc, checks)
+    if ev_b is not None:
+        _fill_b_saturation(ev_b, b_specs, checks)
+    return runs_doc, checks
+
+
 def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
                     ledger_path: "Path | str | None" = None,
-                    notes: "Iterable[str]" = ()) -> "dict[str, Any]":
+                    notes: "Iterable[str]" = (),
+                    design: Mapping[str, Any] = DESIGN_V1) -> "dict[str, Any]":
     """沿正式 dispatcher 跑固定校准组合；返回并落盘报告。"""
     ledger = Path(ledger_path) if ledger_path is not None else _default_ledger(ctx)
-    prereg = load_calibration_prereg(ctx)
-    oracle_path = _oracle_path(ctx)
+    prereg = load_calibration_prereg(ctx, design)
+    oracle_path = _oracle_path(ctx, design)
     assert_prereg_matches_sources(prereg, oracle_path=oracle_path)
     _assert_oracle_private(ctx, oracle_path, prereg["oracle"]["sha256"])
     permit = load_permit(ctx)
     assert_permit_usable(ctx, permit, ledger_path=ledger)
-    oracle = load_oracle(oracle_path)
+    oracle = load_oracle(oracle_path, schema=design["oracle_schema"])
 
     entries = calibration_matrix()
     specs = specs_for_matrix(entries)
@@ -831,24 +1158,40 @@ def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
     b_specs = [spec_by_run_for(e, specs) for e in b_entries]
 
     book = CalibrationBook(max_runs=CAL_MAX_RUNS, max_steps=CAL_MAX_STEPS)
+    suffix = "" if design["version"] == 1 else f"_{design['key']}"
     be_a = BK.PhysicsBackend(
         observations_root=ctx.subdir("observations"),
         evidence_root=ctx.subdir("evidence_pack"),
-        work_root=ctx.subdir("private") / "calibration_work",
-        runner=runner, image=image, batch_id="calibration_a")
+        work_root=ctx.subdir("private") / f"calibration_work{suffix}",
+        runner=runner, image=image, batch_id=design["batch_a"])
     be_b = BK.PhysicsBackend(
         observations_root=ctx.subdir("observations"),
         evidence_root=ctx.subdir("evidence_pack"),
-        work_root=ctx.subdir("private") / "calibration_work_b",
-        runner=runner, image=image, batch_id="calibration_b")
+        work_root=ctx.subdir("private") / f"calibration_work_b{suffix}",
+        runner=runner, image=image, batch_id=design["batch_b"])
 
-    ev_a = E.execute_batch(a_specs, be_a, book)
-    ev_b = E.execute_batch(b_specs, be_b, book) if not ev_a.blocked else None
+    # v2：先核 v1 尝试（预注册/报告/缺口件/oracle/raw）未被改写；失败即不跑容器、
+    # 不产生新 raw，报告判 INVALID（历史不可改写是完整性条件，不是科学结论）。
+    prior_err = None
+    prior_now = None
+    if design["version"] >= 2:
+        try:
+            prior_now = verify_prior_attempt(ctx, prereg.get("prior_attempt") or {})
+        except CalibrationError as exc:
+            prior_err = str(exc)
+
+    ev_a = None
+    ev_b = None
+    if prior_err is None:
+        ev_a = E.execute_batch(a_specs, be_a, book)
+        ev_b = E.execute_batch(b_specs, be_b, book) if not ev_a.blocked else None
 
     checks: "list[dict[str, Any]]" = []
     runs_doc: "list[dict[str, Any]]" = []
     blocked = None
-    if ev_a.blocked:
+    if prior_err is not None:
+        blocked = f"PRIOR_ATTEMPT: {prior_err}"
+    elif ev_a.blocked:
         blocked = f"A: {ev_a.reason}"
     elif ev_b is not None and ev_b.blocked:
         blocked = f"B: {ev_b.reason}"
@@ -856,25 +1199,13 @@ def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
         blocked = (f"partial: A {ev_a.n_ok}/{len(a_specs)} ok, "
                    f"B {None if ev_b is None else ev_b.n_ok}/{len(b_specs)} ok")
     if blocked is None:
-        for e, spec in zip(a_entries, a_specs):
-            record = _record_of(ev_a, spec.run_id)
-            metric = M.compute_study_a(record,
-                                       initial_x_m=be_a.metas[spec.run_id]["initial_x_m"])
-            runs_doc.append(_study_a_checks(e, record, be_a.metas[spec.run_id],
-                                            metric, oracle, checks))
-        for e, spec in zip(b_entries, b_specs):
-            record = _record_of(ev_b, spec.run_id)
-            metric = M.compute_study_b(
-                record, amplitude_rad=float(record["params_applied"]["target_amplitude_rad"]))
-            runs_doc.append(_study_b_checks(e, record, metric, oracle, checks))
-        _a_group_checks(runs_doc, checks)
-        _b_group_checks(runs_doc, checks)
-        _replay_checks(runs_doc, checks)
-        if ev_b is not None:
-            _fill_b_saturation(ev_b, b_specs, checks)
+        runs_doc, checks = collect_run_checks(
+            a_entries=a_entries, a_specs=a_specs, ev_a=ev_a, a_metas=be_a.metas,
+            b_entries=b_entries, b_specs=b_specs, ev_b=ev_b, oracle=oracle,
+            design=design)
 
     # ---- 全局完整性检查（失败即 INVALID）----
-    raw_paths = _raw_paths(ctx)
+    raw_paths = _raw_paths(ctx, design)
     try:
         PR.assert_prereg_precedes_raw(prereg, raw_paths)
         _check(checks, "GLOBAL-PREREG-FIRST", True,
@@ -905,13 +1236,25 @@ def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
            total_runs <= CAL_MAX_RUNS and total_steps <= CAL_MAX_STEPS,
            f"runs={total_runs}/{CAL_MAX_RUNS} steps={total_steps}/{CAL_MAX_STEPS}",
            {"runs": total_runs, "steps": total_steps})
+    if design["version"] >= 2:
+        _check(checks, "GLOBAL-PRIOR-ATTEMPT", prior_err is None,
+               ("v1 预注册/报告/oracle/raw 逐字节未变 "
+                f"（{PRIOR_ATTEMPT_FILES.__len__()} 件 + "
+                f"{(prior_now or {}).get('n_raws')} raw）")
+               if prior_err is None else prior_err,
+               {"n_files": (prior_now or {}).get("n_files"),
+                "n_raws": (prior_now or {}).get("n_raws"),
+                "recorded_files_sha256": (prereg.get("prior_attempt") or {}).get(
+                    "files_sha256"),
+                "recorded_raws_sha256": (prereg.get("prior_attempt") or {}).get(
+                    "raws_sha256")})
 
     verdict = "INVALID" if blocked else _verdict(checks)
     if blocked is None:
-        _validate_check_registry(checks)
+        _validate_check_registry(checks, design["families"])
     report = {
-        "schema": REPORT_SCHEMA,
-        "schema_version": 1,
+        "schema": design["report_schema"],
+        "schema_version": design["version"],
         "envelope_id": ctx.envelope_id,
         "generated_at_utc": utc_now_iso_z(),
         "verdict": verdict,
@@ -938,8 +1281,15 @@ def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
         "failures": [c for c in checks if not c["ok"]],
         "notes": list(notes),
     }
-    ctx.write_json(REPORT_RELPATH, report)
-    ctx.write_text(REPORT_MD_RELPATH, render_report_markdown(report))
+    if design["version"] >= 2:
+        report["design_version"] = design["version"]
+        report["supersedes"] = dict(prereg.get("supersedes") or {})
+        report["prior_attempt"] = {"files_sha256": (prereg.get("prior_attempt") or {}).get(
+            "files_sha256"),
+            "raws_sha256": (prereg.get("prior_attempt") or {}).get("raws_sha256"),
+            "verified": prior_err is None}
+    ctx.write_json(design["report_relpath"], report)
+    ctx.write_text(design["report_md_relpath"], render_report_markdown(report))
     return report
 
 

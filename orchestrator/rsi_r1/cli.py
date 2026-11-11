@@ -394,16 +394,44 @@ def cmd_contract(args: argparse.Namespace) -> int:
 def cmd_controls(args: argparse.Namespace) -> int:
     envelope = C.require_safe_id(args.envelope, where="--envelope")
     ctx, _ = _load_envelope_contract(envelope)
+    design = CAL.design_for(getattr(args, "design_version", 1))
     ledger = CAL._default_ledger(ctx)
-    oracle_path = ctx.relative(CAL.ORACLE_RELPATH)
+    oracle_path = CAL._oracle_path(ctx, design)
     if args.prepare_only:
-        doc = CAL.build_calibration_prereg(ctx=ctx, oracle_path=oracle_path)
-        path = CAL.write_calibration_prereg(ctx, doc)
+        supersedes = None
+        prior = None
+        if design["version"] >= 2:
+            prior = CAL.prior_attempt_manifest(ctx)
+            equivalence = CAL.assert_oracle_v2_equivalence(ctx)
+            prior = {**prior, "oracle_equivalence": equivalence}
+            v1_prereg = ctx.read_json(CAL.PREREG_RELPATH)
+            v1_report = ctx.read_json(CAL.REPORT_RELPATH)
+            supersedes = {
+                "prereg_schema": CAL.PREREG_SCHEMA,
+                "prereg_relpath": CAL.PREREG_RELPATH,
+                "prereg_file_sha256": CAL.oracle_sha256(ctx.relative(CAL.PREREG_RELPATH)),
+                "prereg_document_sha256": v1_prereg.get("document_sha256"),
+                "report_relpath": CAL.REPORT_RELPATH,
+                "report_file_sha256": CAL.oracle_sha256(ctx.relative(CAL.REPORT_RELPATH)),
+                "report_verdict": v1_report.get("verdict"),
+                "gap_relpath": CAL.GAP_RELPATH,
+                "gap_file_sha256": CAL.oracle_sha256(ctx.relative(CAL.GAP_RELPATH)),
+            }
+        doc = CAL.build_calibration_prereg(ctx=ctx, oracle_path=oracle_path,
+                                           design=design, supersedes=supersedes,
+                                           prior_attempt=prior)
+        path = CAL.write_calibration_prereg(ctx, doc, design)
         permit = CAL.issue_zero_post_permit(ctx, ledger_path=ledger)
-        print(f"controls prepare ok  envelope={envelope}")
+        print(f"controls prepare ok  envelope={envelope} design=v{design['version']}")
         print(f"  prereg  : {path}")
         print(f"  sha256  : {doc['document_sha256'][:16]}…")
         print(f"  oracle  : {doc['oracle']['sha256'][:16]}…")
+        if prior is not None:
+            eq = prior["oracle_equivalence"]
+            print(f"  prior   : files={prior['n_files']} raws={prior['n_raws']} "
+                  f"files_sha={prior['files_sha256'][:16]}… "
+                  f"raws_sha={prior['raws_sha256'][:16]}…")
+            print(f"  oracle≡v1 max|ΔRMSE|={eq['max_abs_diff']!r}（8 block）")
         print(f"  permit  : {permit['kind']} posts={permit['model_posts_allowed']} "
               f"refusal={permit['sender_refusal']['code']}")
         print(f"  ledger  : {ledger} call_rows=0")
@@ -414,9 +442,11 @@ def cmd_controls(args: argparse.Namespace) -> int:
         return 2
     report = CAL.run_calibration(
         ctx, runner=SANDBOX.DockerRunner(), image=args.image,
-        ledger_path=ledger,
-        notes=["T1b 真实校准沿正式 dispatcher/raw/资源账；零项目模型 POST"])
-    print(f"controls envelope={envelope}  verdict={report['verdict']}")
+        ledger_path=ledger, design=design,
+        notes=[f"T1b 真实校准（design=v{design['version']}）沿正式 dispatcher/"
+               f"raw/资源账；零项目模型 POST"])
+    print(f"controls envelope={envelope} design=v{report['schema_version']}  "
+          f"verdict={report['verdict']}")
     print(f"  runs={len(report['runs'])} checks={len(report['checks'])} "
           f"failures={len(report['failures'])}")
     print(f"  budget runs={report['budget']['total_runs']} steps={report['budget']['total_steps']}")
@@ -575,6 +605,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="显式确认真跑容器（仍不发任何模型 POST）")
     pc2.add_argument("--image", default=CAL.CAL_IMAGE,
                      help=f"容器镜像（默认钉死 {CAL.CAL_IMAGE[:32]}…）")
+    pc2.add_argument("--design-version", type=int, choices=(1, 2), default=1,
+                     help="校准设计版本：1=首轮（历史留档）、2=2026-11-11 批准的修正设计")
     pc2.set_defaults(func=cmd_controls)
 
     return p
