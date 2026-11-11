@@ -236,9 +236,29 @@ def run_id_for(*, plan_sha256: str, study_id: str, condition_id: str,
 
 def _build_spec(*, plan: C.ResearchPlan, condition: C.Condition,
                 block_id: str, params: Mapping[str, Any]) -> ExperimentSpec:
-    doc = S.scene_doc(condition.scene_id)
-    normalised = _scene_params(condition.scene_id, params)
-    shape = _run_shape(condition.scene_id, normalised)
+    return build_host_spec(plan_sha256=plan.sha256, study_id=plan.study_id,
+                           condition_id=condition.id, block_id=block_id,
+                           scene_id=condition.scene_id, params=params)
+
+
+@_public
+def build_host_spec(*, plan_sha256: str, study_id: str, condition_id: str,
+                    block_id: str, scene_id: str, params: Mapping[str, Any]
+                    ) -> ExperimentSpec:
+    """由 host 侧已校验的身份 + 参数构造 ``ExperimentSpec``（唯一构造点）。
+
+    候选矩阵路径（:func:`validate_matrix`）与维护侧校准路径
+    （``calibration.py``）都走这里，保证 run_id/spec_hash/units/整数 ticks
+    只有一份实现。
+    """
+    _require_hex(plan_sha256, where="plan_sha256")
+    if study_id not in ("A", "B"):
+        raise _err("STUDY_UNKNOWN", f"study_id={study_id!r}")
+    doc = S.scene_doc(scene_id)
+    if doc.study != study_id:
+        raise _err("STUDY_MISMATCH", f"{scene_id} 属于 study {doc.study!r}")
+    normalised = _scene_params(scene_id, params)
+    shape = _run_shape(scene_id, normalised)
     physical: "dict[str, str]" = {}
     controller: "dict[str, str]" = {}
     units: "dict[str, str]" = {}
@@ -246,24 +266,24 @@ def _build_spec(*, plan: C.ResearchPlan, condition: C.Condition,
         bucket = physical if spec.role != "controller" else controller
         bucket[spec.id] = normalised[spec.id]
         units[spec.id] = spec.unit
-    if condition.scene_id == S.SCENE_A:
+    if scene_id == S.SCENE_A:
         dt_s, tc_s = str(A_FIXED_DT_S), None
     else:
         dt_s, tc_s = normalised["dt_s"], normalised["tc_s"]
     body = {
         "schema": SPEC_SCHEMA, "schema_version": 1,
-        "study_id": plan.study_id, "plan_sha256": plan.sha256,
-        "condition_id": condition.id, "block_id": block_id,
-        "scene_id": condition.scene_id,
+        "study_id": study_id, "plan_sha256": plan_sha256,
+        "condition_id": condition_id, "block_id": block_id,
+        "scene_id": scene_id,
         "physical_params": physical, "controller_params": controller,
         "dt_s": dt_s, "tc_s": tc_s, "duration_s": str(S.DURATION_S),
         "units": units, "ticks": dict(shape),
-        "run_id": run_id_for(plan_sha256=plan.sha256, study_id=plan.study_id,
-                             condition_id=condition.id, block_id=block_id),
+        "run_id": run_id_for(plan_sha256=plan_sha256, study_id=study_id,
+                             condition_id=condition_id, block_id=block_id),
     }
     return ExperimentSpec(
-        schema=SPEC_SCHEMA, study_id=plan.study_id, plan_sha256=plan.sha256,
-        condition_id=condition.id, block_id=block_id, scene_id=condition.scene_id,
+        schema=SPEC_SCHEMA, study_id=study_id, plan_sha256=plan_sha256,
+        condition_id=condition_id, block_id=block_id, scene_id=scene_id,
         physical_params=physical, controller_params=controller,
         dt_s=dt_s, tc_s=tc_s, duration_s=str(S.DURATION_S), units=units,
         ticks=dict(shape), run_id=body["run_id"], spec_hash=_sha_doc(body))
@@ -500,9 +520,23 @@ def allocate_confirm(plan: C.ResearchPlan, keeper_seed: Any) -> ConfirmManifest:
 # ---------------------------------------------------------------------------
 
 class BackendInfraError(RuntimeError):
-    """基础设施失败：整批 BLOCKED，不补样本。"""
+    """基础设施失败：整批 BLOCKED，不补样本。
+
+    机器码取自消息的首个 token（**必须全大写**，如 ``"RAW_SHA_MISMATCH ..."``）；
+    没有大写前缀时退回 ``INFRA_FAILURE``。``RunOutcome.error_code`` 用它。
+    """
 
     code = "INFRA_FAILURE"
+
+    def __init__(self, detail: str = "", *, code: "str | None" = None) -> None:
+        super().__init__(detail)
+        if code is not None:
+            self.code = code
+            return
+        token = str(detail).split(" ", 1)[0].rstrip(":").strip()
+        if (token and token[0].isalpha() and token == token.upper()
+                and token.replace("_", "").isalnum()):
+            self.code = token
 
 
 class BackendScientificStop(RuntimeError):

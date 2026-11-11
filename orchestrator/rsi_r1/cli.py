@@ -41,11 +41,13 @@ from orchestrator.common.runtime_paths import (
     rsi_r1_subdir,
 )
 from orchestrator.gateway import quota_ledger as QL
+from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import observations as OBS
 from orchestrator.rsi_r1 import prereg as PREREG
 from orchestrator.rsi_r1 import rubric as RUBRIC
 from orchestrator.rsi_r1 import runtime
+from orchestrator.rsi_r1 import sandbox as SANDBOX
 from orchestrator.rsi_r1 import scenes as SCENES
 from orchestrator.rsi_r1.lanes import LANE_ORDER, LANE_POST_CAPS
 
@@ -386,6 +388,44 @@ def cmd_contract(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# controls（T1b）：先预注册再沿正式 dispatcher 跑固定组合；零模型 POST
+# ---------------------------------------------------------------------------
+
+def cmd_controls(args: argparse.Namespace) -> int:
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    ledger = CAL._default_ledger(ctx)
+    oracle_path = ctx.relative(CAL.ORACLE_RELPATH)
+    if args.prepare_only:
+        doc = CAL.build_calibration_prereg(ctx=ctx, oracle_path=oracle_path)
+        path = CAL.write_calibration_prereg(ctx, doc)
+        permit = CAL.issue_zero_post_permit(ctx, ledger_path=ledger)
+        print(f"controls prepare ok  envelope={envelope}")
+        print(f"  prereg  : {path}")
+        print(f"  sha256  : {doc['document_sha256'][:16]}…")
+        print(f"  oracle  : {doc['oracle']['sha256'][:16]}…")
+        print(f"  permit  : {permit['kind']} posts={permit['model_posts_allowed']} "
+              f"refusal={permit['sender_refusal']['code']}")
+        print(f"  ledger  : {ledger} call_rows=0")
+        return 0
+    if not args.real_containers:
+        print("BLOCKED 校准会真跑容器：需显式 --real-containers（无模型 POST）",
+              file=sys.stderr)
+        return 2
+    report = CAL.run_calibration(
+        ctx, runner=SANDBOX.DockerRunner(), image=args.image,
+        ledger_path=ledger,
+        notes=["T1b 真实校准沿正式 dispatcher/raw/资源账；零项目模型 POST"])
+    print(f"controls envelope={envelope}  verdict={report['verdict']}")
+    print(f"  runs={len(report['runs'])} checks={len(report['checks'])} "
+          f"failures={len(report['failures'])}")
+    print(f"  budget runs={report['budget']['total_runs']} steps={report['budget']['total_steps']}")
+    for c in report["failures"][:10]:
+        print(f"  FAIL {c['id']}: {c['detail']}")
+    return 0 if report["verdict"] == "CALIBRATION_PASS" else 2
+
+
+# ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
 
@@ -525,6 +565,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="场景 id 列表（默认两场景）")
     pk.set_defaults(func=cmd_contract)
 
+    pc2 = sub.add_parser(
+        "controls",
+        help="T1b 校准：先写预注册 + 零 POST permit，再沿正式 dispatcher 跑固定组合")
+    pc2.add_argument("--envelope", required=True)
+    pc2.add_argument("--prepare-only", action="store_true",
+                     help="只写 calibration_prereg.json 与零 POST permit（不跑容器）")
+    pc2.add_argument("--real-containers", action="store_true",
+                     help="显式确认真跑容器（仍不发任何模型 POST）")
+    pc2.add_argument("--image", default=CAL.CAL_IMAGE,
+                     help=f"容器镜像（默认钉死 {CAL.CAL_IMAGE[:32]}…）")
+    pc2.set_defaults(func=cmd_controls)
+
     return p
 
 
@@ -534,7 +586,8 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         return int(args.func(args))
     except (CliError, C.ContractError, PREREG.PreregError,
-            SCENES.SceneError, OBS.ObservationError) as exc:
+            SCENES.SceneError, OBS.ObservationError,
+            CAL.CalibrationError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

@@ -39,12 +39,18 @@ WALL_CLOCK_S = 30
 MEMORY_LIMIT = "512m"
 PIDS_LIMIT = 64
 CPU_LIMIT = "1.0"
-OUTPUT_MAX_BYTES = 1 << 20          # 1 MiB
+OUTPUT_MAX_BYTES = 1 << 20          # 1 MiB（候选 design/analysis）
+#: 可信实验服务（§3.1 raw 数组）的输出帽：8000 步 × 多路数组压缩后约 0.6 MiB，
+#: 候选面拿不到这条出口，故单列一个上限而不放宽候选帽。
+PHYSICS_OUTPUT_MAX_BYTES = 4 << 20
 REPLY_MAX_BYTES = 4096
 SOURCE_MAX_BYTES = 64 * 1024
 MAX_OUTPUT_FILES = 64
 MAX_VIEW_DEPTH = 4
 MAX_INPUT_BYTES = 8 << 20       # 单件视图输入上限（观察文件都很小）
+
+#: 可信实验服务的墙钟（含整定 2000 步 + 记录 8000 步；实测 <2 s，留足冷启动）。
+PHYSICS_WALL_CLOCK_S = 120
 
 #: 容器内的非 root uid/gid（nobody）
 CONTAINER_UID = 65534
@@ -251,7 +257,8 @@ class DockerRunner:
 # 输出面
 # ---------------------------------------------------------------------------
 
-def _collect_outputs(out_dir: Path) -> "list[dict[str, Any]]":
+def _collect_outputs(out_dir: Path,
+                     max_bytes: int = OUTPUT_MAX_BYTES) -> "list[dict[str, Any]]":
     files: "list[dict[str, Any]]" = []
     total = 0
 
@@ -269,9 +276,9 @@ def _collect_outputs(out_dir: Path) -> "list[dict[str, Any]]":
             if not stat.S_ISREG(st.st_mode):
                 raise SandboxError("OUTPUT_INVALID", f"输出含非普通文件：{child.name}")
             total += st.st_size
-            if total > OUTPUT_MAX_BYTES:
+            if total > max_bytes:
                 raise SandboxError("OUTPUT_TOO_LARGE",
-                                   f"输出累计 {total} 超过 {OUTPUT_MAX_BYTES} B")
+                                   f"输出累计 {total} 超过 {max_bytes} B")
             if len(files) >= MAX_OUTPUT_FILES:
                 raise SandboxError("OUTPUT_TOO_MANY",
                                    f"输出文件数超过 {MAX_OUTPUT_FILES}")
@@ -320,6 +327,9 @@ class SandboxEvidence:
     reply: "dict[str, Any] | None" = None
     container: str = ""
     stderr_tail: str = ""
+    #: 仅当 ``retain_bytes=True`` 时填充：``{输出名: 字节}``。是**载荷**不是证据
+    #: 元数据，故不进 ``to_dict()``（证据包只收 sha/大小，raw 由宿主另行规范化落盘）。
+    blobs: "Mapping[str, bytes]" = field(default_factory=dict)
 
     def to_dict(self) -> "dict[str, Any]":
         return {"schema": "simpraxis.rsi_r1.sandbox_evidence.v1",
@@ -335,10 +345,11 @@ class SandboxEvidence:
                 "stderr_tail": self.stderr_tail}
 
 
-def _limits_doc() -> "dict[str, Any]":
-    return {"wall_clock_s": WALL_CLOCK_S, "memory": MEMORY_LIMIT,
+def _limits_doc(*, wall_clock_s: int = WALL_CLOCK_S,
+                output_max_bytes: int = OUTPUT_MAX_BYTES) -> "dict[str, Any]":
+    return {"wall_clock_s": wall_clock_s, "memory": MEMORY_LIMIT,
             "pids": PIDS_LIMIT, "cpus": CPU_LIMIT,
-            "output_max_bytes": OUTPUT_MAX_BYTES,
+            "output_max_bytes": output_max_bytes,
             "reply_max_bytes": REPLY_MAX_BYTES,
             "source_max_bytes": SOURCE_MAX_BYTES,
             "uid": CONTAINER_UID, "gid": CONTAINER_GID,
@@ -387,9 +398,35 @@ def _container_argv(*, image: str, container: str, view: Path, out: Path,
     ]
 
 
+_SCRIPT_NAMES: "Mapping[str, str]" = {
+    "design": "design.py",
+    "analysis": "analysis.py",
+    "experiment": "service.py",
+}
+
+
+def _prepare_container_modes(view: Path, out: Path) -> None:
+    """让容器内 uid 65534 能读视图、写 /out。
+
+    视图目录 0711（只给穿越，不给列目录）、文件 0644；``out`` 0777。
+    宿主侧父目录仍是 0700，且视图/out 只在本轮存活，退出即删——容器是通过
+    bind mount 直接看到视图根的，父目录权限不参与容器内路径解析。
+    """
+    os.chmod(view, 0o711)
+    for child in view.iterdir():
+        st = os.lstat(child)
+        if stat.S_ISREG(st.st_mode):
+            os.chmod(child, 0o644)
+    os.chmod(out, 0o777)
+
+
 def _run_in_sandbox(*, kind: str, source: "str | bytes", entries: Iterable[ViewEntry],
                     evidence_root: "Path | str", work_root: "Path | str",
-                    runner: ContainerRunner, image: str) -> SandboxEvidence:
+                    runner: ContainerRunner, image: str,
+                    extra_files: "Iterable[tuple[str, bytes]]" = (),
+                    output_max_bytes: int = OUTPUT_MAX_BYTES,
+                    wall_clock_s: int = WALL_CLOCK_S,
+                    retain_bytes: bool = False) -> SandboxEvidence:
     if not isinstance(image, str) or not image.strip():
         raise SandboxError("IMAGE_MISSING", "必须由 host 指定容器镜像（候选不可覆盖）")
     raw = _normalise_source(source)
@@ -400,7 +437,8 @@ def _run_in_sandbox(*, kind: str, source: "str | bytes", entries: Iterable[ViewE
     out = base / f"out-{uuid.uuid4().hex}"
     out.mkdir(mode=0o700)
     container = f"rsir1-{kind}-{uuid.uuid4().hex[:12]}"
-    script_name = "design.py" if kind == "design" else "analysis.py"
+    script_name = _SCRIPT_NAMES[kind]
+    extra_records: "list[dict[str, Any]]" = []
     try:
         script = view.path / script_name
         try:
@@ -411,11 +449,25 @@ def _run_in_sandbox(*, kind: str, source: "str | bytes", entries: Iterable[ViewE
                                f"视图内已有同名 {script_name}（与候选输入冲突）") from None
         with os.fdopen(fd, "wb") as handle:
             handle.write(raw)
+        for name, payload in extra_files:
+            if not _NAME_RE.fullmatch(name) or name == script_name:
+                raise SandboxError("INPUT_INVALID", f"附加文件名非法：{name!r}")
+            if name in {e["name"] for e in view.entries}:
+                raise SandboxError("DUPLICATE_ID", f"附加文件与输入重名：{name!r}")
+            target = view.path / name
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+            extra_records.append({"name": name,
+                                  "sha256": hashlib.sha256(payload).hexdigest(),
+                                  "bytes": len(payload)})
+        _prepare_container_modes(view.path, out)
         argv = _container_argv(image=image, container=container, view=view.path,
                                out=out, script_name=script_name)
         started = time.monotonic()
         try:
-            result = runner.run(argv, timeout_s=WALL_CLOCK_S, container=container)
+            result = runner.run(argv, timeout_s=wall_clock_s, container=container)
         finally:
             # 本轮自有容器：成功/失败/取消都回收
             runner.force_remove(container)
@@ -423,20 +475,33 @@ def _run_in_sandbox(*, kind: str, source: "str | bytes", entries: Iterable[ViewE
         if runner.residue(container):
             raise SandboxError("CONTAINER_RESIDUE",
                                f"容器 {container} 退出后仍有残留")
-        outputs = _collect_outputs(out)
+        outputs = _collect_outputs(out, max_bytes=output_max_bytes)
         reply = _read_reply(out)
         if result.timed_out:
             raise SandboxError(
                 "TIMEOUT",
-                f"{kind} 容器超过 {WALL_CLOCK_S}s 墙钟被回收（container={container}）")
+                f"{kind} 容器超过 {wall_clock_s}s 墙钟被回收（container={container}）")
+        inputs = tuple({"name": e["name"], "sha256": e["sha256"],
+                        "bytes": e["bytes"]} for e in view.entries)
+        # 只有可信实验路径需要 payload：raw.npz 必须由宿主读入、校验后规范化落盘。
+        # 输出总量已被 _collect_outputs 卡在 output_max_bytes 内（≤4 MiB）。
+        blobs: "dict[str, bytes]" = {}
+        if retain_bytes:
+            for rec in outputs:
+                data = Path(rec["path"]).read_bytes()
+                if hashlib.sha256(data).hexdigest() != rec["sha256"]:
+                    raise SandboxError("OUTPUT_HASH_DRIFT",
+                                       f"{rec['name']} 读取期间字节发生变化")
+                blobs[rec["name"]] = data
         return SandboxEvidence(
             kind=kind, source_sha256=src_sha,
-            inputs=tuple({"name": e["name"], "sha256": e["sha256"],
-                          "bytes": e["bytes"]} for e in view.entries),
-            image=image, limits=_limits_doc(), exit_code=result.exit_code,
+            inputs=inputs + tuple(extra_records),
+            image=image, limits=_limits_doc(wall_clock_s=wall_clock_s,
+                                            output_max_bytes=output_max_bytes),
+            exit_code=result.exit_code,
             timed_out=result.timed_out, duration_ms=duration_ms,
             outputs=tuple(outputs), reply=reply, container=container,
-            stderr_tail=result.stderr_tail[-512:])
+            stderr_tail=result.stderr_tail[-512:], blobs=blobs)
     finally:
         shutil.rmtree(view.path, ignore_errors=True)
         shutil.rmtree(out, ignore_errors=True)
@@ -459,3 +524,25 @@ def run_analysis(source: "str | bytes", allowed_manifest: Iterable[ViewEntry], *
                            entries=allowed_manifest,
                            evidence_root=evidence_root, work_root=work_root,
                            runner=runner, image=image)
+
+
+def run_experiment(service_source: "str | bytes", spec_doc: Mapping[str, Any], *,
+                   evidence_root: "Path | str", work_root: "Path | str",
+                   runner: ContainerRunner, image: str) -> SandboxEvidence:
+    """可信实验服务（T1b）：同一 §5.4 安全面，脚本与 spec 都由宿主提供。
+
+    与 ``run_design``/``run_analysis`` 的唯一差别：``service.py`` 与
+    ``spec.json`` 不是候选文件（候选从未接触它们），所以输出帽放宽到
+    ``PHYSICS_OUTPUT_MAX_BYTES``、墙钟放宽到 ``PHYSICS_WALL_CLOCK_S``，
+    且输出**字节**随证据返回（``evidence.blobs``）——宿主必须自己读 raw
+    并复核 sha，才能据实组装观测记录；容器的自报数字不算证据。
+    """
+    text = json.dumps(dict(spec_doc), ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False) + "\n"
+    return _run_in_sandbox(kind="experiment", source=service_source,
+                           entries=(), evidence_root=evidence_root,
+                           work_root=work_root, runner=runner, image=image,
+                           extra_files=(("spec.json", text.encode("utf-8")),),
+                           output_max_bytes=PHYSICS_OUTPUT_MAX_BYTES,
+                           wall_clock_s=PHYSICS_WALL_CLOCK_S,
+                           retain_bytes=True)

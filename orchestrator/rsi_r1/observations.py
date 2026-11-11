@@ -93,11 +93,25 @@ def _is_finite_number(x: Any) -> bool:
 
 
 def _check_series(values: Any, name: str) -> int:
+    """标量序列或定宽向量序列都接受（A 的 qpos/qvel 是 7/6 维向量）。"""
     if not isinstance(values, list):
         raise ObservationError("FIELD_TYPE", f"{name} 必须是数组")
+    width: "int | None" = None
     for i, v in enumerate(values):
-        if not _is_finite_number(v):
+        if isinstance(v, list):
+            if width is None:
+                width = len(v)
+                if width == 0:
+                    raise ObservationError("LENGTH_MISMATCH", f"{name}[0] 是空向量")
+            elif len(v) != width:
+                raise ObservationError("LENGTH_MISMATCH",
+                                       f"{name}[{i}] 宽度 {len(v)} != {width}")
+            if not all(_is_finite_number(x) for x in v):
+                raise ObservationError("NONFINITE", f"{name}[{i}] 含非有限分量")
+        elif not _is_finite_number(v):
             raise ObservationError("NONFINITE", f"{name}[{i}]={v!r} 不是有限实数")
+        elif width is not None:
+            raise ObservationError("FIELD_TYPE", f"{name} 混用标量与向量")
     return len(values)
 
 
@@ -146,15 +160,28 @@ def validate_record(record: Mapping[str, Any], *, scene_id: str) -> "dict[str, A
         dim = record["contact_dim_per_step"]
         if not isinstance(dim, list) or len(dim) != n:
             raise ObservationError("LENGTH_MISMATCH", "contact_dim_per_step 长度不符")
-        for i, d in enumerate(dim):
-            if isinstance(d, bool) or not isinstance(d, int) or d != 3:
-                raise ObservationError(
-                    "CONTACT_DIM", f"step {i} 实际 condim={d!r} 不等于 3（暴露检查）")
         for name in ("contact_force_n", "friction_sliding_per_step",
                      "friction_torsional_per_step"):
             got = _check_series(record[name], name)
             if got != n:
                 raise ObservationError("LENGTH_MISMATCH", f"{name} 长度不符")
+        force = record["contact_force_n"]
+        # 每步记录该步**实际**接触维度：0 表示此步无 contact（MuJoCo 软接触下
+        # 刚体在滑行中会出现亚毫米弹跳，实测最坏 1.25% 步），有 contact 时必须
+        # 恰为 3。无 contact 步的法向力必须为 0——不允许"有维度没力"或反之。
+        # 接触占比/最大间隙/力平衡的暴露门在 calibration.exposure 里按注册阈值判。
+        for i, d in enumerate(dim):
+            if isinstance(d, bool) or not isinstance(d, int):
+                raise ObservationError("CONTACT_DIM", f"step {i} dim={d!r} 非整数")
+            if d == 0:
+                if float(force[i]) != 0.0:
+                    raise ObservationError(
+                        "CONTACT_DIM",
+                        f"step {i} 无 contact 但接触力 {force[i]!r} 非 0")
+                continue
+            if d != 3:
+                raise ObservationError(
+                    "CONTACT_DIM", f"step {i} 实际 condim={d!r} 不等于 3（暴露检查）")
     else:
         n_ctl = len(record["control_update_index"])
         if n_ctl != n:

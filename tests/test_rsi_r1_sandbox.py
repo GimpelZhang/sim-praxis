@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from orchestrator.rsi_r1 import sandbox as SB
 
 DESIGN_SRC = "print('design')\n"
 ANALYSIS_SRC = "print('analysis')\n"
+SERVICE_SRC = "print('service')\n"
 IMAGE = "simpraxis/agentic@sha256:" + "f" * 64
 
 
@@ -30,13 +32,16 @@ def _entry(root: Path, relpath: str, data: bytes) -> SB.ViewEntry:
 
 
 class FakeRunner:
-    def __init__(self, *, timeout=False, residue=False, write=None, exit_code=0):
+    def __init__(self, *, timeout=False, residue=False, write=None, exit_code=0,
+                 expected_timeout=None):
         self.argv: "list[list[str]]" = []
         self.removed: "list[str]" = []
         self.timeout = timeout
         self._residue = residue
         self.exit_code = exit_code
         self.write = write or {}
+        self.expected_timeout = (SB.WALL_CLOCK_S if expected_timeout is None
+                                 else expected_timeout)
 
     def _out_dir(self, argv) -> Path:
         for i, arg in enumerate(argv):
@@ -46,7 +51,7 @@ class FakeRunner:
 
     def run(self, argv, *, timeout_s, container):
         self.argv.append(list(argv))
-        assert timeout_s == SB.WALL_CLOCK_S
+        assert timeout_s == self.expected_timeout
         out = self._out_dir(argv)
         for name, payload in self.write.items():
             target = out / name
@@ -277,3 +282,125 @@ def test_evidence_document_is_serialisable(tmp_path) -> None:
     assert doc["limits"]["network"] == "none"
     assert doc["limits"]["cap_drop"] == "ALL"
     assert "path" not in doc["outputs"][0]
+
+
+# ---------------------------------------------------------------------------
+# T1b：可信实验服务（同一 §5.4 安全面，两项帽放宽）
+# ---------------------------------------------------------------------------
+
+SPEC_DOC = {"schema": "simpraxis.rsi_r1.experiment_spec.v1",
+            "schema_version": 1, "run_id": "r1-a-000", "spec_hash": "ab" * 32,
+            "study_id": "study_A", "nsteps": 4, "dt_s": 0.0005,
+            "mujoco_version": "3.15.0", "scene_xml": "<mujoco/>",
+            "run": {"kind": "A", "settle_steps": 2, "initial_vx_mps": 0.4}}
+
+
+def _canonical_spec_text(doc) -> str:
+    """宿主 canonical JSON（独立于实现重算，钉住"字节可复现"这一契约）。"""
+    return json.dumps(doc, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":"), allow_nan=False) + "\n"
+
+
+def _run_experiment(tmp_path, runner, spec=None, source=SERVICE_SRC):
+    root = tmp_path / "evidence"
+    root.mkdir(exist_ok=True)
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    return SB.run_experiment(source, dict(SPEC_DOC if spec is None else spec),
+                             evidence_root=root, work_root=work,
+                             runner=runner, image=IMAGE)
+
+
+def test_run_experiment_uses_service_entry_and_relaxed_caps(tmp_path) -> None:
+    runner = FakeRunner(write={"reply.json": '{"status":"ok"}',
+                               "raw.npz": b"PK\x03\x04raw"},
+                        expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
+    ev = _run_experiment(tmp_path, runner)
+    argv = runner.argv[0]
+    assert argv[-2:] == ["python3", "/data/service.py"]
+    # 与设计/分析同一安全面：只换脚本名与两项帽，别的旗标不得少
+    assert _flag_value(argv, "--network") == ["none"]
+    assert "--read-only" in argv
+    assert _flag_value(argv, "--cap-drop") == ["ALL"]
+    assert _flag_value(argv, "--user") == [f"{SB.CONTAINER_UID}:{SB.CONTAINER_GID}"]
+    assert _flag_value(argv, "--pids-limit") == [str(SB.PIDS_LIMIT)]
+    assert ev.kind == "experiment"
+    assert ev.exit_code == 0 and ev.reply == {"status": "ok"}
+    # 帽：4 MiB 输出、120 s 墙钟，且真写进 evidence limits
+    assert ev.limits["output_max_bytes"] == SB.PHYSICS_OUTPUT_MAX_BYTES == 4 << 20
+    assert ev.limits["wall_clock_s"] == SB.PHYSICS_WALL_CLOCK_S == 120
+    assert ev.limits["network"] == "none"
+    # spec.json 由宿主附加，sha 与 canonical 字节严格相等（不是"随便 dump"）
+    assert [i["name"] for i in ev.inputs] == ["spec.json"]
+    text = _canonical_spec_text(SPEC_DOC).encode("utf-8")
+    assert ev.inputs[0]["sha256"] == _sha(text)
+    assert ev.inputs[0]["bytes"] == len(text)
+    assert runner.removed == [ev.container]
+    assert list((tmp_path / "work").iterdir()) == []
+
+
+def test_run_experiment_prepares_container_modes(tmp_path) -> None:
+    """容器 uid 65534 必须能读 /data 视图、写 /out（T3 旧实现只测过假 runner）。"""
+
+    class ModeProbe(FakeRunner):
+        def run(self, argv, *, timeout_s, container):
+            view = Path(_flag_value(argv, "-v")[0][: -len(":/data:ro")])
+            out = self._out_dir(argv)
+            self.seen = {
+                "view": stat.S_IMODE(os.stat(view).st_mode),
+                "out": stat.S_IMODE(os.stat(out).st_mode),
+                "files": {c.name: stat.S_IMODE(os.lstat(c).st_mode)
+                          for c in view.iterdir()},
+            }
+            return super().run(argv, timeout_s=timeout_s, container=container)
+
+    runner = ModeProbe(write={"reply.json": "{}"},
+                       expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
+    _run_experiment(tmp_path, runner)
+    assert runner.seen["view"] == 0o711
+    assert runner.seen["out"] == 0o777
+    assert runner.seen["files"] == {"service.py": 0o644, "spec.json": 0o644}
+
+
+def test_run_experiment_output_cap_is_physics_scoped(tmp_path) -> None:
+    big = b"0" * (SB.OUTPUT_MAX_BYTES + 1)          # 1 MiB + 1：设计帽下会炸
+    ok = FakeRunner(write={"reply.json": "{}", "raw.bin": big},
+                    expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
+    ev = _run_experiment(tmp_path, ok)
+    assert {o["name"] for o in ev.outputs} == {"reply.json", "raw.bin"}
+
+    with pytest.raises(SB.SandboxError) as exc:
+        _run_design(tmp_path, FakeRunner(write={"raw.bin": big}))
+    assert exc.value.code == "OUTPUT_TOO_LARGE"
+
+    over = FakeRunner(write={"reply.json": "{}",
+                             "raw.bin": b"0" * (SB.PHYSICS_OUTPUT_MAX_BYTES + 1)},
+                      expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
+    with pytest.raises(SB.SandboxError) as exc:
+        _run_experiment(tmp_path, over)
+    assert exc.value.code == "OUTPUT_TOO_LARGE"
+
+
+def test_run_experiment_retains_payload_bytes(tmp_path) -> None:
+    raw = b"PK\x03\x04raw-bytes\x00\x01"
+    reply_text = '{"status":"ok","nsteps":4}'
+    runner = FakeRunner(write={"reply.json": reply_text, "raw.npz": raw},
+                        expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
+    ev = _run_experiment(tmp_path, runner)
+    assert ev.blobs["raw.npz"] == raw
+    assert ev.blobs["reply.json"] == reply_text.encode()
+    # payload 是数据不是证据元数据：不得进 to_dict（证据包只收 sha/bytes）
+    doc = ev.to_dict()
+    assert "blobs" not in doc
+    assert json.loads(json.dumps(doc))["kind"] == "experiment"
+
+    # 设计/分析路径不保留 payload（候选输出永不回流宿主）
+    design = _run_design(tmp_path, FakeRunner(write={"reply.json": "{}"}))
+    assert dict(design.blobs) == {}
+
+
+def test_run_experiment_rejects_non_serialisable_spec(tmp_path) -> None:
+    doc = dict(SPEC_DOC)
+    doc["run"] = {"kind": "A", "nan": float("nan")}
+    with pytest.raises(ValueError):
+        _run_experiment(tmp_path, FakeRunner(), spec=doc)
