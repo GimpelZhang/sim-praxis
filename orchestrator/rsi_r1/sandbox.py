@@ -509,21 +509,32 @@ def _run_in_sandbox(*, kind: str, source: "str | bytes", entries: Iterable[ViewE
 
 def run_design(source: "str | bytes", inputs: Iterable[ViewEntry], *,
                evidence_root: "Path | str", work_root: "Path | str",
-               runner: ContainerRunner, image: str) -> SandboxEvidence:
-    """候选 design 代码：读 /data 只读视图，写 /out。"""
+               runner: ContainerRunner, image: str,
+               retain_bytes: bool = False) -> SandboxEvidence:
+    """候选 design 代码：读 /data 只读视图，写 /out。
+
+    锁内适配（RSI-R1 T5）：``retain_bytes`` 与 ``run_experiment`` 同义——
+    让调度层在**本进程**直接拿到输出字节（矩阵/分析结果），而不必等
+    容器工作目录被回收后再从磁盘找。默认 False，生产路径行为不变。
+    """
     return _run_in_sandbox(kind="design", source=source, entries=inputs,
                            evidence_root=evidence_root, work_root=work_root,
-                           runner=runner, image=image)
+                           runner=runner, image=image, retain_bytes=retain_bytes)
 
 
 def run_analysis(source: "str | bytes", allowed_manifest: Iterable[ViewEntry], *,
                  evidence_root: "Path | str", work_root: "Path | str",
-                 runner: ContainerRunner, image: str) -> SandboxEvidence:
-    """分析代码：只挂 ``allowed_manifest`` 列出的 run 文件（同构安全面）。"""
+                 runner: ContainerRunner, image: str,
+                 retain_bytes: bool = False) -> SandboxEvidence:
+    """分析代码：只挂 ``allowed_manifest`` 列出的 run 文件（同构安全面）。
+
+    锁内适配（RSI-R1 T5）：同 ``run_design``，``retain_bytes`` 供调度层
+    读取分析输出字节（主张复算的唯一来源）。
+    """
     return _run_in_sandbox(kind="analysis", source=source,
                            entries=allowed_manifest,
                            evidence_root=evidence_root, work_root=work_root,
-                           runner=runner, image=image)
+                           runner=runner, image=image, retain_bytes=retain_bytes)
 
 
 def run_experiment(service_source: "str | bytes", spec_doc: Mapping[str, Any], *,

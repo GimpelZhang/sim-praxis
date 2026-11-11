@@ -43,6 +43,7 @@ from orchestrator.common.runtime_paths import (
 from orchestrator.gateway import quota_ledger as QL
 from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import observations as OBS
 from orchestrator.rsi_r1 import prereg as PREREG
 from orchestrator.rsi_r1 import rubric as RUBRIC
@@ -456,6 +457,39 @@ def cmd_controls(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# freeze（T5）：不可变闭包 LOCK + 双签（AC27）
+# ---------------------------------------------------------------------------
+
+def cmd_freeze(args: argparse.Namespace) -> int:
+    """冻结八组闭包 + 镜像钉死 + 预注册/校准引用，随后按 ``--sign`` 逐个签名。
+
+    签名格式 ``ROLE:ACTOR:DECISION[:RATIONALE]``，ROLE ∈ {reviewer, verifier}；
+    两个角色必须不同 actor 且都 APPROVE，最后一次 ``verify_lock`` 才算冻结完成。
+    """
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    repo_root = Path(args.repo_root).resolve() if args.repo_root else None
+    frozen = LK.freeze_lock(ctx, repo_root=repo_root, image_pin=args.image)
+    print(f"freeze ok  envelope={envelope}  lock_sha256={frozen['sha256']}")
+    print(f"  closure_sha256={frozen['doc']['closure_sha256']}")
+    print(f"  image={frozen['doc']['image']['pin']}")
+    for spec in args.sign:
+        parts = spec.split(":", 3)
+        if len(parts) < 3:
+            raise CliError(f"--sign 需 ROLE:ACTOR:DECISION[:RATIONALE]，收到 {spec!r}")
+        role, actor, decision = parts[:3]
+        rationale = parts[3] if len(parts) > 3 else ""
+        doc = LK.sign_lock(ctx, role=role, actor=actor, decision=decision,
+                           rationale=rationale)
+        print(f"  signed role={doc['role']} actor={doc['actor']} "
+              f"decision={doc['decision']}")
+    verified = LK.verify_lock(ctx, repo_root=repo_root)
+    print(f"verify ok  lock_sha256={verified['lock_sha256']}  "
+          f"signatures={sorted(verified['signatures'])}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
 
@@ -609,6 +643,19 @@ def build_parser() -> argparse.ArgumentParser:
                      help="校准设计版本：1=首轮（历史留档）、2=2026-11-11 批准的修正设计")
     pc2.set_defaults(func=cmd_controls)
 
+    pf = sub.add_parser(
+        "freeze",
+        help="T5 冻结：八组闭包 + 镜像钉死 + 预注册/校准引用，可选双签后复核")
+    pf.add_argument("--envelope", required=True)
+    pf.add_argument("--image", default=None,
+                    help="容器镜像 name@sha256:<64>（缺省取校准报告 container_image）")
+    pf.add_argument("--sign", action="append", default=[],
+                    metavar="ROLE:ACTOR:DECISION[:RATIONALE]",
+                    help="冻结后立即签名（可重复；两个角色须不同 actor）")
+    pf.add_argument("--repo-root", default=None,
+                    help="闭包与依赖索引的仓库根（缺省为源码仓根）")
+    pf.set_defaults(func=cmd_freeze)
+
     return p
 
 
@@ -619,7 +666,7 @@ def main(argv: "list[str] | None" = None) -> int:
         return int(args.func(args))
     except (CliError, C.ContractError, PREREG.PreregError,
             SCENES.SceneError, OBS.ObservationError,
-            CAL.CalibrationError) as exc:
+            CAL.CalibrationError, LK.LockError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

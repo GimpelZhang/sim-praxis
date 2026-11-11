@@ -923,7 +923,10 @@ RSI_R1_CAMPAIGN_SUBDIRS: "tuple[str, ...]" = (
     "trials",            # 逐 trial 证据（explore/confirm/replay 分 root）
     "designs",           # 候选 design/analysis 源码版本（按 hash 存储）
     "confirm",           # 确认集私有 block 与一次原子批次证据
+    "judge",             # 独立判据报告（T4 judge.write_report 的消费面）
     "replay",            # 独立复跑 root
+    "deliverable",       # 结案交付件（独立复算器读 deliverable/closure.json）
+    "claim",             # 候选主张提交件（claim/submission_<study>.json）
     "research_packets",  # §11.3 两 study 的研究包
     "state",             # T2 事件日志/回复原文（journal.jsonl 与其 sha 链）
     "human_events",      # §8.4 HumanEvent 计时

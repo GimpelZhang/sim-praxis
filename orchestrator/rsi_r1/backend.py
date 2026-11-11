@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.rsi_r1 import observations as O
 from orchestrator.rsi_r1 import physics as P
 from orchestrator.rsi_r1 import sandbox as SB
@@ -97,6 +98,7 @@ class PhysicsBackend:
         if not isinstance(spec, ExperimentSpec):
             raise BackendInfraError(f"spec 类型 {type(spec).__name__} 不接受")
         doc = P.build_spec_document(spec)
+        started_at_utc = utc_now_iso_z()
         try:
             ev = SB.run_experiment(self.service_source, doc,
                                    evidence_root=self.evidence_root,
@@ -115,7 +117,8 @@ class PhysicsBackend:
         with open(target["npz"], "wb") as fh:
             fh.write(npz_bytes)
         os.chmod(target["npz"], 0o600)
-        meta = self._meta(spec, reply, ev, arrays, doc)
+        meta = self._meta(spec, reply, ev, arrays, doc, record=record,
+                          started_at_utc=started_at_utc)
         target["meta"].write_text(
             json.dumps(meta, ensure_ascii=False, sort_keys=True,
                        separators=(",", ":"), allow_nan=False) + "\n",
@@ -293,12 +296,25 @@ class PhysicsBackend:
 
     def _meta(self, spec: ExperimentSpec, reply: Mapping[str, Any],
               ev: SB.SandboxEvidence, arrays: Mapping[str, Any],
-              envelope: Mapping[str, Any]) -> "dict[str, Any]":
+              envelope: Mapping[str, Any], *,
+              record: "Mapping[str, Any] | None" = None,
+              started_at_utc: "str | None" = None) -> "dict[str, Any]":
         extra = reply.get("extra") or {}
         initial: "dict[str, Any]" = {}
         if spec.study_id == "A":
             initial = {"initial_x_m": float(arrays["initial_x_m"][0]),
                        "initial_z_m": float(arrays["initial_z_m"][0])}
+        # 复跑独立性所需的执行身份（``replay.EXECUTION_KEYS``）：
+        # execution/container 来自本轮**自有**容器名；started_at 是宿主发车时间；
+        # raw_sha256 是**搬运身份**（记录字节 + 执行信封），不是内容哈希——
+        # 确定性物理在同输入下内容逐位相同是合法事实（``record_identical``），
+        # 而执行身份必须不同，否则 inspector 无法区分「复跑」与「抄原件」。
+        execution_id = ev.container
+        raw_identity = hashlib.sha256(json.dumps(
+            {"record": record, "envelope": dict(envelope),
+             "execution_id": execution_id, "started_at_utc": started_at_utc},
+            ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
         return {
             "schema": META_SCHEMA, "schema_version": 1,
             "batch_id": self.batch_id, "run_id": spec.run_id,
@@ -312,6 +328,12 @@ class PhysicsBackend:
             "sandbox": ev.to_dict(),
             "spec_envelope": dict(envelope),
             "reply_extra": {k: v for k, v in extra.items() if k != "displacement_note"},
+            "execution_id": execution_id,
+            "container_id": ev.container,
+            "started_at_utc": started_at_utc,
+            "raw_sha256": raw_identity,
+            "root": str(self.evidence_root),
+            "cache_hit": False,
             **initial,
         }
 
