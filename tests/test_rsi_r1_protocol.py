@@ -69,9 +69,11 @@ def _prev_result(request: T.Request) -> "dict[str, Any] | None":
 class ToyScript:
     """一条 study 的编排；``results`` 只装**宿主回传的真实结果**。"""
 
-    def __init__(self, study: str, scope: Path) -> None:
+    def __init__(self, study: str, scope: Path, *,
+                 sentinel_parent: bool = False) -> None:
         self.study = study
         self.scope = Path(scope)
+        self.sentinel_parent = sentinel_parent
         self.explore_doc = PT.toy_plan_doc(study, phase="explore", revision=1)
         self.explore_plan = C.ResearchPlan.from_dict(self.explore_doc)
         self.results: "list[dict[str, Any]]" = []
@@ -86,9 +88,11 @@ class ToyScript:
 
     def _confirm_plan(self) -> "dict[str, Any]":
         if self.confirm_doc is None:
+            parent = (L.HOST_PLAN_SHA if self.sentinel_parent
+                      else self.explore_plan.sha256)
             self.confirm_doc = PT.toy_plan_doc(
                 self.study, phase="confirm", revision=2,
-                parent_sha=self.explore_plan.sha256,
+                parent_sha=parent,
                 design_sha256=self._design_sha(),
                 analysis_sha256=self._analysis_sha())
         return self.confirm_doc
@@ -122,7 +126,11 @@ class ToyScript:
         return out
 
     def _claims(self) -> "list[dict[str, Any]]":
-        plan = C.ResearchPlan.from_dict(self._confirm_plan())
+        doc = dict(self._confirm_plan())
+        # 候选侧自用的合同对象：sentinel 换成真实探索计划 sha（与宿主替换一致）
+        if doc.get("parent_sha") == L.HOST_PLAN_SHA:
+            doc["parent_sha"] = self.explore_plan.sha256
+        plan = C.ResearchPlan.from_dict(doc)
         manifest = self._manifest()
         specs = J.build_specs(plan, manifest)
         report = J.judge_study(plan=plan, manifest=manifest,
@@ -191,11 +199,13 @@ class ToyModel:
 
     def __init__(self, *, scope: Path, label: str,
                  repair_at: "int | None" = None,
-                 bad_doc: "dict[str, Any] | None" = None) -> None:
+                 bad_doc: "dict[str, Any] | None" = None,
+                 sentinel_parent: bool = False) -> None:
         self.scope = Path(scope)
         self.label = label
         self.repair_at = repair_at
         self.bad_doc = bad_doc
+        self.sentinel_parent = sentinel_parent
         self.scripts: "dict[str, ToyScript]" = {}
         self.index: "dict[str, int]" = {}
         self.last_sent: "dict[str, int]" = {}
@@ -204,7 +214,9 @@ class ToyModel:
 
     def __call__(self, request: T.Request) -> L.Reply:
         study = _STUDY_RE.search(request.messages[0]["content"]).group(1)
-        script = self.scripts.setdefault(study, ToyScript(study, self.scope))
+        script = self.scripts.setdefault(
+            study, ToyScript(study, self.scope,
+                             sentinel_parent=self.sentinel_parent))
         idx = self.index.get(study, 0)
         prev = _prev_result(request)
         if prev is not None and self.last_sent.get(study) == idx:
@@ -242,9 +254,11 @@ def _attempt_scope(ctx: Any, lane: str, attempt: int = 1) -> Path:
 def _run(driver: RehearsalDriver, lane: str, *, label: str,
          repair_at: "int | None" = None,
          bad_doc: "dict[str, Any] | None" = None,
-         batch_id: "str | None" = None) -> "tuple[dict[str, Any], ToyModel]":
+         batch_id: "str | None" = None,
+         sentinel_parent: bool = False) -> "tuple[dict[str, Any], ToyModel]":
     model = ToyModel(scope=_attempt_scope(driver.ctx, lane), label=label,
-                     repair_at=repair_at, bad_doc=bad_doc)
+                     repair_at=repair_at, bad_doc=bad_doc,
+                     sentinel_parent=sentinel_parent)
     report = PT.run_protocol(
         driver.ctx, lane=lane, spend=driver.spend,
         transport_factory=lambda: model, runner=driver.runner,
@@ -305,6 +319,21 @@ def test_protocol_brief_is_deterministic_and_documents_host_sha() -> None:
     assert "16" in practice_brief
 
 
+def test_study_brief_is_deterministic_and_names_the_lane_cap() -> None:
+    """T7 正式研究 brief：同样公开八动作与 sentinel 约定，且明确 48 呼预算。"""
+    for study in S.STUDIES:
+        first = PT.render_study_brief(study)
+        assert first == PT.render_study_brief(study) and first.strip()
+        listed = re.findall(r"^\s*\d+\.\s*([a-z_]+)\(", first, flags=re.MULTILINE)
+        assert tuple(listed) == CHAIN, "八动作顺序必须逐字按 Plan §8.1"
+        assert L.HOST_PLAN_SHA in first and "PARENT_SHA_MISMATCH" in first
+        assert f"study {study}" in first
+        assert "48" in first
+        assert str(J.JUDGE_STATISTICS_SEED) in first
+    with pytest.raises(PT.ProtocolError):
+        PT.render_study_brief("C")
+
+
 # ---------------------------------------------------------------------------
 # probe：严格首错终止
 # ---------------------------------------------------------------------------
@@ -339,6 +368,40 @@ def test_probe_pass_advances_root_to_probed(frozen: RehearsalDriver) -> None:
     assert beat["phase"] == "probe:study-A"
     assert not any(t.name == "rsi-r1-heartbeat" and t.is_alive()
                    for t in threading.enumerate())
+
+
+def test_probe_parent_sha_sentinel_is_filled_by_host(
+        frozen: RehearsalDriver) -> None:
+    """L-R1-07 主线：confirm 计划把 ``parent_sha`` 写 ``"host"`` 也能走完整链。"""
+    report, model = _run(frozen, PT.PROBE, label="hostparent",
+                         sentinel_parent=True)
+    assert report["verdict"] == PT.VERDICT_PASS, report["reason"]
+    assert model.calls == PT.PROBE_POSTS
+    (study,) = report["studies"]
+    assert study["ok_count"] == 8 and not study["stopped"]
+    assert study["judge_verdict"] == "JUDGE_OK"
+    assert study["study_verdict"] == S.ST_VERIFIED
+
+
+def test_probe_parent_sha_wrong_value_stops_with_mismatch(
+        frozen: RehearsalDriver) -> None:
+    """64 hex 但值不对：宿主给可解释的 ``PARENT_SHA_MISMATCH``（非格式码）。"""
+    doc = PT.toy_plan_doc("A", phase="confirm", revision=2,
+                          parent_sha="0" * 64,
+                          design_sha256="d" * 64, analysis_sha256="e" * 64)
+    bad = {"action": "freeze_confirm", "plan_sha256": L.HOST_PLAN_SHA,
+           "design_sha256": "d" * 64, "analysis_sha256": "e" * 64,
+           "plan": doc}
+    report, model = _run(frozen, PT.PROBE, label="badparent",
+                         repair_at=5, bad_doc=bad)
+    assert report["verdict"] == PT.VERDICT_NOT_MEASURED
+    assert report["posts"]["this_attempt"] == 6
+    assert model.calls == 6
+    assert report["root_after"] == S.ROOT_FROZEN
+    (study,) = report["studies"]
+    assert study["ok_count"] == 5
+    assert study["stopped"] == "PARENT_SHA_MISMATCH"
+    assert study["terminal"] is False, "可自修：改写 \"host\" 即可继续"
 
 
 def test_probe_stops_at_first_error_without_repair(

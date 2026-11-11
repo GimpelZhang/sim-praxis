@@ -142,6 +142,27 @@ def _require_plan(doc: Mapping[str, Any], key: str = "plan") -> "dict[str, Any]"
     return dict(value)
 
 
+def _require_confirm_plan(doc: Mapping[str, Any]) -> "dict[str, Any]":
+    """confirm 计划的结构校验，``parent_sha`` 允许字面 sentinel ``"host"``。
+
+    锁内适配（RSI-R1.1 / L-R1-07，2026-11-11 复盘）：round 1 的 probe 因模型把
+    ``plan.parent_sha`` 写成 ``"host"`` 被纯格式闸拒（brief 一边说「模型无法算
+    sha256」一边要求 64 hex）。修复：``parent_sha`` 与 ``plan_sha256`` 一样接受
+    sentinel——宿主在 ``CampaignDispatcher._do_freeze_confirm`` 里把它替换成
+    **当前探索计划的真实 sha** 后再做值校验；这里只把 placeholder 用于其余
+    结构检查，绝不把 placeholder 写回候选文档。
+    """
+    plan = doc.get("plan")
+    if not isinstance(plan, Mapping):
+        raise LoopError("WRONG_TYPE", "plan 必须是对象")
+    if plan.get("parent_sha") != HOST_PLAN_SHA:
+        return _require_plan(doc)
+    probe = dict(plan)
+    probe["parent_sha"] = "0" * 64
+    _require_plan({"plan": probe})
+    return dict(plan)
+
+
 def _validate_claims(raw: Any) -> "list[dict[str, Any]]":
     if not isinstance(raw, list) or not raw:
         raise LoopError("WRONG_TYPE", "claims 必须是非空数组")
@@ -248,7 +269,8 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
             _require_hex(doc, "plan_sha256")
         _require_hex(doc, "design_sha256")
         _require_hex(doc, "analysis_sha256")
-        _require_plan(doc)
+        # parent_sha 同为不可计算项：允许 sentinel，宿主替换后做**值**校验。
+        _require_confirm_plan(doc)
     elif name == "run_confirm":
         _require_str(doc, "confirm_token", max_bytes=200)
     elif name == "submit_claim":

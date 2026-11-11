@@ -623,11 +623,26 @@ class CampaignDispatcher:
     # -- 5) freeze_confirm ----------------------------------------------
     def _do_freeze_confirm(self, action: L.Action) -> "dict[str, Any]":
         self._binding(action)
-        plan = C.ResearchPlan.from_dict(dict(action.doc["plan"]))
+        plan_doc = dict(action.doc["plan"])
+        # 锁内适配（RSI-R1.1 / L-R1-07）：``parent_sha`` 允许字面 sentinel
+        # ``"host"``，宿主替换成当前探索计划的真实 sha；64 hex 则做**值**校验
+        # （round 1 的 `SOURCE_SHA_INVALID` 纯格式闸就此变成可解释的
+        # `PARENT_SHA_MISMATCH`）。两者都不放宽任何其它字段。
+        expect_parent = self._explore_plan_sha()
+        if plan_doc.get("parent_sha") == L.HOST_PLAN_SHA:
+            if expect_parent is None:
+                return self._fail("PARENT_MISSING", "尚无探索计划可作为 parent_sha")
+            plan_doc["parent_sha"] = expect_parent
+        plan = C.ResearchPlan.from_dict(plan_doc)
         if plan.phase != "confirm":
             return self._fail("PLAN_PHASE_INVALID", "freeze 需要 confirm 计划")
         if plan.study_id != self.study:
             return self._fail("STUDY_MISMATCH", plan.study_id)
+        if plan.parent_sha != expect_parent:
+            return self._fail(
+                "PARENT_SHA_MISMATCH",
+                f"parent_sha={plan.parent_sha} 不是当前探索计划的 sha "
+                f"（{expect_parent}）；可写 \"host\" 由宿主代填")
         claimed = str(action.doc["plan_sha256"])
         if claimed != L.HOST_PLAN_SHA and plan.sha256 != claimed:
             return self._fail("PLAN_MISMATCH", "plan 文档 sha 与字段不符")
@@ -773,6 +788,19 @@ class CampaignDispatcher:
                     and ev.payload.get("study") == self.study:
                 latest = ev.payload.get("doc")
         return dict(latest) if isinstance(latest, Mapping) else None
+
+    def _explore_plan_sha(self) -> "str | None":
+        """当前最新探索计划的 canonical sha（confirm.parent_sha 的期望值）。"""
+        latest = self._latest_plan_doc()
+        if latest is None:
+            return None
+        try:
+            plan = C.ResearchPlan.from_dict(latest)
+        except C.ContractError:
+            return None
+        if plan.study_id != self.study or plan.phase != "explore":
+            return None
+        return plan.sha256
 
     def _source_text(self, source_sha: str) -> str:
         path = self.ctx.relative(f"designs/{source_sha}.py")

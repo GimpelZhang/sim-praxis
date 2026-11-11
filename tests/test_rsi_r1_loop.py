@@ -100,6 +100,28 @@ def test_parse_rejects_unknown_and_extra_keys() -> None:
     assert exc.value.code == "SOURCE_SHA_INVALID"
 
 
+def test_freeze_confirm_accepts_host_parent_sha_sentinel() -> None:
+    """L-R1-07：confirm 计划的 ``parent_sha`` 同为不可计算项，接受字面 sentinel。
+
+    round 1 的 probe 死在第二步：brief 一边说「模型无法自己算 sha256」，一边要求
+    ``parent_sha`` 是 64 hex。修复后它与 ``plan_sha256`` 一样可写 ``"host"``——
+    解析层只做结构校验，值校验（是否等于当前探索计划）由宿主替换后完成。
+    """
+    doc = dict(_all_actions()["freeze_confirm"])
+    doc["plan"] = {**doc["plan"], "parent_sha": L.HOST_PLAN_SHA}
+    action = L.parse_action(json.dumps(doc, ensure_ascii=False))
+    assert action.doc["plan"]["parent_sha"] == "host"
+    # 近似值一律不放宽：仍按 64 hex 拒
+    for bad in ("HOST", "host ", "h" * 63):
+        broken = {**doc, "plan": {**doc["plan"], "parent_sha": bad}}
+        with pytest.raises(L.LoopError) as exc:
+            L.parse_action(json.dumps(broken, ensure_ascii=False))
+        assert exc.value.code == "SOURCE_SHA_INVALID"
+    # 合法 64 hex 在解析层放行（值对不对由宿主判 PARENT_SHA_MISMATCH）
+    ok = {**doc, "plan": {**doc["plan"], "parent_sha": "b" * 64}}
+    assert L.parse_action(json.dumps(ok, ensure_ascii=False)).name == "freeze_confirm"
+
+
 def test_parse_rejects_confirm_phase_in_run_batch() -> None:
     with pytest.raises(L.LoopError) as exc:
         L.parse_action(json.dumps({**_all_actions()["run_batch"],

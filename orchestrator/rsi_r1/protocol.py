@@ -241,9 +241,17 @@ def toy_plan_doc(study: str, *, phase: str = "explore", revision: int = 1,
         "design_source_sha": (design_sha256 if phase == "confirm" else None),
         "phase": phase,
     }
+    # 锁内适配（RSI-R1.1 / L-R1-07）：``parent_sha`` 允许字面 sentinel ``"host"``
+    # （宿主代填当前探索计划的 sha）。结构校验用占位 hex，返回时原样还原 sentinel。
+    sentinel = doc["parent_sha"] == L.HOST_PLAN_SHA
+    if sentinel:
+        doc["parent_sha"] = "0" * 64
     plan = C.ResearchPlan.from_dict(doc)
     C.validate_plan(plan)
-    return plan.to_dict()
+    out = plan.to_dict()
+    if sentinel:
+        out["parent_sha"] = L.HOST_PLAN_SHA
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +352,46 @@ ESTIMATOR_SPEC = """\
   逐次 `integers(0, n, n)` 抽 block 下标；同日同实现的候选可逐位复现）。"""
 
 
+PLAN_SENTINEL_NOTE = (
+    "### 两个「不可计算」字段的公开约定\n"
+    "模型无法自己算 sha256，这一点是公开约定。以下两处接受字面 sentinel `\"host\"`：\n"
+    "1) `freeze_confirm.plan_sha256`：宿主对**你发来的 confirm 文档**计算 sha；\n"
+    "2) confirm 计划里的 `parent_sha`：宿主填成**当前探索计划**的 sha（第 2 步返回的\n"
+    "   `plan_sha256` 逐字复制也可以）。\n"
+    "传 64 hex 时宿主逐字比对：计划文档不符 ⇒ `PLAN_MISMATCH`；`parent_sha` 不是当前\n"
+    "探索计划 ⇒ `PARENT_SHA_MISMATCH`。有探索计划时 `parent_sha` 不得为空。\n")
+
+_ACTIONS_BLOCK = (
+    "### 八动作顺序（每个回复只给一个动作）\n"
+    "1. write_artifact(kind=design, source=<python>)>\n"
+    "2. propose_plan(plan=<ResearchPlan>)   ← 返回 plan_sha256\n"
+    "3. run_batch(plan_sha256, design_sha256, phase=\"explore\")  ← 返回 run_ids\n"
+    "4. write_artifact(kind=analysis, source=<python>)\n"
+    "5. analyze(source_sha256, run_ids=[...])  ← 返回该程序的 analysis 结果\n"
+    "6. freeze_confirm(plan_sha256=\"host\", design_sha256, analysis_sha256,\n"
+    "                   plan=<confirm 计划>)  ← 返回 confirm_token\n"
+    "7. run_confirm(confirm_token)          ← 返回确认批 run_ids\n"
+    "8. submit_claim(claims=[...], report_text=<正文>)\n")
+
+_SOURCE_TEMPLATES_BLOCK = (
+    "### 格式示例（不是最优设计，只演示输入输出形状）\n"
+    "design 程序：argv[1]=只读视图（含 `plan-<sha12>.json` 与 `public_contract.json`），\n"
+    "argv[2]=输出目录，必须写 `matrix.json`。注意 matrix 的 `plan_sha` 是**计划\n"
+    "文档的 canonical sha256**：`sha256(json.dumps(plan, sort_keys=True,\n"
+    "separators=(\",\", \":\"), ensure_ascii=False))`，示例里已写好这个函数。\n"
+    "```python\n" + DESIGN_TEMPLATE + "```\n"
+    "analysis 程序：argv[1]=只读观测视图（`*/*.jsonl`），argv[2]=输出目录，\n"
+    "必须写 `analysis.json`。\n"
+    "```python\n" + ANALYSIS_TEMPLATE + "```\n")
+
+_CLAIMS_BLOCK = (
+    "### claims 字段（每个假设一条，逐条提交，不能汇总替代）\n"
+    "`{\"hypothesis_id\", \"proposition\", \"metric_id\", \"delta\", \"estimate\",\n"
+    "\"lower\", \"upper\"}`；`delta` 必须与公开合同里该指标的 δ 逐字相等（数值），\n"
+    "`metric_id`/`proposition` 必须与计划里的对比一致。宿主用上面的公开估计量独立\n"
+    "重算，并按 1e-8 + 1e-6×|参考值| 逐字段比对；不一致即 CLAIM_INVALID。\n")
+
+
 def render_protocol_brief(lane: str) -> str:
     """system 追加段：把公开玩具域、八动作顺序与格式示例写清（不写任何答案）。"""
     if lane not in PROTOCOL_LANES:
@@ -363,19 +411,8 @@ def render_protocol_brief(lane: str) -> str:
             "先完成 study A 的八动作链，再完成 study B 的八动作链。合同内的失败可以\n"
             "自己修正（例如字段写错、设计代码报错），修正也消耗调用额度；越权、状态\n"
             "不明、LOCK 漂移、额度耗尽是终止类，不会再给你下一呼。")
-    parts.append(
-        "### 八动作顺序（每个回复只给一个动作）\n"
-        "1. write_artifact(kind=design, source=<python>)>\n"
-        "2. propose_plan(plan=<ResearchPlan>)   ← 返回 plan_sha256\n"
-        "3. run_batch(plan_sha256, design_sha256, phase=\"explore\")  ← 返回 run_ids\n"
-        "4. write_artifact(kind=analysis, source=<python>)\n"
-        "5. analyze(source_sha256, run_ids=[...])  ← 返回该程序的 analysis 结果\n"
-        "6. freeze_confirm(plan_sha256=\"host\", design_sha256, analysis_sha256,\n"
-        "                   plan=<confirm 计划>)  ← 返回 confirm_token\n"
-        "7. run_confirm(confirm_token)          ← 返回确认批 run_ids\n"
-        "8. submit_claim(claims=[...], report_text=<正文>)\n"
-        "`plan_sha256` 传字符串 `\"host\"` 表示「由宿主计算该计划文档的 sha」——模型\n"
-        "无法自己算 sha256，这一点是公开约定；传 64 hex 时宿主会逐字比对。\n")
+    parts.append(_ACTIONS_BLOCK)
+    parts.append(PLAN_SENTINEL_NOTE)
     for study in studies:
         explore = toy_plan_doc(study, phase="explore", revision=1)
         parts.append(
@@ -383,25 +420,45 @@ def render_protocol_brief(lane: str) -> str:
             "```json\n" + json.dumps(explore, ensure_ascii=False, sort_keys=True,
                                       indent=1) + "\n```\n"
             f"confirm 计划 = 同一份文档把 phase 改成 \"confirm\"、revision 改成 2、\n"
-            f"parent_sha 填探索计划的 sha、design_source_sha/analysis_source_sha 填\n"
-            f"第 1/4 步返回的 sha；其余字段逐字不变。")
+            f"parent_sha 逐字复制第 2 步返回的 plan_sha256（或写 \"host\"）、\n"
+            "design_source_sha/analysis_source_sha 填第 1/4 步返回的 sha；其余字段\n"
+            "逐字不变。")
     parts.append(ESTIMATOR_SPEC)
+    parts.append(_SOURCE_TEMPLATES_BLOCK)
+    parts.append(_CLAIMS_BLOCK)
+    return "\n".join(parts)
+
+
+def render_study_brief(study: str) -> str:
+    """正式研究 study 的 system 追加段（T7：真实研究，48 呼预算，不是演练）。"""
+    if study not in S.STUDIES:
+        raise ProtocolError("STUDY_UNKNOWN", repr(study))
+    cap = LANES.LANE_POST_CAPS[f"study_{study}"]
+    parts: "list[str]" = [
+        f"### 本轮任务：正式研究 study {study}（{cap} 呼预算）\n"
+        "这是**真实研究**：针对公开合同里 study "
+        f"{study} 的题目，自主提出竞争解释、\n"
+        "设计鉴别实验、写实验/分析程序、跑真实物理、冻结唯一确认集、按证据下结论。\n"
+        "研究过程允许合同内自修（字段错、代码报错），每次调用都消耗预算；越权、\n"
+        "状态不明、LOCK 漂移、预算耗尽是终止类。判定由独立判据给出，与你提交的\n"
+        "自我评价无关。探索阶段可以提交多份修订（revision 递增）；确认集只能冻结\n"
+        "一次，冻结时宿主检查本 lane 冻结后至少还剩 8 呼；确认批跑完后按每个假设\n"
+        "逐条提交主张。\n",
+        _ACTIONS_BLOCK,
+        PLAN_SENTINEL_NOTE,
+    ]
+    explore = toy_plan_doc(study, phase="explore", revision=1)
     parts.append(
-        "### 格式示例（不是最优设计，只演示输入输出形状）\n"
-        "design 程序：argv[1]=只读视图（含 `plan-<sha12>.json` 与 `public_contract.json`），\n"
-        "argv[2]=输出目录，必须写 `matrix.json`。注意 matrix 的 `plan_sha` 是**计划\n"
-        "文档的 canonical sha256**：`sha256(json.dumps(plan, sort_keys=True,\n"
-        "separators=(\",\", \":\"), ensure_ascii=False))`，示例里已写好这个函数。\n"
-        "```python\n" + DESIGN_TEMPLATE + "```\n"
-        "analysis 程序：argv[1]=只读观测视图（`*/*.jsonl`），argv[2]=输出目录，\n"
-        "必须写 `analysis.json`。\n"
-        "```python\n" + ANALYSIS_TEMPLATE + "```\n")
-    parts.append(
-        "### claims 字段（每个假设一条，逐条提交，不能汇总替代）\n"
-        "`{\"hypothesis_id\", \"proposition\", \"metric_id\", \"delta\", \"estimate\",\n"
-        "\"lower\", \"upper\"}`；`delta` 必须与公开合同里该指标的 δ 逐字相等（数值），\n"
-        "`metric_id`/`proposition` 必须与计划里的对比一致。宿主用上面的公开估计量独立\n"
-        "重算，并按 1e-8 + 1e-6×|参考值| 逐字段比对；不一致即 CLAIM_INVALID。")
+        f"### study {study} 的公开计划示例（可逐字复制；也可自行改写，但必须过合同）\n"
+        "```json\n" + json.dumps(explore, ensure_ascii=False, sort_keys=True,
+                                  indent=1) + "\n```\n"
+        "confirm 计划 = 同一份文档把 phase 改成 \"confirm\"、revision 改成 2、\n"
+        "parent_sha 逐字复制最后一次 propose_plan 返回的 plan_sha256（或写 \"host\"）、\n"
+        "design_source_sha/analysis_source_sha 填对应 write_artifact 返回的 sha；\n"
+        "其余字段逐字不变。")
+    parts.append(ESTIMATOR_SPEC)
+    parts.append(_SOURCE_TEMPLATES_BLOCK)
+    parts.append(_CLAIMS_BLOCK)
     return "\n".join(parts)
 
 
@@ -912,5 +969,5 @@ __all__ = [
     "TOY_CONDITIONS", "VERDICT_NOT_MEASURED", "VERDICT_PASS", "approval_doc",
     "attempt_prefix", "backend_factory_for", "build_lane_parts", "drive_chain",
     "ensure_approval", "mirror_root", "next_attempt", "render_protocol_brief",
-    "run_protocol", "toy_plan_doc",
+    "render_study_brief", "run_protocol", "toy_plan_doc",
 ]
