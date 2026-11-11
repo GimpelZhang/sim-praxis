@@ -54,6 +54,21 @@ def test_parse_accepts_every_action() -> None:
         assert action.to_doc() == doc
 
 
+def test_freeze_confirm_accepts_host_plan_sha_sentinel_only() -> None:
+    """锁内适配（T6）：确认计划的 sha 由宿主计算，候选只能写字面 sentinel。"""
+    doc = dict(_all_actions()["freeze_confirm"])
+    doc["plan_sha256"] = L.HOST_PLAN_SHA
+    action = L.parse_action(json.dumps(doc, ensure_ascii=False))
+    assert action.doc["plan_sha256"] == "host"
+    # 大小写/近似值一律不放宽：仍按 64 hex 拒绝
+    for bad in ("HOST", "host ", "", "h" * 64):
+        broken = dict(doc)
+        broken["plan_sha256"] = bad
+        with pytest.raises(L.LoopError) as exc:
+            L.parse_action(json.dumps(broken, ensure_ascii=False))
+        assert exc.value.code == "SOURCE_SHA_INVALID"
+
+
 def test_parse_rejects_non_single_json() -> None:
     for text in ("", "   ", "not json", "[1,2]", '"str"',
                  json.dumps(_all_actions()["run_confirm"]) + "\n"

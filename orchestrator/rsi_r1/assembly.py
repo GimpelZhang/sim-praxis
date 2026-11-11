@@ -601,7 +601,10 @@ class CampaignDispatcher:
             return self._fail("ANALYSIS_INVALID", str(exc))
         rel = f"analysis/{source_sha[:12]}-{_sha_doc(doc)[:12]}.json"
         self.ctx.write_json(rel, doc)
-        return self._ok(analysis_relpath=rel, n_runs=len(wanted))
+        # 候选必须看到自己程序的真实输出才能写 claims（§8.1「submit 必须消费
+        # 真实分析结果」）；这里回传的是宿主原样保存的同一份文档。
+        return self._ok(analysis_relpath=rel, n_runs=len(wanted),
+                        analysis=doc)
 
     # -- 5) freeze_confirm ----------------------------------------------
     def _do_freeze_confirm(self, action: L.Action) -> "dict[str, Any]":
@@ -611,7 +614,8 @@ class CampaignDispatcher:
             return self._fail("PLAN_PHASE_INVALID", "freeze 需要 confirm 计划")
         if plan.study_id != self.study:
             return self._fail("STUDY_MISMATCH", plan.study_id)
-        if plan.sha256 != str(action.doc["plan_sha256"]):
+        claimed = str(action.doc["plan_sha256"])
+        if claimed != L.HOST_PLAN_SHA and plan.sha256 != claimed:
             return self._fail("PLAN_MISMATCH", "plan 文档 sha 与字段不符")
         design_sha = _require_sha256(action.doc["design_sha256"],
                                      where="design_sha256")
@@ -631,7 +635,8 @@ class CampaignDispatcher:
         self.confirm_manifest = manifest
         CL.write_confirm_manifest(self.ctx, self.study, manifest)
         return self._ok(confirm_token=lock.token, block_count=lock.block_count,
-                        manifest_sha256=manifest.sha256, n_assignments=n)
+                        manifest_sha256=manifest.sha256, n_assignments=n,
+                        plan_sha256=plan.sha256)
 
     # -- 6) run_confirm --------------------------------------------------
     def _do_run_confirm(self, action: L.Action) -> "dict[str, Any]":

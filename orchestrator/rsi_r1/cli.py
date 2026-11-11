@@ -29,6 +29,8 @@ import argparse
 import ast
 import hashlib
 import json
+import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -38,18 +40,24 @@ from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.runtime_paths import (
     assert_rsi_r1_roots_isolated,
     rsi_r1_campaign_root,
+    rsi_r1_gateway_state_path,
     rsi_r1_subdir,
 )
 from orchestrator.gateway import quota_ledger as QL
+from orchestrator.rsi_r1 import assembly as ASM
 from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import gateway_transport as GT
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import observations as OBS
 from orchestrator.rsi_r1 import prereg as PREREG
+from orchestrator.rsi_r1 import protocol as PT
 from orchestrator.rsi_r1 import rubric as RUBRIC
 from orchestrator.rsi_r1 import runtime
 from orchestrator.rsi_r1 import sandbox as SANDBOX
 from orchestrator.rsi_r1 import scenes as SCENES
+from orchestrator.rsi_r1 import state as ST
+from orchestrator.rsi_r1 import watchdog as W
 from orchestrator.rsi_r1.lanes import LANE_ORDER, LANE_POST_CAPS
 
 #: Plan §1.1「已核实的源码接缝（只读10文件）」+ T0 要求定位的装配点。
@@ -490,6 +498,186 @@ def cmd_freeze(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# state：root 推进入口（T0/T1/T5 三段，操作者显式推进）
+# ---------------------------------------------------------------------------
+#
+# 状态机本身只做「+1 向前」的结构守卫；**语义前置条件**在这里 fail-closed：
+# AUTHORIZED 要付费授权与 consent 字节逐字节对得上，CALIBRATED 要校准报告
+# 判决 PASS，FROZEN 要 ``verify_lock`` 全量复核（闭包/依赖/校准/双签）。
+# PROBED 起不设操作者入口——那一步只能由协议链 PASS 或研究闭环本身推进。
+
+#: 操作者可推进的三步（顺序即状态机顺序）。
+OPERATOR_STATES: "tuple[str, ...]" = (
+    ST.ROOT_AUTHORIZED, ST.ROOT_CALIBRATED, ST.ROOT_FROZEN)
+
+
+def _check_authorized_preconditions(ctx: Any, env_doc: Mapping[str, Any]) -> None:
+    if env_doc.get("paid_authorized") is not True:
+        raise CliError("AUTHORIZED_PRECONDITION: envelope.paid_authorized 不是 true")
+    if not ctx.exists("contract/consent.json"):
+        raise CliError("AUTHORIZED_PRECONDITION: 缺 contract/consent.json")
+    raw = ctx.relative("contract/consent.json").read_bytes()
+    got = hashlib.sha256(raw).hexdigest()
+    want = env_doc.get("consent_document_sha256")
+    if want and got != want:
+        raise CliError(
+            f"AUTHORIZED_PRECONDITION: consent 字节 sha256={got} != "
+            f"envelope.consent_document_sha256={want}")
+
+
+def _check_calibrated_preconditions(ctx: Any) -> None:
+    for rel in LK.CALIBRATION_REPORTS:
+        if ctx.exists(rel):
+            doc = ctx.read_json(rel)
+            if doc.get("verdict") == "CALIBRATION_PASS":
+                return
+            raise CliError(
+                f"CALIBRATED_PRECONDITION: {rel} verdict={doc.get('verdict')!r}")
+    raise CliError(
+        "CALIBRATED_PRECONDITION: 缺校准报告（先跑 controls）")
+
+
+def cmd_state(args: argparse.Namespace) -> int:
+    """显式推进 root（仅 AUTHORIZED/CALIBRATED/FROZEN；幂等；前置条件 fail-closed）。"""
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, env_doc = _load_envelope_contract(envelope)
+    state = ST.ResearchState(ctx)
+    cur = state.root_state()
+    target = str(args.to).upper()
+    if target not in OPERATOR_STATES:
+        raise CliError(
+            f"STATE_OPERATOR_SCOPE: 操作者只能推进 {list(OPERATOR_STATES)}，"
+            f"收到 {target!r}")
+    if target == cur:
+        print(f"state ok  envelope={envelope}  root={cur}（已是目标，幂等）")
+        return 0
+    if target == ST.ROOT_AUTHORIZED:
+        _check_authorized_preconditions(ctx, env_doc)
+    elif target == ST.ROOT_CALIBRATED:
+        _check_calibrated_preconditions(ctx)
+    else:  # FROZEN
+        verified = LK.verify_lock(ctx)
+        print(f"  lock_sha256={verified['lock_sha256']}  "
+              f"signatures={sorted(verified['signatures'])}")
+    state.advance_root(target, reason=args.reason or f"操作者推进 → {target}")
+    print(f"state ok  envelope={envelope}  {cur} → {target}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# watch：主机外部监护者（Plan §8.4 / AC24）
+# ---------------------------------------------------------------------------
+#
+# 监护对象**显式**传：campaign 根、账本文件、暂停件。三者在启动时写进
+# ``state/watchdog_operator.json``（0600），使「它到底在看谁」可复核。
+# SIGINT/SIGTERM 都转成 KeyboardInterrupt，``Watcher.run`` 会据此写 teardown
+# （不擅杀他方进程；只写事件与暂停件）。
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    state_dir = ctx.subdir("state")
+    ledger = ctx.relative("quota/ledger.jsonl")
+    pause = ctx.relative("state/pause.json")
+    operator = {
+        "schema": "simpraxis.rsi_r1.watchdog_operator.v1", "schema_version": 1,
+        "envelope_id": envelope, "campaign_root": str(ctx.root),
+        "state_dir": str(state_dir), "ledger_path": str(ledger),
+        "pause_path": str(pause), "pid": os.getpid(),
+        "started_at_utc": utc_now_iso_z()}
+    ctx.write_json("state/watchdog_operator.json", operator)
+    watcher = W.Watcher(W.WatchConfig(state_dir=state_dir, poll_s=args.poll))
+
+    def _on_sigterm(signum, frame):  # noqa: ARG001 —— 签名由 signal 规定
+        raise KeyboardInterrupt
+
+    previous = signal.signal(signal.SIGTERM, _on_sigterm)
+    try:
+        teardown = watcher.run(max_ticks=args.max_ticks)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    print(f"watch teardown  reason={teardown.get('reason')}  "
+          f"ticks={teardown.get('ticks')}  "
+          f"last_state={teardown.get('last_state')}  "
+          f"pause_preserved={teardown.get('pause_preserved')}")
+    print(f"  operator={ctx.relative('state/watchdog_operator.json')}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# probe / practice（T6，AC28）：真实模型 POST + 真实容器
+# ---------------------------------------------------------------------------
+
+def _tokenizer_counter(path: str, sha256_hex: str):
+    """本地 token 计数（只用于 20000 token 请求门；不参与任何科学判决）。"""
+    raw = Path(path).read_bytes()
+    got = hashlib.sha256(raw).hexdigest()
+    if got != sha256_hex:
+        raise CliError(f"tokenizer sha256 不符：{path} 实为 {got}")
+    from tokenizers import Tokenizer  # 本地文件；不联网
+
+    tok = Tokenizer.from_file(str(path))
+
+    def count(text: str) -> int:
+        return len(tok.encode(text, add_special_tokens=False).ids)
+
+    return count
+
+
+def _run_protocol_cmd(args: argparse.Namespace, lane: str) -> int:
+    """probe/practice 的唯一 CLI 路径：批准件 → 付费闸 → 网关 → 链 → 报告。"""
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    assert_rsi_r1_roots_isolated()
+    # 环境闸先于一切副作用（含批准件写入与 tokenizer 加载）：没有
+    # SIMPRAXIS_ALLOW_PAID=1 就不动作，也不引入任何配置依赖。
+    GT.require_paid_env(os.environ)
+    if not args.tokenizer or not args.tokenizer_sha256:
+        raise CliError("付费运行需要 --tokenizer 与 --tokenizer-sha256")
+    counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
+    consent = C.Consent.from_dict(ctx.read_json("contract/consent.json"))
+    spend = ASM.SpendContract(mode=ASM.MODE_PAID, consent=consent)
+    posts = PT.PROBE_POSTS if lane == PT.PROBE else PT.PRACTICE_POSTS
+    approval = PT.ensure_approval(ctx, batch_id=args.batch_id, lane=lane,
+                                 approved=posts, note=args.note or "")
+    lock_doc = ctx.read_json(LK.LOCK_RELPATH)
+    image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
+    if not image:
+        raise CliError("缺 --image 且 LOCK 未登记镜像 pin")
+    gateway = GT.build_gateway(
+        ledger=QL.QuotaLedger.rsi_r1(),
+        pause_state_path=rsi_r1_gateway_state_path())
+    transport = GT.build_transport(
+        gateway=gateway, lane=lane, batch_id=args.batch_id,
+        thread_id=args.thread_id or f"rsi-r1-{lane}", env=os.environ)
+    report = PT.run_protocol(
+        ctx, lane=lane, spend=spend, transport_factory=lambda: transport,
+        runner=SANDBOX.DockerRunner(), image=image, batch_id=args.batch_id,
+        counter=counter)
+    print(f"{lane} {report['verdict']}  attempt={report['attempt']}  "
+          f"posts={report['posts']['this_attempt']}/"
+          f"{report['posts']['allowed']}  root={report['root_after']}")
+    if report["reason"]:
+        print(f"  reason: {report['reason']}")
+    for study in report["studies"]:
+        print(f"  study {study['study']}: {study['ok_count']}/8 ok  "
+              f"stopped={study['stopped'] or '-'}  "
+              f"state={study['study_state']}  "
+              f"judge={study['judge_verdict'] or '-'}")
+    print(f"  approval={approval}")
+    print(f"  report={ctx.relative(f'protocol/report_{lane}.json')}")
+    return 0 if report["verdict"] == PT.VERDICT_PASS else 2
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    return _run_protocol_cmd(args, PT.PROBE)
+
+
+def cmd_practice(args: argparse.Namespace) -> int:
+    return _run_protocol_cmd(args, PT.PRACTICE)
+
+
+# ---------------------------------------------------------------------------
 # check
 # ---------------------------------------------------------------------------
 
@@ -656,6 +844,42 @@ def build_parser() -> argparse.ArgumentParser:
                     help="闭包与依赖索引的仓库根（缺省为源码仓根）")
     pf.set_defaults(func=cmd_freeze)
 
+    pst = sub.add_parser(
+        "state",
+        help="显式推进 root（仅 AUTHORIZED/CALIBRATED/FROZEN；前置条件 fail-closed）")
+    pst.add_argument("--envelope", required=True)
+    pst.add_argument("--to", required=True,
+                     choices=[s.lower() for s in OPERATOR_STATES] + list(OPERATOR_STATES),
+                     help="目标 root 状态：authorized|calibrated|frozen")
+    pst.add_argument("--reason", default=None, help="推进理由（写入 append-only 日志）")
+    pst.set_defaults(func=cmd_state)
+
+    pwt = sub.add_parser(
+        "watch", help="主机外部监护者（AC24）：每 tick 读心跳，静默/死亡即暂停 dispatch")
+    pwt.add_argument("--envelope", required=True)
+    pwt.add_argument("--poll", type=float, default=1.0, help="poll 间隔秒（默认 1.0）")
+    pwt.add_argument("--max-ticks", type=int, default=None,
+                     help="只跑 N 个 tick（默认无限，SIGINT/SIGTERM 收尾）")
+    pwt.set_defaults(func=cmd_watch)
+
+    for name, func, cap in (("probe", cmd_probe, PT.PROBE_POSTS),
+                            ("practice", cmd_practice, PT.PRACTICE_POSTS)):
+        pp2 = sub.add_parser(
+            name, help=f"T6 {name} 协议链（{cap} 次真实 POST + 真实容器）")
+        pp2.add_argument("--envelope", required=True)
+        pp2.add_argument("--batch-id", required=True,
+                         help="本批账本 batch_id（批准件同名，0600 落 quota/approvals/）")
+        pp2.add_argument("--image", default=None,
+                         help="容器镜像 name@sha256:<64>（缺省取 LOCK 登记值）")
+        pp2.add_argument("--tokenizer", default=None,
+                         help="本地 tokenizer.json 路径（20000 token 请求门）")
+        pp2.add_argument("--tokenizer-sha256", default=None,
+                         help="tokenizer.json 的 sha256（逐字节钉死）")
+        pp2.add_argument("--thread-id", default="",
+                         help="账本 thread_id（默认 rsi-r1-<lane>）")
+        pp2.add_argument("--note", default=None, help="批准件备注")
+        pp2.set_defaults(func=func)
+
     return p
 
 
@@ -666,7 +890,9 @@ def main(argv: "list[str] | None" = None) -> int:
         return int(args.func(args))
     except (CliError, C.ContractError, PREREG.PreregError,
             SCENES.SceneError, OBS.ObservationError,
-            CAL.CalibrationError, LK.LockError) as exc:
+            CAL.CalibrationError, LK.LockError, PT.ProtocolError,
+            GT.TransportError, ASM.AssemblyError, QL.QuotaError,
+            ST.StateError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

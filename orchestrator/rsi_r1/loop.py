@@ -33,6 +33,10 @@ ACTION_NAMES = (
     "freeze_confirm", "run_confirm", "submit_claim",
 )
 
+#: ``freeze_confirm.plan_sha256`` 的字面 sentinel：由宿主对收到的 confirm 计划
+#: 计算 canonical sha256 并回传（见 ``_validate_action_fields`` 的锁内适配说明）。
+HOST_PLAN_SHA = "host"
+
 REPORT_MAX_BYTES = 24 * 1024
 SOURCE_MAX_BYTES = 64 * 1024
 MAX_RUN_IDS_PER_ANALYZE = 64
@@ -234,7 +238,14 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
             if not isinstance(rid, str) or not rid:
                 raise LoopError("WRONG_TYPE", f"run_ids[{i}] 必须是非空字符串")
     elif name == "freeze_confirm":
-        _require_hex(doc, "plan_sha256")
+        # 锁内适配（RSI-R1 T6）：confirm 计划的 sha 含 `analysis_source_sha`
+        # 等字段，候选无法先算出「包含自身 sha」的文档——模型没有解释器。
+        # 因此允许字面 sentinel `"host"`：宿主对**收到的文档**计算 sha 并回传；
+        # 传 64 hex 时仍逐字比对（不放宽任何校验，只是把不可计算项交给宿主）。
+        # 用 .get 而不是下标：缺键也必须走 LoopError（下单键会抛 KeyError 绕过
+        # 拒绝条款）。非字符串/非 sentinel 一律交回 _require_hex 判 64 hex。
+        if doc.get("plan_sha256") != HOST_PLAN_SHA:
+            _require_hex(doc, "plan_sha256")
         _require_hex(doc, "design_sha256")
         _require_hex(doc, "analysis_sha256")
         _require_plan(doc)
