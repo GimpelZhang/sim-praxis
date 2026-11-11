@@ -621,6 +621,21 @@ class ResearchLoop:
                                                reason=exc.code))
             self.store.stop_or_block(code=exc.code, detail=exc.detail)
             return StepOutcome(ok=False, code=exc.code, terminal=True)
+        except Exception as exc:  # noqa: BLE001 —— 先分类，非网关错照旧上抛
+            # 网关层异常（如 HTTP 200 空回答的 EmptyResponseError）在账本里
+            # 已有 ok=false 行；这里必须把它变成可机读的停止回合，而不是让
+            # 异常穿出 drive_chain 把整条 lane 崩掉（2026-11-11 practice 实跑
+            # 就是这样 rc=1、连协议报告都没写）。语义按「回复不可动作」处理：
+            # 写暂停件、停止本链、报告照落盘，修复后由操作者显式 resume。
+            from orchestrator.gateway.router import GatewayError
+
+            if not isinstance(exc, GatewayError):
+                raise
+            code = type(exc).__name__
+            self.budget.resolve_or_pause(Reply(text="", response_id="",
+                                               is_actionable=False, reason=code))
+            self.store.stop_or_block(code=code, detail=str(exc))
+            return StepOutcome(ok=False, code=code, terminal=True)
 
         self.store.record_reply(response_id=reply.response_id, text=reply.text,
                                 phase=self.phase, nonce=_nonce_of(request))
@@ -670,16 +685,28 @@ def _nonce_of(request: T.Request) -> str:
 # ---------------------------------------------------------------------------
 
 class EventStore:
-    """把循环的回复/动作/结果落到 ``ResearchState`` 事件日志（AC10/AC14）。"""
+    """把循环的回复/动作/结果落到 ``ResearchState`` 事件日志（AC10/AC14）。
 
-    def __init__(self, state: Any):
+    ``study`` 非空时给每条事件打 study 标并按它过滤历史：协议/正式研究的
+    A、B 两条链共用一个 attempt 级事件日志，若不过滤，B 的第一回合会把 A 的
+    全部对话（含 A 的 run_confirm 参考值）当成自己的上下文——2026-11-11 的
+    practice 实跑就是这样让 B 提交了 A 的 claim（PLAN_MISSING）。
+    """
+
+    def __init__(self, state: Any, study: str = ""):
         self.state = state
+        self.study = str(study or "")
+
+    def _mine(self, ev: Any) -> bool:
+        return not self.study or ev.payload.get("study") == self.study
 
     def history(self) -> "list[T.Turn]":
         replies: "dict[str, str]" = {}
         results: "dict[str, Mapping[str, Any]]" = {}
         order: "list[str]" = []
         for ev in self.state._events():
+            if not self._mine(ev):
+                continue
             rid = ev.payload.get("response_id")
             if not isinstance(rid, str):
                 continue
@@ -708,22 +735,29 @@ class EventStore:
     def record_reply(self, *, response_id: str, text: str, phase: str,
                      nonce: str) -> Mapping[str, Any]:
         return self.state.record_reply(response_id=response_id, text=text,
-                                       phase=phase, nonce=nonce)
+                                       phase=phase, nonce=nonce,
+                                       study=self.study)
 
     def record_action(self, *, response_id: str,
                       action: Mapping[str, Any]) -> Mapping[str, Any]:
-        return self.state.record_action(response_id=response_id, action=action)
+        return self.state.record_action(response_id=response_id, action=action,
+                                        study=self.study)
 
     def record_result(self, *, response_id: str,
                       result: Mapping[str, Any]) -> Mapping[str, Any]:
-        return self.state.journal.append("action_result", {
+        payload = {
             "response_id": response_id, "result": dict(result),
             "ok": bool(result.get("ok")), "code": result.get("code"),
-            "action": result.get("action")}).payload
+            "action": result.get("action")}
+        if self.study:
+            payload["study"] = self.study
+        return self.state.journal.append("action_result", payload).payload
 
     def stop_or_block(self, *, code: str, detail: str) -> Mapping[str, Any]:
-        return self.state.journal.append("loop_stop", {
-            "code": code, "detail": detail}).payload
+        payload = {"code": code, "detail": detail}
+        if self.study:
+            payload["study"] = self.study
+        return self.state.journal.append("loop_stop", payload).payload
 
 
 def sha256_text(text: str) -> str:

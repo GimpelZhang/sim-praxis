@@ -645,3 +645,79 @@ def test_submit_claim_judge_failure_leaves_study_reopenable(
     assert state.study_state("A") == before, "judge 失败不许推进状态"
     assert not frozen.ctx.exists("judge/report_A.json")
     assert not frozen.ctx.exists("claim/submission_A.json")
+
+
+class _FakeAdmission:
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.used = 0
+
+    def posts_used(self, lane: str) -> int:
+        return self.used
+
+
+class _FakeStudyState:
+    def study_state(self, study: str) -> str:
+        return "EXPLORING"
+
+
+class _FakeTurnLoop:
+    def __init__(self, outcomes: "list[L.StepOutcome]", admission: _FakeAdmission
+                 ) -> None:
+        self.outcomes = list(outcomes)
+        self.admission = admission
+        self.turns = 0
+
+    def turn(self) -> L.StepOutcome:
+        self.turns += 1
+        self.admission.used += 1
+        return self.outcomes.pop(0)
+
+
+def _parts(outcomes: "list[L.StepOutcome]", cap: int) -> "tuple[PT.LaneParts, _FakeAdmission]":
+    adm = _FakeAdmission(cap)
+    parts = PT.LaneParts(
+        lane=PT.PRACTICE, scope=None, admission=adm, slots=None,
+        state=_FakeStudyState(), dispatcher=None, store=None, sender=None,
+        loop=_FakeTurnLoop(outcomes, adm), study="A", billing_lane=PT.PRACTICE)
+    return parts, adm
+
+
+def _ok(action: str) -> L.StepOutcome:
+    return L.StepOutcome(ok=True, action=action, result={"action": action})
+
+
+def test_chain_cursor_completes_only_after_submit_claim() -> None:
+    """自修产生的额外 ok 不推进游标；链的完成判据是 submit_claim 成功。
+
+    2026-11-11 practice 实跑：run_batch 撞 RESOURCE_EXCEEDED 后模型自修重写
+    design，ok 计数在 run_confirm 处就凑满 8 → 链被当成「完成」提前收尾，
+    submit_claim 一次都没发，B 链随后拿 A 的上下文提交了 A 的 claim。
+    """
+    outcomes = [_ok("write_artifact"), _ok("propose_plan"),
+                _ok("write_artifact"),          # 自修：额外重写 design
+                _ok("run_batch"), _ok("write_artifact"),
+                _ok("analyze"), _ok("freeze_confirm"),
+                _ok("run_confirm"), _ok("submit_claim")]
+    parts, adm = _parts(outcomes, cap=len(outcomes))
+    res = PT.drive_chain(parts, strict=False, cap=len(outcomes))
+    assert res.completed is True, "submit_claim 成功之后才算完成"
+    assert res.stage == PT.CHAIN_ACTIONS
+    assert res.ok_count == 9 and len(res.actions) == 9
+    assert res.stopped == ""
+    # 旧判据（ok_count == 8 即完成）会在这里提前停在 run_confirm。
+    assert res.actions[7]["action"] == "run_confirm"
+    assert res.actions[-1]["action"] == "submit_claim"
+
+
+def test_chain_cursor_stops_uncompleted_when_posts_run_out() -> None:
+    """八个 ok 但缺 submit_claim ⇒ NOT completed，且停止码是 POSTS_EXHAUSTED。"""
+    outcomes = [_ok("write_artifact"), _ok("write_artifact"),
+                _ok("propose_plan"), _ok("write_artifact"),
+                _ok("run_batch"), _ok("write_artifact"),
+                _ok("analyze"), _ok("freeze_confirm")]
+    parts, adm = _parts(outcomes, cap=len(outcomes))
+    res = PT.drive_chain(parts, strict=False, cap=len(outcomes))
+    assert res.completed is False
+    assert res.ok_count == 8
+    assert res.stopped == "POSTS_EXHAUSTED"

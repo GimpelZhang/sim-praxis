@@ -435,19 +435,22 @@ class ResearchState:
     # ---- 模型回复与动作（AC10 谱系）----
 
     def record_reply(self, *, response_id: str, text: str, phase: str,
-                     nonce: str = "") -> "dict[str, Any]":
+                     nonce: str = "", study: str = "") -> "dict[str, Any]":
         if not response_id:
             raise StateError("MISSING_KEY", "response_id 必填")
         rel = f"state/replies/{response_id}.txt"
         self.ctx.write_text(rel, text)
-        return self.journal.append("reply", {
+        payload = {
             "response_id": response_id, "text_sha256": _sha_text(text),
             "n_bytes": len(text.encode("utf-8")), "phase": phase,
-            "nonce": nonce, "relpath": rel}).payload | {
+            "nonce": nonce, "relpath": rel}
+        if study:
+            payload["study"] = str(study)
+        return self.journal.append("reply", payload).payload | {
                 "response_id": response_id, "text_sha256": _sha_text(text)}
 
-    def record_action(self, *, response_id: str, action: Mapping[str, Any]
-                      ) -> "dict[str, Any]":
+    def record_action(self, *, response_id: str, action: Mapping[str, Any],
+                      study: str = "") -> "dict[str, Any]":
         """把解析后的动作登记为事实：response→action_sha 的唯一绑定点。"""
         if not self._reply_event(response_id):
             raise StateError("UNKNOWN_REPLY",
@@ -458,10 +461,13 @@ class ResearchState:
                and ev.payload.get("action_sha256") == action_sha
                for ev in self._events()):
             return {"response_id": response_id, "action_sha256": action_sha}
-        self.journal.append("action", {
+        payload = {
             "response_id": response_id, "action_sha256": action_sha,
             "name": str(action.get("action") or ""),
-            "payload": dict(action)})
+            "payload": dict(action)}
+        if study:
+            payload["study"] = str(study)
+        self.journal.append("action", payload)
         return {"response_id": response_id, "action_sha256": action_sha}
 
     def _reply_event(self, response_id: str) -> "Event | None":

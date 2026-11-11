@@ -61,6 +61,21 @@ PRACTICE_POSTS = 16
 PRACTICE_STUDIES: "tuple[str, ...]" = ("A", "B")
 CHAIN_ACTIONS = 8
 
+#: 八动作链的**规范顺序**（Plan §8.1 / T3 合同）。完成判据按这个游标走，
+#: 不按 ok 计数：合同内自修会产生额外同名动作（重写 design 等），计数会把
+#: 链提前凑满、漏掉 submit_claim。
+CHAIN_SEQUENCE: "tuple[str, ...]" = (
+    "write_artifact",   # 1 design
+    "propose_plan",     # 2
+    "run_batch",        # 3 explore
+    "write_artifact",   # 4 analysis
+    "analyze",          # 5
+    "freeze_confirm",   # 6
+    "run_confirm",      # 7
+    "submit_claim",     # 8
+)
+assert len(CHAIN_SEQUENCE) == CHAIN_ACTIONS
+
 PROTOCOL_SUBDIR = "protocol"
 REPORT_SCHEMA = "simpraxis.rsi_r1.protocol_report.v1"
 SCHEMA_VERSION = 1
@@ -591,7 +606,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
     dispatcher = A.CampaignDispatcher(
         ctx=scope, state=state, admission=admission, budget=budget, study=study,
         runner=runner, image=image, backend_factory=factory)
-    store = L.EventStore(state)
+    store = L.EventStore(state, study=study)
     envelope = A.Envelope.from_ctx(ctx)
     sender = L.build_production_sender(
         lock_reader=LK.lock_reader(ctx), transport_factory=transport_factory,
@@ -627,6 +642,9 @@ def repo_sha(relpath: str) -> str:
 # 链驱动
 # ---------------------------------------------------------------------------
 
+CHAINS_TOO_LONG = "CHAIN_TOO_LONG"  # 连续同名动作超出合同（诊断用，非判据）
+
+
 @dataclass
 class ChainResult:
     study: str
@@ -637,11 +655,17 @@ class ChainResult:
     study_state: str = ""
     judge_verdict: "str | None" = None
     study_verdict: "str | None" = None
+    #: 八个**规范动作**按序全部走完（由 ``drive_chain`` 的游标决定，不由 ok 计数决定）。
+    completed: bool = False
+    #: 游标所在位置（0..8）：报告里用它说明「走到第几个规范动作」。
+    stage: int = 0
 
     def as_dict(self) -> "dict[str, Any]":
         return {"study": self.study, "actions": list(self.actions),
                 "ok_count": self.ok_count, "stopped": self.stopped,
                 "terminal": bool(self.terminal),
+                "completed": bool(self.completed),
+                "stage": int(self.stage),
                 "study_state": self.study_state,
                 "judge_verdict": self.judge_verdict,
                 "study_verdict": self.study_verdict}
@@ -651,12 +675,18 @@ def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
     """跑一条 8 动作链。
 
     ``strict=True``（probe）：出现第一个非 ok 回合即停，**不再发下一呼**；
-    ``strict=False``（practice）：允许合同内自修，跑满 8 个 ok 或额度用尽为止。
-    终止类拒绝（``terminal``）两种策略都立即停。
+    ``strict=False``（practice/正式 study）：允许合同内自修，直到八个规范动作
+    按序全部成功或额度用尽为止。终止类拒绝（``terminal``）两种策略都立即停。
+
+    完成判据是**规范动作游标**而不是「ok 计数」：合同内自修一定会产生额外的
+    同名动作（如 run_batch 资源超额后重写 design 再来一次），按 ok 计数会在
+    run_confirm 之后提前凑满 8 个 ok，把 submit_claim 整个跳过去——2026-11-11
+    practice A 链就是这样空跑到 B 链（B 拿到 A 的上下文后提交 A 的 claim）。
     """
     result = ChainResult(study=parts.study)
     lane = parts.billing_lane
-    while result.ok_count < CHAIN_ACTIONS:
+    stage = 0
+    while stage < len(CHAIN_SEQUENCE):
         if parts.admission.posts_used(lane) >= cap:
             result.stopped = "POSTS_EXHAUSTED"
             break
@@ -675,6 +705,10 @@ def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
         result.actions.append(doc)
         if outcome.ok:
             result.ok_count += 1
+            # 只有**当前规范位**的动作成功才推进游标；自修产生的额外动作
+            # （重写 design、换 run_batch 参数等）只记账不推进。
+            if outcome.action == CHAIN_SEQUENCE[stage]:
+                stage += 1
             continue
         if outcome.terminal:
             result.stopped = outcome.code or "TERMINAL"
@@ -683,6 +717,8 @@ def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
         if strict:
             result.stopped = outcome.code or "FIRST_ERROR"
             break
+    result.stage = stage
+    result.completed = stage >= len(CHAIN_SEQUENCE)
     result.study_state = parts.state.study_state(parts.study)
     claim = None
     for act in result.actions:
@@ -841,7 +877,7 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
 
     used_after = posts_used(ctx, lane=billing, lock=lock, spend=spend)
 
-    ok_chains = all(c.ok_count == CHAIN_ACTIONS and not c.stopped for c in chains)
+    ok_chains = all(c.completed and not c.stopped for c in chains)
     posts = used_after - used_before
     passed = bool(ok_chains and len(chains) == len(studies) and posts == wanted_posts)
     if passed:
@@ -902,10 +938,10 @@ def _not_measured_reason(chains: "list[ChainResult]", posts: int,
     for chain in chains:
         if chain.stopped:
             parts.append(f"study {chain.study} 停于 {chain.stopped}"
-                         f"（{chain.ok_count}/{CHAIN_ACTIONS} ok）")
-        elif chain.ok_count != CHAIN_ACTIONS:
-            parts.append(f"study {chain.study} 只完成 "
-                         f"{chain.ok_count}/{CHAIN_ACTIONS}")
+                         f"（规范动作 {chain.stage}/{CHAIN_ACTIONS}）")
+        elif not chain.completed:
+            parts.append(f"study {chain.study} 只完成规范动作 "
+                         f"{chain.stage}/{CHAIN_ACTIONS}")
     if posts != wanted:
         parts.append(f"实呼 {posts} != 允许 {wanted}")
     return "；".join(parts) or "链未走通"

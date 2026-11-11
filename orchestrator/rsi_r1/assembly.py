@@ -478,6 +478,10 @@ class CampaignDispatcher:
         want = _sha_doc(action.to_doc())
         for ev in reversed(self.state.journal.events()):
             if ev.event == "action":
+                # A/B 两条链共用一个 attempt 级日志：只认本 study 的动作事件，
+                # 否则另一条链刚登记的动作会让本链的绑定校验恒失败。
+                if ev.payload.get("study") not in (None, self.study):
+                    continue
                 if ev.payload.get("action_sha256") != want:
                     raise L.LoopError(
                         "STATE_UNKNOWN",

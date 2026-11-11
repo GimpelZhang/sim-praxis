@@ -561,3 +561,53 @@ def test_event_store_folds_journal_into_turns(tmp_path) -> None:
     assert turns[0].result["run_id"] == "x"
     store.stop_or_block(code="INPUT_LIMIT", detail="over")
     assert any(ev.event == "loop_stop" for ev in st._events())
+
+
+def test_event_store_scopes_history_per_study(tmp_path) -> None:
+    """A/B 共用 attempt 日志时，B 的历史里不得出现 A 的回合。
+
+    2026-11-11 practice 实跑：A 链按 ok 计数提前收尾，B 链首回合拿到了 A 的
+    完整对话（含 run_confirm 的参考值），于是提交了 A 的 claim 并撞 PLAN_MISSING。
+    """
+    from orchestrator.rsi_r1 import state as ST
+    from tests.rsi_r1_helpers import make_ctx, make_dirs
+
+    make_dirs(tmp_path)
+    st = ST.ResearchState(make_ctx(tmp_path))
+    a = L.EventStore(st, study="A")
+    b = L.EventStore(st, study="B")
+    a.record_reply(response_id="A1", text='{"action":"run_batch"}',
+                   phase="explore", nonce="aa")
+    a.record_result(response_id="A1",
+                    result={"ok": True, "action": "run_batch", "run_id": "ra"})
+    assert [t.result["run_id"] for t in a.history()] == ["ra"]
+    assert b.history() == [], "B 不得看到 A 的回合"
+    b.record_reply(response_id="B1", text='{"action":"write_artifact"}',
+                   phase="explore", nonce="bb")
+    b.record_result(response_id="B1",
+                    result={"ok": True, "action": "write_artifact"})
+    assert [t.model_text for t in b.history()] == ['{"action":"write_artifact"}']
+    # 事件按 study 打标；未标 study 的老事件不归任何链。
+    tagged = [ev.payload.get("study") for ev in st._events()
+              if ev.event in ("reply", "action_result")]
+    assert tagged == ["A", "A", "B", "B"]
+
+
+def test_gateway_error_becomes_terminal_step_not_crash(monkeypatch) -> None:
+    """HTTP 200 空回答必须变成可机读的停止回合，而不是把整条 lane 崩掉。
+
+    2026-11-11 practice 实跑：EmptyResponseError 穿出 turn()/drive_chain，
+    CLI rc=1，连协议报告都没写（账本行在，报告不在）。
+    """
+    from orchestrator.gateway.router import EmptyResponseError
+
+    def boom(request):
+        raise EmptyResponseError("stage=coding_debug 连续 1 次 HTTP 200 空回答")
+
+    loop, store, dispatcher, budget, calls = _loop(reply_text="x", transport=boom)
+    out = loop.turn()
+    assert out.ok is False and out.terminal is True
+    assert out.code == "EmptyResponseError"
+    assert dispatcher.seen == [], "网关错误不应进入分派器"
+    assert store.stops and store.stops[-1]["code"] == "EmptyResponseError"
+    assert budget.resolved and budget.resolved[-1].is_actionable is False

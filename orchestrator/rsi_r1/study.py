@@ -122,7 +122,7 @@ def build_study_parts(
     admission, slots, dispatcher, state = A.build_campaign_parts(
         ctx, spend=spend, lane=lane, study=study, runner=runner, image=image,
         backend_factory=factory, lock_sha256=lock.sha256)
-    store = L.EventStore(state)
+    store = L.EventStore(state, study=study)
     envelope = A.Envelope.from_ctx(ctx)
     sender = L.build_production_sender(
         lock_reader=LK.lock_reader(ctx), transport_factory=transport_factory,
