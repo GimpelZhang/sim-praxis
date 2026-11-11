@@ -687,7 +687,7 @@ class CampaignDispatcher:
                                         outcome=S.OUTCOME_INFRA_FAIL)
             return self._fail("RESOURCE_EXHAUSTED",
                               f"确认批 {len(ordered)} > 余量 {room}")
-        backend = self.backend_factory(f"confirm-{self.study}-{token[:12]}")
+        backend = self.backend_factory(confirm_batch_id(self.study, token))
         book = E.ResourceBook(max_runs=len(ordered),
                               max_steps=int(self.budget.max_steps))
         evidence = E.execute_batch(ordered, backend, book)
@@ -853,35 +853,41 @@ class CampaignDispatcher:
         rel = f"confirm/manifest_{self.study}.json"
         if not self.ctx.exists(rel):
             return None
-        doc = self.ctx.read_json(rel)
-        return E.ConfirmManifest(
-            study_id=str(doc["study_id"]), plan_sha256=str(doc["plan_sha256"]),
-            keeper_seed_sha256=str(doc["keeper_seed_sha256"]),
-            block_count=int(doc["block_count"]),
-            varying={k: (v[0], v[1]) for k, v in doc["varying"].items()},
-            assignments=tuple(
-                E.ConfirmAssignment(condition_id=str(a["condition_id"]),
-                                    block_id=str(a["block_id"]),
-                                    params=dict(a["params"]))
-                for a in doc["assignments"]))
+        # 单一解析点（``E.manifest_from_doc`` 会重算并比对 manifest_sha256）。
+        return E.manifest_from_doc(self.ctx.read_json(rel))
 
     def _collect_confirm_artifacts(
             self, backend: Any,
             specs: Sequence[E.ExperimentSpec]) -> "dict[str, dict[str, Any]]":
-        out: "dict[str, dict[str, Any]]" = {}
-        base = self.ctx.subdir("observations") / str(backend.batch_id)
-        for spec in specs:
-            jsonl = base / f"{spec.run_id}.jsonl"
-            meta = base / f"{spec.run_id}.meta.json"
-            if not jsonl.is_file() or not meta.is_file():
-                raise L.LoopError("OBSERVATION_MISSING", str(jsonl))
-            # ``read_record_jsonl`` 已强制「恰一行 + 顶层对象」，返回单条记录；
-            # 早先这里按列表取 ``records[0]`` 显然会拿到键名（T5 排演暴露）。
-            record = O.read_record_jsonl(jsonl)
-            out[spec.run_id] = {
-                "record": record,
-                "meta": json.loads(meta.read_text(encoding="utf-8"))}
-        return out
+        return collect_batch_artifacts(self.ctx.subdir("observations"),
+                                       str(backend.batch_id), specs)
+
+
+def confirm_batch_id(study: str, token: str) -> str:
+    """确认批的观测批次名（token 前 12 位；T8 复跑按同一规则定位原件）。"""
+    return f"confirm-{study}-{str(token)[:12]}"
+
+
+def collect_batch_artifacts(
+        observations_root: "Path | str", batch_id: str,
+        specs: Sequence[E.ExperimentSpec]) -> "dict[str, dict[str, Any]]":
+    """从观测目录读回 ``run_id → {"record", "meta"}``（T8 复跑的新进程入口）。
+
+    ``read_record_jsonl`` 已强制「恰一行 + 顶层对象」，返回单条记录；早先
+    按列表取 ``records[0]`` 会拿到键名（T5 排演暴露）。缺件 fail-closed。
+    """
+    out: "dict[str, dict[str, Any]]" = {}
+    base = Path(observations_root) / str(batch_id)
+    for spec in specs:
+        jsonl = base / f"{spec.run_id}.jsonl"
+        meta = base / f"{spec.run_id}.meta.json"
+        if not jsonl.is_file() or not meta.is_file():
+            raise L.LoopError("OBSERVATION_MISSING", str(jsonl))
+        record = O.read_record_jsonl(jsonl)
+        out[spec.run_id] = {
+            "record": record,
+            "meta": json.loads(meta.read_text(encoding="utf-8"))}
+    return out
 
 
 def _outcome_doc(outcome: E.RunOutcome) -> "dict[str, Any]":

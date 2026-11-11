@@ -55,6 +55,7 @@ from orchestrator.rsi_r1 import observations as OBS
 from orchestrator.rsi_r1 import prereg as PREREG
 from orchestrator.rsi_r1 import protocol as PT
 from orchestrator.rsi_r1 import repair as RPR
+from orchestrator.rsi_r1 import replay_driver as RPD
 from orchestrator.rsi_r1 import rubric as RUBRIC
 from orchestrator.rsi_r1 import runtime
 from orchestrator.rsi_r1 import sandbox as SANDBOX
@@ -746,6 +747,43 @@ def cmd_study(args: argparse.Namespace) -> int:
     return 0 if report["status"] == "COMPLETED" else 2
 
 
+def cmd_replay(args: argparse.Namespace) -> int:
+    """T8 独立复跑：零模型 POST、真容器；比对件只封一次。
+
+    不建网关、不占任何 lane 呼量（账本恒不动），因此**不需要**付费环境闸与
+    批准件；但会真跑容器，必须显式 ``--real-containers``。study A 需
+    root≥STUDY_A、study B 需 root≥STUDY_B，且两 study 的判据/主张件齐备。
+    """
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    study = str(args.id).strip().upper()
+    if study not in ST.STUDIES:
+        raise CliError(f"--id 只能是 A 或 B，收到 {args.id!r}")
+    if not args.real_containers:
+        raise CliError("复跑会真跑容器：需显式 --real-containers（无模型 POST）")
+    assert_rsi_r1_roots_isolated()
+    lock_doc = ctx.read_json(LK.LOCK_RELPATH)
+    image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
+    if not image:
+        raise CliError("缺 --image 且 LOCK 未登记镜像 pin")
+    report = RPD.run_replay(
+        ctx, study=study, runner=SANDBOX.DockerRunner(), image=image,
+        batch_id=args.batch_id, max_steps=args.max_steps)
+    print(f"replay {study} {report['status']}  runs={report['n_runs_used']}/"
+          f"{report['n_expected']}  root={report.get('root_after')}  "
+          f"attempt={report['attempt']}")
+    if report.get("summary"):
+        s2 = report["summary"]
+        print(f"  comparison ok={s2['ok']} failed={s2['failed']} "
+              f"identical={s2['identical']}  problems={len(report['problems'])}")
+    else:
+        print("  blocked=infra：无比对件，修复后可在同一 root 重试")
+    print(f"  report={ctx.relative(RPD.report_relpath(study))}"
+          + (f"  comparison={ctx.relative(RPD.comparison_relpath(study))}"
+             if report.get("comparison_relpath") else ""))
+    return 0 if report["status"] in (RPD.STATUS_COMPLETE, RPD.STATUS_MISMATCH) else 2
+
+
 def cmd_repair_authorize(args: argparse.Namespace) -> int:
     """写 Plan §8.1 的一次性修复授权（新 root INIT 位）+ 旧消耗逐字节搬入。"""
     envelope = C.require_safe_id(args.envelope, where="--envelope")
@@ -1099,6 +1137,22 @@ def build_parser() -> argparse.ArgumentParser:
     psty.add_argument("--note", default=None, help="批准件备注")
     psty.set_defaults(func=cmd_study)
 
+    prp = sub.add_parser(
+        "replay",
+        help="T8 独立复跑（A/B 各一次；零模型 POST + 真容器；比对件只封一次）")
+    prp.add_argument("--envelope", required=True)
+    prp.add_argument("--id", required=True, choices=["A", "B", "a", "b"],
+                     help="研究编号：A 或 B（须该 study 已收官）")
+    prp.add_argument("--batch-id", required=True,
+                     help="复跑观测批次名（新批次；不得与既有批次重名）")
+    prp.add_argument("--image", default=None,
+                     help="容器镜像 name@sha256:<64>（缺省取 LOCK 登记值）")
+    prp.add_argument("--max-steps", type=int, default=None,
+                     help="整批物理步数帽（缺省取 contract/budget.json）")
+    prp.add_argument("--real-containers", action="store_true",
+                     help="确认真跑容器（无模型 POST、零付费）")
+    prp.set_defaults(func=cmd_replay)
+
     pra = sub.add_parser(
         "repair-authorize",
         help="Plan §8.1 一次性修复授权（新 root 的 INIT 位；旧消耗逐字节搬入）")
@@ -1156,7 +1210,7 @@ def main(argv: "list[str] | None" = None) -> int:
             SCENES.SceneError, OBS.ObservationError,
             CAL.CalibrationError, LK.LockError, PT.ProtocolError,
             RPR.RepairError, CLOSEOUT.CloseoutError, CLOSURE.ClosureError,
-            STD.StudyError, runtime.CampaignError,
+            STD.StudyError, RPD.ReplayDriverError, runtime.CampaignError,
             GT.TransportError, ASM.AssemblyError, QL.QuotaError,
             ST.StateError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)

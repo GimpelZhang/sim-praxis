@@ -466,6 +466,30 @@ class ConfirmManifest:
         return len(self.assignments)
 
 
+def manifest_from_doc(doc: "Mapping[str, Any]") -> ConfirmManifest:
+    """从落盘 manifest 文档重建（T8 复跑的新进程入口，不依赖 dispatcher 内存）。
+
+    文档若带 ``manifest_sha256`` 则**重算比对**：确认批的分配件是科学事实，
+    落盘后被改动一律 fail-closed，不复用半可信件。
+    """
+    manifest = ConfirmManifest(
+        study_id=str(doc["study_id"]), plan_sha256=str(doc["plan_sha256"]),
+        keeper_seed_sha256=str(doc["keeper_seed_sha256"]),
+        block_count=int(doc["block_count"]),
+        varying={k: (str(v[0]), str(v[1]))
+                 for k, v in dict(doc["varying"]).items()},
+        assignments=tuple(
+            ConfirmAssignment(condition_id=str(a["condition_id"]),
+                              block_id=str(a["block_id"]),
+                              params=dict(a["params"]))
+            for a in doc["assignments"]))
+    stored = doc.get("manifest_sha256")
+    if stored is not None and str(stored) != manifest.sha256:
+        raise _err("MANIFEST_TAMPERED",
+                   f"manifest_sha256 {stored!r} != 重算 {manifest.sha256}")
+    return manifest
+
+
 @_public
 def allocate_confirm(plan: C.ResearchPlan, keeper_seed: Any) -> ConfirmManifest:
     """host 用私有 keeper seed 把已锁 plan 的分布展开成 32×条件 的确认批。
