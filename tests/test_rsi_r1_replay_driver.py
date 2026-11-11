@@ -187,3 +187,21 @@ def test_both_studies_sealed_advance_root_to_replay(tmp_path: Path) -> None:
     assert second["status"] == RPD.STATUS_COMPLETE
     assert second["root_after"] == S.ROOT_REPLAY
     assert S.ResearchState(driver.ctx).root_state() == S.ROOT_REPLAY
+
+
+def test_missing_original_is_a_driver_error_not_a_crash(tmp_path: Path) -> None:
+    """原件观测缺件必须变成可机读的 ``ReplayDriverError``（不是裸 traceback）。
+
+    2026-11-11 审计：读回路径会抛 ``ObservationError``/``LoopError``，驱动层若
+    只按 ``LoopError`` 捕获（且未导入模块）就是运维故障变 NameError/AttributeError，
+    T8 无法给出 BLOCKED 报告。
+    """
+    driver = _driver(tmp_path)
+    _study(driver, "A", batch="drvA")
+    base = sorted(driver.ctx.subdir("observations").glob("confirm-A-*"))[-1]
+    victim = sorted(base.glob("*.jsonl"))[0]
+    victim.unlink()
+    with pytest.raises(RPD.ReplayDriverError) as exc:
+        _replay(driver, "A")
+    assert exc.value.code == "MANIFEST_MISSING"
+    assert str(victim) in exc.value.detail

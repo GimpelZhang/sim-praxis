@@ -470,7 +470,8 @@ class CampaignDispatcher:
             study=self.study, study_state=str(status["state"]),
             artifacts=status["artifacts"], last_batch=self.last_batch,
             budget_slots_remaining=max(0, cap - used),
-            confirm_token=lock.get("token"))
+            confirm_token=lock.get("token"),
+            plan_doc=self._latest_plan_doc())
 
     # -- 动作绑定 --------------------------------------------------------
     def _binding(self, action: L.Action) -> "tuple[str, str]":
@@ -501,6 +502,13 @@ class CampaignDispatcher:
             raise L.LoopError("UNKNOWN_ACTION", action.name, terminal=True)
         try:
             return handler(action)
+        except L.LoopError as exc:
+            # 可自修语义（RUN_UNKNOWN/UNBOUND_SOURCE/PLAN_MISSING/…）必须以
+            # **回包**交给候选，而不是逃出循环被驱动当成终止——一次字段手滑
+            # 烧掉整条 study 的 48 呼。真正终止类（terminal=True）照旧上抛。
+            if exc.terminal:
+                raise
+            return self._fail(exc.code, exc.detail)
         except (C.ContractError, E.ExperimentError, S.StateError,
                 J.JudgeError, RP.ReplayError, CL.ClosureError,
                 SB.SandboxError, O.ObservationError, AssemblyError) as exc:
@@ -603,8 +611,12 @@ class CampaignDispatcher:
             work_root=self.ctx.subdir("trials") / f"analysis-{source_sha[:12]}",
             runner=self.runner, image=self.image, retain_bytes=True)
         if ev.exit_code != 0 or ev.timed_out:
-            return self._fail("ANALYSIS_FAILED",
-                              f"exit={ev.exit_code} timeout={ev.timed_out}")
+            # 与 DESIGN_FAILED 对称：代码报错必须带容器 stderr 尾巴，
+            # 否则候选只能看到 exit=1 盲改（T6 已证明这是最大摩擦点）。
+            tail = " ".join(str(ev.stderr_tail or "").split())[-600:]
+            return self._fail(
+                "ANALYSIS_FAILED",
+                f"exit={ev.exit_code} timeout={ev.timed_out} stderr={tail!r}")
         payload = ev.blobs.get(ANALYSIS_OUTPUT)
         if payload is None:
             return self._fail("ANALYSIS_MISSING",
@@ -613,6 +625,12 @@ class CampaignDispatcher:
             doc = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             return self._fail("ANALYSIS_INVALID", str(exc))
+        produced = doc.get("n_runs") if isinstance(doc, Mapping) else None
+        if not isinstance(produced, int) or produced != len(wanted):
+            return self._fail(
+                "ANALYSIS_RUNS_MISMATCH",
+                f"analysis.n_runs={produced!r} != 请求的 {len(wanted)} 个 run"
+                "（观测视图是**平铺**的 `*.jsonl`，不是 `*/*.jsonl`）")
         rel = f"analysis/{source_sha[:12]}-{_sha_doc(doc)[:12]}.json"
         self.ctx.write_json(rel, doc)
         # 候选必须看到自己程序的真实输出才能写 claims（§8.1「submit 必须消费
@@ -629,9 +647,15 @@ class CampaignDispatcher:
         # （round 1 的 `SOURCE_SHA_INVALID` 纯格式闸就此变成可解释的
         # `PARENT_SHA_MISMATCH`）。两者都不放宽任何其它字段。
         expect_parent = self._explore_plan_sha()
+        if expect_parent is None:
+            # 没有探索计划时 confirm 的 parent_sha 无锚点：放开会让「未经探索
+            # 校准的确认集」照跑照判。此前的 None==None 相等恰好放行了
+            # parent_sha=null 的冻结，是科学链上的缺口。
+            return self._fail(
+                "PARENT_MISSING",
+                "尚无探索计划：confirm 计划必须以探索计划的 sha 为 parent_sha"
+                "（先 propose_plan + run_batch，或写 \"host\" 前提是已有探索计划）")
         if plan_doc.get("parent_sha") == L.HOST_PLAN_SHA:
-            if expect_parent is None:
-                return self._fail("PARENT_MISSING", "尚无探索计划可作为 parent_sha")
             plan_doc["parent_sha"] = expect_parent
         plan = C.ResearchPlan.from_dict(plan_doc)
         if plan.phase != "confirm":
@@ -651,12 +675,17 @@ class CampaignDispatcher:
         analysis_sha = _require_sha256(action.doc["analysis_sha256"],
                                        where="analysis_sha256")
         # 确认集先由 host 私有 keeper seed 展开，算力门要按真实分配数判。
-        manifest = E.allocate_confirm(plan, self._keeper_seed())
+        # seed 只在冻结真正落成后才落盘：一次非法 freeze 尝试不应留下
+        # 未使用的私有 seed（证据包里会出现无归属件）。
+        seed, seed_path, seed_is_new = self._keeper_seed_for_freeze()
+        manifest = E.allocate_confirm(plan, seed)
         n = manifest.n_assignments
         self.admission.require_lane_space(confirm_runs=n, replay_runs=n)
         lock = self.state.freeze_confirm(study=self.study, plan=plan.to_dict(),
                                          design_sha256=design_sha,
                                          analysis_sha256=analysis_sha)
+        if seed_is_new:
+            _write_private(seed_path, (seed + "\n").encode("utf-8"))
         # 冻结件只留 plan sha；确认计划原文落到 confirm/ 供重入与判据复算
         # （锁内适配：append_plan 只收 explore 修订，confirm 计划由冻结动作携带）。
         self.ctx.write_json(f"confirm/plan_{self.study}.json", plan.to_dict())
@@ -717,17 +746,20 @@ class CampaignDispatcher:
         self.last_batch = {"phase": "confirm", "n_runs": len(run_ids),
                            "blocked": False, "run_ids": run_ids[:64],
                            "manifest_sha256": _sha_doc(manifest_out)}
-        return self._ok(run_ids=run_ids, n_runs=len(ordered),
-                        result_sha256=result_sha)
+        # 第 8 步 claims 要逐字段复现宿主从**确认批**重算的值，但候选从未见过
+        # 确认批的数值（观测只在容器里、run_confirm 只回 id）：不把宿主用公开
+        # 估计量算出的参考值回灌，submit 分支在物理上不可能通过。这里给的是
+        # 「你自己这批观测的测量结果」，判据仍从 raw 独立重算并 1e-8 比对。
+        references = J.reference_claims(plan=plan, manifest=manifest,
+                                        artifacts=artifacts)
+        return self._ok(run_ids_head=run_ids[:8], n_runs=len(ordered),
+                        result_sha256=result_sha, references=references)
 
     # -- 7) submit_claim -------------------------------------------------
     def _do_submit_claim(self, action: L.Action) -> "dict[str, Any]":
         response_id, _ = self._binding(action)
         claims = [dict(c) for c in action.doc["claims"]]
         report_text = str(action.doc["report_text"])
-        self.state.submit_claim(study=self.study, claims=claims,
-                                report_text=report_text,
-                                response_id=response_id)
         plan = self._current_plan(phase="confirm")
         manifest = self.confirm_manifest or self._frozen_manifest_raw()
         if manifest is None:
@@ -737,9 +769,15 @@ class CampaignDispatcher:
             "plan_sha256": plan.sha256,
             "confirm_manifest_sha256": manifest.sha256,
             "primary_contrast_id": plan.primary.id, "claims": claims}
+        # 先判后记：judge 抛错/判负都不应把状态推到 CLAIM_SUBMITTED——
+        # 旧顺序（先 state.submit_claim 再判）会让一次 judge 异常把 study
+        # 钉死在不可重试的终态。
         report = J.judge_study(plan=plan, manifest=manifest,
-                               artifacts=self.confirm_artifacts,
+                               artifacts=self._confirm_artifacts(),
                                submission=submission)
+        self.state.submit_claim(study=self.study, claims=claims,
+                                report_text=report_text,
+                                response_id=response_id)
         CL.write_claim_submission(self.ctx, self.study, submission)
         CL.write_judge_report(self.ctx, self.study, report)
         verdict = self._verdict(report)
@@ -840,6 +878,13 @@ class CampaignDispatcher:
         _write_private(path, (seed + "\n").encode("utf-8"))
         return seed
 
+    def _keeper_seed_for_freeze(self) -> "tuple[str, Any, bool]":
+        """读已有 seed，或生成一个**待落盘**的新 seed（返回 (seed, path, is_new)）。"""
+        path = self.ctx.relative(f"private/keeper_{self.study}.seed")
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip(), path, False
+        return secrets.token_hex(32), path, True
+
     def _frozen_manifest(self, token: str) -> "E.ConfirmManifest":
         lock = self.state.confirm_lock(self.study)
         if token != lock.token:
@@ -861,6 +906,33 @@ class CampaignDispatcher:
             specs: Sequence[E.ExperimentSpec]) -> "dict[str, dict[str, Any]]":
         return collect_batch_artifacts(self.ctx.subdir("observations"),
                                        str(backend.batch_id), specs)
+
+    def _confirm_artifacts(self) -> "dict[str, dict[str, Any]]":
+        """确认批原件的按需读回（进程重入后内存为空时从落盘件恢复）。
+
+        旧实现只在 ``run_confirm`` 内存里赋值；同 root 续跑/崩溃重入后
+        ``submit_claim`` 拿空 artifacts 判 ``J-RUN-SET``，把本可验证的确认批
+        记成仪器失败。这里与 T8 复跑同一条读回路径（manifest 先验、逐件 sha）。
+        """
+        if self.confirm_artifacts:
+            return self.confirm_artifacts
+        manifest = self._frozen_manifest_raw()
+        if manifest is None:
+            raise L.LoopError("CONFIRM_NOT_LOCKED", "缺 confirm/manifest 落盘件")
+        plan = self._current_plan(phase="confirm")
+        specs = J.build_specs(plan, manifest)
+        lock = self.state.confirm_lock(self.study)
+        batch = confirm_batch_id(self.study, lock.token)
+        base = self.ctx.subdir("observations") / batch
+        doc_manifest = base / "manifest.json"
+        if not doc_manifest.is_file():
+            raise L.LoopError("OBSERVATION_MISSING", str(doc_manifest))
+        O.verify_manifest(json.loads(doc_manifest.read_text(encoding="utf-8")),
+                          base)
+        self.confirm_artifacts = collect_batch_artifacts(
+            self.ctx.subdir("observations"), batch,
+            [specs[rid] for rid in sorted(specs)])
+        return self.confirm_artifacts
 
 
 def confirm_batch_id(study: str, token: str) -> str:

@@ -143,3 +143,49 @@ def test_stable_nonce_is_deterministic_and_feedback_sensitive() -> None:
     assert T.stable_nonce({"x": 1, "y": 2}) == T.stable_nonce({"y": 2, "x": 1})
     # 段边界不会被拼接吞掉
     assert T.stable_nonce("ab", "c") != T.stable_nonce("a", "bc")
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-11 契约面审计：超帽回包必须保住候选作决定所需的字段
+# ---------------------------------------------------------------------------
+
+def _big_confirm_result(n_refs: int = 8) -> "dict":
+    refs = [{"hypothesis_id": f"h{i}", "contrast_id": f"c{i}",
+             "proposition": "位" * 400, "metric_id": "displacement_x_m",
+             "delta": -0.01, "estimate": 0.02, "lower": 0.01, "upper": 0.03,
+             "status": "OK", "n_blocks": 4} for i in range(n_refs)]
+    return {"ok": True, "action": "run_confirm", "confirm_token": "t" * 24,
+            "run_ids_head": [f"run-{i:03d}" for i in range(8)],
+            "n_runs": 12, "result_sha256": "f" * 64,
+            "references": refs, "message": "确认批完成 " + "m" * 3000}
+
+
+def test_clip_keeps_references_and_run_summary() -> None:
+    """保结构截断：references 是模型唯一可用的确认批数值来源，绝不能丢。"""
+    turn = T.Turn(model_text="{}", result=_big_confirm_result()).clipped()
+    body = turn.result
+    assert body["ok"] is True and body.get("truncated") is True
+    assert isinstance(body.get("references"), list) and body["references"]
+    assert body["n_runs"] == 12 and len(body["run_ids_head"]) == 8
+    # 每条参考都保住结构键（字符串可被截短，但不是整包丢弃）
+    first = body["references"][0]
+    assert {"hypothesis_id", "metric_id", "delta", "estimate", "lower",
+            "upper"} <= set(first)
+    assert len(json.dumps(body, ensure_ascii=False,
+                          sort_keys=True).encode("utf-8")) <= T.TOOL_REPLY_MAX_BYTES
+
+
+def test_compact_fallback_keeps_analysis_and_references() -> None:
+    """结构截断仍超帽时退到白名单，白名单必须包含 analyze/confirm 的关键键。"""
+    result = _big_confirm_result()
+    result["analysis"] = {"n_runs": 12, "summary": "s" * 200}
+    result["analysis_relpath"] = "analysis/A-n1.json"
+    for i in range(40):  # 大量无关键把总字节推过帽，逼出 compact 分支
+        result[f"noise_{i:02d}"] = "n" * 200
+    body = T.Turn(model_text="{}", result=result).clipped().result
+    assert body.get("truncated") is True
+    assert body.get("code") == "RESULT_TRUNCATED"
+    assert "references" in body and "analysis" in body
+    assert body.get("n_runs") == 12
+    assert len(json.dumps(body, ensure_ascii=False,
+                          sort_keys=True).encode("utf-8")) <= T.TOOL_REPLY_MAX_BYTES

@@ -163,6 +163,31 @@ def test_parse_rejects_bad_claims() -> None:
     assert exc.value.code == "FIELD_TOO_LARGE"
 
 
+def test_claims_reject_non_finite_numbers() -> None:
+    """NaN/inf 能过 json.loads（非严格 JSON），但绝不许进主张/区间的数值面。"""
+    base = _all_actions()["submit_claim"]
+    good = dict(base["claims"][0])
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        for key in ("delta", "estimate", "lower", "upper"):
+            with pytest.raises(L.LoopError) as exc:
+                L.parse_action(json.dumps({**base,
+                                           "claims": [{**good, key: bad}]}))
+            assert exc.value.code == "WRONG_TYPE"
+
+
+def test_claims_accept_n_blocks_and_reject_other_extras() -> None:
+    """``n_blocks`` 是宿主回灌的参考字段，允许带；其余多余键一律拒。"""
+    base = _all_actions()["submit_claim"]
+    good = dict(base["claims"][0])
+    doc = {**base, "claims": [{**good, "n_blocks": 4}]}
+    parsed = L.parse_action(json.dumps(doc))
+    assert set(parsed.to_doc()) == set(base)  # 解析结果仍逐字原样
+    with pytest.raises(L.LoopError) as exc:
+        L.parse_action(json.dumps({**base,
+                                   "claims": [{**good, "status": "x"}]}))
+    assert exc.value.code == "UNKNOWN_KEY"
+
+
 def test_report_text_is_required_and_bounded() -> None:
     base = _all_actions()["submit_claim"]
     with pytest.raises(L.LoopError) as exc:
@@ -206,7 +231,8 @@ def test_rendered_brief_carries_only_public_state_and_nonce() -> None:
     # 隐藏面（私有 block / seed / 确认集）不得出现在渲染里
     body = json.loads(brief.split("\n", 1)[1].rsplit("\n\n请给出", 1)[0])
     assert set(body) == {"study", "state", "artifacts", "last_batch",
-                         "budget_slots_remaining", "confirm_token", "nonce"}
+                         "budget_slots_remaining", "confirm_token",
+                         "plan", "nonce"}
     assert "seed" not in brief.lower() and "private" not in brief.lower()
 
 

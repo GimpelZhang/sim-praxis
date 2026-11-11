@@ -438,6 +438,45 @@ def _judge_contrast(plan: C.ResearchPlan, per_run: Mapping[str, Mapping[str, Any
             "lower": lower, "upper": upper, "status": status}
 
 
+def reference_claims(*, plan: C.ResearchPlan, manifest: E.ConfirmManifest,
+                     artifacts: Mapping[str, Mapping[str, Any]]
+                     ) -> "list[dict[str, Any]]":
+    """从确认批原始观测算出每条假设的参考值（``run_confirm`` 回包用）。
+
+    候选在容器里只能看到探索批的观测；确认批的数值从未以任何形式到达模型面。
+    若 submit 的 claims 要求逐字段复现宿主从确认批重算的值，而不把测量结果
+    回灌，该分支物理上不可能通过。这里用**与判决同一条**代码路径
+    （``build_specs`` → ``recompute_metrics`` → ``_judge_contrast``，公开估计量）
+    给出每假设的 estimate/lower/upper；judge 在 submit 时仍从 raw 独立重算并
+    按 1e-8 + 1e-6×|ref| 比对，回灌不构成任何自证。
+    """
+    specs = build_specs(plan, manifest)
+    missing = sorted(set(specs) - set(artifacts))
+    if missing:
+        raise JudgeError("MISSING_RECORD", f"缺 {missing[:5]} 的运行记录")
+    per_run = recompute_metrics(plan=plan, artifacts=artifacts, specs=specs)
+    by_id: "dict[str, dict[str, Any]]" = {}
+    for contrast in _contrasts(plan):
+        by_id[contrast.id] = _judge_contrast(plan, per_run, contrast, [])
+    out: "list[dict[str, Any]]" = []
+    for hypothesis in plan.hypotheses:
+        target = by_id.get(hypothesis.contrast_id)
+        if target is None or target.get("effect") is None:
+            # 无可配对 block/未知对比：没有可回灌的数（judge 会按规则判
+            # INCONCLUSIVE/CLAIM_INVALID），不在这里编造占位值。
+            continue
+        out.append({
+            "hypothesis_id": hypothesis.id,
+            "contrast_id": hypothesis.contrast_id,
+            "proposition": target["proposition"],
+            "metric_id": target["metric_id"],
+            "delta": float(target["delta"]),
+            "estimate": target["effect"], "lower": target["lower"],
+            "upper": target["upper"], "status": target["status"],
+            "n_blocks": target["n_blocks"]})
+    return out
+
+
 def _schema_check(plan: C.ResearchPlan, submission: "Mapping[str, Any] | None",
                   *, manifest_sha: str) -> "dict[str, Any]":
     if submission is None:

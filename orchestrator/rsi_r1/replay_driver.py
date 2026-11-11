@@ -31,6 +31,7 @@ from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import experiments as E
 from orchestrator.rsi_r1 import judge as J
 from orchestrator.rsi_r1 import lock as LK
+from orchestrator.rsi_r1 import loop as L
 from orchestrator.rsi_r1 import observations as O
 from orchestrator.rsi_r1 import protocol as PT
 from orchestrator.rsi_r1 import replay as RP
@@ -173,7 +174,14 @@ def run_replay(
     plan, manifest, token = _load_locked_confirm(ctx, study, lock)
     specs = J.build_specs(plan, manifest)
     ordered = [specs[rid] for rid in sorted(specs)]
-    originals, original_root = _load_originals(ctx, study, token, specs)
+    try:
+        originals, original_root = _load_originals(ctx, study, token, specs)
+    # 观测缺件是运维面错误（manifest 验签失败/记录缺失），统一成可机读的驱动码；
+    # 否则同一条运维故障在 T8 表现为裸 traceback 而不是 BLOCKED 报告。
+    except (L.LoopError, O.ObservationError, KeyError, ValueError) as exc:
+        code = getattr(exc, "code", None) or type(exc).__name__
+        detail = getattr(exc, "detail", None) or str(exc)
+        raise ReplayDriverError(code, detail) from exc
 
     budget = C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json"))
     steps_cap = int(max_steps if max_steps is not None

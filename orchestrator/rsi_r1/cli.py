@@ -791,7 +791,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
 
     不建网关、不占任何 lane 呼量（账本恒不动），因此**不需要**付费环境闸与
     批准件；但会真跑容器，必须显式 ``--real-containers``。study A 需
-    root≥STUDY_A、study B 需 root≥STUDY_B，且两 study 的判据/主张件齐备。
+    root≥STUDY_A、study B 需 root≥STUDY_B，且**目标 study** 的判据/主张件齐备。
     """
     envelope = C.require_safe_id(args.envelope, where="--envelope")
     ctx, _ = _load_envelope_contract(envelope)

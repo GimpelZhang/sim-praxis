@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -62,8 +63,8 @@ CHECK_POLICY_RULES = """\
 - {"action":"write_artifact","kind":"design|analysis","source":"<python 源码>"}
 - {"action":"propose_plan","plan":{<ResearchPlan>}}   （可另带 design_source/analysis_source）
 - {"action":"run_batch","plan_sha256":"<64hex>","design_sha256":"<64hex>","phase":"explore"}
-- {"action":"analyze","source_sha256":"<64hex>","run_ids":["<run_id>", ...]}
-- {"action":"freeze_confirm","plan_sha256":"<64hex>","design_sha256":"<64hex>","analysis_sha256":"<64hex>","plan":{<confirm plan>}}
+- {"action":"analyze","source_sha256":"<64hex>","run_ids":["<run_id>", ...]}   （单次 ≤ 64 个 run；更多 run 按对比拆成多次）
+- {"action":"freeze_confirm","plan_sha256":"<64hex>|host","design_sha256":"<64hex>","analysis_sha256":"<64hex>","plan":{<confirm plan>}}
 - {"action":"run_confirm","confirm_token":"<freeze 返回的 token>"}
 - {"action":"submit_claim","claims":[{<主张>}],"report_text":"<你的报告正文>"}
 
@@ -175,7 +176,7 @@ def _validate_claims(raw: Any) -> "list[dict[str, Any]]":
         missing = sorted(need - set(item))
         if missing:
             raise LoopError("MISSING_KEY", f"claims[{i}] 缺 {missing}")
-        extra = sorted(set(item) - need)
+        extra = sorted(set(item) - need - {"n_blocks"})
         if extra:
             raise LoopError("UNKNOWN_KEY", f"claims[{i}] 多余字段 {extra}")
         prop = item["proposition"]
@@ -187,6 +188,8 @@ def _validate_claims(raw: Any) -> "list[dict[str, Any]]":
         delta = item["delta"]
         if isinstance(delta, bool) or not isinstance(delta, (int, float)):
             raise LoopError("WRONG_TYPE", f"claims[{i}].delta 必须是数")
+        if not math.isfinite(float(delta)):
+            raise LoopError("WRONG_TYPE", f"claims[{i}].delta 必须是有限数")
         want = R.METRICS[metric]["delta"]
         if abs(float(delta) - float(want)) > 1e-12:
             raise LoopError("DELTA_DRIFT",
@@ -195,6 +198,9 @@ def _validate_claims(raw: Any) -> "list[dict[str, Any]]":
             v = item[key]
             if isinstance(v, bool) or not isinstance(v, (int, float)):
                 raise LoopError("WRONG_TYPE", f"claims[{i}].{key} 必须是数")
+            if not math.isfinite(float(v)):
+                raise LoopError("WRONG_TYPE",
+                                f"claims[{i}].{key} 必须是有限数（NaN/inf 不接受）")
         if not (float(item["lower"]) <= float(item["upper"])):
             raise LoopError("CI_INVALID", f"claims[{i}] lower > upper")
         out.append({"hypothesis_id": _require_str(item, "hypothesis_id",
@@ -297,30 +303,39 @@ class VisibleState:
     budget_slots_remaining: int
     confirm_token: "str | None"
     nonce: str
+    #: 当前最新探索计划全文（宿主逐字回灌）：freeze_confirm 要求把同一份文档
+    #: 改 phase/revision/parent_sha 后重发，但第 2 步可能已在数十呼之前、原文
+    #: 早已滚出历史窗口；不给全文时模型只能凭记忆重写，必然 PARENT_SHA_MISMATCH。
+    plan_doc: "Mapping[str, Any] | None" = None
 
     def as_public(self) -> "dict[str, Any]":
         return {"study": self.study, "state": self.study_state,
                 "artifacts": {k: list(v) for k, v in sorted(self.artifacts.items())},
                 "last_batch": None if self.last_batch is None else dict(self.last_batch),
                 "budget_slots_remaining": int(self.budget_slots_remaining),
-                "confirm_token": self.confirm_token, "nonce": self.nonce}
+                "confirm_token": self.confirm_token,
+                "plan": None if self.plan_doc is None else dict(self.plan_doc),
+                "nonce": self.nonce}
 
 
 def make_visible_state(*, study: str, study_state: str,
                        artifacts: Mapping[str, Sequence[str]],
                        last_batch: "Mapping[str, Any] | None",
                        budget_slots_remaining: int,
-                       confirm_token: "str | None") -> VisibleState:
+                       confirm_token: "str | None",
+                       plan_doc: "Mapping[str, Any] | None" = None) -> VisibleState:
     payload = {"study": study, "state": study_state,
                "artifacts": {k: list(v) for k, v in sorted(artifacts.items())},
                "last_batch": None if last_batch is None else dict(last_batch),
                "budget_slots_remaining": int(budget_slots_remaining),
-               "confirm_token": confirm_token}
+               "confirm_token": confirm_token,
+               "plan": None if plan_doc is None else dict(plan_doc)}
     nonce = T.stable_nonce(payload)
     return VisibleState(study=study, study_state=study_state, artifacts=artifacts,
                         last_batch=last_batch,
                         budget_slots_remaining=int(budget_slots_remaining),
-                        confirm_token=confirm_token, nonce=nonce)
+                        confirm_token=confirm_token, nonce=nonce,
+                        plan_doc=plan_doc)
 
 
 def render_system(*, extra_rules: str = "") -> str:

@@ -494,9 +494,9 @@ class StudyScript:
             token = str(self.results[5]["confirm_token"])
             return ({"action": "run_confirm", "confirm_token": token}, (token,))
         if index == 7:
-            run_ids = [str(r) for r in self.results[6]["run_ids"]]
+            n_runs = int(self.results[6]["n_runs"])
             body = (f"排演报告（study {s}）：零付费 mock 链，仅证明协议与产物"
-                    f"闭合，不声明研究结论。确认批 {len(run_ids)} run。")
+                    f"闭合，不声明研究结论。确认批 {n_runs} run。")
             return ({"action": "submit_claim", "claims": self._claims(),
                      "report_text": body},
                     (str(self.results[6]["result_sha256"]),))

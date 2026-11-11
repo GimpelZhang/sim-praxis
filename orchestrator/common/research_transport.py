@@ -119,12 +119,44 @@ class Turn:
                           sort_keys=True).encode("utf-8")) <= limit:
             return clipped
         keep = ("ok", "action", "run_id", "analysis_id", "analysis_ids", "path",
-                "sha256", "status", "claim", "cell", "code", "message")
+                "sha256", "status", "claim", "cell", "code", "message",
+                # 2026-11-11 审计：成功回包超 4096 字节时旧白名单会把
+                # analyze 的 analysis/run_ids 与 run_confirm 的 references
+                # 整包丢掉，模型看不到自己观测的数值，claim 分支必死。
+                "analysis", "analysis_relpath", "run_ids", "run_ids_head",
+                "n_runs", "confirm_token", "references")
         compact = {k: clipped[k] for k in keep if k in clipped}
         compact["message"] = clip_text(str(result.get("message") or ""), budget)
         compact["code"] = result.get("code") or "RESULT_TRUNCATED"
         compact["truncated"] = True
-        return compact
+
+        def _size(node: Any) -> int:
+            return len(json.dumps(node, ensure_ascii=False,
+                                  sort_keys=True).encode("utf-8"))
+
+        def tighten(node: Any, budget_: int, depth: int = 0) -> Any:
+            if depth > 6:
+                return node
+            if isinstance(node, str):
+                return clip_text(node, budget_)
+            if isinstance(node, Mapping):
+                return {k: tighten(v, budget_, depth + 1)
+                        for k, v in node.items()}
+            if isinstance(node, (list, tuple)):
+                return [tighten(v, budget_, depth + 1) for v in node]
+            return node
+
+        # 白名单本身也可能超帽（如 8 条 references 各带 1 KiB 正文）。逐档收紧
+        # 字符串预算直到塞进上限；数值键不受影响，结构键全部保留。
+        for divisor in (8, 16, 32, 64):
+            trial = tighten(compact, max(16, limit // divisor))
+            trial["truncated"] = True
+            if _size(trial) <= limit:
+                return trial
+        # 最后兜底：只留身份/状态键，message 收窄——绝不超帽。
+        return {"ok": ok, "code": compact["code"],
+                "message": clip_text(compact["message"], 128),
+                "truncated": True}
 
 
 # ---------------------------------------------------------------------------

@@ -363,14 +363,18 @@ PLAN_SENTINEL_NOTE = (
 
 _ACTIONS_BLOCK = (
     "### 八动作顺序（每个回复只给一个动作）\n"
-    "1. write_artifact(kind=design, source=<python>)>\n"
-    "2. propose_plan(plan=<ResearchPlan>)   ← 返回 plan_sha256\n"
+    "1. write_artifact(kind=design, source=<python>)\n"
+    "2. propose_plan(plan=<ResearchPlan>)   ← 返回 plan_sha256；计划全文也会在每轮的\n"
+    "   「当前可见状态.plan」里逐字回灌，freeze 时照它改字段即可\n"
     "3. run_batch(plan_sha256, design_sha256, phase=\"explore\")  ← 返回 run_ids\n"
     "4. write_artifact(kind=analysis, source=<python>)\n"
     "5. analyze(source_sha256, run_ids=[...])  ← 返回该程序的 analysis 结果\n"
+    "   （单次最多 64 个 run；确认批 run 更多时按对比拆成多次 analyze）\n"
     "6. freeze_confirm(plan_sha256=\"host\", design_sha256, analysis_sha256,\n"
     "                   plan=<confirm 计划>)  ← 返回 confirm_token\n"
-    "7. run_confirm(confirm_token)          ← 返回确认批 run_ids\n"
+    "7. run_confirm(confirm_token)  ← 返回确认批 run_ids_head 与 references：\n"
+    "   references 是宿主用公开估计量从**你这批确认观测**算出的每条假设的\n"
+    "   estimate/lower/upper（你自己看不到确认批数值，直接逐字复制即可）\n"
     "8. submit_claim(claims=[...], report_text=<正文>)\n")
 
 _SOURCE_TEMPLATES_BLOCK = (
@@ -380,16 +384,19 @@ _SOURCE_TEMPLATES_BLOCK = (
     "文档的 canonical sha256**：`sha256(json.dumps(plan, sort_keys=True,\n"
     "separators=(\",\", \":\"), ensure_ascii=False))`，示例里已写好这个函数。\n"
     "```python\n" + DESIGN_TEMPLATE + "```\n"
-    "analysis 程序：argv[1]=只读观测视图（`*/*.jsonl`），argv[2]=输出目录，\n"
-    "必须写 `analysis.json`。\n"
+    "analysis 程序：argv[1]=只读观测视图（run 文件**平铺**在根目录，"
+    "用 `glob(\"*.jsonl\")` 或 `rglob(\"*.jsonl\")`；不是 `*/*.jsonl`），"
+    "argv[2]=输出目录，\n必须写 `analysis.json`（含 `n_runs`，须等于请求的 run 数）。\n"
     "```python\n" + ANALYSIS_TEMPLATE + "```\n")
 
 _CLAIMS_BLOCK = (
     "### claims 字段（每个假设一条，逐条提交，不能汇总替代）\n"
     "`{\"hypothesis_id\", \"proposition\", \"metric_id\", \"delta\", \"estimate\",\n"
     "\"lower\", \"upper\"}`；`delta` 必须与公开合同里该指标的 δ 逐字相等（数值），\n"
-    "`metric_id`/`proposition` 必须与计划里的对比一致。宿主用上面的公开估计量独立\n"
-    "重算，并按 1e-8 + 1e-6×|参考值| 逐字段比对；不一致即 CLAIM_INVALID。\n")
+    "`metric_id`/`proposition` 必须与计划里的对比一致。**estimate/lower/upper 直接\n"
+    "逐字复制第 7 步 `run_confirm` 返回的 `references[i]` 同名同值**（那是宿主用\n"
+    "公开估计量从你自己的确认批观测算出的测量结果）。宿主仍会用公开估计量从 raw\n"
+    "独立重算，并按 1e-8 + 1e-6×|参考值| 逐字段比对；不一致即 CLAIM_INVALID。\n")
 
 
 def render_protocol_brief(lane: str) -> str:

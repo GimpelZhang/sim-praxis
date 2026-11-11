@@ -126,25 +126,19 @@ class ToyScript:
         return out
 
     def _claims(self) -> "list[dict[str, Any]]":
-        doc = dict(self._confirm_plan())
-        # 候选侧自用的合同对象：sentinel 换成真实探索计划 sha（与宿主替换一致）
-        if doc.get("parent_sha") == L.HOST_PLAN_SHA:
-            doc["parent_sha"] = self.explore_plan.sha256
-        plan = C.ResearchPlan.from_dict(doc)
-        manifest = self._manifest()
-        specs = J.build_specs(plan, manifest)
-        report = J.judge_study(plan=plan, manifest=manifest,
-                               artifacts=self._artifacts(list(specs)))
-        by_contrast = {c["id"]: c for c in report["layers"]["scientific"]}
+        # 确认批的数值只经 run_confirm 回包的 ``references`` 到达模型面——
+        # 这正是候选在真实战役里唯一的取值来源（容器里看不到确认批 raw）。
+        refs = list((self.results[6] or {}).get("references") or [])
+        if not refs:
+            raise AssertionError("run_confirm 未回传 references：主张无从取值")
         claims: "list[dict[str, Any]]" = []
-        for hid, hyp in sorted({h.id: h for h in plan.hypotheses}.items()):
-            row = by_contrast[hyp.contrast_id]
-            claims.append({"hypothesis_id": hid,
-                           "proposition": row["proposition"],
-                           "metric_id": row["metric_id"],
-                           "delta": float(row["delta"]),
-                           "estimate": row["effect"],
-                           "lower": row["lower"], "upper": row["upper"]})
+        for ref in refs:
+            claims.append({"hypothesis_id": ref["hypothesis_id"],
+                           "proposition": ref["proposition"],
+                           "metric_id": ref["metric_id"],
+                           "delta": float(ref["delta"]),
+                           "estimate": ref["estimate"],
+                           "lower": ref["lower"], "upper": ref["upper"]})
         return claims
 
     # -- 编排 -----------------------------------------------------------
@@ -181,9 +175,12 @@ class ToyScript:
             token = str(self.results[5]["confirm_token"])
             return ({"action": "run_confirm", "confirm_token": token}, (token,))
         if index == 7:
-            run_ids = [str(r) for r in self.results[6]["run_ids"]]
+            # run_confirm 回包只给 ``run_ids_head``（前 8 个）与 ``n_runs``：
+            # 完整 run 列表在超帽截断时会被压缩，计数必须用 n_runs。
+            n_runs = int(self.results[6]["n_runs"])
             body = (f"协议演练报告（study {s}）：公开玩具域、零付费 mock 链；"
-                    f"确认批 {len(run_ids)} run，claims 由候选侧按落盘证据独立重算。")
+                    f"确认批 {n_runs} run，claims 由宿主回传的 references "
+                    f"逐字段提交（judge 仍从 raw 独立重算）。")
             return ({"action": "submit_claim", "claims": self._claims(),
                      "report_text": body},
                     (str(self.results[6]["result_sha256"]),))
@@ -586,3 +583,65 @@ def test_cli_probe_refuses_without_paid_env_gate(
     # 环境闸先于批准件写入：拒绝路径不得留下任何票
     assert not (driver.ctx.root / "quota" / "approvals" / "t6cligate.json").exists()
     assert not driver.ctx.exists("protocol/report_probe.json")
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-11 契约面审计：可自修失败必须以回包到达候选、judge 先于状态
+# ---------------------------------------------------------------------------
+
+def _dispatcher(driver: RehearsalDriver, *, study: str = "A") -> Any:
+    lock = LK.load_frozen(driver.ctx)
+    _adm, _slots, dispatcher, _state = A.build_campaign_parts(
+        driver.ctx, spend=driver.spend, lane=f"study_{study}", study=study,
+        runner=driver.runner, image=REHEARSAL_IMAGE,
+        backend_factory=driver._factory(f"study_{study}"),
+        lock_sha256=lock.sha256)
+    return dispatcher
+
+
+def test_freeze_without_explore_plan_is_refused_not_free_passed(
+        frozen: RehearsalDriver) -> None:
+    """没有探索计划时 ``parent_sha=null`` 不得因 None==None 放行冻结。"""
+    dispatcher = _dispatcher(frozen)
+    # 分支级隔离：动作绑定来自 journal 事件，这条用例只验证 parent 锚点检查。
+    dispatcher._binding = lambda action: ("resp-probe", "sha-probe")
+    doc = PT.toy_plan_doc("A", phase="confirm", revision=2, parent_sha=None,
+                          design_sha256="d" * 64, analysis_sha256="e" * 64)
+    action = L.parse_action(json.dumps({
+        "action": "freeze_confirm", "plan_sha256": L.HOST_PLAN_SHA,
+        "design_sha256": "d" * 64, "analysis_sha256": "e" * 64, "plan": doc}))
+    result = dispatcher.execute_once(action, None)
+    assert result["ok"] is False and result["code"] == "PARENT_MISSING"
+    # 失败不落任何冻结件：可修后重试，不留孤儿 seed/manifest
+    assert not frozen.ctx.exists("confirm/plan_A.json")
+    assert not frozen.ctx.exists("confirm/manifest_A.json")
+
+
+def test_submit_claim_judge_failure_leaves_study_reopenable(
+        frozen: RehearsalDriver, monkeypatch: pytest.MonkeyPatch) -> None:
+    """先判后记：judge 抛错不得把 study 钉死在 CLAIM_SUBMITTED。"""
+    dispatcher = _dispatcher(frozen)
+    state = S.ResearchState(frozen.ctx)
+    before = state.study_state("A")
+    dispatcher._binding = lambda action: ("resp-probe", "sha-probe")
+    plan = C.ResearchPlan.from_dict(PT.toy_plan_doc(
+        "A", phase="confirm", revision=2,
+        design_sha256="d" * 64, analysis_sha256="e" * 64))
+    dispatcher._current_plan = lambda phase: plan
+    dispatcher.confirm_manifest = type("M", (), {"sha256": "f" * 64})()
+    dispatcher._confirm_artifacts = lambda: {}
+
+    def boom(**_kw: Any) -> Any:
+        raise J.JudgeError("JUDGE_BOOM", "注入的判据异常")
+
+    monkeypatch.setattr(J, "judge_study", boom)
+    good = {"hypothesis_id": "h1", "proposition": "decrease_gt",
+            "metric_id": "displacement_x_m", "delta": 0.001,
+            "estimate": 0.02, "lower": 0.01, "upper": 0.03}
+    action = L.parse_action(json.dumps({
+        "action": "submit_claim", "claims": [good], "report_text": "报告"}))
+    result = dispatcher.execute_once(action, None)
+    assert result["ok"] is False and result["code"] == "JUDGE_BOOM"
+    assert state.study_state("A") == before, "judge 失败不许推进状态"
+    assert not frozen.ctx.exists("judge/report_A.json")
+    assert not frozen.ctx.exists("claim/submission_A.json")
