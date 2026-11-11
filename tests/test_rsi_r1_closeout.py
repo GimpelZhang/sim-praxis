@@ -134,7 +134,11 @@ def test_cost_accounting_exact_and_unknown(tmp_path: Path) -> None:
     assert cost["usd"]["value"] is None
     assert cost["usd"]["bound_max"] == "12.24"
     assert readout["approvals_not_used"] == {BATCH: 1}
-    assert readout["human"]["known_minutes_total"] == 0.0
+    # AC34「未知不填 0」：没有机器计时的人工事件时，分钟数是 null 不是 0.0。
+    assert readout["human"]["timing"] == "UNKNOWN"
+    assert readout["human"]["known_minutes_total"] is None
+    assert readout["human"]["known_seconds_total"] is None
+    assert readout["human"]["out_of_band"]["machine_timed"] is False
     assert readout["human"]["complete"] is True
 
 
@@ -286,3 +290,157 @@ def test_adopt_context_refuses_foreign_root(tmp_path: Path) -> None:
     root = _campaign(tmp_path)
     with pytest.raises(RT.CampaignRootRefused):
         RT.adopt_context("other_env", root)
+
+
+# ---------------------------------------------------------------------------
+# 评审修复的负面用例（CRITICAL/M1–M7）
+# ---------------------------------------------------------------------------
+
+def _journal_lines(entries) -> str:
+    """按生产 Journal 的链式 sha 生成 human_events 行（测试侧独立实现）。"""
+    prev, out = None, []
+    for i, (event, payload, ts) in enumerate(entries, 1):
+        doc = {"schema": "simpraxis.rsi_r1.event.v1", "seq": i, "ts_iso": ts,
+               "event": event, "payload": payload, "prev_sha256": prev}
+        sha = hashlib.sha256(json.dumps(
+            doc, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode("utf-8")).hexdigest()
+        doc["sha256"] = sha
+        prev = sha
+        out.append(json.dumps(doc, ensure_ascii=False) + "\n")
+    return "".join(out)
+
+
+def _human_event_file(root: Path, *, end: bool = True) -> None:
+    entries = [("human_event_begin",
+                {"event_id": "he-1", "kind": "approval", "actor": "user",
+                 "reason": "Gate2 真人复核", "artifact_refs": [],
+                 "start_utc": "2026-11-11T10:00:00Z", "study": None,
+                 "touch": None}, "2026-11-11T10:00:00Z")]
+    if end:
+        entries.append(("human_event_end",
+                        {"event_id": "he-1", "end_utc": "2026-11-11T10:30:00Z"},
+                        "2026-11-11T10:30:00Z"))
+    path = root / "human_events" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_journal_lines(entries), encoding="utf-8")
+
+
+def test_human_minutes_come_from_machine_timing(tmp_path: Path) -> None:
+    root = _campaign(tmp_path)
+    _human_event_file(root)
+    readout = _build(root)
+    assert readout["human"]["n_events"] == 1
+    assert readout["human"]["timing"] == "TIMED"
+    assert readout["human"]["known_minutes_total"] == 30.0
+    assert CHK.Checker(root).run()["verdict"] == "PASS"
+    # 改分钟数（并重算锚点）必须被独立折叠识破。
+    def fn(doc):
+        doc["human"]["known_minutes_total"] = 0.0
+        doc["human"]["known_seconds_total"] = 0.0
+        _reanchor(doc)
+    _mutate(root / CL.READOUT_RELPATH, fn)
+    out = CHK.Checker(root).run()
+    assert any(p.startswith("X-HUMAN-MINUTES") for p in out["problems"])
+
+
+def test_human_unknown_event_never_zero(tmp_path: Path) -> None:
+    """未闭合事件 ⇒ timing UNKNOWN、分钟 null；机判不得把它读成 0。"""
+    root = _campaign(tmp_path)
+    _human_event_file(root, end=False)
+    readout = _build(root)
+    assert readout["human"]["timing"] == "UNKNOWN"
+    assert readout["human"]["known_minutes_total"] is None
+    assert readout["human"]["complete"] is False
+    out = CHK.Checker(root).run()
+    assert out["verdict"] == "PASS", out["problems"]
+
+
+def test_checker_rejects_forged_axes_with_recomputed_anchor(tmp_path: Path) -> None:
+    """CRITICAL：把 claim/r1 抬到最强并重算锚点，独立机判仍须拒。"""
+    root = _campaign(tmp_path)
+    _build(root)
+
+    def fn(doc):
+        doc["axes"].update({"study_execution": "COMPLETED",
+                            "measurement": "VALID", "claim": "SUPPORTED",
+                            "r1": "MINIMAL_RESEARCH_LOOP_ESTABLISHED"})
+        doc["process_reasons"] = []
+        _reanchor(doc)
+
+    _mutate(root / CL.READOUT_RELPATH, fn)
+    out = CHK.Checker(root).run()
+    assert out["verdict"] == "FAIL"
+    ids = {p.split(":")[0] for p in out["problems"]}
+    assert "X-AXES-R1-MINIMAL" in ids
+    assert "X-AXES-NO-JUDGE" in ids
+
+
+def test_checker_rejects_approval_removed_after_build(tmp_path: Path) -> None:
+    """M1：批报件在 build 后被删，机判必须从盘面重算出来，不信 readout。"""
+    root = _campaign(tmp_path)
+    _build(root)
+    assert CHK.Checker(root).run()["verdict"] == "PASS"
+    (root / "quota" / "approvals" / f"{BATCH}.json").unlink()
+    out = CHK.Checker(root).run()
+    ids = {p.split(":")[0] for p in out["problems"]}
+    assert "X-BATCH-R1-RP1-probe1-APPROVAL" in ids
+    assert "X-PROCESS" in ids
+
+
+def test_checker_rejects_failure_evidence_sha_mismatch(tmp_path: Path) -> None:
+    """M5：失败谱系证据的登记 sha 与盘上字节不符 ⇒ FAIL。"""
+    root = _campaign(tmp_path)
+    _build(root)
+    evidence = root / "protocol" / "report_probe.json"
+
+    def fn(doc):
+        doc["entries"][0]["evidence"][0]["sha256"] = "0" * 64
+
+    _mutate(root / CL.FAILURE_MAP_RELPATH, fn)
+    assert evidence.is_file()
+    out = CHK.Checker(root).run()
+    assert any(p.startswith("X-FAILURE-EVIDENCE-SHA") for p in out["problems"])
+
+
+def test_repair_evidence_retained_with_sha(tmp_path: Path) -> None:
+    """§8.1 授权件的证据项必须进失败谱系（旧实现会静默丢成 evidence: []）。"""
+    root = _campaign(tmp_path)
+    defect = tmp_path / "defect.txt"
+    defect.write_text("boom", encoding="utf-8")
+    sha = hashlib.sha256(b"boom").hexdigest()
+    repair_doc = {"evidence": {"d01": {"path": str(defect), "sha256": sha,
+                                       "bytes": 4}}}
+    entries = CL._failure_entries(root, {}, repair_doc, {})
+    auth = [e for e in entries if e["id"] == "repair_authorization"][0]
+    assert auth["evidence"], "授权件证据不得为空"
+    assert auth["evidence"][0]["sha256"] == sha
+    assert auth["evidence"][0]["declared_sha256"] == sha
+    assert auth["evidence"][0]["sha_match"] is True
+
+
+def test_adopt_context_refuses_archived_root(tmp_path: Path) -> None:
+    """M6：§8.1 换 root 后旧根进家族登记，结案工具拒绝往里写。"""
+    root = _campaign(tmp_path)
+    RT.register_archived_root(root, reason="§8.1 换 root 旧根只读",
+                              clock="2026-11-11T12:00:00Z")
+    assert RT.is_archived_root(root) is not None
+    with pytest.raises(RT.CampaignRootRefused):
+        RT.adopt_context("r1_test", root)
+
+
+def test_pack_must_bind_to_the_same_root(tmp_path: Path) -> None:
+    """MINOR：manifest 的 campaign_root 必须是被核对的根，否则换个根也「验过」。"""
+    root = _campaign(tmp_path)
+    _build(root)
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    payload = pack / "a.txt"
+    payload.write_text("x", encoding="utf-8")
+    _write(pack / "evidence_manifest.json", {
+        "campaign_root": "/somewhere/else", "n_files": 1, "total_bytes": 1,
+        "files": {"a.txt": hashlib.sha256(b"x").hexdigest()}})
+    checker = CHK.Checker(root)
+    checker.verify_pack(pack)
+    root_check = [c for c in checker.checks if c["id"] == "P-MANIFEST-ROOT"][0]
+    assert root_check["ok"] is False

@@ -137,11 +137,15 @@ def artifact_inventory(root: Path) -> "dict[str, Any]":
 
 
 def studies_started(inventory: Mapping[str, Any]) -> bool:
+    """只认 **A/B 的研究产物**。``practice`` 报告是「研究前的协议练习」，它存在
+    （尤其练习帽尽 ``NOT_MEASURED``）**不等于**研究已启动——§11.2 明写练习帽尽
+    落 NOT_MEASURED；把 practice 当启动会把预注册的退出抬成 INCOMPLETE_COVERAGE。
+    """
     for study in STUDIES:
         entry = (inventory.get("studies") or {}).get(study) or {}
         if any(bool(v) for v in entry.values()):
             return True
-    return bool(inventory.get("practice_report"))
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +197,10 @@ def batch_facts(root: Path, rows: "list[dict[str, Any]]",
     source_root = (Path(str((carryover or {}).get("source_root") or ""))
                    if carried_n else None)
     batches: "dict[str, dict[str, Any]]" = {}
-    for index, row in enumerate(rows):
+    # 继承判定按 **call 行**的下标：账本里可能有 ``event != "call"`` 的开账/事件行，
+    # 用全表下标会把事件行算进或挤掉 call 行。
+    carried_seen = 0
+    for row in rows:
         if row.get("event", "call") != "call":
             continue
         bid = str(row.get("batch_id") or "")
@@ -205,8 +212,9 @@ def batch_facts(root: Path, rows: "list[dict[str, Any]]",
                                          "approval_path": None,
                                          "task": None})
         entry["calls"] += 1
-        if index < carried_n:
+        if carried_seen < carried_n:
             entry["carried_calls"] += 1
+        carried_seen += 1
         if row.get("ok") is True:
             entry["ok"] += 1
         elif row.get("ok") is False:
@@ -310,21 +318,28 @@ def human_facts(ctx: Any) -> "dict[str, Any]":
             "decision": "AUTHORIZED_REPAIR",
             "at_utc": repair.get("created_at_utc"),
             "decision_text_sha256": repair.get("decision_text_sha256")}
+    # AC34「未知不填 0」：没有机器计时的事件（或存在未闭合事件）时，分钟数必须是
+    # **null** 而不是 0.0——0.0 会被下游自动读成「0 人工分钟」。
+    unknown_events = list(summary.get("unknown_event_ids") or [])
+    timed = n_events > 0 and not unknown_events
+    minutes = (round(float(summary.get("known_seconds_total") or 0.0) / 60.0, 3)
+               if timed else None)
+    secs = summary.get("known_seconds_total") if timed else None
     return {
         "n_events": summary.get("n_events"),
-        "known_seconds_total": summary.get("known_seconds_total"),
-        "known_minutes_total": round(float(summary.get("known_seconds_total") or 0.0)
-                                     / 60.0, 3),
-        "unknown_events": summary.get("unknown_event_ids"),
+        "timing": "TIMED" if timed else "UNKNOWN",
+        "known_seconds_total": secs,
+        "known_minutes_total": minutes,
+        "unknown_events": unknown_events,
         "complete": summary.get("complete"),
         "by_kind": summary.get("kinds"),
         "out_of_band": {
-            "machine_timed": n_events > 0,
+            "machine_timed": timed,
             "decisions_on_record": decisions,
             "note": ("human_events 有机器计时；盘外裁决仅按记录列出，不计分钟"
-                     if n_events else
-                     "本轮无人机计时的 human_events：known_minutes_total=0 表示"
-                     "**未计时**，不是 0 人工；盘外裁决见 decisions_on_record"),
+                     if timed else
+                     "本轮无完整机器计时（timing=UNKNOWN，known_minutes_total=null）；"
+                     "这不是「0 人工分钟」；盘外裁决见 decisions_on_record"),
         },
     }
 
@@ -371,9 +386,18 @@ def containers_probe(image_pin: "str | None") -> "dict[str, Any]":
     short = ""
     if image_pin and "@sha256:" in image_pin:
         short = image_pin.split("@sha256:", 1)[1][:12]
-    own = [ln for ln in lines if short and short in ln]
-    return {"probe": "docker ps -a", "available": proc.returncode == 0,
-            "total": len(lines), "own": len(own), "own_sample": own[:5],
+    available = proc.returncode == 0
+    if not short:
+        # 没有 digest 就**无法**判断哪些容器是本镜像的：记 UNKNOWN（``own=None``），
+        # 不许写 0 —— 0 会被读成「已确认无残留」。
+        return {"probe": "docker ps -a", "available": available,
+                "total": len(lines), "own": None, "match": "UNKNOWN",
+                "own_sample": [], "image_short_sha": "",
+                "error": (proc.stderr or "").strip()[:300]}
+    own = [ln for ln in lines if short in ln]
+    return {"probe": "docker ps -a", "available": available,
+            "total": len(lines), "own": len(own), "match": "SHA256_PREFIX",
+            "own_sample": own[:5],
             "image_short_sha": short, "error": (proc.stderr or "").strip()[:300]}
 
 
@@ -381,9 +405,13 @@ def containers_probe(image_pin: "str | None") -> "dict[str, Any]":
 # 结论轴（§11.1 唯一优先级）
 # ---------------------------------------------------------------------------
 
-def compute_axes(inventory: Mapping[str, Any],
-                 protocol: Mapping[str, Any]) -> "dict[str, str]":
-    """只按盘面事实推轴；**不读**任何自述结论，也不接受「跳级」。"""
+def compute_axes(inventory: Mapping[str, Any]) -> "dict[str, str]":
+    """只按盘面事实推轴；**不读**任何自述结论，也不接受「跳级」。
+
+    协议（probe/practice）的结论不参与轴位——§11.2 的退出表说的是「练习帽尽 ⇒
+    NOT_MEASURED」，而 NOT_MEASURED 判定的依据正是「研究没启动」，与 protocol
+    报告里写了什么无关；报告内容只进 ``protocol``/``failure_map`` 事实面。
+    """
     started = studies_started(inventory)
     if not started:
         return {"process": "CLOSEOUT_INCOMPLETE",  # 由 build 覆盖
@@ -413,6 +441,14 @@ def compute_axes(inventory: Mapping[str, Any],
 # 结案件
 # ---------------------------------------------------------------------------
 
+def _evidence_item(path: Path, rel: str) -> "dict[str, Any]":
+    """证据项：文件记 sha256（机判按字节复核），目录只记存在性。"""
+    if path.is_file():
+        return {"path": rel, "kind": "file",
+                "sha256": _sha256_bytes(path.read_bytes())}
+    return {"path": rel, "kind": "dir" if path.is_dir() else "missing"}
+
+
 def _failure_entries(root: Path, protocol: Mapping[str, Any],
                      repair_doc: "Mapping[str, Any] | None",
                      old_root: Mapping[str, Any]) -> "list[dict[str, Any]]":
@@ -421,10 +457,11 @@ def _failure_entries(root: Path, protocol: Mapping[str, Any],
         if not doc or doc.get("verdict") == "PASS":
             continue
         attempt = doc.get("attempt")
-        evidence = [f"protocol/report_{name}.json"]
+        evidence = [_evidence_item(root / "protocol" / f"report_{name}.json",
+                                   f"protocol/report_{name}.json")]
         attempt_rel = f"protocol/{name}/attempt-{attempt}"
         if attempt and (root / attempt_rel).is_dir():
-            evidence.append(attempt_rel)
+            evidence.append(_evidence_item(root / attempt_rel, attempt_rel))
         out.append({
             "id": f"protocol_{name}",
             "stage": f"protocol/{name}",
@@ -445,13 +482,32 @@ def _failure_entries(root: Path, protocol: Mapping[str, Any],
             "verdict": history.get("probe_verdict"),
             "posts": history.get("posts"),
             "stopped_codes": history.get("stopped"),
-            "evidence": [str(report)] if report.is_file() else [],
+            "evidence": [_evidence_item(report, str(report))]
+                        if report.is_file() else [],
             "note": "旧 campaign 原样保留；其仪器缺陷证据见 repair 授权的 evidence 项",
         })
     if repair_doc:
-        # 授权件里的 evidence 是 NAME→绝对路径：登记**路径**，机判按盘面核。
-        paths = [str(p) for p in (repair_doc.get("evidence") or {}).values()
-                 if Path(str(p)).exists()]
+        # 授权件的 evidence 是 ``NAME → {path, sha256, bytes}``（旧形态可能是
+        # ``NAME → 路径字符串``）。两种形态都收，登记**实际字节**的 sha 供机判复核。
+        evidence: "list[dict[str, Any]]" = []
+        for name, item in sorted((repair_doc.get("evidence") or {}).items()):
+            if isinstance(item, dict):
+                raw = str(item.get("path") or "")
+                declared = item.get("sha256")
+            else:
+                raw, declared = str(item), None
+            if not raw:
+                continue
+            path = Path(raw)
+            if not path.exists():
+                continue
+            entry = _evidence_item(path, raw)
+            entry["ref"] = name
+            if declared:
+                entry["declared_sha256"] = declared
+                entry["sha_match"] = (entry.get("sha256") == declared
+                                      if entry["kind"] == "file" else None)
+            evidence.append(entry)
         out.append({
             "id": "repair_authorization",
             "stage": "repair/authorize（§8.1）",
@@ -459,7 +515,7 @@ def _failure_entries(root: Path, protocol: Mapping[str, Any],
             "document_sha256": repair_doc.get("document_sha256"),
             "prior_root": repair_doc.get("prior_root"),
             "prior_calls": repair_doc.get("prior_calls"),
-            "evidence": paths,
+            "evidence": evidence,
             "note": "一次性授权件；授权本身不是失败，登记在此是为了让失败谱系可追",
         })
     return out
@@ -467,8 +523,16 @@ def _failure_entries(root: Path, protocol: Mapping[str, Any],
 
 def _process_reasons(ledger: Mapping[str, Any], batches: Mapping[str, Any],
                      old_root: Mapping[str, Any],
-                     containers: Mapping[str, Any]) -> "list[str]":
+                     containers: Mapping[str, Any],
+                     *, root: "Path | None" = None,
+                     protocol: "Mapping[str, Any] | None" = None) -> "list[str]":
     reasons: "list[str]" = []
+    if root is not None and not (root / "quota" / "ledger.jsonl").is_file():
+        # 空账本会让 ``ledger_facts`` 的计数全 0、seq 判「连续」——那是真空满足，
+        # 不能据此判 COMPLETE（AC35：缺件要出 missing，不是造 PASS）。
+        reasons.append("缺账本 quota/ledger.jsonl")
+    if protocol is not None and not any(protocol.get(n) for n in PROTOCOLS):
+        reasons.append("缺协议报告 protocol/report_{probe,practice}.json（结案核心证据件）")
     if not ledger.get("seq_contiguous"):
         reasons.append("ledger seq 不连续")
     if ledger.get("unknown_outcome"):
@@ -482,6 +546,8 @@ def _process_reasons(ledger: Mapping[str, Any], batches: Mapping[str, Any],
         reasons.append("旧 root 账本与 carryover 登记不符（旧实验只读保护失效）")
     if containers.get("available") and containers.get("own"):
         reasons.append(f"仍有 {containers['own']} 个本镜像容器未回收")
+    if containers.get("available") and containers.get("own") is None:
+        reasons.append("容器回收状态 UNKNOWN（无镜像 digest 可比对）——不算干净")
     return reasons
 
 
@@ -510,16 +576,27 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         repair_doc = RPR.load_authorization(ctx)
     containers = dict(container_facts) if container_facts is not None \
         else containers_probe(image_pin)
-    reasons = _process_reasons(ledger, batches, old_root, containers)
-    axes = compute_axes(inventory, protocol)
+    reasons = _process_reasons(ledger, batches, old_root, containers,
+                               root=root, protocol=protocol)
+    axes = compute_axes(inventory)
     axes["process"] = "COMPLETE" if not reasons else "CLOSEOUT_INCOMPLETE"
 
     envelope = _read_json(root / "contract" / "envelope.json") or {}
     budget = _read_json(root / "contract" / "budget.json") or {}
+    # 旧根（carryover）批的批准件在冻结旧根里：其剩余额度**不可能**在本轮使用，
+    # 单列 ``carryover_batches``，不计入 ``approvals_not_used``（否则读成「还有额度」）。
     approvals_unused = {
         bid: int(entry["approved"]) - entry["calls"]
         for bid, entry in sorted(batches.items())
         if entry.get("approved") is not None
+        and entry.get("approval_in") != "carryover_source"
+    }
+    carryover_batches = {
+        bid: {"calls": entry["calls"], "approved": int(entry["approved"]),
+              "remaining_unusable": int(entry["approved"]) - entry["calls"]}
+        for bid, entry in sorted(batches.items())
+        if entry.get("approved") is not None
+        and entry.get("approval_in") == "carryover_source"
     }
 
     entries = _failure_entries(root, protocol, repair_doc, old_root)
@@ -540,8 +617,11 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "envelope_id": ctx.envelope_id,
             "study": study,
             "status": "NOT_STARTED" if not any(started_entry.values()) else "STARTED",
-            "reason": ("probe 未过门（§9 T6「过门才研究」）；本 packet 无轨迹、"
-                       "无主张、无 raw——不得据此推断任何科学结论"),
+            "reason": (("研究未启动（probe/practice 未过门，§9 T6「过门才研究」）；"
+                        "本 packet 无轨迹、无主张、无 raw——不得据此推断任何科学结论")
+                       if not any(started_entry.values()) else
+                       "研究已启动：本 packet 仅登记产物在场情况，结论以 "
+                       "confirm/judge/replay 与盲审签名为准"),
             "artifacts": started_entry,
             "created_at_utc": clock(),
         })
@@ -622,6 +702,7 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         "ledger": ledger,
         "batches": batches,
         "approvals_not_used": approvals_unused,
+        "carryover_batches": carryover_batches,
         "cost": {
             "classification": {"posts": "EXACT", "tokens": "EXACT", "usd": "UNKNOWN"},
             "posts": {"used": ledger["calls"],

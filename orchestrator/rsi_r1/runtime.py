@@ -27,6 +27,7 @@ from orchestrator.common.runtime_paths import (
     rsi_r1_campaign_id,
     rsi_r1_campaign_root,
     rsi_r1_protected_write_roots,
+    rsi_r1_root,
 )
 
 
@@ -52,6 +53,70 @@ def _is_within(child: Path, parent: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+#: 家族根下的封存登记（**不是** campaign 内的文件）：§8.1 换 root 时把旧
+#: campaign 根登记为「已封存、只读」。结案工具（``adopt_context``）据此拒写，
+#: 否则旧根虽不在写守卫保护集里，也会被 closeout 长出新产物（AC34 只读）。
+ARCHIVE_REGISTRY_NAME = "archived_roots.json"
+ARCHIVE_REGISTRY_SCHEMA = "simpraxis.rsi_r1.archived_roots.v1"
+
+
+def archive_registry_path(campaign_root: "str | Path") -> Path:
+    """登记件位置 = campaign 根的**家族根**（父目录），不是 campaign 内部。"""
+    return Path(campaign_root).resolve(strict=False).parent / ARCHIVE_REGISTRY_NAME
+
+
+def _read_archive_registry(family: Path) -> "dict[str, Any]":
+    path = Path(family) / ARCHIVE_REGISTRY_NAME
+    if not path.is_file():
+        return {"schema": ARCHIVE_REGISTRY_SCHEMA, "schema_version": 1,
+                "roots": []}
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise CampaignError(f"{path} 不可读：{exc}") from None
+    if not isinstance(doc, dict) or not isinstance(doc.get("roots"), list):
+        raise CampaignError(f"{path} 结构不符（roots 必须是列表）")
+    return doc
+
+
+def is_archived_root(root: "str | Path") -> "str | None":
+    """若 root 已在家族登记里，返回登记理由；否则 None。"""
+    resolved = Path(root).resolve(strict=False)
+    for entry in _read_archive_registry(resolved.parent).get("roots") or []:
+        target = entry.get("root") if isinstance(entry, dict) else entry
+        if target and Path(str(target)).resolve(strict=False) == resolved:
+            return str(entry.get("reason") or "") if isinstance(entry, dict) else ""
+    return None
+
+
+def register_archived_root(campaign_root: "str | Path", *, reason: str,
+                           clock: str) -> None:
+    """把旧 campaign 根登记进家族根（幂等；只追加不覆盖）。"""
+    resolved = Path(campaign_root).resolve(strict=False)
+    family = resolved.parent
+    doc = _read_archive_registry(family)
+    roots = doc.get("roots") or []
+    if any((e.get("root") if isinstance(e, dict) else e)
+           and Path(str(e.get("root") if isinstance(e, dict) else e)
+                    ).resolve(strict=False) == resolved for e in roots):
+        return
+    roots.append({"root": str(resolved), "archived_at_utc": clock,
+                  "reason": reason})
+    doc.update({"schema": ARCHIVE_REGISTRY_SCHEMA, "schema_version": 1,
+                "roots": roots, "updated_at_utc": clock})
+    path = family / ARCHIVE_REGISTRY_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (json.dumps(doc, ensure_ascii=False, sort_keys=True,
+                                 indent=2) + "\n").encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
 
 
 def _assert_no_symlink_components(path: Path, *, stop: Path) -> None:
@@ -212,10 +277,21 @@ def adopt_context(envelope_id: str, root: "str | Path") -> CampaignContext:
             raise CampaignRootRefused(
                 f"根内 envelope_id={declared!r} 与入参 {envelope_id!r} 不一致")
     protected = protected_roots_tuple()
+    family = rsi_r1_root().resolve(strict=False)
+    if resolved == family:
+        raise CampaignRootRefused(
+            f"closeout 根是 R1 家族根本身（{family}），不是 campaign 根：拒绝")
+    archived_reason = is_archived_root(resolved)
+    if archived_reason is not None:
+        raise CampaignRootRefused(
+            f"closeout 根已登记为封存旧根（{archive_registry_path(resolved)}）："
+            f"旧实验只读，拒绝结案写盘（{archived_reason or '见登记件'}）")
     for name, prot in protected:
-        if resolved == prot or _is_within(resolved, prot):
+        # 双向包含：根落在旧根内、或根**包含**旧根（祖先目录）都拒。
+        if resolved == prot or _is_within(resolved, prot) \
+                or _is_within(prot, resolved):
             raise CampaignRootRefused(
-                f"closeout 根落进旧根 {name}（{prot}）：旧实验只读，拒绝")
+                f"closeout 根与旧根 {name}（{prot}）相等/嵌套：旧实验只读，拒绝")
     return CampaignContext(envelope_id=envelope_id, root=resolved,
                            protected_roots=protected)
 

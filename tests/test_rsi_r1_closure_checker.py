@@ -245,7 +245,7 @@ def test_budget_declaration_drift_is_rejected(tmp_path: Path) -> None:
 # 证据包核对
 # ---------------------------------------------------------------------------
 
-def _pack(tmp_path: Path) -> Path:
+def _pack(tmp_path: Path, *, root: "Path | None" = None) -> Path:
     pack = tmp_path / "pack"
     (pack / "files").mkdir(parents=True)
     (pack / "files" / "a.json").write_text("{\"a\":1}\n", encoding="utf-8")
@@ -253,34 +253,52 @@ def _pack(tmp_path: Path) -> Path:
     files = {}
     for rel in ("files/a.json", "files/b.txt"):
         files[rel] = CL.hashlib.sha256((pack / rel).read_bytes()).hexdigest()
-    _write(pack / "evidence_manifest.json", {"files": files})
+    total = sum((pack / rel).stat().st_size for rel in files)
+    # 包必须与根绑定：manifest 的 campaign_root/n_files/total_bytes 都要对得上。
+    manifest = {"files": files, "n_files": len(files), "total_bytes": total}
+    if root is not None:
+        manifest["campaign_root"] = str(root.resolve())
+    _write(pack / "evidence_manifest.json", manifest)
     return pack
 
 
 def test_pack_verify_passes(tmp_path: Path) -> None:
-    pack = _pack(tmp_path)
-    out = CL.Checker(_root(tmp_path)).run(pack=pack)
+    root = _root(tmp_path)
+    pack = _pack(tmp_path, root=root)
+    out = CL.Checker(root).run(pack=pack)
     assert out["verdict"] == "PASS", out["problems"]
 
 
+def test_pack_bound_to_other_root_is_rejected(tmp_path: Path) -> None:
+    """换个根仍能把同一个包「验过」= 没验；manifest 的 campaign_root 必须相等。"""
+    root = _root(tmp_path)
+    pack = _pack(tmp_path, root=tmp_path / "another_root")
+    out = CL.Checker(root).run(pack=pack)
+    assert out["verdict"] == "FAIL"
+    assert any(p.startswith("P-MANIFEST-ROOT") for p in out["problems"])
+
+
 def test_pack_tamper_is_rejected(tmp_path: Path) -> None:
-    pack = _pack(tmp_path)
+    root = _root(tmp_path)
+    pack = _pack(tmp_path, root=root)
     (pack / "files" / "a.json").write_text("{\"a\":2}\n", encoding="utf-8")
-    out = CL.Checker(_root(tmp_path)).run(pack=pack)
+    out = CL.Checker(root).run(pack=pack)
     assert out["verdict"] == "FAIL"
     assert any(p.startswith("P-HASH") for p in out["problems"])
 
 
 def test_pack_extra_file_is_rejected(tmp_path: Path) -> None:
-    pack = _pack(tmp_path)
+    root = _root(tmp_path)
+    pack = _pack(tmp_path, root=root)
     (pack / "files" / "c.txt").write_text("c\n", encoding="utf-8")
-    out = CL.Checker(_root(tmp_path)).run(pack=pack)
+    out = CL.Checker(root).run(pack=pack)
     assert out["verdict"] == "FAIL"
     assert any(p.startswith("P-EXTRA") for p in out["problems"])
 
 
 def test_pack_symlink_is_rejected(tmp_path: Path) -> None:
-    pack = _pack(tmp_path)
+    root = _root(tmp_path)
+    pack = _pack(tmp_path, root=root)
     target = pack / "files" / "b.txt"
     link = pack / "files" / "link.txt"
     os.symlink(target, link)
@@ -288,7 +306,7 @@ def test_pack_symlink_is_rejected(tmp_path: Path) -> None:
     manifest["files"]["files/link.txt"] = CL.hashlib.sha256(
         target.read_bytes()).hexdigest()
     _write(pack / "evidence_manifest.json", manifest)
-    out = CL.Checker(_root(tmp_path)).run(pack=pack)
+    out = CL.Checker(root).run(pack=pack)
     assert out["verdict"] == "FAIL"
     assert any(p.startswith("P-HASH") for p in out["problems"])
 

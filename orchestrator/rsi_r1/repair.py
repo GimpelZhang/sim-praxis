@@ -320,6 +320,11 @@ def authorize(ctx: Any, *, prior_root: "str | Path", decision_text: str,
     prior = _require_prior_root(ctx, prior_root)
     facts = _prior_facts(prior)
     carry = _write_carryover(ctx, prior, facts, clock=clock)
+    # 旧根一经搬入即标「已封存」：结案工具（adopt_context）据此拒绝往旧根写
+    # （AC34 旧实验只读）。登记件落在**家族根**，不在被封存的 campaign 内。
+    from orchestrator.rsi_r1 import runtime as RT
+    RT.register_archived_root(
+        prior, reason=f"§8.1 换 root：旧根被 {ctx.root} 继承", clock=clock())
 
     doc = {
         "schema": AUTH_SCHEMA, "schema_version": SCHEMA_VERSION,
