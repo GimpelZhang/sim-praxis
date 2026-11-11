@@ -156,6 +156,38 @@ class Checker:
                   if not str(r.get("ts_iso", "")).endswith("Z")]
         self.add("B-TS-UTC", not bad_ts, f"非严格 Z: {bad_ts[:3]}")
 
+    def check_carryover(self, rows) -> None:
+        """AC34「整轮新 root 不归零」：搬入行必须在现账原位且未被改写。
+
+        ``quota/carryover.json`` 只在 §8.1 仪器修复重开时存在；普通 campaign
+        没有它，本条不产生任何断言。摘要在 authorize 时由 ``repair.py`` 按同一
+        口径计算，机判独立重算，不信自述。
+        """
+        path = self.root / "quota" / "carryover.json"
+        if not path.exists():
+            return
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            self.add("C-READABLE", False, f"不可读: {exc}")
+            return
+        self.add("C-READABLE", True, "")
+        n = int(doc.get("carried_rows") or 0)
+        head = rows[:n]
+        self.add("C-ROWS-PRESENT", n > 0 and len(head) == n,
+                 f"carried_rows={n} 现账行数={len(rows)}")
+        got = hashlib.sha256(json.dumps(
+            head, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":")).encode("utf-8")).hexdigest()
+        want = doc.get("carried_rows_sha256")
+        self.add("C-ROWS-INTACT", isinstance(want, str) and got == want,
+                 f"前 {n} 行摘要 {got[:16]}… vs 登记 {str(want)[:16]}…")
+        calls = sum(1 for r in head if r.get("event", "call") == "call")
+        self.add("C-CALLS-COUNT", calls == int(doc.get("carried_calls") or -1),
+                 f"前 {n} 行实呼 {calls} vs 登记 {doc.get('carried_calls')}")
+        self.add("C-REASON-AC34", "AC34" in str(doc.get("reason") or ""),
+                 "carryover.reason 必须引用 AC34")
+
     def check_manifest(self, study: str, manifest) -> "set[str] | None":
         if not isinstance(manifest, dict):
             return None
@@ -305,6 +337,7 @@ class Checker:
         budget = self.load("contract/budget.json")
         rows = self.ledger_rows()
         self.check_budget(budget, rows)
+        self.check_carryover(rows)
         judge_ok, replay_ok, statuses = {}, {}, {}
         for study in STUDIES:
             manifest = self.load(f"confirm/manifest_{study}.json")

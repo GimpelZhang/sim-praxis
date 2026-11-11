@@ -52,6 +52,7 @@ from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import observations as OBS
 from orchestrator.rsi_r1 import prereg as PREREG
 from orchestrator.rsi_r1 import protocol as PT
+from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import rubric as RUBRIC
 from orchestrator.rsi_r1 import runtime
 from orchestrator.rsi_r1 import sandbox as SANDBOX
@@ -625,9 +626,21 @@ def _tokenizer_counter(path: str, sha256_hex: str):
 
 
 def _run_protocol_cmd(args: argparse.Namespace, lane: str) -> int:
-    """probe/practice 的唯一 CLI 路径：批准件 → 付费闸 → 网关 → 链 → 报告。"""
+    """probe/practice 的唯一 CLI 路径：批准件 → 付费闸 → 网关 → 链 → 报告。
+
+    ``--repair`` 是 Plan §8.1 的仪器修复重做：协议动作与报告仍按 ``lane``
+    （probe/practice），但**全部实呼记 ``repair_reserve``**（task 4，帽 24），
+    且需一次性授权件（``cli repair-authorize``）在场。批准件/账本/线程名
+    一律跟随记账 lane，协议 gate 仍按协议 lane 配对 root（probe→FROZEN、
+    practice→PROBED）。
+    """
     envelope = C.require_safe_id(args.envelope, where="--envelope")
     ctx, _ = _load_envelope_contract(envelope)
+    billing = RPR.LANE if getattr(args, "repair", False) else lane
+    if billing != lane:
+        # 授权件缺失要在扣任何东西之前就拒绝（fail-closed，不写批准件）。
+        RPR.require_repair_gate(ctx, root=ST.ResearchState(ctx).root_state(),
+                                protocol=lane)
     assert_rsi_r1_roots_isolated()
     # 环境闸先于一切副作用（含批准件写入与 tokenizer 加载）：没有
     # SIMPRAXIS_ALLOW_PAID=1 就不动作，也不引入任何配置依赖。
@@ -637,8 +650,9 @@ def _run_protocol_cmd(args: argparse.Namespace, lane: str) -> int:
     counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
     consent = C.Consent.from_dict(ctx.read_json("contract/consent.json"))
     spend = ASM.SpendContract(mode=ASM.MODE_PAID, consent=consent)
-    posts = PT.PROBE_POSTS if lane == PT.PROBE else PT.PRACTICE_POSTS
-    approval = PT.ensure_approval(ctx, batch_id=args.batch_id, lane=lane,
+    posts = RPR.POSTS_BY_PROTOCOL[lane] if billing != lane else (
+        PT.PROBE_POSTS if lane == PT.PROBE else PT.PRACTICE_POSTS)
+    approval = PT.ensure_approval(ctx, batch_id=args.batch_id, lane=billing,
                                  approved=posts, note=args.note or "")
     lock_doc = ctx.read_json(LK.LOCK_RELPATH)
     image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
@@ -647,14 +661,17 @@ def _run_protocol_cmd(args: argparse.Namespace, lane: str) -> int:
     gateway = GT.build_gateway(
         ledger=QL.QuotaLedger.rsi_r1(),
         pause_state_path=rsi_r1_gateway_state_path())
+    default_thread = (f"rsi-r1-{lane}" if billing == lane
+                      else f"rsi-r1-repair-{lane}")
     transport = GT.build_transport(
-        gateway=gateway, lane=lane, batch_id=args.batch_id,
-        thread_id=args.thread_id or f"rsi-r1-{lane}", env=os.environ)
+        gateway=gateway, lane=billing, batch_id=args.batch_id,
+        thread_id=args.thread_id or default_thread, env=os.environ)
     report = PT.run_protocol(
         ctx, lane=lane, spend=spend, transport_factory=lambda: transport,
         runner=SANDBOX.DockerRunner(), image=image, batch_id=args.batch_id,
-        counter=counter)
+        counter=counter, billing_lane=billing)
     print(f"{lane} {report['verdict']}  attempt={report['attempt']}  "
+          f"billing={report.get('billing_lane')}  "
           f"posts={report['posts']['this_attempt']}/"
           f"{report['posts']['allowed']}  root={report['root_after']}")
     if report["reason"]:
@@ -675,6 +692,36 @@ def cmd_probe(args: argparse.Namespace) -> int:
 
 def cmd_practice(args: argparse.Namespace) -> int:
     return _run_protocol_cmd(args, PT.PRACTICE)
+
+
+def cmd_repair_authorize(args: argparse.Namespace) -> int:
+    """写 Plan §8.1 的一次性修复授权（新 root INIT 位）+ 旧消耗逐字节搬入。"""
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    decision_path = Path(args.decision_file).expanduser()
+    if not decision_path.is_file():
+        raise CliError(f"裁决正文不存在：{decision_path}")
+    evidence: "dict[str, str]" = {}
+    for spec in args.evidence or []:
+        name, sep, path = str(spec).partition("=")
+        if not sep or not name.strip() or not path.strip():
+            raise CliError(f"--evidence 需 NAME=PATH，收到 {spec!r}")
+        if name in evidence:
+            raise CliError(f"--evidence 重名：{name!r}")
+        evidence[name] = path.strip()
+    doc = RPR.authorize(
+        ctx, prior_root=args.prior_root,
+        decision_text=decision_path.read_text(encoding="utf-8"),
+        evidence=evidence, note=args.note or "")
+    print(f"repair-authorize ok  envelope={envelope}  "
+          f"lane={doc['lane']} task={doc['lane_task_id']} cap={doc['cap_posts']}")
+    print(f"  prior_root : {doc['prior_root']}")
+    print(f"  prior_calls: {doc['prior_calls']}  by_task={doc['prior_calls_by_task']}")
+    print(f"  decision   : sha256={doc['decision_text_sha256'][:16]}…")
+    print(f"  evidence   : {sorted(doc['evidence'])}")
+    print(f"  authorization={ctx.relative(RPR.AUTH_RELPATH)}")
+    print(f"  carryover   ={ctx.relative(RPR.CARRYOVER_RELPATH)}")
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -878,7 +925,23 @@ def build_parser() -> argparse.ArgumentParser:
         pp2.add_argument("--thread-id", default="",
                          help="账本 thread_id（默认 rsi-r1-<lane>）")
         pp2.add_argument("--note", default=None, help="批准件备注")
+        pp2.add_argument("--repair", action="store_true",
+                         help="Plan §8.1 仪器修复重做：实呼全记 repair_reserve"
+                              "（需先 repair-authorize；协议报告仍按本 lane）")
         pp2.set_defaults(func=func)
+
+    pra = sub.add_parser(
+        "repair-authorize",
+        help="Plan §8.1 一次性修复授权（新 root 的 INIT 位；旧消耗逐字节搬入）")
+    pra.add_argument("--envelope", required=True)
+    pra.add_argument("--prior-root", required=True,
+                     help="旧 campaign root（只读；必须同 envelope、无正式 study 实呼）")
+    pra.add_argument("--decision-file", required=True,
+                     help="用户授权裁决正文（UTF-8；逐字节 sha 入授权件）")
+    pra.add_argument("--evidence", action="append", default=[], metavar="NAME=PATH",
+                     help="缺陷证据件（可多次；逐件 sha256/bytes 入册）")
+    pra.add_argument("--note", default=None, help="授权件备注")
+    pra.set_defaults(func=cmd_repair_authorize)
 
     return p
 
@@ -891,8 +954,8 @@ def main(argv: "list[str] | None" = None) -> int:
     except (CliError, C.ContractError, PREREG.PreregError,
             SCENES.SceneError, OBS.ObservationError,
             CAL.CalibrationError, LK.LockError, PT.ProtocolError,
-            GT.TransportError, ASM.AssemblyError, QL.QuotaError,
-            ST.StateError) as exc:
+            RPR.RepairError, GT.TransportError, ASM.AssemblyError,
+            QL.QuotaError, ST.StateError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

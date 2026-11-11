@@ -376,6 +376,14 @@ def _normalise_source(source: "str | bytes") -> bytes:
 
 def _container_argv(*, image: str, container: str, view: Path, out: Path,
                     script_name: str) -> "list[str]":
+    """容器 argv。**末两参必须是** ``/data``（只读视图）与 ``/out``（输出根）。
+
+    公开契约（``protocol.DESIGN_TEMPLATE``/``ANALYSIS_TEMPLATE``）与候选程序都按
+    ``sys.argv[1]=view, sys.argv[2]=out`` 取路径；缺了这两个参数，任何按契约写的
+    design/analysis 都会在第一行 ``Path(sys.argv[1])`` 上 IndexError。
+    R1 T6 probe 首跑（2026-11-11）正是踩在这里：容器内 exit=1、3 呼后
+    DESIGN_FAILED——属**仪器缺陷**，用户已裁决重开并记 repair_reserve（§8.1）。
+    """
     return [
         "docker", "run", "--rm", "--name", container,
         "--network", "none",
@@ -395,6 +403,8 @@ def _container_argv(*, image: str, container: str, view: Path, out: Path,
         "-v", f"{out}:/out:rw",
         image,
         "python3", f"/data/{script_name}",
+        # 契约入参：视图根、输出根（见上方 docstring；service.py 不读它们也无害）。
+        "/data", "/out",
     ]
 
 
@@ -408,11 +418,17 @@ _SCRIPT_NAMES: "Mapping[str, str]" = {
 def _prepare_container_modes(view: Path, out: Path) -> None:
     """让容器内 uid 65534 能读视图、写 /out。
 
-    视图目录 0711（只给穿越，不给列目录）、文件 0644；``out`` 0777。
-    宿主侧父目录仍是 0700，且视图/out 只在本轮存活，退出即删——容器是通过
-    bind mount 直接看到视图根的，父目录权限不参与容器内路径解析。
+    视图目录 **0755**（可读可穿越）、文件 0644；``out`` 0777。
+    目录必须 **可列**：公开合同告诉候选「视图含 ``plan-<sha12>.json`` 与
+    ``public_contract.json``」，参考模板与真实候选都用 ``glob`` 找计划文件；
+    0711 只给穿越不给列目录，容器内（uid 65534=others）``glob`` 恒空——
+    R1 T6 修复重做的真实容器复现抓到的第二个仪器缺陷（2026-11-11）。
+    视图里只有本轮显式列入的文件（无未列入件、无软/硬链接），列出名字不
+    暴露额外内容，内容本来已 0644 可读。
+    宿主侧父目录仍是 0700，且视图/out 只在本轮存活，退出即删——容器通过
+    bind mount 直接看到视图根，父目录权限不参与容器内路径解析。
     """
-    os.chmod(view, 0o711)
+    os.chmod(view, 0o755)
     for child in view.iterdir():
         st = os.lstat(child)
         if stat.S_ISREG(st.st_mode):

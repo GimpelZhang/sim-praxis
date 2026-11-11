@@ -43,6 +43,7 @@ from orchestrator.rsi_r1 import lanes as LANES
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import loop as L
 from orchestrator.rsi_r1 import observations as O
+from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import replay as RP
 from orchestrator.rsi_r1 import sandbox as SB
 from orchestrator.rsi_r1 import state as S
@@ -67,8 +68,9 @@ ROOT_GATE = {
     "study_A": S.ROOT_PRACTICED,
     "study_B": S.ROOT_STUDY_A,
 }
-#: repair_reserve 只在已有 study 阶段之后可用（不允许拿储备跑 probe/practice）。
-REPAIR_ALLOWED_ROOTS = (S.ROOT_STUDY_A, S.ROOT_STUDY_B, S.ROOT_REPLAY)
+#: repair_reserve 的门位由 ``repair`` 模块单一真值给出（§8.1：只在正式 study
+#: 首 POST **之前**、经新 root 授权后重做 probe8+practice16；储备不借给 study）。
+REPAIR_ALLOWED_ROOTS = RPR.ALLOWED_ROOTS
 
 
 class AssemblyError(RuntimeError):
@@ -221,11 +223,12 @@ class CampaignAdmission:
     def _require_root(self) -> None:
         root = self.state.root_state()
         if self.lane == "repair_reserve":
-            if root not in REPAIR_ALLOWED_ROOTS:
-                raise L.LoopError(
-                    "STATE_UNKNOWN",
-                    f"repair_reserve 只能出现在 {REPAIR_ALLOWED_ROOTS}，现为 {root}",
-                    terminal=True)
+            # 单次授权件 + 修复门位（FROZEN/PROBED）；probe/practice 配对由
+            # protocol._check_gate 另行复核（准入层只认 root 集合）。
+            try:
+                RPR.require_repair_gate(self.ctx, root=root)
+            except RPR.RepairError as exc:
+                raise L.LoopError(exc.code, exc.detail, terminal=True) from None
             return
         want = ROOT_GATE[self.lane]
         if root != want:
@@ -323,6 +326,13 @@ class CampaignAdmission:
                 raise L.LoopError(
                     "RESOURCE_EXHAUSTED",
                     f"practice 冻结后余 {remaining} < 2", terminal=True)
+        elif lane == "repair_reserve":
+            # 修复重做在**同一 lane**里依次跑 probe8+practice16（共 24）；
+            # 冻结之后仍须给本协议的 run_confirm/submit 留 2 呼。
+            if remaining < 2:
+                raise L.LoopError(
+                    "RESOURCE_EXHAUSTED",
+                    f"repair_reserve 冻结后余 {remaining} < 2", terminal=True)
         else:
             raise L.LoopError("LANE_UNKNOWN", f"{lane} 无冻结面", terminal=True)
         return {"lane": lane, "posts_used": used, "posts_remaining": remaining,
@@ -541,8 +551,12 @@ class CampaignDispatcher:
             work_root=self.ctx.subdir("trials") / f"design-{design_sha[:12]}",
             runner=self.runner, image=self.image, retain_bytes=True)
         if ev.exit_code != 0 or ev.timed_out:
-            return self._fail("DESIGN_FAILED",
-                              f"exit={ev.exit_code} timeout={ev.timed_out}")
+            # 失败反馈必须带容器 stderr 尾巴（截断）：T6 首跑只给了 exit=1，
+            # 候选/操作者都看不到 ``IndexError: sys.argv[1]``，定位靠离线复现。
+            tail = " ".join(str(ev.stderr_tail or "").split())[-600:]
+            return self._fail(
+                "DESIGN_FAILED",
+                f"exit={ev.exit_code} timeout={ev.timed_out} stderr={tail!r}")
         payload = ev.blobs.get(MATRIX_OUTPUT)
         if payload is None:
             return self._fail("MATRIX_MISSING", f"design 未写 {MATRIX_OUTPUT}")

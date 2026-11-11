@@ -168,7 +168,7 @@ def test_run_design_passes_every_security_flag(tmp_path) -> None:
     assert _flag_value(argv, "-v")[-1].endswith(":/out:rw")
     assert _flag_value(argv, "-v")[0].endswith(":/data:ro")
     assert IMAGE in argv and "docker" in argv[0]
-    assert argv[-2:] == ["python3", "/data/design.py"]
+    assert argv[-4:] == ["python3", "/data/design.py", "/data", "/out"]
     # 不传凭据/网关/宿主 docker.sock
     joined = " ".join(argv)
     for needle in ("ANTHROPIC", "DOCKER_HOST", "docker.sock", "AWS_", "/root"):
@@ -201,7 +201,7 @@ def test_run_analysis_uses_same_sandbox_and_script_name(tmp_path) -> None:
     work.mkdir()
     ev = SB.run_analysis(ANALYSIS_SRC, [entry], evidence_root=root,
                          work_root=work, runner=runner, image=IMAGE)
-    assert runner.argv[0][-2:] == ["python3", "/data/analysis.py"]
+    assert runner.argv[0][-4:] == ["python3", "/data/analysis.py", "/data", "/out"]
     assert ev.kind == "analysis" and ev.reply == {"claim": "x"}
     assert "--network" in runner.argv[0]
 
@@ -317,7 +317,7 @@ def test_run_experiment_uses_service_entry_and_relaxed_caps(tmp_path) -> None:
                         expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
     ev = _run_experiment(tmp_path, runner)
     argv = runner.argv[0]
-    assert argv[-2:] == ["python3", "/data/service.py"]
+    assert argv[-4:] == ["python3", "/data/service.py", "/data", "/out"]
     # 与设计/分析同一安全面：只换脚本名与两项帽，别的旗标不得少
     assert _flag_value(argv, "--network") == ["none"]
     assert "--read-only" in argv
@@ -357,7 +357,9 @@ def test_run_experiment_prepares_container_modes(tmp_path) -> None:
     runner = ModeProbe(write={"reply.json": "{}"},
                        expected_timeout=SB.PHYSICS_WALL_CLOCK_S)
     _run_experiment(tmp_path, runner)
-    assert runner.seen["view"] == 0o711
+    # 目录必须可列（glob 找 plan-<sha12>.json）；只给穿越的 0711 在容器内
+    # （uid 65534=others）会让候选始终读不到列入的输入。
+    assert runner.seen["view"] == 0o755
     assert runner.seen["out"] == 0o777
     assert runner.seen["files"] == {"service.py": 0o644, "spec.json": 0o644}
 
@@ -404,3 +406,34 @@ def test_run_experiment_rejects_non_serialisable_spec(tmp_path) -> None:
     doc["run"] = {"kind": "A", "nan": float("nan")}
     with pytest.raises(ValueError):
         _run_experiment(tmp_path, FakeRunner(), spec=doc)
+
+
+def test_container_argv_matches_candidate_contract(tmp_path) -> None:
+    """容器 argv 必须**真的**把视图/输出根交给候选程序（T6 probe 缺陷回归）。
+
+    排演台 ``LocalRunner`` 一直是 ``[script, view, out]``，容器路径曾漏掉后两个
+    参数并且三处断言把错误 argv 当正确——本条把契约钉在两条路径共同的语义上：
+    脚本之后必须紧跟 ``argv[1]=/data``（只读视图根）与 ``argv[2]=/out``。
+    """
+    seen = {}
+
+    class ModeProbe(FakeRunner):
+        def run(self, argv, *, timeout_s, container):
+            view = Path(_flag_value(argv, "-v")[0][: -len(":/data:ro")])
+            seen["mode"] = stat.S_IMODE(os.stat(view).st_mode)
+            seen["listable"] = sorted(p.name for p in view.iterdir())
+            return super().run(argv, timeout_s=timeout_s, container=container)
+
+    runner = ModeProbe(write={"reply.json": "{}"})
+    _run_design(tmp_path, runner)
+    argv = runner.argv[0]
+    assert argv[-4] == "python3"
+    assert argv[-3].startswith("/data/"), argv[-3]
+    assert argv[-2] == "/data"
+    assert argv[-1] == "/out"
+    mounts = _flag_value(argv, "-v")
+    assert any(m.endswith(":/data:ro") for m in mounts)
+    assert any(m.endswith(":/out:rw") for m in mounts)
+    # 容器 uid 65534=others：视图目录必须 r+x（glob 才看得见列入的文件）
+    assert seen["mode"] & 0o005 == 0o005, oct(seen["mode"])
+    assert seen["listable"] == ["design.py"]

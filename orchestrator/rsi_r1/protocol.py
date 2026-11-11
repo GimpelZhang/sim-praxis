@@ -43,8 +43,10 @@ from orchestrator.common.runtime_paths import RSI_R1_CAMPAIGN_SUBDIRS
 from orchestrator.rsi_r1 import assembly as A
 from orchestrator.rsi_r1 import backend as BK
 from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import lanes as LANES
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import loop as L
+from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import scenes as SC
 from orchestrator.rsi_r1 import state as S
 from orchestrator.rsi_r1 import watchdog as W
@@ -421,6 +423,9 @@ class LaneParts:
     sender: L.LockedSender
     loop: L.ResearchLoop
     study: str
+    #: 记账 lane：正常 runs 与 ``lane`` 相同；仪器修复重做固定为
+    #: ``repair_reserve``（§8.1：储备 24 呼只跑 probe8+practice16，不回填原槽）。
+    billing_lane: str = PROBE
 
 
 def next_attempt(ctx: Any, lane: str) -> int:
@@ -495,6 +500,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
                      transport_factory: Callable[[], Callable[[T.Request], L.Reply]],
                      runner: Any, image: str, counter: Callable[[str], int],
                      backend_factory: "Callable[[str], Any] | None" = None,
+                     billing_lane: "str | None" = None,
                      ) -> LaneParts:
     """按生产面装配一条链：准入/槽绑主 ctx，状态/分派绑 scoped ctx。"""
     if lane not in PROTOCOL_LANES:
@@ -503,6 +509,9 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
         raise ProtocolError("STUDY_UNKNOWN", repr(study))
     if study != "A" and lane == PROBE:
         raise ProtocolError("STUDY_MISMATCH", f"probe 只用 study A，收到 {study!r}")
+    billing = lane if billing_lane is None else str(billing_lane)
+    if billing not in LANES.LANE_ORDER:
+        raise ProtocolError("LANE_UNKNOWN", repr(billing))
     scope = ScopedContext(ctx, attempt_prefix(lane, attempt))
     journal = mirror_root(scope)
     _seed_public(scope)
@@ -510,7 +519,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
     budget = C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json"))
     # 暂停件/台账/预留必须全 campaign 共享 ⇒ admission 用主 ctx；root 门读独立日志。
     admission = A.CampaignAdmission(ctx=ctx, state=state, budget=budget,
-                                    lock_sha256=lock.sha256, spend=spend, lane=lane)
+                                    lock_sha256=lock.sha256, spend=spend, lane=billing)
     slots = A.SlotBook(ctx, budget)
     admission.attach_slots(slots)
     factory = backend_factory or backend_factory_for(
@@ -538,7 +547,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
         envelope=envelope, root_lock=lock, spend_contract=spend)
     return LaneParts(lane=lane, scope=scope, admission=admission, slots=slots,
                      state=state, dispatcher=dispatcher, store=store,
-                     sender=sender, loop=loop, study=study)
+                     sender=sender, loop=loop, study=study, billing_lane=billing)
 
 
 def _repo_sha(relpath: str) -> str:
@@ -582,7 +591,7 @@ def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
     终止类拒绝（``terminal``）两种策略都立即停。
     """
     result = ChainResult(study=parts.study)
-    lane = parts.lane
+    lane = parts.billing_lane
     while result.ok_count < CHAIN_ACTIONS:
         if parts.admission.posts_used(lane) >= cap:
             result.stopped = "POSTS_EXHAUSTED"
@@ -621,8 +630,14 @@ def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
     return result
 
 
-def _check_gate(ctx: Any, lane: str) -> "tuple[L.LockDocument, dict[str, Any]]":
-    """过门前复核：主 root 必须在门位，LOCK 必须已冻结且双签有效。"""
+def _check_gate(ctx: Any, lane: str, *, billing_lane: "str | None" = None
+                ) -> "tuple[L.LockDocument, dict[str, Any], dict[str, Any] | None]":
+    """过门前复核：主 root 必须在门位，LOCK 必须已冻结且双签有效。
+
+    修复重做（``billing_lane=repair_reserve``）额外要求：一次性授权件在场、
+    协议与门位配對（probe→FROZEN、practice→PROBED）、practice 须有同 lane 的
+    probe PASS 在先（§8.1；每协议只重做一次）。
+    """
     lock, report = LK.require_frozen(ctx)
     root = S.ResearchState(ctx).root_state()
     want = ROOT_GATE[lane]
@@ -633,7 +648,17 @@ def _check_gate(ctx: Any, lane: str) -> "tuple[L.LockDocument, dict[str, Any]]":
     if lock.envelope_id != ctx.envelope_id:
         raise ProtocolError("LOCK_MISMATCH",
                             f"LOCK.envelope={lock.envelope_id!r} != {ctx.envelope_id!r}")
-    return lock, report
+    auth = None
+    if billing_lane is not None and billing_lane != lane:
+        if billing_lane != RPR.LANE:
+            raise ProtocolError("LANE_UNKNOWN",
+                                f"重做记账 lane 只能是 {RPR.LANE!r}，收到 {billing_lane!r}")
+        try:
+            auth = RPR.require_repair_gate(ctx, root=root, protocol=lane)
+            RPR.require_protocol_sequence(ctx, protocol=lane)
+        except RPR.RepairError as exc:
+            raise ProtocolError(exc.code, exc.detail) from None
+    return lock, report, auth
 
 
 def _posts_used(ctx: Any, *, lane: str, lock: L.LockDocument,
@@ -696,21 +721,42 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
                  counter: Callable[[str], int],
                  clock: Callable[[], str] = utc_now_iso_z,
                  backend_factory: "Callable[[str], Any] | None" = None,
+                 billing_lane: "str | None" = None,
                  ) -> "dict[str, Any]":
-    """跑一条协议链并落 ``protocol/report_<lane>.json``，PASS 时推进主 root。"""
+    """跑一条协议链并落 ``protocol/report_<lane>.json``，PASS 时推进主 root。
+
+    ``billing_lane=repair_reserve`` 是 §8.1 的仪器修复重做：协议动作/报告仍按
+    ``lane``（probe/practice）组织，但**全部 POST 记 repair_reserve 槽**，且
+    每协议只允许 attempt 1 一次。
+    """
     if lane not in PROTOCOL_LANES:
         raise ProtocolError("LANE_UNKNOWN", repr(lane))
+    billing = lane if billing_lane is None else str(billing_lane)
+    if billing not in LANES.LANE_ORDER:
+        raise ProtocolError("LANE_UNKNOWN", repr(billing))
+    if billing != lane and billing != RPR.LANE:
+        raise ProtocolError(
+            "LANE_UNKNOWN", f"只有 {RPR.LANE!r} 可作为重做记账 lane，收到 {billing!r}")
     if not str(batch_id).strip():
         raise ProtocolError("BATCH_MISSING", "batch_id 不得为空")
-    lock, freeze_report = _check_gate(ctx, lane)
+    lock, freeze_report, auth = _check_gate(ctx, lane, billing_lane=billing)
     root_before = S.ResearchState(ctx).root_state()
     attempt = next_attempt(ctx, lane)
+    if auth is not None and attempt != 1:
+        raise ProtocolError(
+            "REPAIR_ATTEMPT_EXHAUSTED",
+            f"修复重做 {lane} 已有 attempt-{attempt - 1}：§8.1 每协议只允许一次")
     started = clock()
-    cap = PROBE_POSTS if lane == PROBE else PRACTICE_POSTS
+    wanted_posts = PROBE_POSTS if lane == PROBE else PRACTICE_POSTS
+    # 正常链路用 lane 的绝对帽（probe 8 / practice 16）；修复重做按「本 lane
+    # 已用 + 本协议额度」封闭，绝不把 repair 的余量借给未发生的动作。
+    cap = wanted_posts
     studies = (S.STUDIES[0],) if lane == PROBE else PRACTICE_STUDIES
     strict = lane == PROBE
 
-    used_before = _posts_used(ctx, lane=lane, lock=lock, spend=spend)
+    used_before = _posts_used(ctx, lane=billing, lock=lock, spend=spend)
+    if billing != lane:
+        cap = used_before + wanted_posts
 
     chains: "list[ChainResult]" = []
     pump = _HeartbeatPump(ctx.subdir("state")).start()
@@ -721,18 +767,18 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
             parts = build_lane_parts(
                 ctx, lane=lane, study=study, attempt=attempt, spend=spend,
                 lock=lock, transport_factory=lambda: transport, runner=runner,
-                image=image, counter=counter, backend_factory=backend_factory)
+                image=image, counter=counter, backend_factory=backend_factory,
+                billing_lane=billing)
             chains.append(drive_chain(parts, strict=strict, cap=cap))
             if chains[-1].stopped:
                 break
     finally:
         pump.stop()
 
-    used_after = _posts_used(ctx, lane=lane, lock=lock, spend=spend)
+    used_after = _posts_used(ctx, lane=billing, lock=lock, spend=spend)
 
     ok_chains = all(c.ok_count == CHAIN_ACTIONS and not c.stopped for c in chains)
     posts = used_after - used_before
-    wanted_posts = PROBE_POSTS if lane == PROBE else PRACTICE_POSTS
     passed = bool(ok_chains and len(chains) == len(studies) and posts == wanted_posts)
     if passed:
         verdict, reason = VERDICT_PASS, (
@@ -743,7 +789,8 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
 
     report = {
         "schema": REPORT_SCHEMA, "schema_version": SCHEMA_VERSION,
-        "lane": lane, "attempt": attempt,
+        "lane": lane, "attempt": attempt, "billing_lane": billing,
+        "repair": _repair_block(auth, billing),
         "envelope_id": ctx.envelope_id, "lock_sha256": lock.sha256,
         "lock_verified": bool(freeze_report.get("ok")),
         "lock_signatures": freeze_report.get("signatures") or {},
@@ -771,6 +818,20 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
     return report
 
 
+def _repair_block(auth: "dict[str, Any] | None",
+                  billing: str) -> "dict[str, Any] | None":
+    """报告里的修复归因块：只有 repair_reserve 运行才有内容。"""
+    if billing != RPR.LANE:
+        return None
+    if auth is None:  # 防御性：lane 已核过授权，正常不会到这。
+        return {"authorization": "MISSING"}
+    return {"authorization_relpath": RPR.AUTH_RELPATH,
+            "authorization_sha256": auth.get("document_sha256"),
+            "prior_root": auth.get("prior_root"),
+            "carryover_relpath": auth.get("carryover_relpath"),
+            "single_use": True}
+
+
 def _not_measured_reason(chains: "list[ChainResult]", posts: int,
                          wanted: int) -> str:
     parts: "list[str]" = []
@@ -795,7 +856,9 @@ def approval_doc(*, batch_id: str, lane: str, approved: int,
     """本批批准件的**期望字段**（与 ``QuotaLedger.write_approval`` 逐键对照）。"""
     from orchestrator.rsi_r1 import lanes as LANES
 
-    if lane not in PROTOCOL_LANES:
+    # 批准件按**记账 lane** 出票：仪器修复重做的票是 repair_reserve（task 4），
+    # 不是被重做的协议名——预算审计必须能一眼看出这 8/16 呼动了储备。
+    if lane not in LANES.LANE_ORDER:
         raise ProtocolError("LANE_UNKNOWN", repr(lane))
     if isinstance(approved, bool) or not isinstance(approved, int) or approved <= 0:
         raise ProtocolError("APPROVAL_INVALID", f"approved={approved!r}")

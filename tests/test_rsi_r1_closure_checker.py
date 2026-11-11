@@ -318,3 +318,58 @@ def test_cli_rc_and_report_file(tmp_path: Path) -> None:
     doc = json.loads(out_path.read_text(encoding="utf-8"))
     assert doc["verdict"] == "PASS"
     assert oct(out_path.stat().st_mode & 0o777) == "0o600"
+
+
+# ---------------------------------------------------------------------------
+# AC34：修复重开的搬入行（carryover）——机判独立重算前 N 行摘要
+# ---------------------------------------------------------------------------
+
+def _carry_rows(n: int = 3) -> "list[dict]":
+    return [{"event": "call", "seq": i + 1,
+             "ts_iso": f"2026-11-11T00:0{i}:00Z", "task": 0, "ok": True}
+            for i in range(n)]
+
+
+def _write_carryover(root: Path, rows, **over) -> None:
+    from orchestrator.rsi_r1 import repair as RPR
+    doc = {"schema": "simpraxis.rsi_r1.carryover.v1", "schema_version": 1,
+           "carried_rows": len(rows), "carried_calls": len(rows),
+           "carried_rows_sha256": RPR.rows_sha256(rows),
+           "reason": "AC34 整轮新 root 不归零"}
+    doc.update(over)
+    _write(root / "quota" / "carryover.json", doc)
+
+
+def test_carryover_intact_rows_pass(tmp_path: Path) -> None:
+    rows = _carry_rows(3) + [{"event": "call", "seq": 4,
+                              "ts_iso": "2026-11-11T00:03:00Z", "task": 4,
+                              "ok": True}]
+    root = _root(tmp_path, ledger=rows)
+    _write_carryover(root, rows[:3])
+    out = CL.Checker(root).run()
+    assert out["verdict"] == "PASS", out["problems"]
+
+
+def test_carryover_rewritten_rows_are_rejected(tmp_path: Path) -> None:
+    rows = _carry_rows(3)
+    root = _root(tmp_path, ledger=rows)
+    _write_carryover(root, rows)
+    # 事后改写搬入行的 task（旧消耗被"洗白"）——摘要必须失败
+    rewritten = [dict(r) for r in rows]
+    rewritten[0]["task"] = 4
+    (root / "quota" / "ledger.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rewritten),
+        encoding="utf-8")
+    out = CL.Checker(root).run()
+    assert out["verdict"] == "FAIL"
+    assert any(p.startswith("C-ROWS-INTACT") for p in out["problems"])
+
+
+def test_carryover_missing_rows_and_reason_are_rejected(tmp_path: Path) -> None:
+    rows = _carry_rows(3)
+    root = _root(tmp_path, ledger=rows[:2])      # 少搬一行
+    _write_carryover(root, rows, reason="无引用")
+    out = CL.Checker(root).run()
+    assert out["verdict"] == "FAIL"
+    assert any(p.startswith("C-ROWS-PRESENT") for p in out["problems"])
+    assert any(p.startswith("C-REASON-AC34") for p in out["problems"])

@@ -100,7 +100,10 @@ class LocalRunner:
     def run(self, argv: "list[str]", *, timeout_s: int,
             container: str) -> SB.RunResult:
         view, out = self.mounts(argv)
-        script = Path(argv[-1]).name
+        # 容器契约（与 sandbox._container_argv 同源）：python3 <script> <view> <out>。
+        # 不要假设 script 是 argv[-1]——契约尾参是视图根/输出根。
+        idx = list(argv).index("python3")
+        script = Path(argv[idx + 1]).name
         self.calls.append({"argv": list(argv), "container": container})
         try:
             proc = subprocess.run(

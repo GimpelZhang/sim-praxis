@@ -61,6 +61,7 @@ CLOSURE_GROUPS: "dict[str, tuple[str, ...]]" = {
                "orchestrator/rsi_r1/protocol.py",
                "orchestrator/rsi_r1/gateway_transport.py",
                "orchestrator/rsi_r1/closure.py",
+               "orchestrator/rsi_r1/repair.py",
                "orchestrator/rsi_r1/lock.py",
                "orchestrator/rsi_r1/human_events.py",
                "orchestrator/rsi_r1/watchdog.py"),
