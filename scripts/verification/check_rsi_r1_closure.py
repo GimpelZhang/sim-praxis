@@ -319,7 +319,7 @@ class Checker:
         return (self.root / "protocol" / "report_practice.json").is_file()
 
     def check_closeout(self, rows) -> "dict | None":
-        readout = self.load("closeout/readout.json", required=False)
+        readout = self.load("closeout/r1_readout.json", required=False)
         if not isinstance(readout, dict):
             return None
         body = dict(readout)
@@ -538,10 +538,10 @@ class Checker:
         rows = self.ledger_rows()
         self.check_budget(budget, rows)
         self.check_carryover(rows)
-        # T9：有 closeout/readout.json 就按「结案口径」判——研究未启动时
+        # T9：有 closeout/r1_readout.json 就按「结案口径」判——研究未启动时
         # 研究产物**应当缺席**，缺件不是错误；矛盾声明才是。
         close = self.check_closeout(rows) if (
-            self.root / "closeout" / "readout.json").exists() else None
+            self.root / "closeout" / "r1_readout.json").exists() else None
         started = bool(close and close.get("started"))
         judge_ok, replay_ok, statuses = {}, {}, {}
         if close is None or started:

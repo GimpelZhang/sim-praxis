@@ -41,7 +41,7 @@ from orchestrator.rsi_r1 import repair as RPR
 SCHEMA = "simpraxis.rsi_r1.closeout.v1"
 SCHEMA_VERSION = 1
 
-READOUT_RELPATH = "closeout/readout.json"
+READOUT_RELPATH = "closeout/r1_readout.json"
 FAILURE_MAP_RELPATH = "closeout/failure_map.json"
 R2_READINESS_RELPATH = "closeout/r2_readiness.json"
 SHADOW_RELPATH = "closeout/shadow_proposals.jsonl"
