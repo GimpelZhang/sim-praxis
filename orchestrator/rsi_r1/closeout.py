@@ -248,6 +248,7 @@ def protocol_facts(root: Path) -> "dict[str, Any]":
         studies = doc.get("studies") or []
         out[name] = {
             "verdict": doc.get("verdict"),
+            "reason": doc.get("reason"),
             "billing_lane": doc.get("billing_lane"),
             "attempt": doc.get("attempt"),
             "posts": doc.get("posts"),
@@ -551,6 +552,53 @@ def _process_reasons(ledger: Mapping[str, Any], batches: Mapping[str, Any],
     return reasons
 
 
+def _r2_proposal(protocol: Mapping[str, Any]) -> "dict[str, Any]":
+    """R2 前置条件**只按协议事实生成**，不写死某一轮的失败原因。
+
+    §11.3：R1 满足后也不是自动执行 R2——本件只登记「要再跑正式研究必须先满足什么」。
+    摘要逐字引用报告 ``reason``（盘面事实），前置条件按 ``stopped`` 码给对应的
+    可执行约束；未知码只留程序性三条，不臆测原因。
+    """
+    failed = [(name, doc) for name, doc in protocol.items()
+              if isinstance(doc, Mapping) and doc.get("verdict")
+              and doc.get("verdict") != "PASS"]
+    if not failed:
+        summary = ("R1 本轮未进入正式研究（无 PASS 协议报告）；"
+                   "R2 不得自动启动（§11.3「R1 满足后不是自动执行 R2」）。")
+    else:
+        parts: "list[str]" = []
+        for name, doc in failed:
+            posts = doc.get("posts")
+            post_txt = (f"{posts.get('this_attempt')}/{posts.get('allowed')}"
+                        if isinstance(posts, Mapping) else str(posts))
+            codes = [str(c) for c in (doc.get("stopped") or []) if c]
+            detail = (f"{name} 判 {doc.get('verdict')}（lane={doc.get('billing_lane')}，"
+                      f"attempt={doc.get('attempt')}，"
+                      f"posts={post_txt}")
+            if codes:
+                detail += f"，stopped={','.join(codes)}"
+            if doc.get("reason"):
+                detail += f"；{doc['reason']}"
+            parts.append(detail + "）")
+        summary = ("R1 本轮未进入正式研究：" + "；".join(parts)
+                   + "。R2 不得自动启动（§11.3「R1 满足后不是自动执行 R2」）。")
+    codes = {str(c) for _, doc in failed for c in (doc.get("stopped") or []) if c}
+    prereq: "list[str]" = []
+    if "RESOURCE_EXCEEDED" in codes:
+        prereq.append("阻断动作为合同资源帽（RESOURCE_EXCEEDED，本轮 run_batch 提出的 "
+                      "matrix.cells 超过探索 runs 帽）：要么在候选侧遵守帽值，要么在"
+                      "**新轮预注册**中显式放宽——不得回填/改动本轮判读")
+    if "SOURCE_SHA_INVALID" in codes:
+        prereq.append("阻断动作为引用哈希不一致（SOURCE_SHA_INVALID）：复核 brief 中 "
+                      "parent_sha 与 plan_sha256 sentinel 的口径自洽性——修复须在"
+                      "**新轮**生效，不得回填本轮")
+    prereq.extend([
+        "新研究轮须用户显式裁决（§11.2「需要未来新研究轮则另裁决」）",
+        "新轮重新冻结 LOCK 与预算 envelope，旧账全部累计不归零",
+    ])
+    return {"summary": summary, "prerequisites": prereq}
+
+
 def build(ctx: Any, *, image_pin: "str | None" = None,
           notes: "list[str] | None" = None,
           clock: Callable[[], str] = utc_now_iso_z,
@@ -673,16 +721,7 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         "created_at_utc": clock(),
         "deployed": False,
         "r1_axes": dict(axes),
-        "proposal": {
-            "summary": ("R1 本轮未进入正式研究：T6 probe 在协议层被判 NOT_MEASURED。"
-                        "R2 不得自动启动（§11.3「R1 满足后不是自动执行 R2」）。"),
-            "prerequisites": [
-                "修复并复核阻断 probe 的协议文案/字段一致性（parent_sha 与 "
-                "plan_sha256 sentinel 的口径必须自洽）",
-                "新研究轮须用户显式裁决（§11.2「需要未来新研究轮则另裁决」）",
-                "新轮重新冻结 LOCK 与预算 envelope，旧账全部累计不归零",
-            ],
-        },
+        "proposal": _r2_proposal(protocol),
         "blocked_by": [e.get("id") for e in entries
                        if e.get("verdict") not in (None, "PASS")],
     }

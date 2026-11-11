@@ -444,3 +444,31 @@ def test_pack_must_bind_to_the_same_root(tmp_path: Path) -> None:
     checker.verify_pack(pack)
     root_check = [c for c in checker.checks if c["id"] == "P-MANIFEST-ROOT"][0]
     assert root_check["ok"] is False
+
+
+def test_r2_proposal_derives_from_protocol_facts() -> None:
+    """R1.1：R2 前置条件按协议事实生成，不写死某一轮的失败原因。
+
+    回归：报告 ``posts`` 既有 dict 形态（真报告）也有 int 形态（旧件/桩），
+    两种都不得让结案崩掉；摘要必须逐字引用 ``reason``，前置条件按 stopped 码给。
+    """
+    out = CL._r2_proposal({
+        "probe": {"verdict": "NOT_MEASURED", "billing_lane": "repair_reserve",
+                  "attempt": 1, "posts": {"this_attempt": 3, "allowed": 8},
+                  "stopped": ["RESOURCE_EXCEEDED"],
+                  "reason": "study A 停于 RESOURCE_EXCEEDED（规范动作 2/8）"},
+        "practice": None,
+    })
+    assert "posts=3/8" in out["summary"]
+    assert "study A 停于 RESOURCE_EXCEEDED" in out["summary"]
+    assert any("RESOURCE_EXCEEDED" in p for p in out["prerequisites"])
+    assert any("另裁决" in p for p in out["prerequisites"])
+
+    legacy = CL._r2_proposal({"probe": {"verdict": "NOT_MEASURED", "posts": 6,
+                                       "stopped": ["SOURCE_SHA_INVALID"]}})
+    assert "posts=6" in legacy["summary"]
+    assert any("SOURCE_SHA_INVALID" in p for p in legacy["prerequisites"])
+
+    empty = CL._r2_proposal({"probe": None, "practice": None})
+    assert "无 PASS 协议报告" in empty["summary"]
+    assert not any("RESOURCE_EXCEEDED" in p for p in empty["prerequisites"])
