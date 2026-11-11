@@ -60,6 +60,7 @@ from orchestrator.rsi_r1 import runtime
 from orchestrator.rsi_r1 import sandbox as SANDBOX
 from orchestrator.rsi_r1 import scenes as SCENES
 from orchestrator.rsi_r1 import state as ST
+from orchestrator.rsi_r1 import study as STD
 from orchestrator.rsi_r1 import watchdog as W
 from orchestrator.rsi_r1.lanes import LANE_ORDER, LANE_POST_CAPS
 
@@ -696,6 +697,55 @@ def cmd_practice(args: argparse.Namespace) -> int:
     return _run_protocol_cmd(args, PT.PRACTICE)
 
 
+def cmd_study(args: argparse.Namespace) -> int:
+    """T7 正式研究：单 study（A 48 / B 48），真实物理 + 真实 POST。
+
+    与 probe/practice 同一条付费纪律：环境闸 → 批准件 → 网关 → 研究链 → 报告。
+    study A 须 root=PRACTICED、study B 须 root=STUDY_A；同一 study 只跑一次
+    （报告件在场即拒）。``INCOMPLETE`` 不推进 root（§11.2：STOP 不自动继续）。
+    """
+    envelope = C.require_safe_id(args.envelope, where="--envelope")
+    ctx, _ = _load_envelope_contract(envelope)
+    study = str(args.id).strip().upper()
+    if study not in ST.STUDIES:
+        raise CliError(f"--id 只能是 A 或 B，收到 {args.id!r}")
+    assert_rsi_r1_roots_isolated()
+    GT.require_paid_env(os.environ)
+    if not args.tokenizer or not args.tokenizer_sha256:
+        raise CliError("付费运行需要 --tokenizer 与 --tokenizer-sha256")
+    counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
+    consent = C.Consent.from_dict(ctx.read_json("contract/consent.json"))
+    spend = ASM.SpendContract(mode=ASM.MODE_PAID, consent=consent)
+    lane = STD.STUDY_LANE[study]
+    cap = STD.STUDY_POSTS[study]
+    approval = PT.ensure_approval(ctx, batch_id=args.batch_id, lane=lane,
+                                  approved=cap, note=args.note or "")
+    lock_doc = ctx.read_json(LK.LOCK_RELPATH)
+    image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
+    if not image:
+        raise CliError("缺 --image 且 LOCK 未登记镜像 pin")
+    gateway = GT.build_gateway(
+        ledger=QL.QuotaLedger.rsi_r1(),
+        pause_state_path=rsi_r1_gateway_state_path())
+    transport = GT.build_transport(
+        gateway=gateway, lane=lane, batch_id=args.batch_id,
+        thread_id=args.thread_id or f"rsi-r1-{lane}", env=os.environ)
+    report = STD.run_study(
+        ctx, study=study, spend=spend, transport_factory=lambda: transport,
+        runner=SANDBOX.DockerRunner(), image=image, batch_id=args.batch_id,
+        counter=counter)
+    print(f"study {study} {report['status']}  state={report['study_state']}  "
+          f"posts={report['posts']['this_attempt']}/"
+          f"{report['posts']['allowed']}  root={report['root_after']}  "
+          f"stopped={report['stopped'] or '-'}")
+    print(f"  ok turns={report['ok_count']}  "
+          f"judge={report['judge'].get('verdict') or '-'}  "
+          f"claim={'present' if report['claim_submitted'] else 'missing'}")
+    print(f"  approval={approval}")
+    print(f"  report={ctx.relative(STD.report_relpath(study))}")
+    return 0 if report["status"] == "COMPLETED" else 2
+
+
 def cmd_repair_authorize(args: argparse.Namespace) -> int:
     """写 Plan §8.1 的一次性修复授权（新 root INIT 位）+ 旧消耗逐字节搬入。"""
     envelope = C.require_safe_id(args.envelope, where="--envelope")
@@ -1031,6 +1081,24 @@ def build_parser() -> argparse.ArgumentParser:
                               "（需先 repair-authorize；协议报告仍按本 lane）")
         pp2.set_defaults(func=func)
 
+    psty = sub.add_parser(
+        "study", help="T7 正式研究（A/B 各 48 次真实 POST + 真实容器）")
+    psty.add_argument("--envelope", required=True)
+    psty.add_argument("--id", required=True, choices=["A", "B", "a", "b"],
+                      help="研究编号：A（接触/摩擦）或 B（控制采样/积分）")
+    psty.add_argument("--batch-id", required=True,
+                      help="本批账本 batch_id（批准件同名，0600 落 quota/approvals/）")
+    psty.add_argument("--image", default=None,
+                      help="容器镜像 name@sha256:<64>（缺省取 LOCK 登记值）")
+    psty.add_argument("--tokenizer", default=None,
+                      help="本地 tokenizer.json 路径（20000 token 请求门）")
+    psty.add_argument("--tokenizer-sha256", default=None,
+                      help="tokenizer.json 的 sha256（逐字节钉死）")
+    psty.add_argument("--thread-id", default="",
+                      help="账本 thread_id（默认 rsi-r1-study_<A|B>）")
+    psty.add_argument("--note", default=None, help="批准件备注")
+    psty.set_defaults(func=cmd_study)
+
     pra = sub.add_parser(
         "repair-authorize",
         help="Plan §8.1 一次性修复授权（新 root 的 INIT 位；旧消耗逐字节搬入）")
@@ -1088,7 +1156,7 @@ def main(argv: "list[str] | None" = None) -> int:
             SCENES.SceneError, OBS.ObservationError,
             CAL.CalibrationError, LK.LockError, PT.ProtocolError,
             RPR.RepairError, CLOSEOUT.CloseoutError, CLOSURE.ClosureError,
-            runtime.CampaignError,
+            STD.StudyError, runtime.CampaignError,
             GT.TransportError, ASM.AssemblyError, QL.QuotaError,
             ST.StateError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)

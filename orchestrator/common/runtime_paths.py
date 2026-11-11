@@ -933,6 +933,7 @@ RSI_R1_CAMPAIGN_SUBDIRS: "tuple[str, ...]" = (
     "quota",             # 本 R1 独立账
     "quota/approvals",   # 批次批准件
     "protocol",          # probe8 协议链
+    "studies",           # T7 两个正式研究 study 的驱动报告（report_A/B.json）
     "closeout",          # 结案件
     "evidence_pack",     # 证据包
 )

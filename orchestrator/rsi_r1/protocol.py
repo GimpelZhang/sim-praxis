@@ -589,7 +589,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
     sender = L.build_production_sender(
         lock_reader=LK.lock_reader(ctx), transport_factory=transport_factory,
         admission=admission, budget=slots, envelope=envelope,
-        spend_contract=spend, sha_of=_repo_sha)
+        spend_contract=spend, sha_of=repo_sha)
     system = L.render_system(extra_rules=render_protocol_brief(lane))
 
     def messages() -> T.Request:
@@ -607,7 +607,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
                      sender=sender, loop=loop, study=study, billing_lane=billing)
 
 
-def _repo_sha(relpath: str) -> str:
+def repo_sha(relpath: str) -> str:
     path = LK.REPO_ROOT / relpath
     digest = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -718,7 +718,7 @@ def _check_gate(ctx: Any, lane: str, *, billing_lane: "str | None" = None
     return lock, report, auth
 
 
-def _posts_used(ctx: Any, *, lane: str, lock: L.LockDocument,
+def posts_used(ctx: Any, *, lane: str, lock: L.LockDocument,
                 spend: A.SpendContract) -> int:
     """lane 已用 POST 数（槽预留 ∪ 账本实呼取大者，与准入同口径）。"""
     admission = A.CampaignAdmission(
@@ -731,7 +731,7 @@ def _posts_used(ctx: Any, *, lane: str, lock: L.LockDocument,
     return admission.posts_used(lane)
 
 
-class _HeartbeatPump:
+class HeartbeatPump:
     """worker 侧心律：独立线程每 60 s 写一次心跳（Plan §8.4）。
 
     为什么必须独立线程：确认批是 96 个 run 的阻塞调用，单线程「每回合写一次」
@@ -757,7 +757,7 @@ class _HeartbeatPump:
         while not self._stop.wait(self.interval_s):
             self.heartbeat.beat(phase=self.phase)
 
-    def start(self) -> "_HeartbeatPump":
+    def start(self) -> "HeartbeatPump":
         self.heartbeat.beat(phase=self.phase)
         self._thread = threading.Thread(target=self._loop,
                                         name="rsi-r1-heartbeat", daemon=True)
@@ -811,12 +811,12 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
     studies = (S.STUDIES[0],) if lane == PROBE else PRACTICE_STUDIES
     strict = lane == PROBE
 
-    used_before = _posts_used(ctx, lane=billing, lock=lock, spend=spend)
+    used_before = posts_used(ctx, lane=billing, lock=lock, spend=spend)
     if billing != lane:
         cap = used_before + wanted_posts
 
     chains: "list[ChainResult]" = []
-    pump = _HeartbeatPump(ctx.subdir("state")).start()
+    pump = HeartbeatPump(ctx.subdir("state")).start()
     try:
         transport = transport_factory()
         for study in studies:
@@ -832,7 +832,7 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
     finally:
         pump.stop()
 
-    used_after = _posts_used(ctx, lane=billing, lock=lock, spend=spend)
+    used_after = posts_used(ctx, lane=billing, lock=lock, spend=spend)
 
     ok_chains = all(c.ok_count == CHAIN_ACTIONS and not c.stopped for c in chains)
     posts = used_after - used_before
@@ -968,6 +968,7 @@ __all__ = [
     "ProtocolError", "REPORT_SCHEMA", "ROOT_GATE", "ROOT_NEXT", "ScopedContext",
     "TOY_CONDITIONS", "VERDICT_NOT_MEASURED", "VERDICT_PASS", "approval_doc",
     "attempt_prefix", "backend_factory_for", "build_lane_parts", "drive_chain",
-    "ensure_approval", "mirror_root", "next_attempt", "render_protocol_brief",
+    "ensure_approval", "mirror_root", "next_attempt", "posts_used",
+    "render_protocol_brief", "repo_sha", "HeartbeatPump",
     "render_study_brief", "run_protocol", "toy_plan_doc",
 ]
