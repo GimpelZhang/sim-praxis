@@ -18,89 +18,16 @@ from orchestrator.rsi_r1 import rubric as R
 from orchestrator.rsi_r1 import scenes as S
 
 # ---------------------------------------------------------------------------
-# 构造合法计划的工具
+# 构造合法计划的工具（单一来源：tests/rsi_r1_helpers.py）
 # ---------------------------------------------------------------------------
 
-def _cond(cid: str, scene: str, **params) -> dict:
-    return {"id": cid, "scene_id": scene, "params": params}
-
-
-A_CONDITIONS = (
-    _cond("base", S.SCENE_A, mass_kg="0.5", v0_mps="0.4",
-          sliding_friction="0.4", torsional_friction_m="0.01"),
-    _cond("sham", S.SCENE_A, mass_kg="0.5", v0_mps="0.4",
-          sliding_friction="0.4", torsional_friction_m="0.02"),
-    _cond("low_mu", S.SCENE_A, mass_kg="0.5", v0_mps="0.4",
-          sliding_friction="0.15", torsional_friction_m="0.01"),
-    _cond("heavy", S.SCENE_A, mass_kg="0.9", v0_mps="0.4",
-          sliding_friction="0.4", torsional_friction_m="0.01"),
+from tests.rsi_r1_helpers import (  # noqa: E402
+    A_CONDITIONS,
+    B_CONDITIONS,
+    SHA,
+    cond as _cond,
+    plan_doc as _plan_doc,
 )
-
-B_CONDITIONS = (
-    _cond("base", S.SCENE_B, inertia_ratio="1.0", target_amplitude_rad="0.2",
-          target_freq_hz="1.0", tc_s="0.008", dt_s="0.001",
-          controller="PD", kp="5", kd="0.1"),
-    _cond("tc_only", S.SCENE_B, inertia_ratio="1.0", target_amplitude_rad="0.2",
-          target_freq_hz="1.0", tc_s="0.016", dt_s="0.001",
-          controller="PD", kp="5", kd="0.1"),
-    _cond("dt_only", S.SCENE_B, inertia_ratio="1.0", target_amplitude_rad="0.2",
-          target_freq_hz="1.0", tc_s="0.008", dt_s="0.0005",
-          controller="PD", kp="5", kd="0.1"),
-)
-
-SHA = "a" * 64
-
-
-def _plan_doc(study: str, *, phase: str = "confirm", conditions=None,
-              primary=None, negative=None, varying=None, block_count: int = 32,
-              hypotheses=None) -> dict:
-    import copy
-
-    scene = S.SCENE_A if study == "A" else S.SCENE_B
-    conds = copy.deepcopy(
-        list(A_CONDITIONS if study == "A" else B_CONDITIONS)) \
-        if conditions is None else conditions
-    if primary is None:
-        if study == "A":
-            primary = {"id": "primary", "kind": "primary",
-                       "metric": "displacement_x_m",
-                       "proposition": "decrease_gt", "delta": "0.001",
-                       "condition_ids": ["base", "low_mu"]}
-        else:
-            primary = {"id": "primary", "kind": "primary",
-                       "metric": "normalized_tracking_rmse",
-                       "proposition": "increase_gt", "delta": "0.01",
-                       "condition_ids": ["base", "tc_only"]}
-    if negative is None and study == "A":
-        negative = {"id": "negative", "kind": "negative",
-                    "metric": "displacement_x_m_negative_equivalence",
-                    "proposition": "equivalent", "delta": "0.001",
-                    "condition_ids": ["base", "sham"]}
-    if hypotheses is None:
-        hypotheses = [
-            {"id": "h1", "mechanism": "摩擦耗能主导减速",
-             "predicted": "decrease_gt" if study == "A" else "increase_gt",
-             "contrast_id": "primary", "falsification": "区间跨过 δ 即反证"},
-            {"id": "h2", "mechanism": "扭转摩擦只影响旋转耦合",
-             "predicted": "equivalent", "contrast_id":
-                 "negative" if study == "A" else "primary",
-             "falsification": "位移差区间越出等效界即反证"},
-        ]
-    if varying is None:
-        varying = ({"mass_kg": ["0.2", "1.0"]} if study == "A"
-                   else {"inertia_ratio": ["0.5", "2.0"]})
-    return {
-        "schema": C.PLAN_SCHEMA, "schema_version": 1,
-        "study_id": study, "revision": 1, "parent_sha": None,
-        "hypotheses": hypotheses, "conditions": conds,
-        "nuisance_distribution": {"generator": "pcg64-host",
-                                  "block_count": block_count,
-                                  "varying": varying},
-        "primary": primary, "negative_control": negative,
-        "analysis_source_sha": SHA if phase == "confirm" else None,
-        "design_source_sha": SHA if phase == "confirm" else None,
-        "phase": phase,
-    }
 
 
 # ---------------------------------------------------------------------------
