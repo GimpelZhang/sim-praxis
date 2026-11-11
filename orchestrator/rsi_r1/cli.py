@@ -289,6 +289,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         "model_config_sha256": model_sha,
         "consent_sha256": consent.sha256,
         "consent_document_sha256": consent_doc_sha,
+        # 签署原件的路径：AUTHORIZED 前置条件要回读**源件字节**复核（副本是
+        # 规范化重序列化，字节永不等于源件；两个 hash 各管一层，见校验函数）。
+        "consent_document_path": str(consent_path),
         "cost_decision": consent.decision,
         "paid_authorized": consent.paid_authorized,
         "budget_sha256": budget.sha256,
@@ -517,17 +520,53 @@ OPERATOR_STATES: "tuple[str, ...]" = (
 
 
 def _check_authorized_preconditions(ctx: Any, env_doc: Mapping[str, Any]) -> None:
+    """AUTHORIZED 前置条件：付费授权 + 决定书两层完整性。
+
+    两个 hash 各管一层，不可互换（L-R1-07 同类「值 vs 字节」缺陷的修复）：
+
+    * ``consent_sha256`` —— 决定书**值**的规范 hash。校验对象是 campaign 内的
+      ``contract/consent.json``（init 时由 ``Consent.to_dict()`` 规范化重序列化写出，
+      字节与源件不同），检测副本落盘后被改写/损坏。
+    * ``consent_document_sha256`` —— 签署**源件**的原始字节 hash。校验对象是
+      init 时登记的 ``consent_document_path``；源件在授权后被改写（哪怕只是
+      加一个空格）都说明「这份授权不是当前这版文字」，必须阻断。
+      旧 envelope 没有该路径字段时退回副本字节口径（历史兼容）。
+    """
     if env_doc.get("paid_authorized") is not True:
         raise CliError("AUTHORIZED_PRECONDITION: envelope.paid_authorized 不是 true")
     if not ctx.exists("contract/consent.json"):
         raise CliError("AUTHORIZED_PRECONDITION: 缺 contract/consent.json")
-    raw = ctx.relative("contract/consent.json").read_bytes()
-    got = hashlib.sha256(raw).hexdigest()
-    want = env_doc.get("consent_document_sha256")
-    if want and got != want:
+    try:
+        signed = C.Consent.from_dict(ctx.read_json("contract/consent.json"))
+    except (C.ContractError, KeyError, TypeError) as exc:
         raise CliError(
-            f"AUTHORIZED_PRECONDITION: consent 字节 sha256={got} != "
-            f"envelope.consent_document_sha256={want}")
+            "AUTHORIZED_PRECONDITION: contract/consent.json 不是合法决定书："
+            f"{exc}") from exc
+    want_value = env_doc.get("consent_sha256")
+    if want_value and signed.sha256 != want_value:
+        raise CliError(
+            "AUTHORIZED_PRECONDITION: consent 规范值 sha256="
+            f"{signed.sha256} != envelope.consent_sha256={want_value}")
+    want_doc = env_doc.get("consent_document_sha256")
+    if not want_doc:
+        return
+    src = env_doc.get("consent_document_path")
+    if src:
+        path = Path(str(src))
+        if not path.is_file():
+            raise CliError(
+                "AUTHORIZED_PRECONDITION: consent 原件不在，无法复核签署字节："
+                f"{path}")
+        got = hashlib.sha256(path.read_bytes()).hexdigest()
+        what = f"consent 原件 {path}"
+    else:
+        got = hashlib.sha256(
+            ctx.relative("contract/consent.json").read_bytes()).hexdigest()
+        what = "contract/consent.json 字节（旧 envelope 无源件路径）"
+    if got != want_doc:
+        raise CliError(
+            f"AUTHORIZED_PRECONDITION: {what} sha256={got} != "
+            f"envelope.consent_document_sha256={want_doc}")
 
 
 def _check_calibrated_preconditions(ctx: Any) -> None:

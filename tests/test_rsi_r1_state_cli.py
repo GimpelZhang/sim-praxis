@@ -8,8 +8,9 @@
 * 只允许 AUTHORIZED / CALIBRATED / FROZEN 三步（PROBED 起只能由协议链或
   研究闭环推进，操作者无权代劳）；
 * 每一步都有**语义前置条件**且 fail-closed：AUTHORIZED 要
-  ``envelope.paid_authorized is true`` 且 consent 字节 sha 与 envelope 登记
-  一致；CALIBRATED 要校准报告判决 ``CALIBRATION_PASS``；FROZEN 要
+  ``envelope.paid_authorized is true`` + 决定书两层完整性（副本**值**对
+  ``consent_sha256``、签署**源件字节**对 ``consent_document_sha256``）；
+  CALIBRATED 要校准报告判决 ``CALIBRATION_PASS``；FROZEN 要
   ``verify_lock`` 全量复核（闭包/依赖/校准/双签）通过；
 * 幂等：已是目标状态时重复调用 rc=0 且不追加第二条事件。
 """
@@ -24,6 +25,7 @@ from typing import Any
 import pytest
 
 from orchestrator.rsi_r1 import cli as CLI
+from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import state as S
 from tests import rsi_r1_helpers as H
@@ -48,15 +50,31 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> RehearsalDriver:
     return driver
 
 
-def _authorize(driver: RehearsalDriver) -> None:
-    """写付费授权 + consent 字节，使 AUTHORIZED 前置条件成立。"""
-    consent = {"schema": "simpraxis.rsi_r1.consent.v1", "schema_version": 1,
-               "envelope_id": H.ENVELOPE, "paid_authorized": True}
-    path = driver.ctx.write_json("contract/consent.json", consent)
+def _authorize(driver: RehearsalDriver) -> Path:
+    """写一份**真实**决定书：源件（非规范排版）+ campaign 副本 + 两层 hash 登记。
+
+    现实里 init 收到的是用户手写的 JSON（缩进/换行任意），落盘副本是
+    ``Consent.to_dict()`` 的规范化重序列化——两者字节必然不同。所以
+    ``consent_sha256``（值）与 ``consent_document_sha256``（源件字节）必须
+    各验各的对象，不能拿副本字节去对源件 hash。
+    """
+    consent = {"schema": C.CONSENT_SCHEMA, "schema_version": 1,
+               "envelope_id": H.ENVELOPE, "decision": C.COST_DECISION_WAIVER,
+               "scope": "R1", "granted_at_utc": "2026-11-11T00:00:00Z",
+               "granted_by": "user", "verbatim": "我授权执行 R1（排演）",
+               "plan_path": "/tmp/plan.md", "plan_sha256": "a" * 64,
+               "supersedes": [], "notes": ""}
+    driver.ctx.write_json("contract/consent.json", consent)
+    source = driver.ctx.root.parent / "signed_consent.json"
+    source.write_text(json.dumps(consent, ensure_ascii=False, indent=2) + "\n",
+                      encoding="utf-8")
     doc = driver.ctx.read_json("contract/envelope.json")
     doc["paid_authorized"] = True
-    doc["consent_document_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    doc["consent_sha256"] = C.Consent.from_dict(consent).sha256
+    doc["consent_document_sha256"] = hashlib.sha256(source.read_bytes()).hexdigest()
+    doc["consent_document_path"] = str(source)
     driver.ctx.write_json("contract/envelope.json", doc)
+    return source
 
 
 def _advance(driver: RehearsalDriver, to: str, reason: str = "") -> int:
@@ -81,7 +99,7 @@ def test_authorized_requires_paid_authorization_and_consent_bytes(
     # 排演 envelope 没有 paid_authorized ⇒ 拒绝（rc=2，状态机不动）
     assert _advance(driver, "AUTHORIZED") == 2
     assert _root(driver) == S.ROOT_INIT
-    # 有 paid_authorized，但 consent 字节 sha 与登记不符 ⇒ 拒绝
+    # 有 paid_authorized，但登记 hash 与源件不符 ⇒ 拒绝
     _authorize(driver)
     doc = driver.ctx.read_json("contract/envelope.json")
     doc["consent_document_sha256"] = "0" * 64
@@ -95,6 +113,46 @@ def test_authorized_requires_paid_authorization_and_consent_bytes(
     # 幂等：重复调用 rc=0，且不追加第二条事件
     assert _advance(driver, "AUTHORIZED") == 0
     assert len(_events(driver)) == 1
+
+
+def test_authorized_detects_two_layer_consent_tampering(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """L-R1-07 同族缺陷：副本字节 ≠ 源件字节，两层 hash 必须各验各的对象。"""
+    driver = _env(tmp_path, monkeypatch)
+    source = _authorize(driver)
+    copy_bytes = driver.ctx.relative("contract/consent.json").read_bytes()
+    assert hashlib.sha256(copy_bytes).hexdigest() != \
+        hashlib.sha256(source.read_bytes()).hexdigest(), \
+        "测试前提：campaign 副本是规范化重序列化，字节必须不同于签署源件"
+    # 源件在授权后被改写（只多一个换行也算）：签署字节不再成立 ⇒ 阻断
+    source.write_text(source.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert _advance(driver, "AUTHORIZED") == 2
+    assert _root(driver) == S.ROOT_INIT
+    # 源件复原后仍要过第二层：campaign 副本的**值**被改写 ⇒ 阻断
+    _authorize(driver)
+    doc = driver.ctx.read_json("contract/consent.json")
+    doc["granted_by"] = "someone-else"
+    driver.ctx.write_json("contract/consent.json", doc)
+    assert _advance(driver, "AUTHORIZED") == 2
+    assert _root(driver) == S.ROOT_INIT
+    # 两层都正确 ⇒ 通过
+    _authorize(driver)
+    assert _advance(driver, "AUTHORIZED") == 0
+    assert _root(driver) == S.ROOT_AUTHORIZED
+
+
+def test_authorized_legacy_envelope_without_source_path(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """历史 envelope 无源件路径：退回副本字节口径（显式分支，不留静默跳过）。"""
+    driver = _env(tmp_path, monkeypatch)
+    _authorize(driver)
+    doc = driver.ctx.read_json("contract/envelope.json")
+    doc.pop("consent_document_path", None)
+    doc["consent_document_sha256"] = hashlib.sha256(
+        driver.ctx.relative("contract/consent.json").read_bytes()).hexdigest()
+    driver.ctx.write_json("contract/envelope.json", doc)
+    assert _advance(driver, "AUTHORIZED") == 0
+    assert _root(driver) == S.ROOT_AUTHORIZED
 
 
 def test_calibrated_requires_pass_report(
