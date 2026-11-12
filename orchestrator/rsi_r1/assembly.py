@@ -43,8 +43,10 @@ from orchestrator.rsi_r1 import lanes as LANES
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import loop as L
 from orchestrator.rsi_r1 import observations as O
+from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import replay as RP
+from orchestrator.rsi_r1 import resources as RS
 from orchestrator.rsi_r1 import sandbox as SB
 from orchestrator.rsi_r1 import state as S
 from orchestrator.rsi_r1 import watchdog as W
@@ -437,9 +439,24 @@ class CampaignDispatcher:
                  admission: CampaignAdmission, budget: C.BudgetSpec,
                  study: str, runner: Any, image: str,
                  backend_factory: Callable[[str], Any],
-                 clock: Callable[[], str] = utc_now_iso_z) -> None:
+                 clock: Callable[[], str] = utc_now_iso_z,
+                 profile: "P.CampaignProfile | None" = None,
+                 resource_ledger: "RS.ResourceLedger | None" = None) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
+        # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
+        # 旧 profile/不传则维持 R1 行为，逐字节不变。
+        if profile is not None and profile.is_r12:
+            if resource_ledger is None:
+                raise AssemblyError(
+                    "RESOURCE_LEDGER_MISSING",
+                    "rsi-r1.2 分派器必须绑定 ResourceLedger（无法无账执行）")
+            if resource_ledger.profile.profile_id != profile.profile_id:
+                raise AssemblyError("PROFILE_MISMATCH",
+                                    "资源账 profile 与分派器 profile 不一致")
+        elif resource_ledger is not None:
+            raise AssemblyError(
+                "PROFILE_MISMATCH", "旧 profile 不得挂 R1.2 资源账")
         self.ctx = ctx
         self.state = state
         self.admission = admission
@@ -449,6 +466,8 @@ class CampaignDispatcher:
         self.image = image
         self.backend_factory = backend_factory
         self.clock = clock
+        self.profile = profile
+        self.resource_ledger = resource_ledger
         self.runs_used: "dict[str, int]" = {"explore": 0, "confirm": 0,
                                             "replay": 0}
         self.last_batch: "dict[str, Any] | None" = None
@@ -466,12 +485,48 @@ class CampaignDispatcher:
         lock = status.get("confirm_lock") or {}
         used = self.admission.posts_used(self.admission.lane)
         cap = int(self.budget.posts_by_lane[self.admission.lane])
+        if self.resource_ledger is not None:
+            return self._visible_state_v2(status, lock, max(0, cap - used))
         return L.make_visible_state(
             study=self.study, study_state=str(status["state"]),
             artifacts=status["artifacts"], last_batch=self.last_batch,
             budget_slots_remaining=max(0, cap - used),
             confirm_token=lock.get("token"),
             plan_doc=self._latest_plan_doc())
+
+    def _visible_state_v2(self, status: Mapping[str, Any],
+                          lock: Mapping[str, Any], slots: int) -> "L.VisibleState":
+        """R1.2 精确公开面：资源快照 + 动态 SHA 全来自宿主事实。"""
+        snap = self.resource_ledger.snapshot(self.study)
+        plan_doc = self._latest_plan_doc()
+        plan_sha = None
+        if plan_doc is not None:
+            try:
+                plan_sha = C.ResearchPlan.from_dict(plan_doc).sha256
+            except C.ContractError:
+                plan_sha = None
+        artifacts = status["artifacts"]
+        analyses = artifacts.get("analysis") or ()
+        manifest = self.confirm_manifest or self._frozen_manifest_raw()
+        phase = "confirm" if (lock or manifest is not None) else "explore"
+        latest = {
+            "plan_sha256": plan_sha,
+            "analysis_source_sha256": str(analyses[-1]) if analyses else None,
+            "confirm_manifest_sha256": None if manifest is None else manifest.sha256,
+            # host nonce：随账本行/study 状态确定变化，不是可见面自身哈希。
+            "nonce": _sha_doc({"study": self.study,
+                               "study_state": str(status["state"]),
+                               "phase": phase,
+                               "ledger_rows": snap["ledger"]["rows"],
+                               "ledger_head": snap["ledger"]["head_sha256"]}),
+        }
+        references = {"plan": plan_sha}
+        return L.make_visible_state_v2(
+            study=self.study, study_state=str(status["state"]),
+            artifacts=artifacts, last_batch=self.last_batch,
+            budget_slots_remaining=slots, confirm_token=lock.get("token"),
+            phase=phase, resources=snap, latest_sha=latest,
+            references=references, plan_doc=plan_doc)
 
     # -- 动作绑定 --------------------------------------------------------
     def _binding(self, action: L.Action) -> "tuple[str, str]":
@@ -558,6 +613,10 @@ class CampaignDispatcher:
                                      where="design_sha256")
         source = self._source_text(design_sha)
         inputs = self._design_inputs(plan)
+        if self.resource_ledger is not None:
+            # 候选沙盒执行：即使设计脚本随后出错/矩阵被拒，这一次也计数。
+            self.resource_ledger.reserve_sandbox(self.study,
+                                                 purpose="explore-design")
         ev = SB.run_design(
             source, inputs, evidence_root=self.ctx.subdir("public"),
             work_root=self.ctx.subdir("trials") / f"design-{design_sha[:12]}",
@@ -576,12 +635,20 @@ class CampaignDispatcher:
             matrix = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             return self._fail("MATRIX_INVALID", str(exc))
-        specs = E.validate_matrix(matrix, plan, self.budget)
-        explore_cap = int(self.budget.max_runs_by_lane["explore"]) \
-            - self.runs_used["explore"]
-        if len(specs) > explore_cap:
-            return self._fail("RESOURCE_EXCEEDED",
-                              f"{len(specs)} runs > 探索余量 {explore_cap}")
+        if self.resource_ledger is not None:
+            # 逐 cell 形状仍由 experiments.validate_matrix 单一实现裁决；
+            # 累计 run/batch/步数/沙盒由资源账在 run_batch 前原子预留。
+            specs, _res = RS.validate_matrix_v2(
+                matrix, plan, ledger=self.resource_ledger, study=self.study,
+                batch_id=f"explore-{_sha_doc(action.to_doc())[:16]}")
+            explore_cap = len(specs)
+        else:
+            specs = E.validate_matrix(matrix, plan, self.budget)
+            explore_cap = int(self.budget.max_runs_by_lane["explore"]) \
+                - self.runs_used["explore"]
+            if len(specs) > explore_cap:
+                return self._fail("RESOURCE_EXCEEDED",
+                                  f"{len(specs)} runs > 探索余量 {explore_cap}")
         backend = self.backend_factory(
             f"explore-{self.study}-{self.runs_used['explore']}")
         book = E.ResourceBook(max_runs=explore_cap,
@@ -610,6 +677,10 @@ class CampaignDispatcher:
         entries: "list[SB.ViewEntry]" = []
         for run_id in wanted:
             entries.extend(self._run_view_entries(run_id))
+        if self.resource_ledger is not None:
+            # analysis 容器同样计数（物理 step=0 也不免费）。
+            self.resource_ledger.reserve_sandbox(self.study,
+                                                 purpose="analysis")
         ev = SB.run_analysis(
             source, entries, evidence_root=self.ctx.subdir("observations"),
             work_root=self.ctx.subdir("trials") / f"analysis-{source_sha[:12]}",
@@ -684,7 +755,22 @@ class CampaignDispatcher:
         seed, seed_path, seed_is_new = self._keeper_seed_for_freeze()
         manifest = E.allocate_confirm(plan, seed)
         n = manifest.n_assignments
-        self.admission.require_lane_space(confirm_runs=n, replay_runs=n)
+        if self.resource_ledger is not None:
+            # T1：freeze 一次原子预留 confirm+replay 算力，并过本 lane POST 余量门
+            #（≥8，不得借其他 lane 余额）。
+            built = J.build_specs(plan, manifest)
+            batch_steps = sum(int(s.nsteps) for s in built.values())
+            lane_cap = int(self.budget.posts_by_lane[self.admission.lane])
+            remaining = lane_cap - self.admission.posts_used(self.admission.lane)
+            self.resource_ledger.reserve_freeze(
+                self.study, lane=self.admission.lane,
+                blocks=int(plan.block_count),
+                n_conditions=len(plan.conditions), replay_runs=n,
+                confirm_steps=batch_steps, replay_steps=batch_steps,
+                posts_remaining_after_charge=remaining,
+                purpose=f"freeze-{self.study}")
+        else:
+            self.admission.require_lane_space(confirm_runs=n, replay_runs=n)
         lock = self.state.freeze_confirm(study=self.study, plan=plan.to_dict(),
                                          design_sha256=design_sha,
                                          analysis_sha256=analysis_sha)
@@ -712,14 +798,23 @@ class CampaignDispatcher:
                               for s in ordered])
         intent = self.state.begin_confirm(study=self.study, token=token,
                                           specs_sha256=specs_sha)
-        room = int(self.budget.max_runs_by_lane["confirm"]) \
-            - self.runs_used["confirm"]
-        if len(ordered) > room:
-            self.state.complete_confirm(intent_id=intent.intent_id,
-                                        result_sha256=_sha_doc({"blocked": True}),
-                                        outcome=S.OUTCOME_INFRA_FAIL)
-            return self._fail("RESOURCE_EXHAUSTED",
-                              f"确认批 {len(ordered)} > 余量 {room}")
+        if self.resource_ledger is not None:
+            # 确认批只能消费 freeze 时已预留的算力（不新增 runs 计费）。
+            self.resource_ledger.consume_confirm(
+                self.study, kind=RS.KIND_CONFIRM, runs=len(ordered),
+                steps=sum(int(s.nsteps) for s in ordered),
+                batch_id=confirm_batch_id(self.study, token))
+            self.resource_ledger.reserve_sandbox(self.study,
+                                                 purpose="confirm-batch")
+        else:
+            room = int(self.budget.max_runs_by_lane["confirm"]) \
+                - self.runs_used["confirm"]
+            if len(ordered) > room:
+                self.state.complete_confirm(intent_id=intent.intent_id,
+                                            result_sha256=_sha_doc({"blocked": True}),
+                                            outcome=S.OUTCOME_INFRA_FAIL)
+                return self._fail("RESOURCE_EXHAUSTED",
+                                  f"确认批 {len(ordered)} > 余量 {room}")
         backend = self.backend_factory(confirm_batch_id(self.study, token))
         book = E.ResourceBook(max_runs=len(ordered),
                               max_steps=int(self.budget.max_steps))
@@ -984,7 +1079,9 @@ def honest_zero_row_ledger(ctx: Any) -> Path:
 def build_campaign_parts(
         ctx: Any, *, spend: SpendContract, lane: str, study: str,
         runner: Any, image: str, backend_factory: Callable[[str], Any],
-        lock_sha256: str
+        lock_sha256: str,
+        profile: "P.CampaignProfile | None" = None,
+        resource_ledger: "RS.ResourceLedger | None" = None
 ) -> "tuple[CampaignAdmission, SlotBook, CampaignDispatcher, S.ResearchState]":
     """标准装配：状态 + 预算 + 准入 + 槽 + 分派（同 root 共享）。"""
     budget = C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json"))
@@ -995,5 +1092,7 @@ def build_campaign_parts(
     admission.attach_slots(slots)
     dispatcher = CampaignDispatcher(ctx=ctx, state=state, admission=admission,
                                     budget=budget, study=study, runner=runner,
-                                    image=image, backend_factory=backend_factory)
+                                    image=image, backend_factory=backend_factory,
+                                    profile=profile,
+                                    resource_ledger=resource_ledger)
     return admission, slots, dispatcher, state

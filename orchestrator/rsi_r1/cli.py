@@ -1063,11 +1063,24 @@ def cmd_check(args: argparse.Namespace) -> int:
 # main
 # ---------------------------------------------------------------------------
 
+def _run_r12(argv: "list[str]") -> int:
+    """``r12`` 子命令转发；延迟 import 避免旧路径加载新模块。"""
+    from orchestrator.rsi_r1 import cli_r12
+
+    return cli_r12.main(list(argv))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m orchestrator.rsi_r1.cli",
         description="RSI-R1 研究闭环 CLI（T0：init/check；其余命令随后续 Task 接线）")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    # RSI-R1.2（profile rsi-r1.2；账 2904）：转发到独立 CLI，旧行为逐字节不变。
+    p12 = sub.add_parser("r12", help="RSI-R1.2 子命令（init/check/status/contract）")
+    p12.add_argument("r12_args", nargs=argparse.REMAINDER,
+                     help="原样转发给 orchestrator.rsi_r1.cli_r12")
+    p12.set_defaults(func=lambda a: _run_r12(a.r12_args))
 
     pi = sub.add_parser("init", help="初始化 R1 campaign：预算/授权/依赖索引落件")
     pi.add_argument("--envelope", required=True, help="envelope id（同时作 campaign id）")

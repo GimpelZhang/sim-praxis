@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
 
+from orchestrator.rsi_r1 import profiles as _p12
 from orchestrator.rsi_r1.lanes import (
     LANE_ORDER,
     LANE_POST_CAPS,
@@ -103,6 +104,33 @@ REFUSAL_CLAUSES: "Mapping[str, str]" = {
     "MAX_CONDITIONS": "R1-S5-08",
     "SEED_INVALID": "R1-S5-09",
     "SCENE_MISMATCH": "R1-S5-10",
+    # ---- RSI-R1.2（Plan §1/§1.1/§2；新 profile 段）----
+    "PROFILE_UNKNOWN": "R12-S1-01",
+    "PROFILE_MISMATCH": "R12-S1-02",
+    "FAMILY_CAP_EXCEEDED": "R12-S1-03",
+    "FAMILY_RESERVATION_MISMATCH": "R12-S1-04",
+    "FAMILY_ROUND_OPEN": "R12-S1-05",
+    "FAMILY_PERMIT_INVALID": "R12-S1-06",
+    "HISTORY_DRIFT": "R12-S1-07",
+    "HISTORY_UNAVAILABLE": "R12-S1-08",
+    "COST_GATE_BLOCKED": "R12-S1-09",
+    "OFFLINE_AUTH_REQUIRED": "R12-S1-10",
+    # 族账自身完整性（family.py 可抛；注册即公开条款，不留给运行时裸码）
+    "FAMILY_USAGE_INVALID": "R12-S1-11",
+    "FAMILY_CORRUPT": "R12-S1-12",
+    "FAMILY_ABSENT": "R12-S1-13",
+    "FAMILY_CAP_MISMATCH": "R12-S1-14",
+    "FAMILY_PROFILE_MISMATCH": "R12-S1-15",
+    "PROFILE_NOT_ELIGIBLE": "R12-S1-16",
+    "PUBLIC_CONTRACT_INVALID": "R12-S2-01",
+    # ---- RSI-R1.2 T1（Plan §2.1/§2.2；资源账与最终请求审计）----
+    "RESOURCE_LEDGER_TAMPERED": "R12-S2-02",
+    "RESOURCE_LEDGER_CORRUPT": "R12-S2-03",
+    "BUDGET_UNREACHABLE": "R12-S2-04",
+    "PUBLIC_CONTRACT_MISSING": "R12-S2-05",
+    "PUBLIC_CONTRACT_DRIFT": "R12-S2-06",
+    "PUBLIC_CONTRACT_PRIVATE": "R12-S2-07",
+    "DYNAMIC_REF_INVALID": "R12-S2-08",
 }
 
 
@@ -443,6 +471,254 @@ def assert_run_budget_consistent() -> None:
 
 
 # ---------------------------------------------------------------------------
+# BudgetSpecV2 / ConsentV2（RSI-R1.2 profile；T0）
+#
+# 旧 schema（budget.v1 / consent.v1）逐字节不变：旧 golden、旧 LOCK、旧判器继续
+# 走 ``BudgetSpec``/``Consent``。新 profile 的解析必须**显式声明** schema，选择器
+# ``budget_from_dict`` / ``consent_from_dict`` 按 schema 分派，未知 schema 拒绝，
+# 不做「猜一个最像的」回退。
+#
+# 数值单一真值在 ``orchestrator.rsi_r1.profiles``（版本化 profile）；
+# 本段只做形状/绑定校验，不再写第二份字面量表（AC04）。
+# ---------------------------------------------------------------------------
+
+BUDGET_KEYS_V2 = frozenset({
+    "schema", "schema_version", "envelope_id", "profile_id",
+    "posts_by_lane", "max_usd", "max_runs_by_lane", "max_steps",
+    "aux_subenvelopes",
+})
+
+
+@dataclass(frozen=True)
+class BudgetSpecV2:
+    """R1.2 预算信封：四条 lane（无 repair_reserve）+ 资源帽 + aux 子信封。
+
+    与 ``BudgetSpec`` 的差异（Plan §1.1）：
+    * lane 表 12/16/48/48=124，**无** ``repair_reserve``；
+    * 正常预算 == 硬帽（付费后无本轮修复入口）；
+    * 新增 ``aux_subenvelopes``（五子信封合计恰 2,000,000 step）；
+    * 新增 ``profile_id``（必须显式 ``rsi-r1.2``）。
+    """
+
+    schema: str
+    envelope_id: str
+    profile_id: str
+    posts_by_lane: Mapping[str, int]
+    max_usd: Decimal
+    max_runs_by_lane: Mapping[str, int]
+    max_steps: int
+    aux_subenvelopes: Mapping[str, int]
+
+    def __post_init__(self) -> None:
+        _p12.assert_r12_table_consistent()
+        if self.schema != _p12.BUDGET_SCHEMA_V2:
+            raise ContractError("SCHEMA_MISMATCH",
+                                f"schema 必须是 {_p12.BUDGET_SCHEMA_V2}，实为 {self.schema!r}")
+        if self.profile_id != _p12.PROFILE_R12:
+            raise ContractError("PROFILE_MISMATCH",
+                                f"profile_id 必须是 {_p12.PROFILE_R12}，实为 "
+                                f"{self.profile_id!r}")
+        require_safe_id(self.envelope_id, where="envelope_id")
+        if not isinstance(self.max_usd, Decimal):
+            raise ContractError("USD_INVALID", "max_usd 必须是 Decimal")
+        if not self.max_usd.is_finite() or self.max_usd <= 0:
+            raise ContractError("USD_INVALID", f"max_usd={self.max_usd} 必须为正有限值")
+        if self.max_usd > MAX_USD_LITERAL:
+            raise ContractError("CAP_EXCEEDED",
+                                f"max_usd={self.max_usd} 超过整轮费用帽 {MAX_USD_LITERAL}")
+        got_lanes = tuple(self.posts_by_lane)
+        if set(got_lanes) != set(_p12.LANE_ORDER_R12):
+            raise ContractError("LANE_UNKNOWN",
+                                f"posts_by_lane 的 lane 集合必须是 "
+                                f"{_p12.LANE_ORDER_R12}，实为 {got_lanes}")
+        if "repair_reserve" in self.posts_by_lane:
+            raise ContractError("BUDGET_DRIFT",
+                                "R1.2 无 repair_reserve；登记该 lane 即为旧合同混入")
+        for lane in _p12.LANE_ORDER_R12:
+            cap = require_int(self.posts_by_lane[lane], where=f"posts_by_lane.{lane}",
+                              min_value=0)
+            if cap != _p12.LANE_POST_CAPS_R12[lane]:
+                raise ContractError(
+                    "BUDGET_DRIFT",
+                    f"posts_by_lane.{lane}={cap} 与 profile 表 "
+                    f"{_p12.LANE_POST_CAPS_R12[lane]} 不符（禁止本地改写）")
+        total = sum(self.posts_by_lane[lane] for lane in _p12.LANE_ORDER_R12)
+        if total != _p12.RSI_R12_HARD_CAP:
+            raise ContractError("BUDGET_DRIFT",
+                                f"lane 帽合计 {total} != {_p12.RSI_R12_HARD_CAP}")
+        expected_runs = {
+            "explore": _p12.MAX_EXPLORE_RUNS_PER_STUDY,
+            "confirm": _p12.MAX_CONFIRM_RUNS_PER_STUDY,
+            "replay": _p12.MAX_REPLAY_RUNS_PER_STUDY,
+        }
+        if dict(self.max_runs_by_lane) != expected_runs:
+            raise ContractError(
+                "BUDGET_DRIFT",
+                f"max_runs_by_lane={dict(self.max_runs_by_lane)} 与 R1.2 "
+                f"{expected_runs} 不符")
+        if self.max_steps != _p12.MAX_TOTAL_STEPS:
+            raise ContractError(
+                "BUDGET_DRIFT",
+                f"max_steps={self.max_steps} 与 R1.2 {_p12.MAX_TOTAL_STEPS} 不符")
+        require_int(self.max_steps, where="max_steps", min_value=1)
+        expected_aux = dict(_p12.AUX_SUBENVELOPES)
+        if dict(self.aux_subenvelopes) != expected_aux:
+            raise ContractError(
+                "BUDGET_DRIFT",
+                f"aux_subenvelopes={dict(self.aux_subenvelopes)} 与 R1.2 "
+                f"{expected_aux} 不符")
+        if sum(self.aux_subenvelopes.values()) != _p12.AUX_SUBENVELOPE_TOTAL:
+            raise ContractError("BUDGET_DRIFT", "aux 子信封合计不等于 2,000,000")
+
+    @property
+    def total_posts(self) -> int:
+        return sum(self.posts_by_lane[lane] for lane in _p12.LANE_ORDER_R12)
+
+    @property
+    def normal_posts(self) -> int:
+        # 无 repair_reserve：正常预算即硬帽。
+        return self.total_posts
+
+    @property
+    def max_total_runs(self) -> int:
+        return 2 * sum(self.max_runs_by_lane.values())
+
+    @property
+    def aux_total_steps(self) -> int:
+        return sum(self.aux_subenvelopes.values())
+
+    def slots(self) -> "list[dict[str, Any]]":
+        out: "list[dict[str, Any]]" = []
+        n = 0
+        for lane in _p12.LANE_ORDER_R12:
+            for i in range(self.posts_by_lane[lane]):
+                n += 1
+                out.append({"slot": n, "lane": lane,
+                            "lane_task_id": _p12.LANE_TASK_ID_R12[lane],
+                            "lane_index": i + 1, "reserve": False})
+        return out
+
+    def to_dict(self) -> "dict[str, Any]":
+        return {
+            "schema": self.schema,
+            "schema_version": _p12.SCHEMA_VERSION,
+            "envelope_id": self.envelope_id,
+            "profile_id": self.profile_id,
+            "posts_by_lane": {lane: self.posts_by_lane[lane]
+                              for lane in _p12.LANE_ORDER_R12},
+            "max_usd": str(self.max_usd),
+            "max_runs_by_lane": dict(self.max_runs_by_lane),
+            "max_steps": self.max_steps,
+            "aux_subenvelopes": dict(self.aux_subenvelopes),
+        }
+
+    @property
+    def sha256(self) -> str:
+        return document_hash(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, obj: Any) -> "BudgetSpecV2":
+        obj = require_object(obj, where="budget")
+        require_no_nan(obj, where="budget")
+        require_exact_keys(obj, BUDGET_KEYS_V2, where="budget")
+        if obj["schema_version"] != _p12.SCHEMA_VERSION:
+            raise ContractError("SCHEMA_MISMATCH",
+                                f"schema_version={obj['schema_version']!r} != "
+                                f"{_p12.SCHEMA_VERSION}")
+        posts = require_object(obj["posts_by_lane"], where="budget.posts_by_lane")
+        runs = require_object(obj["max_runs_by_lane"], where="budget.max_runs_by_lane")
+        require_no_nan(runs, where="budget.max_runs_by_lane")
+        aux = require_object(obj["aux_subenvelopes"], where="budget.aux_subenvelopes")
+        require_no_nan(aux, where="budget.aux_subenvelopes")
+        return cls(
+            schema=require_str(obj["schema"], where="budget.schema"),
+            envelope_id=require_safe_id(obj["envelope_id"], where="budget.envelope_id"),
+            profile_id=require_str(obj["profile_id"], where="budget.profile_id"),
+            posts_by_lane={lane: require_int(posts[lane], where=f"posts_by_lane.{lane}")
+                           for lane in _p12.LANE_ORDER_R12},
+            max_usd=require_decimal(obj["max_usd"], where="budget.max_usd"),
+            max_runs_by_lane={k: require_int(v, where=f"max_runs_by_lane.{k}")
+                              for k, v in runs.items()},
+            max_steps=require_int(obj["max_steps"], where="budget.max_steps"),
+            aux_subenvelopes={k: require_int(v, where=f"aux_subenvelopes.{k}")
+                              for k, v in aux.items()},
+        )
+
+    def to_json(self) -> str:
+        return canonical_json(self.to_dict())
+
+
+def default_budget_v2(envelope_id: str) -> BudgetSpecV2:
+    """按 R1.2 profile 的字面值构造**唯一**默认预算；无缺省 envelope。"""
+    return BudgetSpecV2(
+        schema=_p12.BUDGET_SCHEMA_V2,
+        envelope_id=require_safe_id(envelope_id, where="envelope_id"),
+        profile_id=_p12.PROFILE_R12,
+        posts_by_lane={lane: _p12.LANE_POST_CAPS_R12[lane]
+                       for lane in _p12.LANE_ORDER_R12},
+        max_usd=Decimal(_p12.MAX_USD_LITERAL_DECIMAL),
+        max_runs_by_lane={
+            "explore": _p12.MAX_EXPLORE_RUNS_PER_STUDY,
+            "confirm": _p12.MAX_CONFIRM_RUNS_PER_STUDY,
+            "replay": _p12.MAX_REPLAY_RUNS_PER_STUDY,
+        },
+        max_steps=_p12.MAX_TOTAL_STEPS,
+        aux_subenvelopes=dict(_p12.AUX_SUBENVELOPES),
+    )
+
+
+def budget_from_dict(obj: Any) -> "BudgetSpec | BudgetSpecV2":
+    """按 ``schema`` 分派预算解析；未知/缺失 schema 一律拒绝。"""
+    obj = require_object(obj, where="budget")
+    schema = obj.get("schema")
+    if schema == BUDGET_SCHEMA:
+        return BudgetSpec.from_dict(obj)
+    if schema == _p12.BUDGET_SCHEMA_V2:
+        return BudgetSpecV2.from_dict(obj)
+    raise ContractError("SCHEMA_MISMATCH",
+                        f"budget.schema={schema!r} 未登记（合法：{BUDGET_SCHEMA!r} / "
+                        f"{_p12.BUDGET_SCHEMA_V2!r}）")
+
+
+def assert_single_truth_v2(budget: BudgetSpecV2, *,
+                           ledger_task_caps: Mapping[int, int],
+                           ledger_hard_cap: int,
+                           ledger_normal_budget: int,
+                           family_cap: int) -> None:
+    """AC04/AC07 机判：预算 ↔ 账本命名空间 ↔ profile ↔ 族帽 四源逐项相等。"""
+    if dict(ledger_task_caps) != dict(_p12.RSI_R12_TASK_CAPS):
+        raise ContractError(
+            "BUDGET_DRIFT",
+            f"账本 task_caps={dict(ledger_task_caps)} != profile "
+            f"{dict(_p12.RSI_R12_TASK_CAPS)}")
+    if ledger_hard_cap != _p12.RSI_R12_HARD_CAP:
+        raise ContractError("BUDGET_DRIFT",
+                            f"账本硬帽 {ledger_hard_cap} != {_p12.RSI_R12_HARD_CAP}")
+    if ledger_normal_budget != _p12.RSI_R12_NORMAL_BUDGET:
+        raise ContractError("BUDGET_DRIFT",
+                            f"账本正常预算 {ledger_normal_budget} != "
+                            f"{_p12.RSI_R12_NORMAL_BUDGET}")
+    if budget.total_posts != ledger_hard_cap:
+        raise ContractError("BUDGET_DRIFT",
+                            f"预算槽数 {budget.total_posts} != 账本硬帽 {ledger_hard_cap}")
+    if budget.normal_posts != ledger_normal_budget:
+        raise ContractError("BUDGET_DRIFT",
+                            f"预算正常槽 {budget.normal_posts} != {ledger_normal_budget}")
+    if family_cap != _p12.FAMILY_CAP:
+        raise ContractError("BUDGET_DRIFT",
+                            f"族帽 {family_cap} != {_p12.FAMILY_CAP}")
+    if family_cap != _p12.FAMILY_HISTORY_POSTS + budget.total_posts:
+        raise ContractError(
+            "BUDGET_DRIFT",
+            f"族帽 {family_cap} != 历史 {_p12.FAMILY_HISTORY_POSTS} + 本轮 "
+            f"{budget.total_posts}")
+    # 旧合同数值（144/224/228）绝不能被混进来当 R1.2 真值。
+    if budget.total_posts in (144, 224, 228):
+        raise ContractError("BUDGET_DRIFT",
+                            f"检测到旧合同数值 {budget.total_posts} 混入 R1.2 预算")
+
+
+# ---------------------------------------------------------------------------
 # 费用/授权决定（Plan §8.3；AC01）
 # ---------------------------------------------------------------------------
 #
@@ -579,6 +855,300 @@ def verify_consent_binds_plan(consent: Consent, *, plan_path: str,
             "CONSENT_STALE",
             f"consent.plan_sha256={consent.plan_sha256[:12]}… 与当前 Plan "
             f"{plan_sha256[:12]}… 不符")
+
+
+# ---- ConsentV2（R1.2 费用门；Plan §1.1「新 scope R1.2」）----
+#
+# 旧 ``Consent``（scope "R1"）逐字节保留；R1.2 的豁免/硬保证必须用新 schema、
+# 新 scope，并**显式**绑定：
+#   * 新 Plan 字节 sha256；
+#   * 新 profile id；
+#   * 族帽 155 与历史两本源账的冻结 sha256（防「历史又是 31」口头承诺）；
+#   * 费用风险处置（每 POST 预留/总暴露），旧轮豁免不承继。
+
+CONSENT_SCHEMA_V2 = _p12.CONSENT_SCHEMA_V2
+COST_DECISION_SUPPLY_V2 = "SUPPLY_HARD_GUARANTEE"
+COST_DECISION_WAIVER_V2 = "R1_2_SCOPE_RISK_WAIVER"
+COST_DECISION_BLOCKED_V2 = "BLOCKED"
+COST_DECISIONS_V2 = (COST_DECISION_SUPPLY_V2, COST_DECISION_WAIVER_V2,
+                     COST_DECISION_BLOCKED_V2)
+
+CONSENT_KEYS_V2 = frozenset({
+    "schema", "schema_version", "envelope_id", "profile_id", "decision", "scope",
+    "granted_at_utc", "granted_by", "verbatim", "plan_path", "plan_sha256",
+    "family_cap", "history_posts", "history_ledger_sha256",
+    "risk_reserve_usd", "exposure_note", "supersedes", "notes",
+})
+
+
+@dataclass(frozen=True)
+class ConsentV2:
+    """R1.2 费用门决定书（供应硬保证 / R1.2 范围风险豁免 / 阻断）。
+
+    ``scope`` 必须是 ``"R1.2"``；``history_ledger_sha256`` 必须恰为两本历史
+    源账的冻结字节 sha256（顺序固定），任何「换个说法」的历史口径都拒收。
+    """
+
+    schema: str
+    envelope_id: str
+    profile_id: str
+    decision: str
+    scope: str
+    granted_at_utc: str
+    granted_by: str
+    verbatim: str
+    plan_path: str
+    plan_sha256: str
+    family_cap: int
+    history_posts: int
+    history_ledger_sha256: "tuple[str, ...]"
+    risk_reserve_usd: Decimal
+    exposure_note: str
+    supersedes: "tuple[str, ...]"
+    notes: str
+
+    def __post_init__(self) -> None:
+        if self.schema != CONSENT_SCHEMA_V2:
+            raise ContractError("SCHEMA_MISMATCH",
+                                f"consent schema 必须是 {CONSENT_SCHEMA_V2}，实为 "
+                                f"{self.schema!r}")
+        if self.profile_id != _p12.PROFILE_R12:
+            raise ContractError("PROFILE_MISMATCH",
+                                f"profile_id 必须是 {_p12.PROFILE_R12}，实为 "
+                                f"{self.profile_id!r}")
+        if self.decision not in COST_DECISIONS_V2:
+            raise ContractError("PAID_NOT_AUTHORIZED",
+                                f"decision={self.decision!r} 不在 {COST_DECISIONS_V2}")
+        if self.scope != "R1.2":
+            raise ContractError(
+                "CONSENT_STALE",
+                f"scope={self.scope!r} != 'R1.2'：旧 R1/R0.x 豁免不承继（Plan §1.1）")
+        require_safe_id(self.envelope_id, where="consent.envelope_id")
+        for name in ("granted_at_utc", "granted_by", "plan_path", "plan_sha256"):
+            require_str(getattr(self, name), where=f"consent.{name}")
+        if len(self.plan_sha256) != 64 or any(
+                c not in "0123456789abcdef" for c in self.plan_sha256):
+            raise ContractError("CONSENT_STALE",
+                                "consent.plan_sha256 必须是 64 位小写十六进制")
+        if self.family_cap != _p12.FAMILY_CAP:
+            raise ContractError("FAMILY_CAP_EXCEEDED",
+                                f"family_cap={self.family_cap} != {_p12.FAMILY_CAP}")
+        if self.history_posts != _p12.FAMILY_HISTORY_POSTS:
+            raise ContractError("HISTORY_DRIFT",
+                                f"history_posts={self.history_posts} != "
+                                f"{_p12.FAMILY_HISTORY_POSTS}")
+        expected_ledgers = tuple(str(s["ledger_sha256"])
+                                 for s in _p12.HISTORY_SOURCES)
+        if tuple(self.history_ledger_sha256) != expected_ledgers:
+            raise ContractError(
+                "HISTORY_DRIFT",
+                "history_ledger_sha256 必须恰为两本历史源账的冻结字节 sha256")
+        if not isinstance(self.risk_reserve_usd, Decimal):
+            raise ContractError("USD_INVALID", "risk_reserve_usd 必须是 Decimal")
+        if not self.risk_reserve_usd.is_finite() or self.risk_reserve_usd < 0:
+            raise ContractError("USD_INVALID",
+                                "risk_reserve_usd 必须是非负有限值")
+        if self.risk_reserve_usd > MAX_USD_LITERAL:
+            raise ContractError("CAP_EXCEEDED",
+                                "risk_reserve_usd 超过整轮费用帽 100 USD")
+        if self.decision == COST_DECISION_WAIVER_V2:
+            if not self.verbatim.strip():
+                raise ContractError("PAID_NOT_AUTHORIZED",
+                                    "R1.2 范围风险豁免必须携带授权方原话 verbatim")
+            if not self.exposure_note.strip():
+                raise ContractError(
+                    "PAID_NOT_AUTHORIZED",
+                    "风险豁免必须写明每个 POST 的预留与总暴露处置（exposure_note）")
+            if self.risk_reserve_usd <= 0:
+                raise ContractError(
+                    "PAID_NOT_AUTHORIZED",
+                    "风险豁免必须给出正的每轮风险预留 risk_reserve_usd")
+        if not isinstance(self.supersedes, tuple):
+            raise ContractError("WRONG_TYPE", "consent.supersedes 必须是字符串数组")
+
+    def to_dict(self) -> "dict[str, Any]":
+        return {
+            "schema": self.schema,
+            "schema_version": _p12.SCHEMA_VERSION,
+            "envelope_id": self.envelope_id,
+            "profile_id": self.profile_id,
+            "decision": self.decision,
+            "scope": self.scope,
+            "granted_at_utc": self.granted_at_utc,
+            "granted_by": self.granted_by,
+            "verbatim": self.verbatim,
+            "plan_path": self.plan_path,
+            "plan_sha256": self.plan_sha256,
+            "family_cap": self.family_cap,
+            "history_posts": self.history_posts,
+            "history_ledger_sha256": list(self.history_ledger_sha256),
+            "risk_reserve_usd": str(self.risk_reserve_usd),
+            "exposure_note": self.exposure_note,
+            "supersedes": list(self.supersedes),
+            "notes": self.notes,
+        }
+
+    @property
+    def sha256(self) -> str:
+        return document_hash(self.to_dict())
+
+    @property
+    def paid_authorized(self) -> bool:
+        return self.decision in (COST_DECISION_SUPPLY_V2,
+                                 COST_DECISION_WAIVER_V2)
+
+    @classmethod
+    def from_dict(cls, obj: Any) -> "ConsentV2":
+        obj = require_object(obj, where="consent")
+        require_no_nan(obj, where="consent")
+        require_exact_keys(obj, CONSENT_KEYS_V2, where="consent")
+        if obj["schema_version"] != _p12.SCHEMA_VERSION:
+            raise ContractError("SCHEMA_MISMATCH",
+                                f"consent.schema_version={obj['schema_version']!r} != "
+                                f"{_p12.SCHEMA_VERSION}")
+        sup = obj["supersedes"]
+        if not isinstance(sup, (list, tuple)) or not all(isinstance(s, str) for s in sup):
+            raise ContractError("WRONG_TYPE", "consent.supersedes 必须是字符串数组")
+        ledgers = obj["history_ledger_sha256"]
+        if not isinstance(ledgers, (list, tuple)) or not all(
+                isinstance(s, str) for s in ledgers):
+            raise ContractError("WRONG_TYPE",
+                                "consent.history_ledger_sha256 必须是字符串数组")
+        return cls(
+            schema=require_str(obj["schema"], where="consent.schema"),
+            envelope_id=require_safe_id(obj["envelope_id"], where="consent.envelope_id"),
+            profile_id=require_str(obj["profile_id"], where="consent.profile_id"),
+            decision=require_str(obj["decision"], where="consent.decision"),
+            scope=require_str(obj["scope"], where="consent.scope"),
+            granted_at_utc=require_str(obj["granted_at_utc"], where="consent.granted_at_utc"),
+            granted_by=require_str(obj["granted_by"], where="consent.granted_by"),
+            verbatim=str(obj["verbatim"] or ""),
+            plan_path=require_str(obj["plan_path"], where="consent.plan_path"),
+            plan_sha256=require_str(obj["plan_sha256"], where="consent.plan_sha256"),
+            family_cap=require_int(obj["family_cap"], where="consent.family_cap"),
+            history_posts=require_int(obj["history_posts"],
+                                      where="consent.history_posts"),
+            history_ledger_sha256=tuple(str(s) for s in ledgers),
+            risk_reserve_usd=require_decimal(obj["risk_reserve_usd"],
+                                             where="consent.risk_reserve_usd"),
+            exposure_note=str(obj["exposure_note"] or ""),
+            supersedes=tuple(sup),
+            notes=str(obj["notes"] or ""),
+        )
+
+
+def consent_from_dict(obj: Any) -> "Consent | ConsentV2":
+    """按 ``schema`` 分派费用门决定书；未知/缺失 schema 一律拒绝。"""
+    obj = require_object(obj, where="consent")
+    schema = obj.get("schema")
+    if schema in (CONSENT_SCHEMA, f"{SCHEMA_PREFIX}.consent.v1"):
+        return Consent.from_dict(obj)
+    if schema == CONSENT_SCHEMA_V2:
+        return ConsentV2.from_dict(obj)
+    raise ContractError("SCHEMA_MISMATCH",
+                        f"consent.schema={schema!r} 未登记")
+
+
+def assert_paid_authorized_v2(consent: ConsentV2) -> None:
+    """AC08：R1.2 付费门——无 R1.2 范围有效授权即 0 POST。"""
+    if not isinstance(consent, ConsentV2):
+        raise ContractError("CONSENT_STALE", "R1.2 付费门只接受 ConsentV2")
+    if consent.decision == COST_DECISION_BLOCKED_V2:
+        raise ContractError(
+            "COST_GATE_BLOCKED",
+            "费用门 BLOCKED：T0–T5 离线工作可继续，T6 付费探针不得发网")
+    if not consent.paid_authorized:
+        raise ContractError("PAID_NOT_AUTHORIZED",
+                            "R1.2 费用门无有效授权（互斥三选一未选供应硬保证/风险豁免）")
+
+
+# ---- R1.2 envelope 文档（contract/envelope.json）----
+
+ENVELOPE_KEYS_V2 = frozenset({
+    "schema", "schema_version", "profile_id", "envelope_id", "mode",
+    "created_at_utc", "plan_path", "plan_sha256",
+    "budget_path", "budget_sha256", "profile_sha256",
+    "ledger_namespace", "hard_cap", "normal_budget", "lane_caps",
+    "family_cap", "history_posts",
+    "family_permit_path", "family_permit_sha256",
+    "cost_gate", "public_science_scope_sha256", "public_contract_sha256",
+})
+
+ENVELOPE_MODES = ("offline_validation", "paid")
+
+
+def validate_envelope_v2(doc: Any, *, envelope_id: "str | None" = None) -> "dict[str, Any]":
+    """校验 R1.2 envelope 文档；任何未登记键/漂移值都拒（T0 冻结面）。
+
+    返回原文档的浅拷贝（不就地改）。``envelope_id`` 给出时额外核对一致。
+    """
+    doc = require_object(doc, where="envelope")
+    require_no_nan(doc, where="envelope")
+    require_exact_keys(doc, ENVELOPE_KEYS_V2, where="envelope")
+    if doc["schema"] != _p12.ENVELOPE_SCHEMA_V2:
+        raise ContractError("SCHEMA_MISMATCH",
+                            f"envelope.schema={doc['schema']!r} != "
+                            f"{_p12.ENVELOPE_SCHEMA_V2}")
+    if doc["schema_version"] != _p12.SCHEMA_VERSION:
+        raise ContractError("SCHEMA_MISMATCH",
+                            f"envelope.schema_version={doc['schema_version']!r}")
+    if doc["profile_id"] != _p12.PROFILE_R12:
+        raise ContractError("PROFILE_MISMATCH",
+                            f"envelope.profile_id={doc['profile_id']!r}")
+    env_id = require_safe_id(doc["envelope_id"], where="envelope.envelope_id")
+    if envelope_id is not None and env_id != envelope_id:
+        raise ContractError("PROFILE_MISMATCH",
+                            f"envelope.id={env_id!r} 与请求 {envelope_id!r} 不符")
+    if doc["mode"] not in ENVELOPE_MODES:
+        raise ContractError("WRONG_TYPE",
+                            f"envelope.mode={doc['mode']!r} 不在 {ENVELOPE_MODES}")
+    if require_int(doc["ledger_namespace"], where="envelope.ledger_namespace") \
+            != _p12.PROFILE_R12_DEF.namespace:
+        raise ContractError("BUDGET_DRIFT",
+                            f"envelope.ledger_namespace={doc['ledger_namespace']} "
+                            f"!= {_p12.PROFILE_R12_DEF.namespace}")
+    if require_int(doc["hard_cap"], where="envelope.hard_cap") \
+            != _p12.RSI_R12_HARD_CAP:
+        raise ContractError("BUDGET_DRIFT", "envelope.hard_cap 不等于 124")
+    if require_int(doc["normal_budget"], where="envelope.normal_budget") \
+            != _p12.RSI_R12_NORMAL_BUDGET:
+        raise ContractError("BUDGET_DRIFT", "envelope.normal_budget 不等于 124")
+    lanes = require_object(doc["lane_caps"], where="envelope.lane_caps")
+    if {k: require_int(v, where=f"envelope.lane_caps.{k}") for k, v in lanes.items()} \
+            != dict(_p12.LANE_POST_CAPS_R12):
+        raise ContractError("BUDGET_DRIFT", "envelope.lane_caps 与 profile 表不符")
+    if require_int(doc["family_cap"], where="envelope.family_cap") != _p12.FAMILY_CAP:
+        raise ContractError("FAMILY_CAP_EXCEEDED", "envelope.family_cap 不等于 155")
+    if require_int(doc["history_posts"], where="envelope.history_posts") \
+            != _p12.FAMILY_HISTORY_POSTS:
+        raise ContractError("HISTORY_DRIFT", "envelope.history_posts 不等于 31")
+    for name in ("plan_sha256", "budget_sha256", "profile_sha256",
+                 "family_permit_sha256", "public_science_scope_sha256",
+                 "public_contract_sha256"):
+        value = require_str(doc[name], where=f"envelope.{name}")
+        if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+            raise ContractError("SCHEMA_MISMATCH",
+                                f"envelope.{name} 必须是 64 位小写十六进制")
+    for name in ("plan_path", "budget_path", "family_permit_path"):
+        require_str(doc[name], where=f"envelope.{name}")
+    created = require_str(doc["created_at_utc"], where="envelope.created_at_utc")
+    if not created.endswith("Z"):
+        raise ContractError("SCHEMA_MISMATCH",
+                            "envelope.created_at_utc 必须是严格 UTC Z（ts_iso 口径）")
+    gate = require_object(doc["cost_gate"], where="envelope.cost_gate")
+    decision = gate.get("decision")
+    if decision not in COST_DECISIONS_V2:
+        raise ContractError("PAID_NOT_AUTHORIZED",
+                            f"envelope.cost_gate.decision={decision!r} 未登记")
+    paid = bool(gate.get("paid_authorized"))
+    if paid != (decision in (COST_DECISION_SUPPLY_V2, COST_DECISION_WAIVER_V2)):
+        raise ContractError("PAID_NOT_AUTHORIZED",
+                            "envelope.cost_gate.paid_authorized 与 decision 不一致")
+    if doc["mode"] == "offline_validation" and paid:
+        raise ContractError(
+            "OFFLINE_AUTH_REQUIRED",
+            "offline_validation 模式不得携带付费授权（离线演练禁用 sender）")
+    return dict(doc)
 
 
 # ---------------------------------------------------------------------------
@@ -1095,7 +1665,10 @@ def public_contract_document(*, scene_ids: "tuple[str, ...]",
                         "study": v["study"], "censoring": v["censoring"],
                         "description": v["description"]}
                     for k, v in sorted(METRICS.items())},
-        "refusals": {k: v for k, v in sorted(REFUSAL_CLAUSES.items())},
+        # v1 公开合同是冻结的 R1 面：只暴露 R1-S 条款；R12-S 条款属于
+        # v2 资源合同（profiles.public_contract_document），不得混入旧文档。
+        "refusals": {k: v for k, v in sorted(REFUSAL_CLAUSES.items())
+                     if v.startswith("R1-S")},
         "rubric_sha256": rubric_sha256(),
     }
 

@@ -27,6 +27,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from orchestrator.common import research_transport as T
 from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import rubric as R
 
 ACTION_NAMES = (
@@ -336,6 +337,163 @@ def make_visible_state(*, study: str, study_state: str,
                         budget_slots_remaining=int(budget_slots_remaining),
                         confirm_token=confirm_token, nonce=nonce,
                         plan_doc=plan_doc)
+
+
+# ---------------------------------------------------------------------------
+# RSI-R1.2 可见面 v2（T1）：精确资源快照 + 阶段 + 动态 SHA 引用关系
+# ---------------------------------------------------------------------------
+
+#: 资源快照必须出现的段（``resources.ResourceLedger.snapshot`` 的子集）。
+RESOURCE_VIEW_KEYS: "tuple[str, ...]" = (
+    "explore", "confirm", "replay", "runs_total", "steps", "sandbox",
+    "wallclock", "aux")
+
+DYNAMIC_REF_FIELDS = P.DYNAMIC_REF_FIELDS
+REFERENCE_NAMES = P.REFERENCE_NAMES
+
+
+def _is_hex64(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(ch in "0123456789abcdef" for ch in value))
+
+
+def check_dynamic_refs(latest_sha: Any, references: Any
+                       ) -> "tuple[dict[str, Any], dict[str, Any]]":
+    """动态 SHA 与引用关系的合法性（缺失/非法/悬空引用即拒）。
+
+    值必须来自真实公开结果（调用方只能传宿主派生的 sha 或 nonce）；``None``
+    表示该引用当前尚未可用，是合法状态；但一旦给了值就必须是 64 位小写
+    hex（nonce 除外），且 ``references`` 里的每个非空值必须是当前有效值之一。
+    """
+    if not isinstance(latest_sha, Mapping):
+        raise P.ProfileError("DYNAMIC_REF_INVALID", "latest_sha 必须是对象")
+    missing = [f for f in DYNAMIC_REF_FIELDS if f not in latest_sha]
+    if missing:
+        raise P.ProfileError("DYNAMIC_REF_INVALID",
+                             f"latest_sha 缺字段 {missing}")
+    extra = sorted(set(latest_sha) - set(DYNAMIC_REF_FIELDS))
+    if extra:
+        raise P.ProfileError("DYNAMIC_REF_INVALID",
+                             f"latest_sha 含未登记字段 {extra}")
+    for field in DYNAMIC_REF_FIELDS:
+        value = latest_sha[field]
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value:
+            raise P.ProfileError("DYNAMIC_REF_INVALID",
+                                 f"{field}={value!r} 非字符串")
+        if field != "nonce" and not _is_hex64(value):
+            raise P.ProfileError("DYNAMIC_REF_INVALID",
+                                 f"{field} 不是 64 位小写十六进制：{value!r}")
+        if field == "nonce" and len(value) > 256:
+            raise P.ProfileError("DYNAMIC_REF_INVALID", "nonce 过长")
+    if not isinstance(references, Mapping):
+        raise P.ProfileError("DYNAMIC_REF_INVALID", "references 必须是对象")
+    unknown = sorted(set(references) - set(REFERENCE_NAMES))
+    if unknown:
+        raise P.ProfileError("DYNAMIC_REF_INVALID",
+                             f"references 含未登记名 {unknown}")
+    known = {v for v in latest_sha.values() if isinstance(v, str)}
+    for name, ref in references.items():
+        if ref is None:
+            continue
+        if name == "nonce":
+            if not isinstance(ref, str) or not ref:
+                raise P.ProfileError("DYNAMIC_REF_INVALID",
+                                     f"references.nonce 非法：{ref!r}")
+            if ref != latest_sha.get("nonce"):
+                raise P.ProfileError(
+                    "DYNAMIC_REF_INVALID",
+                    "references.nonce 与 latest_sha.nonce 不一致")
+            continue
+        if not _is_hex64(ref):
+            raise P.ProfileError("DYNAMIC_REF_INVALID",
+                                 f"references.{name} 非 64 位 hex：{ref!r}")
+        if ref not in known:
+            raise P.ProfileError(
+                "DYNAMIC_REF_INVALID",
+                f"references.{name}={ref[:12]}… 不在当前有效动态 SHA 集合")
+    return dict(latest_sha), dict(references)
+
+
+@dataclass(frozen=True)
+class VisibleStateV2:
+    """R1.2 精确可见面：旧 8 键 + phase + resources + latest_sha + references。
+
+    ``resources`` 是 ``ResourceLedger.snapshot`` 的公开投影（used/reserved/
+    remaining），``latest_sha`` 只含宿主派生的动态 SHA 与 nonce，``references``
+    标出候选可安全引用的关系。私有 seed/观测/判决永不进入本对象。
+    """
+
+    study: str
+    study_state: str
+    artifacts: Mapping[str, Sequence[str]]
+    last_batch: "Mapping[str, Any] | None"
+    budget_slots_remaining: int
+    confirm_token: "str | None"
+    nonce: str
+    phase: str
+    resources: Mapping[str, Any]
+    latest_sha: Mapping[str, Any]
+    references: Mapping[str, Any]
+    plan_doc: "Mapping[str, Any] | None" = None
+
+    def as_public(self) -> "dict[str, Any]":
+        return {
+            "study": self.study, "state": self.study_state,
+            "artifacts": {k: list(v) for k, v in sorted(self.artifacts.items())},
+            "last_batch": None if self.last_batch is None else dict(self.last_batch),
+            "budget_slots_remaining": int(self.budget_slots_remaining),
+            "confirm_token": self.confirm_token,
+            "plan": None if self.plan_doc is None else dict(self.plan_doc),
+            "nonce": self.nonce,
+            "phase": self.phase,
+            "resources": json.loads(json.dumps(self.resources,
+                                               ensure_ascii=False)),
+            "latest_sha": dict(self.latest_sha),
+            "references": dict(self.references),
+        }
+
+
+def make_visible_state_v2(*, study: str, study_state: str,
+                          artifacts: Mapping[str, Sequence[str]],
+                          last_batch: "Mapping[str, Any] | None",
+                          budget_slots_remaining: int,
+                          confirm_token: "str | None",
+                          phase: str,
+                          resources: Mapping[str, Any],
+                          latest_sha: Mapping[str, Any],
+                          references: Mapping[str, Any],
+                          plan_doc: "Mapping[str, Any] | None" = None
+                          ) -> VisibleStateV2:
+    if not isinstance(phase, str) or not phase:
+        raise P.ProfileError("PUBLIC_CONTRACT_INVALID", "phase 不能为空")
+    if not isinstance(resources, Mapping):
+        raise P.ProfileError("PUBLIC_CONTRACT_INVALID", "resources 必须是对象")
+    missing = [k for k in RESOURCE_VIEW_KEYS if k not in resources]
+    if missing:
+        raise P.ProfileError("PUBLIC_CONTRACT_INVALID",
+                             f"resources 缺段 {missing}")
+    if resources.get("study") != study:
+        raise P.ProfileError("PUBLIC_CONTRACT_INVALID",
+                             "resources.study 与可见状态 study 不一致")
+    latest_sha, references = check_dynamic_refs(latest_sha, references)
+    payload = {"study": study, "state": study_state,
+               "artifacts": {k: list(v) for k, v in sorted(artifacts.items())},
+               "last_batch": None if last_batch is None else dict(last_batch),
+               "budget_slots_remaining": int(budget_slots_remaining),
+               "confirm_token": confirm_token,
+               "plan": None if plan_doc is None else dict(plan_doc),
+               "phase": phase, "resources": dict(resources),
+               "latest_sha": dict(latest_sha), "references": dict(references)}
+    nonce = T.stable_nonce(payload)
+    return VisibleStateV2(
+        study=study, study_state=study_state, artifacts=artifacts,
+        last_batch=last_batch,
+        budget_slots_remaining=int(budget_slots_remaining),
+        confirm_token=confirm_token, nonce=nonce, phase=phase,
+        resources=resources, latest_sha=latest_sha, references=references,
+        plan_doc=plan_doc)
 
 
 def render_system(*, extra_rules: str = "") -> str:
