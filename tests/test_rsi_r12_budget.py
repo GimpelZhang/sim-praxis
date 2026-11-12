@@ -39,8 +39,13 @@ def test_budget_v2_shape_and_numbers():
     assert budget.max_runs_by_lane == {"explore": 64, "confirm": 192,
                                        "replay": 192}
     assert budget.max_total_runs == 896
-    assert budget.max_steps == 10_000_000
-    assert budget.aux_total_steps == 2_000_000
+    # 锁内适配（2026-11-12 T5 独立评审 MAJOR-6）：这两个值**不许**跟着
+    # ``profiles.P.*`` 走——旧写法 ``== P.MAX_TOTAL_STEPS`` 让测试自动跟随常量，
+    # 帽一改测试照样绿。字面量 = T5 重注册的离线子信封之和（Complete §6 A1–A3）；
+    # **正式**帽（124 POST / 896 run / 7,168,000 study step）未动，
+    # 由 ``test_formal_caps_not_raised_by_offline_envelope`` 逐值钉死。
+    assert budget.max_steps == 12_688_000
+    assert budget.aux_total_steps == 5_520_000
     assert budget.max_usd == Decimal("100")
     slots = budget.slots()
     assert len(slots) == 124
@@ -397,3 +402,25 @@ def test_family_no_double_carryover_across_restart_and_concurrency(fam_root):
     with pytest.raises(FAM.FamilyError) as exc:
         FAM.register(fam_root, P.PROFILE_R12_DEF, "env2-new-root")
     assert exc.value.code == "FAMILY_ROUND_OPEN"
+
+
+def test_formal_caps_not_raised_by_offline_envelope():
+    """MAJOR-6 的第二半：离线子信封上抬**不得**带动正式帽。
+
+    Plan L148 允许「修订离线分配并重新注册离线 spec」，但同一句写明「仍不得抬
+    计算帽」。这里把**正式**帽逐值钉成字面量（不随常量走），任何连带上调即红：
+    124 POST（12/16/48/48）、每 study 探索 64 / 确认 192 / 复跑 192、总 896 run、
+    每 run 8000 step、正式总 7,168,000 step。
+    """
+    b = C.default_budget_v2("env_a")
+    assert b.total_posts == 124
+    assert dict(b.posts_by_lane) == {"probe": 12, "practice": 16,
+                                     "study_A": 48, "study_B": 48}
+    assert dict(b.max_runs_by_lane) == {"explore": 64, "confirm": 192,
+                                        "replay": 192}
+    assert b.max_total_runs == 896
+    assert P.MAX_STEPS_PER_RUN == 8000
+    assert P.MAX_STUDY_STEPS == 7_168_000
+    # aux/整轮是 T5 重注册值，但必须**恰等于**子信封之和（自洽，不是随手数）。
+    assert sum(P.AUX_SUBENVELOPES.values()) == P.AUX_SUBENVELOPE_TOTAL == 5_520_000
+    assert P.MAX_TOTAL_STEPS == P.MAX_STUDY_STEPS + P.AUX_SUBENVELOPE_TOTAL

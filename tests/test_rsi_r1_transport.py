@@ -189,3 +189,40 @@ def test_compact_fallback_keeps_analysis_and_references() -> None:
     assert body.get("n_runs") == 12
     assert len(json.dumps(body, ensure_ascii=False,
                           sort_keys=True).encode("utf-8")) <= T.TOOL_REPLY_MAX_BYTES
+
+
+def test_compact_fallback_keeps_candidate_output_for_r12_confirm() -> None:
+    """R1.2 run_confirm 的数值来源是 ``candidate_output``，白名单也必须保它。
+
+    2026-11-12 T5 离线演练实测：确认批 96 跑的 ``run_ids`` 让回包越过 4096
+    字节帽，旧白名单只保 ``references``（legacy 键），R1.2 的
+    ``candidate_output`` 会被整包丢掉——候选提交 claims 时无值可引。
+    """
+    run_ids = [f"run-{i:04d}-{'a' * 16}" for i in range(96)]
+    candidate_output = {
+        "schema": "simpraxis.rsi_r1.analysis_output.v1",
+        "run_ids": run_ids,
+        "contrasts": [{"contrast_id": "primary",
+                       "metric_id": "displacement_x_m",
+                       "proposition": "decrease_gt",
+                       "estimate": -0.42, "lower": -0.55, "upper": -0.31,
+                       "status": "SUPPORTED", "n_blocks": 32}],
+    }
+    result = {"ok": True, "action": "run_confirm", "n_runs": 96,
+              "run_ids_head": [str(r) for r in run_ids[:8]],
+              "result_sha256": "f" * 64,
+              "candidate_output": candidate_output,
+              "analysis_receipt": {"relpath": "analysis/confirm-a.json",
+                                   "sha256": "b" * 64, "validity": True,
+                                   "phase": "confirm", "reason_codes": []},
+              "message": "确认批完成 " + "m" * 3000}
+    assert len(json.dumps(result, sort_keys=True).encode("utf-8")) \
+        > T.TOOL_REPLY_MAX_BYTES
+    body = T.Turn(model_text="{}", result=result).clipped().result
+    assert body.get("truncated") is True
+    keep = body.get("candidate_output")
+    assert isinstance(keep, dict) and keep.get("contrasts"), sorted(body)
+    assert keep["contrasts"][0]["estimate"] == -0.42      # 数值不受截断影响
+    assert body.get("analysis_receipt", {}).get("validity") is True
+    assert len(json.dumps(body, ensure_ascii=False,
+                          sort_keys=True).encode("utf-8")) <= T.TOOL_REPLY_MAX_BYTES

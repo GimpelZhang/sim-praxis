@@ -237,6 +237,47 @@ def test_output_symlink_is_refused(tmp_path) -> None:
     assert exc.value.code == "SYMLINK_FORBIDDEN"
 
 
+def test_run_analysis_extra_files_land_in_view(tmp_path) -> None:
+    """宿主写进分析视图的 plan/public_contract 必须真在视图里。
+
+    R1.2 的候选分析要按计划里的对比定义配对；视图只有 run 文件时任何合规
+    分析脚本都只能猜（2026-11-12 T5 离线演练实测：分析视图缺 plan ⇒ 脚本
+    glob 空 ⇒ 整链处死）。``extra_files`` 是宿主侧通道，不得被候选覆盖。
+    """
+    seen: "dict[str, bytes]" = {}
+
+    class ViewProbe(FakeRunner):
+        def run(self, argv, *, timeout_s, container):
+            for i, arg in enumerate(argv):
+                if arg == "-v" and argv[i + 1].endswith(":/data:ro"):
+                    view = Path(argv[i + 1][: -len(":/data:ro")])
+                    seen.update({p.name: p.read_bytes() for p in view.iterdir()})
+            return super().run(argv, timeout_s=timeout_s, container=container)
+
+    root = tmp_path / "evidence"
+    root.mkdir()
+    entry = _entry(root, "observations/run-1.jsonl", b"{}")
+    work = tmp_path / "work"
+    work.mkdir()
+    ev = SB.run_analysis(
+        ANALYSIS_SRC, [entry], evidence_root=root, work_root=work,
+        runner=ViewProbe(write={"reply.json": '{"claim":"x"}'}), image=IMAGE,
+        extra_files=(("plan-abc123456789.json", b'{"schema":"plan"}'),
+                     ("public_contract.json", b'{"schema":"contract"}')))
+    assert seen["plan-abc123456789.json"] == b'{"schema":"plan"}'
+    assert seen["public_contract.json"] == b'{"schema":"contract"}'
+    assert seen["run-1.jsonl"] and "analysis.py" in seen
+    # 证据里宿主编排件与 run 输入分开对账（extras 追加在 inputs 尾部）
+    assert [i["name"] for i in ev.inputs][-2:] == ["plan-abc123456789.json",
+                                                   "public_contract.json"]
+
+    with pytest.raises(SB.SandboxError) as exc:
+        SB.run_analysis(ANALYSIS_SRC, [entry], evidence_root=root, work_root=work,
+                        runner=FakeRunner(write={"reply.json": "{}"}),
+                        image=IMAGE, extra_files=(("bad/name.json", b"{}"),))
+    assert exc.value.code == "INPUT_INVALID"
+
+
 def test_timeout_and_residue_are_evidence_failures(tmp_path) -> None:
     runner = FakeRunner(timeout=True)
     with pytest.raises(SB.SandboxError) as exc:

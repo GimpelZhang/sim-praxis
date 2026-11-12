@@ -128,6 +128,30 @@ def test_candidate_artifact_requires_bound_reply_and_action(tmp_path: Path) -> N
     assert (tmp_path / "designs" / f"{rec.source_sha256}.py").is_file()
 
 
+def test_record_action_dedupe_is_study_scoped(tmp_path: Path) -> None:
+    """同一 (response_id, action) 在两个 study 下必须**各自**落一条动作事件。
+
+    2026-11-12 T5 全量演练实测：A 与 B 各有一个运输实例、序号都从 1 起，首呼
+    回复逐字相同 ⇒ response_id 相同 ⇒ 旧去重把 B 的动作当成 A 的重复静默吞掉，
+    ``_binding`` 按 study 过滤后判 ``STATE_UNKNOWN``，整条 B 链处死。
+    幂等去重的本意是「同一 study 内重放同一动作不重记」，故单位是 study。
+    """
+    st = _state(tmp_path)
+    doc = {"action": "write_artifact", "kind": "design", "source": DESIGN_SRC}
+    st.record_reply(response_id="0001-same", text=json.dumps(doc),
+                    phase="explore")
+    st.record_action(response_id="0001-same", action=doc, study="A")
+    st.record_action(response_id="0001-same", action=doc, study="B")
+
+    actions = [e for e in st.journal.events() if e.event == "action"]
+    assert [e.payload.get("study") for e in actions] == ["A", "B"]
+
+    # 同一 study 内重复登记仍是幂等（不重记）
+    st.record_action(response_id="0001-same", action=doc, study="A")
+    again = [e for e in st.journal.events() if e.event == "action"]
+    assert len(again) == 2
+
+
 def test_maintainer_edit_marks_study_assisted_and_rejects_action_sha(
         tmp_path: Path) -> None:
     st = _state(tmp_path)

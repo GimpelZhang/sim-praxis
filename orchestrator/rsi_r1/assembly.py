@@ -60,7 +60,11 @@ PUBLIC_CONTRACT_RELPATH = "public/public_contract.json"
 
 MODE_PAID = "paid"
 MODE_ZERO_PAID = "zero_paid"
-SPEND_MODES = (MODE_PAID, MODE_ZERO_PAID)
+#: R1.2 T5 离线生产演练（Plan §4）：必须配 ``envelope.mode=offline_validation``，
+#: 不得携带 consent，账本恒零实呼；与 ``zero_paid`` 分开，避免「零付费」被
+#: 当成正式（清醒）模式的同义词。
+MODE_OFFLINE_VALIDATION = "offline_validation"
+SPEND_MODES = (MODE_PAID, MODE_ZERO_PAID, MODE_OFFLINE_VALIDATION)
 
 STUDY_LANE = {"A": "study_A", "B": "study_B"}
 
@@ -89,6 +93,48 @@ def _sha_doc(doc: Any) -> str:
         separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
+# 生产者词汇两套：注册表（state.py）用 ``candidate_model`` 标注模型写出的源件，
+# 凭据 schema（analysis_receipt）只认 ``candidate``/``maintainer``。凭据的构造
+# （build_receipt）与复核（validate_receipt）必须经**同一映射**，否则要么
+# PRODUCER_INVALID（2026-11-12 T5 离线演练首次走到 analyze 时实测），要么把
+# 同一个差异误报成 PRODUCER_MISMATCH。未知词汇映射成空串 ⇒ 凭据侧 fail-closed。
+RECEIPT_PRODUCERS = {S.PRODUCER_CANDIDATE: AR.PRODUCER_CANDIDATE,
+                     S.PRODUCER_MAINTAINER: AR.PRODUCER_MAINTAINER}
+
+
+def receipt_producer(art: Mapping[str, Any]) -> str:
+    """注册表 producer 词汇 → 凭据词汇（**唯一映射点**，analyze/confirm/replay 共用）。
+
+    锁内适配（2026-11-12 T5 全量演练）：replay 路径此前把注册表原词
+    ``candidate_model`` 直塞 ``AR.build_receipt`` ⇒ PRODUCER_INVALID 处死
+    整条 replay 链。三处构造 + 两处复核统一走本函数，未知词汇 ⇒ 空串
+    （凭据侧 fail-closed，绝不默认放行）。
+    """
+    return RECEIPT_PRODUCERS.get(str(art.get("producer") or ""), "")
+
+
+def analysis_host_inputs(ctx: Any, plan: C.ResearchPlan
+                         ) -> "tuple[tuple[str, bytes], ...]":
+    """分析视图的宿主机输入：``plan-<sha12>.json`` + ``public_contract.json``。
+
+    锁内适配（2026-11-12 T5 全量演练）：生产 analyze 一直把这两件写进视图，
+    但 replay 复跑路径没写 ⇒ 同一份冻结分析源码在复跑视图里 ``exit=1``
+    （候选模板按公开合同从视图读计划来配对，缺计划只能 ``SystemExit``）。
+    复跑必须喂**与生产同一份字节**，否则 replay 判的不是「同一分析重算」。
+    唯一构造点：生产 ``_r12_analysis`` 与 ``replay_driver`` 共用本函数。
+    """
+    plan_rel = f"public/plan-{plan.sha256[:12]}.json"
+    plan_path = ctx.relative(plan_rel)
+    if not plan_path.is_file():
+        ctx.write_json(plan_rel, plan.to_dict())
+    contract = ctx.relative(PUBLIC_CONTRACT_RELPATH)
+    if not contract.is_file():
+        raise L.LoopError("PUBLIC_CONTRACT_MISSING", PUBLIC_CONTRACT_RELPATH,
+                          terminal=True)
+    return ((plan_path.name, plan_path.read_bytes()),
+            (contract.name, contract.read_bytes()))
+
+
 def _sha_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -102,6 +148,35 @@ def _require_sha256(value: Any, *, where: str) -> str:
             or any(c not in "0123456789abcdef" for c in value):
         raise AssemblyError("SHA_INVALID", f"{where}={value!r}")
     return value
+
+
+def read_confirm_output(ctx: Any, study: str) -> "tuple[bytes, str]":
+    """按确认阶段分析指针取**原始输出字节**与错误码（凭据绑定面）。
+
+    锁内适配（2026-11-12 T5 全量演练）：凭据 ``output_sha256`` 绑的是**沙盒
+    原始输出字节**，``analysis/`` 下归档件是宿主规范化文档（contrasts 按计划
+    重排、缩进不同），两者字节必然不同。旧实现拿归档件去校验凭据 ⇒ 恒
+    ``OUTPUT_SHA_MISMATCH`` ⇒ study judge 以 ``INVALID_ANALYSIS`` 拒绝（drill16
+    suite1 唯一失败点）。指针的 ``raw_relpath``/``raw_sha256`` 由
+    ``_r12_analysis`` 写入私有区（0600）；读到与 sha 不符按漂移 fail-closed。
+    """
+    pointer_rel = f"private/analysis/{study}-confirm.json"
+    if not ctx.exists(pointer_rel):
+        return b"", "ANALYSIS_OUTPUT_MISSING"
+    try:
+        pointer = dict(ctx.read_json(pointer_rel) or {})
+    except (OSError, ValueError):
+        return b"", "ANALYSIS_OUTPUT_MISSING"
+    raw_rel = str(pointer.get("raw_relpath") or "")
+    out_rel = str(pointer.get("relpath") or "")
+    try:
+        data = ctx.relative(raw_rel or out_rel).read_bytes()
+    except OSError:
+        return b"", "ANALYSIS_OUTPUT_MISSING"
+    expect_sha = str(pointer.get("raw_sha256") or "")
+    if raw_rel and expect_sha and hashlib.sha256(data).hexdigest() != expect_sha:
+        return b"", "ANALYSIS_OUTPUT_DRIFT"
+    return data, ""
 
 
 def _write_private(path: Path, data: bytes) -> None:
@@ -127,6 +202,9 @@ def _write_private(path: Path, data: bytes) -> None:
 class Envelope:
     envelope_id: str
     budget_sha256: str
+    #: R1.2 起 envelope 显式声明 ``paid`` | ``offline_validation``；legacy 文档
+    #: 没有该键，解析为 ``paid``（行为逐字节不变）。
+    mode: str = "paid"
 
     def to_dict(self) -> "dict[str, Any]":
         return {"schema": ENVELOPE_SCHEMA, "schema_version": 1,
@@ -136,12 +214,16 @@ class Envelope:
     @classmethod
     def from_ctx(cls, ctx: Any) -> "Envelope":
         doc = ctx.read_json("contract/envelope.json")
-        if doc.get("schema") != ENVELOPE_SCHEMA:
-            raise AssemblyError("ENVELOPE_SCHEMA", repr(doc.get("schema")))
+        schema = doc.get("schema")
+        if schema not in (ENVELOPE_SCHEMA, P.ENVELOPE_SCHEMA_V2):
+            raise AssemblyError(
+                "ENVELOPE_SCHEMA",
+                f"{schema!r} 不在（{ENVELOPE_SCHEMA!r}, {P.ENVELOPE_SCHEMA_V2!r}）")
         return cls(envelope_id=C.require_safe_id(doc.get("envelope_id"),
                                                  where="envelope"),
                    budget_sha256=_require_sha256(
-                       doc.get("budget_sha256"), where="envelope.budget_sha256"))
+                       doc.get("budget_sha256"), where="envelope.budget_sha256"),
+                   mode=str(doc.get("mode") or "paid"))
 
 
 @dataclass(frozen=True)
@@ -163,7 +245,8 @@ class SpendContract:
                 raise AssemblyError("PAID_NOT_AUTHORIZED", "paid 模式缺 consent")
             C.assert_paid_authorized(self.consent)
         elif self.consent is not None:
-            raise AssemblyError("SPEND_MODE", "zero_paid 模式不得携带 consent")
+            raise AssemblyError("SPEND_MODE",
+                                f"{self.mode} 模式不得携带 consent")
 
     def check(self, *, envelope: Envelope,
               ledger_rows: Sequence[Mapping[str, Any]]) -> None:
@@ -175,11 +258,16 @@ class SpendContract:
                     f"consent.envelope={self.consent.envelope_id!r} != "
                     f"{envelope.envelope_id!r}")
             return
+        if self.mode == MODE_OFFLINE_VALIDATION and \
+                getattr(envelope, "mode", "paid") != "offline_validation":
+            raise AssemblyError(
+                "OFFLINE_AUTH_REQUIRED",
+                "offline_validation 费用模式要求 envelope.mode=offline_validation")
         paid_rows = [r for r in ledger_rows if r.get("event", "call") == "call"]
         if paid_rows:
             raise AssemblyError(
                 "SPEND_MODE_VIOLATION",
-                f"zero_paid 模式下账本出现 {len(paid_rows)} 条实呼行")
+                f"{self.mode} 模式下账本出现 {len(paid_rows)} 条实呼行")
 
 
 # ---------------------------------------------------------------------------
@@ -270,22 +358,28 @@ class CampaignAdmission:
             raise L.LoopError("LOCK_MISMATCH", "预算 sha 与 LOCK 不一致",
                               terminal=True)
         # 2) 费用门（AC01）：每次都查，不只在入口查一次。
+        #    离线验证模式要求 envelope 自始声明 ``offline_validation``；
+        #    这里从 envelope 文档读回 mode（不信任构造参数）。
+        env_mode = str((self.ctx.read_json("contract/envelope.json") or {})
+                       .get("mode") or "paid")
         try:
             self.spend.check(envelope=Envelope(self.ctx.envelope_id,
-                                               self.budget.sha256),
+                                               self.budget.sha256,
+                                               mode=env_mode),
                              ledger_rows=CL.ledger_rows(self.ctx))
         except AssemblyError as exc:
             raise L.LoopError(exc.code, exc.detail, terminal=True) from None
-        # 3) 整轮硬帽（独立字面量 144）。
+        # 3) 整轮硬帽（R1 独立字面量 144；R1.2 profile 预算为 124——一律取
+        #    当前预算信封的 total_posts，单真值不另抄字面量）。
         calls = sum(1 for r in CL.ledger_rows(self.ctx)
                     if r.get("event", "call") == "call")
         if self._slots is not None:
             calls = max(calls, sum(self._slots.count(l)
-                                   for l in LANES.LANE_ORDER))
-        if calls >= LANES.RSI_R1_HARD_CAP:
+                                   for l in tuple(self.budget.posts_by_lane)))
+        if calls >= int(self.budget.total_posts):
             raise L.LoopError("BUDGET_REFUSED",
                               f"实呼/预留 {calls} 已达整轮帽 "
-                              f"{LANES.RSI_R1_HARD_CAP}", terminal=True)
+                              f"{int(self.budget.total_posts)}", terminal=True)
         # 4) root 阶段门（§9）。
         self._require_root()
         return L.Permit(envelope_id=self.ctx.envelope_id,
@@ -498,7 +592,8 @@ class CampaignDispatcher:
     def _visible_state_v2(self, status: Mapping[str, Any],
                           lock: Mapping[str, Any], slots: int) -> "L.VisibleState":
         """R1.2 精确公开面：资源快照 + 动态 SHA 全来自宿主事实。"""
-        snap = self.resource_ledger.snapshot(self.study)
+        # 配额按 (study, lane) 分域（见 resources._rows_for 的锁内适配注释）
+        snap = self.resource_ledger.snapshot(self.study, lane=self.admission.lane)
         plan_doc = self._latest_plan_doc()
         plan_sha = None
         if plan_doc is not None:
@@ -631,8 +726,9 @@ class CampaignDispatcher:
         inputs = self._design_inputs(plan)
         if self.resource_ledger is not None:
             # 候选沙盒执行：即使设计脚本随后出错/矩阵被拒，这一次也计数。
-            self.resource_ledger.reserve_sandbox(self.study,
-                                                 purpose="explore-design")
+            self.resource_ledger.reserve_sandbox(
+                self.study, purpose="explore-design",
+                lane=self.admission.lane)
         ev = SB.run_design(
             source, inputs, evidence_root=self.ctx.subdir("public"),
             work_root=self.ctx.subdir("trials") / f"design-{design_sha[:12]}",
@@ -656,12 +752,26 @@ class CampaignDispatcher:
         if self.resource_ledger is not None:
             # 逐 cell 形状仍由 experiments.validate_matrix 单一实现裁决；
             # 累计 run/batch/步数/沙盒由资源账在 run_batch 前原子预留。
-            specs, _res = RS.validate_matrix_v2(
-                matrix, plan, ledger=self.resource_ledger, study=self.study,
-                batch_id=f"explore-{_sha_doc(action.to_doc())[:16]}")
+            # 锁内适配（Plan T5 恢复轨迹）：矩阵/资源前执行拒绝**没有物理副作用**，
+            # 必须如实标 NONE，否则候选无法在同一 attempt 内自修（会被判 terminal）。
+            try:
+                specs, _res = RS.validate_matrix_v2(
+                    matrix, plan, ledger=self.resource_ledger, study=self.study,
+                    batch_id=f"explore-{_sha_doc(action.to_doc())[:16]}",
+                    lane=self.admission.lane)
+            except (RS.ResourceError, E.ExperimentError,
+                    C.ContractError) as exc:
+                code = getattr(exc, "code", None) or type(exc).__name__
+                return self._fail(str(code), str(exc),
+                                  side_effect_status="NONE")
             explore_cap = len(specs)
         else:
-            specs = E.validate_matrix(matrix, plan, self.budget)
+            try:
+                specs = E.validate_matrix(matrix, plan, self.budget)
+            except (E.ExperimentError, C.ContractError) as exc:
+                code = getattr(exc, "code", None) or type(exc).__name__
+                return self._fail(str(code), str(exc),
+                                  side_effect_status="NONE")
             explore_cap = int(self.budget.max_runs_by_lane["explore"]) \
                 - self.runs_used["explore"]
             if len(specs) > explore_cap:
@@ -700,8 +810,8 @@ class CampaignDispatcher:
             entries.extend(self._run_view_entries(run_id))
         if self.resource_ledger is not None:
             # analysis 容器同样计数（物理 step=0 也不免费）。
-            self.resource_ledger.reserve_sandbox(self.study,
-                                                 purpose="analysis")
+            self.resource_ledger.reserve_sandbox(
+                self.study, purpose="analysis", lane=self.admission.lane)
         ev = SB.run_analysis(
             source, entries, evidence_root=self.ctx.subdir("observations"),
             work_root=self.ctx.subdir("trials") / f"analysis-{source_sha[:12]}",
@@ -825,14 +935,20 @@ class CampaignDispatcher:
             entries.extend(self._run_view_entries(run_id))
         context = self._analysis_context(phase, run_ids)
         text = self._analysis_source(source_sha)
+        # 锁内适配（T5）：分析视图必须带上公开合同承诺的 plan-<sha12>.json 与
+        # public_contract.json。R1.2 的候选分析要按计划里的对比定义配对（run
+        # meta 只有 condition_id，没有主张/δ），视图缺计划则合规脚本只能瞎猜。
+        # 这两件由**宿主**按 `_design_inputs` 的同一份字节写入（候选不可覆盖）。
+        extra_files = analysis_host_inputs(self.ctx, plan)
         if self.resource_ledger is not None:
             self.resource_ledger.reserve_sandbox(
-                self.study, purpose=f"analysis-{phase}")
+                self.study, purpose=f"analysis-{phase}",
+                lane=self.admission.lane)
         ev = SB.run_analysis(
             text, entries, evidence_root=self.ctx.subdir("observations"),
             work_root=self.ctx.subdir("trials") / f"analysis-{phase}-{source_sha[:12]}",
             runner=self.runner, image=self.image, retain_bytes=True,
-            analysis_context=context)
+            analysis_context=context, extra_files=extra_files)
         payload = ev.blobs.get(ANALYSIS_OUTPUT)
         output_doc: "dict[str, Any] | None" = None
         reasons: "list[str]" = []
@@ -867,7 +983,7 @@ class CampaignDispatcher:
             source_sha256=source_sha,
             registered_reply_id=art.get("response_id"),
             registered_action_id=art.get("action_sha256"),
-            producer=str(art.get("producer") or ""),
+            producer=receipt_producer(art),
             inputs=self._entry_inputs(entries),
             execution_id=ev.container, sandbox_status=("failed" if reasons else "ok"),
             exit_code=int(ev.exit_code), timed_out=bool(ev.timed_out),
@@ -878,10 +994,23 @@ class CampaignDispatcher:
             rel = f"analysis/{phase}-{source_sha[:12]}-{_sha_doc(output_doc)[:12]}.json"
             self.ctx.write_json(rel, output_doc)
             summary["output_relpath"] = rel
+            # 锁内适配（2026-11-12 T5 全量演练）：凭据 ``output_sha256`` 绑的是
+            # **沙盒原始输出字节**（``AR.build_receipt(output_bytes=payload)``），
+            # 而 ``analysis/`` 下归档件是宿主规范化后的文档（contrasts 按计划
+            # 顺序重排、缩进不同），两者字节必然不同。submit_claim 原来拿归档件
+            # 去校验凭据 ⇒ 恒 ``OUTPUT_SHA_MISMATCH`` ⇒ study judge 以
+            # ``INVALID_ANALYSIS`` 拒绝（drill16 suite1 唯一失败点）。原始字节
+            # 单独落私有区（0600），指针登记 ``raw_relpath``/``raw_sha256``，
+            # 下游校验只认原始件。
+            raw_rel = f"private/analysis/{self.study}-{phase}.raw.json"
+            _write_private(self.ctx.relative(raw_rel), output_bytes)
+            summary["output_raw_relpath"] = raw_rel
             pointer = {"schema": "simpraxis.rsi_r1.analysis_pointer.v1",
                        "schema_version": 1, "study_id": self.study,
                        "phase": phase, "relpath": rel,
-                       "sha256": AR.sha256_bytes(output_bytes)}
+                       "raw_relpath": raw_rel,
+                       "sha256": AR.sha256_bytes(output_bytes),
+                       "raw_sha256": AR.sha256_bytes(output_bytes)}
             data = (json.dumps(pointer, ensure_ascii=False, sort_keys=True,
                                indent=1) + "\n").encode("utf-8")
             _write_private(self.ctx.relative(
@@ -970,7 +1099,7 @@ class CampaignDispatcher:
             remaining = lane_cap - self.admission.posts_used(self.admission.lane)
             self.resource_ledger.reserve_freeze(
                 self.study, lane=self.admission.lane,
-                blocks=int(plan.block_count),
+                blocks=int(plan.nuisance_distribution.block_count),
                 n_conditions=len(plan.conditions), replay_runs=n,
                 confirm_steps=batch_steps, replay_steps=batch_steps,
                 posts_remaining_after_charge=remaining,
@@ -1010,9 +1139,11 @@ class CampaignDispatcher:
             self.resource_ledger.consume_confirm(
                 self.study, kind=RS.KIND_CONFIRM, runs=len(ordered),
                 steps=sum(int(s.nsteps) for s in ordered),
-                batch_id=confirm_batch_id(self.study, token))
-            self.resource_ledger.reserve_sandbox(self.study,
-                                                 purpose="confirm-batch")
+                batch_id=confirm_batch_id(self.study, token),
+                lane=self.admission.lane)
+            self.resource_ledger.reserve_sandbox(
+                self.study, purpose="confirm-batch",
+                lane=self.admission.lane)
         else:
             room = int(self.budget.max_runs_by_lane["confirm"]) \
                 - self.runs_used["confirm"]
@@ -1149,30 +1280,19 @@ class CampaignDispatcher:
         if self.ctx.exists(receipt_rel):
             doc = self.ctx.read_json(receipt_rel)
             receipt = dict(doc) if isinstance(doc, Mapping) else None
-        output_bytes = b""
         output_norm: "dict[str, Any] | None" = None
-        output_error = "ANALYSIS_OUTPUT_MISSING"
-        pointer_rel = f"private/analysis/{self.study}-confirm.json"
-        pointer = (dict(self.ctx.read_json(pointer_rel))
-                   if self.ctx.exists(pointer_rel) else {})
-        if pointer:
-            out_rel = str(pointer.get("relpath") or "")
+        # 凭据绑定面 = 沙盒原始字节（见 ``read_confirm_output`` 的锁内适配说明）
+        output_bytes, output_error = read_confirm_output(self.ctx, self.study)
+        if not output_error:
             try:
-                output_bytes = self.ctx.relative(out_rel).read_bytes()
-            except OSError:
-                output_bytes = b""
-                output_error = "ANALYSIS_OUTPUT_MISSING"
-            else:
-                try:
-                    raw = json.loads(output_bytes.decode("utf-8"))
-                    output_norm = AR.parse_output(
-                        raw, expected_run_ids=sorted(self._confirm_artifacts()),
-                        expected_contrasts=self._r12_plan_contrast_ids(plan))
-                    output_error = ""
-                except (ValueError, UnicodeDecodeError):
-                    output_error = "ANALYSIS_OUTPUT_BAD_JSON"
-                except AR.ReceiptError as exc:
-                    output_error = exc.code
+                raw = json.loads(output_bytes.decode("utf-8"))
+                output_norm = AR.parse_output(
+                    raw, expected_run_ids=sorted(self._confirm_artifacts()),
+                    expected_contrasts=self._r12_plan_contrast_ids(plan))
+            except (ValueError, UnicodeDecodeError):
+                output_error = "ANALYSIS_OUTPUT_BAD_JSON"
+            except AR.ReceiptError as exc:
+                output_error = exc.code
 
         run_ids = sorted(self._confirm_artifacts())
         entries: "list[SB.ViewEntry]" = []
@@ -1188,7 +1308,7 @@ class CampaignDispatcher:
         expect = AR.ReceiptExpectation(
             study_id=self.study, phase="confirm", plan_sha256=plan.sha256,
             source_sha256=source_sha, source_file_sha256=source_file_sha,
-            producer=str(art.get("producer") or ""),
+            producer=receipt_producer(art),
             registered_reply_id=art.get("response_id"),
             registered_action_id=art.get("action_sha256"),
             confirm_manifest_sha256=manifest.sha256,
@@ -1439,7 +1559,7 @@ def build_campaign_parts(
         resource_ledger: "RS.ResourceLedger | None" = None
 ) -> "tuple[CampaignAdmission, SlotBook, CampaignDispatcher, S.ResearchState]":
     """标准装配：状态 + 预算 + 准入 + 槽 + 分派（同 root 共享）。"""
-    budget = C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json"))
+    budget = C.budget_from_dict(ctx.read_json("contract/budget.json"))
     state = S.ResearchState(ctx)
     admission = CampaignAdmission(ctx=ctx, state=state, budget=budget,
                                   lock_sha256=lock_sha256, spend=spend, lane=lane)

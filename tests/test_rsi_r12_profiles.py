@@ -56,7 +56,7 @@ def test_r12_profile_numbers():
 def test_r12_table_consistency_selfcheck():
     P.assert_r12_table_consistent()
     assert P.task_caps_sum_r12() == 124
-    assert sum(P.AUX_SUBENVELOPES.values()) == P.AUX_SUBENVELOPE_TOTAL == 2_000_000
+    assert sum(P.AUX_SUBENVELOPES.values()) == P.AUX_SUBENVELOPE_TOTAL
     assert sum(int(s["call_rows"]) for s in P.HISTORY_SOURCES) == 31
     assert P.FAMILY_CAP == P.FAMILY_HISTORY_POSTS + P.RSI_R12_HARD_CAP
 
@@ -109,7 +109,7 @@ def test_public_contract_derives_from_profile():
     assert doc["compute"]["explore"]["cell"] == ["condition_id", "block_id"]
     assert doc["compute"]["confirm"]["blocks"] == 32
     assert doc["compute"]["confirm"]["max_conditions"] == 6
-    assert doc["aux_subenvelopes"]["total"] == 2_000_000
+    assert doc["aux_subenvelopes"]["total"] == P.AUX_SUBENVELOPE_TOTAL
     assert doc["recovery"]["completion"].startswith("规范动作游标完整")
     text = P.render_public_contract_v2(doc)
     assert "64 是每 study 累计上限" in text

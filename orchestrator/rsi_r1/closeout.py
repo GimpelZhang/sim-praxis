@@ -647,6 +647,22 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         and entry.get("approval_in") == "carryover_source"
     }
 
+    # 锁内适配（2026-11-12 T5 全量演练）：R1.2 的 envelope 自带 ``hard_cap``/
+    # ``normal_budget``/``lane_caps``（12/16/48/48、总 124），旧 R1 envelope 没有
+    # ``lane_caps`` 键。结案件登记实际生效的帽：envelope 声明优先，缺失时回落到
+    # R1 字面量表（旧根字节口径不变）。独立复算器仍用**自己的**字面量表交叉核对，
+    # 这里不是「自己证明自己」，只是不自称错误的帽。
+    if isinstance(envelope.get("lane_caps"), Mapping):
+        seal_hard_cap = int(envelope.get("hard_cap") or LANES.RSI_R1_HARD_CAP)
+        seal_normal = int(envelope.get("normal_budget")
+                          or LANES.RSI_R1_NORMAL_BUDGET)
+        seal_lane_caps = {str(k): int(v)
+                          for k, v in dict(envelope["lane_caps"]).items()}
+    else:
+        seal_hard_cap = LANES.RSI_R1_HARD_CAP
+        seal_normal = LANES.RSI_R1_NORMAL_BUDGET
+        seal_lane_caps = dict(LANES.LANE_POST_CAPS)
+
     entries = _failure_entries(root, protocol, repair_doc, old_root)
     failure_map = {
         "schema": f"{SCHEMA}.failure_map",
@@ -745,17 +761,17 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         "cost": {
             "classification": {"posts": "EXACT", "tokens": "EXACT", "usd": "UNKNOWN"},
             "posts": {"used": ledger["calls"],
-                      "cap": LANES.RSI_R1_HARD_CAP,
-                      "normal": LANES.RSI_R1_NORMAL_BUDGET},
+                      "cap": seal_hard_cap,
+                      "normal": seal_normal},
             "tokens": ledger["tokens"],
             "usd": {"value": None,
                     "bound_max": budget.get("max_usd"),
                     "reason": "账本行只记 tokens，不含价格字段；USD 记 UNKNOWN，"
                               "上限取 envelope 的 max_usd（BOUND）"},
         },
-        "budget": {"hard_cap": LANES.RSI_R1_HARD_CAP,
-                   "normal": LANES.RSI_R1_NORMAL_BUDGET,
-                   "lane_caps": dict(LANES.LANE_POST_CAPS),
+        "budget": {"hard_cap": seal_hard_cap,
+                   "normal": seal_normal,
+                   "lane_caps": dict(seal_lane_caps),
                    "declared": budget.get("posts_by_lane")},
         "human": human,
         "watchdog": watchdog,

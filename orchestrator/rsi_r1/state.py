@@ -474,9 +474,16 @@ class ResearchState:
             raise StateError("UNKNOWN_REPLY",
                              f"response_id={response_id!r} 没有登记的原始回复")
         action_sha = _sha_doc(action)
+        # 锁内适配（2026-11-12 T5）：幂等去重必须**按 study 作用域**判重。
+        # 旧实现只比 (response_id, action_sha256)，跨 study 的同字节回合会被
+        # 当成重复而静默跳过——A 的首呼与 B 的首呼回复逐字相同时正是如此：
+        # B 的动作事件根本没落盘，``_binding`` 过滤 study 后判 ``STATE_UNKNOWN``。
+        # 去重的本意是「同一 study 内重放同一动作不重记」，故单位是 study。
+        scope = str(study) if study else None
         if any(ev.event == "action"
                and ev.payload.get("response_id") == response_id
                and ev.payload.get("action_sha256") == action_sha
+               and (ev.payload.get("study") or None) == scope
                for ev in self._events()):
             return {"response_id": response_id, "action_sha256": action_sha}
         payload = {
@@ -518,6 +525,14 @@ class ResearchState:
         if reply is None:
             raise StateError("UNKNOWN_REPLY",
                              f"response_id={response_id!r} 没有登记的原始回复")
+        # 锁内适配（2026-11-12 T5 独立评审：跨 study 盗绑）。回复带 study 标签时，
+        # 只能用**同一 study** 的回合登记产物；否则 B 可以拿 A 的回复+动作把
+        # 自己的产物伪装成候选产物（跨 study 污染）。无 study 标签的旧件不拦。
+        bound_study = reply.payload.get("study")
+        if bound_study and str(bound_study) != study:
+            raise StateError(
+                "STUDY_MISMATCH",
+                f"回复绑定 study={bound_study!r}，登记 study={study!r}")
         if not action_sha256:
             raise StateError("MISSING_KEY",
                              "候选产物必须携带 action_sha256（response→source 绑定）")

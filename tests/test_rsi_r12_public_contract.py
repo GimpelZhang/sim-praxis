@@ -99,7 +99,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert ev["family_cap"] == PROFILE.family_cap == 155
     assert ev["family_history"] == PROFILE.family_history_posts == 31
     assert ev["aux_subenvelopes"] == dict(P.AUX_SUBENVELOPES)
-    assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL == 2_000_000
+    assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
     # 合同文本由同一 profile 渲染：每个期望值都必须在文本里逐字出现
     text = PR.contract_text(_doc())
     assert f"累计上限: {ev['explore_runs']} run" in text
@@ -110,7 +110,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert f"总量: {ev['total_runs']} run / {ev['total_steps']} step" in text
     assert f"每 run ≤ {ev['steps_per_run']} step" in text
     assert f"候选沙盒执行 ≤ {ev['sandbox']} 次" in text
-    assert "合计: 2000000 step" in text
+    assert f"合计: {int(P.AUX_SUBENVELOPE_TOTAL)} step" in text
 
 
 # ---------------------------------------------------------------------------

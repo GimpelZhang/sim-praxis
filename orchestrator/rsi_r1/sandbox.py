@@ -584,7 +584,8 @@ def run_analysis(source: "str | bytes", allowed_manifest: Iterable[ViewEntry], *
                  evidence_root: "Path | str", work_root: "Path | str",
                  runner: ContainerRunner, image: str,
                  retain_bytes: bool = False,
-                 analysis_context: "AnalysisContext | None" = None) -> SandboxEvidence:
+                 analysis_context: "AnalysisContext | None" = None,
+                 extra_files: "Iterable[tuple[str, bytes]]" = ()) -> SandboxEvidence:
     """分析代码：只挂 ``allowed_manifest`` 列出的 run 文件（同构安全面）。
 
     锁内适配（RSI-R1 T5）：同 ``run_design``，``retain_bytes`` 供调度层
@@ -592,6 +593,12 @@ def run_analysis(source: "str | bytes", allowed_manifest: Iterable[ViewEntry], *
 
     R1.2（T4）：``analysis_context`` 是宿主 typed 作用域；非空时在容器启动前
     校验 phase/帽/完整 run 集合。旧路径不传，行为逐字节不变。
+
+    R1.2（T5 锁内适配）：``extra_files`` 由**宿主**写入视图（与
+    ``run_experiment`` 的 ``spec.json`` 同一机制），用于把公开合同承诺的
+    ``plan-<sha12>.json`` 与 ``public_contract.json`` 放进分析视图。R1.2 的
+    候选分析必须按计划里的对比定义配对（run 的 meta 只给 condition_id，
+    没有主张/δ），缺这两件则任何合规分析脚本都只能猜；旧路径不传，行为不变。
     """
     entries = list(allowed_manifest)
     if analysis_context is not None:
@@ -599,7 +606,8 @@ def run_analysis(source: "str | bytes", allowed_manifest: Iterable[ViewEntry], *
     return _run_in_sandbox(kind="analysis", source=source,
                            entries=entries,
                            evidence_root=evidence_root, work_root=work_root,
-                           runner=runner, image=image, retain_bytes=retain_bytes)
+                           runner=runner, image=image, retain_bytes=retain_bytes,
+                           extra_files=extra_files)
 
 
 def run_experiment(service_source: "str | bytes", spec_doc: Mapping[str, Any], *,

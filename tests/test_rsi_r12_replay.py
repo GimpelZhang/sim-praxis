@@ -35,6 +35,11 @@ view = pathlib.Path(sys.argv[1])
 out = pathlib.Path(sys.argv[2])
 CONTRASTS = __CONTRASTS__
 
+# 公开合同承诺视图里有且只有一份计划（宿主写入，候选不可覆盖）。生产 consumer
+# 的分析模板就是这样取对比定义的；夹具同构断言，缺宿主输入即 exit≠0。
+if len(sorted(view.glob("plan-*.json"))) != 1:
+    raise SystemExit("expected exactly one plan")
+
 recs = {}
 cond = {}
 for path in sorted(view.rglob("*.jsonl")):
@@ -130,8 +135,12 @@ def _campaign(tmp_path: Path):
     design = ctx.relative(f"designs/{sha}.py")
     design.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     design.write_text(text, encoding="utf-8")
+    # 锁内适配（2026-11-12 T5）：journal 的 artifact 事件写的是**注册表词汇**
+    # （state.PRODUCER_CANDIDATE == "candidate_model"）；凭据词汇 "candidate"
+    # 只出现在 receipt 里。夹具曾直接用凭据词汇，掩盖了 replay 路径漏做映射
+    # 的缺陷，现按真实写入口径构造。
     S.ResearchState(ctx).journal.append("artifact", {
-        "source_sha256": sha, "producer": "candidate",
+        "source_sha256": sha, "producer": S.PRODUCER_CANDIDATE,
         "response_id": "reply-42", "action_sha256": "act-42"})
     artifacts = {}
     batch_dir = ctx.subdir("observations") / BATCH
@@ -165,6 +174,14 @@ def _campaign(tmp_path: Path):
             "upper": ref["upper"]})
     claim_dir = ctx.subdir("claim")
     claim_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # 锁内适配（2026-11-12 T5）：生产 campaign 在 freeze 前已发布公开视图，
+    # replay 的分析视图与生产**同构**（plan-<sha12>.json + public_contract.json，
+    # 见 assembly.analysis_host_inputs）。夹具此前不建这两件，掩盖了 replay
+    # 视图缺宿主输入、任何合规分析模板都会 ``expected exactly one plan`` 的缺陷。
+    pub = ctx.relative("public/public_contract.json")
+    pub.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    pub.write_text(json.dumps({"schema": "simpraxis.rsi_r1.public_contract.v1",
+                               "schema_version": 1}), encoding="utf-8")
     (claim_dir / "submission_A.json").write_text(json.dumps({
         "schema": J.SUBMISSION_SCHEMA, "study_id": "A",
         "plan_sha256": plan.sha256,

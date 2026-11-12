@@ -609,6 +609,8 @@ class LockDocument:
     phase: str
     dependencies: "Mapping[str, str]"
     sha256: str
+    #: ``paid``（缺省，旧文档无该键）或 ``validation``（T5 离线三签 LOCK）。
+    purpose: str = "paid"
 
     @classmethod
     def from_doc(cls, doc: Mapping[str, Any]) -> "LockDocument":
@@ -616,6 +618,22 @@ class LockDocument:
             raise LoopError("LOCK_MISSING", "LOCK 文档 schema 不符", terminal=True)
         body = {k: doc[k] for k in ("envelope_id", "budget_sha256", "stage",
                                     "phase", "dependencies")}
+        purpose = doc.get("purpose")
+        if purpose is not None:
+            if purpose not in ("paid", "validation"):
+                raise LoopError("LOCK_PURPOSE", repr(purpose), terminal=True)
+            body["purpose"] = purpose
+        if purpose == "validation":
+            # 锁内适配（2026-11-13，R3-M1 补强）：验证 LOCK 的冻结锚点（闭包、
+            # 冻结测试字节 regression_tests、注册件、画像/授权、校准/前置件、
+            # 镜像）原本落在摘要之外——冻结后同时改 LOCK 与现场文件仍能互洽，
+            # 三签绑定值也不含这些字段。整份文档进摘要 ⇒ 任何字段改动都让
+            # lock.sha256 对不上文件（LOAD 即 LOCK_TAMPERED），签后改动则与
+            # 三签记录的 lock_sha256 失配（SIGNATURE_STALE）。付费 LOCK 无
+            # ``purpose`` 键，摘要口径逐字节不变（旧历史 sha 可复算）。
+            for key, value in doc.items():
+                if key != "schema":
+                    body[key] = value
         for key in ("envelope_id", "stage", "phase"):
             if not isinstance(body[key], str) or not body[key].strip():
                 raise LoopError("LOCK_MISSING", f"LOCK.{key} 缺失", terminal=True)
@@ -632,7 +650,7 @@ class LockDocument:
                                 terminal=True)
         digest = C.canonical_sha256({**body, "schema": LOCK_SCHEMA})
         return cls(body["envelope_id"], T_, body["stage"], body["phase"],
-                   dict(deps), digest)
+                   dict(deps), digest, purpose or "paid")
 
 
 def load_lock(reader: Callable[[], Mapping[str, Any]]) -> LockDocument:

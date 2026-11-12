@@ -468,3 +468,61 @@ def test_analysis_context_cannot_be_widened_by_phase_label() -> None:
     confirm = SB.AnalysisContext(phase="confirm", max_runs=192,
                                  allowed_run_ids=allowed)
     confirm.check(entries)                     # 192 帽不截断成 64
+
+
+# ---------------------------------------------------------------------------
+# T5 回归（drill16）：凭据绑定面 = 沙盒原始字节，不是规范化归档件
+# ---------------------------------------------------------------------------
+
+def test_confirm_pointer_binds_raw_bytes_not_normalized_doc(tmp_path) -> None:
+    """``submit_claim`` 必须按分析指针读**原始输出字节**校验凭据。
+
+    drill16 suite1 的唯一失败点：``AR.build_receipt`` 的 ``output_sha256`` 绑
+    沙盒原始字节，旧 ``submit_claim`` 却拿 ``analysis/`` 下的规范化文档（宿主
+    重排 contrasts、缩进不同）去校验 ⇒ 恒 ``OUTPUT_SHA_MISMATCH`` ⇒ 两层
+    R12-RECEIPT 判 false ⇒ study judge ``INVALID_ANALYSIS``。
+    """
+    from orchestrator.rsi_r1 import assembly as A
+
+    plan = _plan()
+    manifest = E.allocate_confirm(plan, KEEPER)
+    inputs = _inputs(plan, manifest)
+    raw_doc = {"schema": AR.OUTPUT_SCHEMA,
+               "run_ids": sorted(J.build_specs(plan, manifest)),
+               "contrasts": []}
+    raw = json.dumps(raw_doc, separators=(",", ":")).encode("utf-8")
+    norm = (json.dumps(raw_doc, sort_keys=True, indent=1) + "\n").encode("utf-8")
+    assert raw != norm                     # 两种序列化逐字节不同
+
+    root = tmp_path / "root"
+    H.make_dirs(root)
+    ctx = H.make_ctx(root)
+    (root / "private" / "analysis").mkdir(parents=True, exist_ok=True, mode=0o700)
+    (root / "analysis").mkdir(exist_ok=True, mode=0o700)
+    (root / "private" / "analysis" / "A-confirm.raw.json").write_bytes(raw)
+    (root / "analysis" / "confirm.json").write_bytes(norm)
+    sha = AR.sha256_bytes(raw)
+    ctx.write_json("private/analysis/A-confirm.json", {
+        "schema": "simpraxis.rsi_r1.analysis_pointer.v1", "schema_version": 1,
+        "study_id": "A", "phase": "confirm",
+        "relpath": "analysis/confirm.json",
+        "raw_relpath": "private/analysis/A-confirm.raw.json",
+        "sha256": sha, "raw_sha256": sha})
+
+    data, error = A.read_confirm_output(ctx, "A")
+    assert (error, data) == ("", raw)
+
+    # 凭据绑原始字节：指针读出的字节校验必过；归档件必挂（旧缺陷形态）
+    receipt = _receipt(raw_doc, inputs, plan=plan, manifest=manifest,
+                       output_bytes=raw)
+    ok, reasons = AR.validate_receipt(
+        receipt, _expect(plan, manifest, inputs, data))
+    assert ok, reasons
+    ok_norm, reasons_norm = AR.validate_receipt(
+        receipt, _expect(plan, manifest, inputs, norm))
+    assert not ok_norm and "OUTPUT_SHA_MISMATCH" in reasons_norm
+
+    # 私有区被改：按漂移 fail-closed，不回落归档件凑数
+    (root / "private" / "analysis" / "A-confirm.raw.json").write_bytes(raw + b" ")
+    drift, err = A.read_confirm_output(ctx, "A")
+    assert drift == b"" and err == "ANALYSIS_OUTPUT_DRIFT"

@@ -576,12 +576,27 @@ def backend_factory_for(scope: ScopedContext, *, runner: Any, image: str,
     return build
 
 
+
+def _resource_ledger(ctx: Any, profile: "P.CampaignProfile | None",
+                     given: "Any") -> "Any":
+    """R1.2 profile 必须有 campaign 级资源账；legacy 不建（行为不变）。"""
+    if profile is None or not getattr(profile, "is_r12", False):
+        return None
+    if given is not None:
+        return given
+    from orchestrator.rsi_r1 import resources as RS
+
+    return RS.ResourceLedger(ctx.root, profile=profile)
+
+
 def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
                      spend: A.SpendContract, lock: L.LockDocument,
                      transport_factory: Callable[[], Callable[[T.Request], L.Reply]],
                      runner: Any, image: str, counter: Callable[[str], int],
                      backend_factory: "Callable[[str], Any] | None" = None,
                      billing_lane: "str | None" = None,
+                     profile: "P.CampaignProfile | None" = None,
+                     resource_ledger: "Any" = None,
                      ) -> LaneParts:
     """按生产面装配一条链：准入/槽绑主 ctx，状态/分派绑 scoped ctx。"""
     if lane not in PROTOCOL_LANES:
@@ -597,7 +612,7 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
     journal = mirror_root(scope)
     _seed_public(scope)
     state = S.ResearchState(scope, journal=journal)
-    budget = C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json"))
+    budget = C.budget_from_dict(ctx.read_json("contract/budget.json"))
     # 暂停件/台账/预留必须全 campaign 共享 ⇒ admission 用主 ctx；root 门读独立日志。
     admission = A.CampaignAdmission(ctx=ctx, state=state, budget=budget,
                                     lock_sha256=lock.sha256, spend=spend, lane=billing)
@@ -607,7 +622,8 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
         scope, runner=runner, image=image, lane=lane)
     dispatcher = A.CampaignDispatcher(
         ctx=scope, state=state, admission=admission, budget=budget, study=study,
-        runner=runner, image=image, backend_factory=factory)
+        runner=runner, image=image, backend_factory=factory,
+        profile=profile, resource_ledger=resource_ledger)
     store = L.EventStore(state, study=study)
     envelope = A.Envelope.from_ctx(ctx)
     sender = L.build_production_sender(
@@ -956,6 +972,7 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
                  backend_factory: "Callable[[str], Any] | None" = None,
                  billing_lane: "str | None" = None,
                  profile: "P.CampaignProfile | None" = None,
+                 resource_ledger: "Any" = None,
                  ) -> "dict[str, Any]":
     """跑一条协议链并落 ``protocol/report_<lane>.json``，PASS 时推进主 root。
 
@@ -1017,7 +1034,8 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
                 ctx, lane=lane, study=study, attempt=attempt, spend=spend,
                 lock=lock, transport_factory=lambda: transport, runner=runner,
                 image=image, counter=counter, backend_factory=backend_factory,
-                billing_lane=billing)
+                billing_lane=billing, profile=profile,
+                resource_ledger=_resource_ledger(ctx, profile, resource_ledger))
             chains.append(drive_chain(parts, strict=strict, cap=cap,
                                       policy=policy if bounded else None))
             if chains[-1].stopped:

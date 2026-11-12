@@ -124,7 +124,13 @@ class Turn:
                 # analyze 的 analysis/run_ids 与 run_confirm 的 references
                 # 整包丢掉，模型看不到自己观测的数值，claim 分支必死。
                 "analysis", "analysis_relpath", "run_ids", "run_ids_head",
-                "n_runs", "confirm_token", "references")
+                "n_runs", "confirm_token", "references",
+                # 2026-11-12 T5 离线演练：R1.2 的 run_confirm 把候选自己的
+                # 确认批分析结果放在 ``candidate_output`` 里回给候选（提交
+                # claims 只能从这里读），白名单漏了它 ⇒ 确认批 96 跑的
+                # run_ids 一超帽，输出被整包丢掉，submit_claim 必然无值可引。
+                # 属于与 11-11 同类的仪器耦合，不是候选能力。
+                "candidate_output", "analysis_receipt")
         compact = {k: clipped[k] for k in keep if k in clipped}
         compact["message"] = clip_text(str(result.get("message") or ""), budget)
         compact["code"] = result.get("code") or "RESULT_TRUNCATED"

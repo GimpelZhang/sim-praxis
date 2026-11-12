@@ -496,7 +496,7 @@ class BudgetSpecV2:
     与 ``BudgetSpec`` 的差异（Plan §1.1）：
     * lane 表 12/16/48/48=124，**无** ``repair_reserve``；
     * 正常预算 == 硬帽（付费后无本轮修复入口）；
-    * 新增 ``aux_subenvelopes``（五子信封合计恰 2,000,000 step）；
+    * 新增 ``aux_subenvelopes``（五子信封合计恰 ``profiles.AUX_SUBENVELOPE_TOTAL``）；
     * 新增 ``profile_id``（必须显式 ``rsi-r1.2``）。
     """
 
@@ -568,7 +568,9 @@ class BudgetSpecV2:
                 f"aux_subenvelopes={dict(self.aux_subenvelopes)} 与 R1.2 "
                 f"{expected_aux} 不符")
         if sum(self.aux_subenvelopes.values()) != _p12.AUX_SUBENVELOPE_TOTAL:
-            raise ContractError("BUDGET_DRIFT", "aux 子信封合计不等于 2,000,000")
+            raise ContractError(
+                "BUDGET_DRIFT",
+                f"aux 子信封合计不等于 {_p12.AUX_SUBENVELOPE_TOTAL}")
 
     @property
     def total_posts(self) -> int:

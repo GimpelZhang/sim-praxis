@@ -36,8 +36,15 @@ from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import family as FAM
 from orchestrator.rsi_r1 import human_events as HE
+from orchestrator.rsi_r1 import lock as LK
+from orchestrator.rsi_r1 import offline_suite as OS
+from orchestrator.rsi_r1 import offline_validation as OV
+from orchestrator.rsi_r1 import prereg as PREREG
 from orchestrator.rsi_r1 import profiles as P
+from orchestrator.rsi_r1 import resources as RS
 from orchestrator.rsi_r1 import runtime as RT
+from orchestrator.rsi_r1 import sandbox as SANDBOX
+from orchestrator.rsi_r1 import state as ST
 
 PLAN_PATH_R12 = Path.home() / "文档" / "RSI_R1.2_Plan_detailed.md"
 
@@ -46,6 +53,10 @@ BUDGET_RELPATH = "contract/budget.json"
 CONSENT_RELPATH = "contract/consent.json"
 CONTRACT_JSON_RELPATH = "contract/public_contract.json"
 CONTRACT_MD_RELPATH = "contract/public_contract.md"
+#: 候选可见面：生产链（``protocol._seed_public`` / ``assembly._design_inputs``）
+#: 只认 ``public/`` 这两个文件；它们是 ``contract/`` 唯一源的**逐字节投影**。
+PUBLIC_VIEW_JSON_RELPATH = "public/public_contract.json"
+PUBLIC_VIEW_MD_RELPATH = "public/public_contract.md"
 SCOPE_RELPATH = "contract/public_science_scope.json"
 PERMIT_RELPATH = "validation/family_permit.json"
 
@@ -185,11 +196,20 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     for name in RP.RSI_R12_CAMPAIGN_SUBDIRS:
         ensure_private_dir(root / name)
+    if mode == "offline_validation":
+        # 锁内适配（2026-11-12 T5 全量演练）：离线根**零 POST**，付费账本不该有
+        # 任何行——但「文件不存在」会被结案/复算器读成「缺账本」（真空满足被拒）。
+        # 离线模式建一个**空** 0600 账本：0 行是事实陈述（零付费调用），账务面
+        # 也因此统一。paid 模式不预建，账本仍由首次写入方创建。
+        ledger = root / "quota" / "ledger.jsonl"
+        if not ledger.is_file():
+            atomic_write_text(ledger, "", mode=0o600)
 
     plan_path, plan_sha = _plan_freeze(Path(args.plan) if args.plan else PLAN_PATH_R12)
 
     budget = C.default_budget_v2(envelope_id)
-    budget_sha = _write_json(root / BUDGET_RELPATH, budget.to_dict())
+    budget_sha = C.document_hash(budget.to_dict())
+    _write_json(root / BUDGET_RELPATH, budget.to_dict())
 
     permit = FAM.register(_family_root(), profile, envelope_id)
     permit_sha = _write_json(root / PERMIT_RELPATH, permit)
@@ -298,12 +318,13 @@ def _check_envelope(root: Path) -> "dict[str, Any]":
     envelope = _load_envelope(root)
     profile = P.resolve_profile(envelope)
     budget_doc = _read_json(root / str(envelope["budget_path"]))
-    if _sha256_bytes(_json_text(budget_doc).encode("utf-8")) \
-            != envelope["budget_sha256"]:
-        raise Cli12Error("BUDGET_TAMPERED", "budget.json 字节哈希与 envelope 不符")
     budget = C.budget_from_dict(budget_doc)
     if not isinstance(budget, C.BudgetSpecV2):
         raise Cli12Error("BUDGET_SCHEMA", "R1.2 envelope 必须携带 budget.v2")
+    # R1.2：envelope.budget_sha256 是预算**文档哈希**（与 lock/assembly 同一口径），
+    # 不是 budget.json 的字节 hash——字节可被重排而不改语义，哈希口径必须单一。
+    if budget.sha256 != envelope["budget_sha256"]:
+        raise Cli12Error("BUDGET_TAMPERED", "budget.json 文档哈希与 envelope 不符")
     C.assert_single_truth_v2(
         budget,
         ledger_task_caps=QL.RSI_R12_TASK_CAPS,
@@ -511,6 +532,12 @@ class R12Context:
         atomic_write_text(target, text, mode=0o600)
         return target
 
+    def assert_write_allowed(self, target: "str | Path") -> Path:
+        """公开写闸面（``state.Journal``/``closure``/``repair`` 的共用入口）。"""
+        path = Path(target)
+        self._assert_write_allowed(path)
+        return path
+
     def write_json(self, relpath: "str | Path", obj: Any) -> Path:
         return self.write_text(
             relpath, json.dumps(obj, ensure_ascii=False, indent=1,
@@ -627,6 +654,13 @@ def cmd_controls(args: argparse.Namespace) -> int:
           f"failures={len(report['failures'])}")
     print(f"  budget runs={report['budget']['total_runs']} "
           f"steps={report['budget']['total_steps']}")
+    if report["verdict"] == "CALIBRATION_PASS":
+        state = ST.ResearchState(ctx)
+        if state.root_state() == ST.ROOT_AUTHORIZED:
+            state.advance_root(
+                ST.ROOT_CALIBRATED,
+                reason=f"controls v2 真容器校准 verdict={report['verdict']}（零 POST）")
+            print(f"  root    : {state.root_state()}")
     return 0
 
 
@@ -736,7 +770,371 @@ def build_parser() -> argparse.ArgumentParser:
     has_.add_argument("--include-rescue", action="store_true",
                       help="实质救援（touch=code/interpretation）也算接触")
     has_.set_defaults(func=cmd_human_assisted)
+
+    # ---- T5：离线生产准入与 LOCK ----
+    ppr = sub.add_parser("prereg", help="仪器预注册（T5 前置，幂等）")
+    _root_args(ppr)
+    ppr.set_defaults(func=cmd_prereg)
+
+    pao = sub.add_parser("authorize-offline",
+                         help="写离线授权件 + 固定套注册件（零 POST）")
+    _root_args(pao)
+    pao.set_defaults(func=cmd_authorize_offline)
+
+    pfr = sub.add_parser("publish-public",
+                         help="把 contract/ 公开合同逐字节投影到候选可见面 public/")
+    _root_args(pfr)
+    pfr.set_defaults(func=cmd_publish_public)
+
+    pfr = sub.add_parser("freeze", help="冻结 validation LOCK（root → FROZEN）")
+    _root_args(pfr)
+    pfr.add_argument("--image", default=None,
+                     help="镜像 pin（缺省取校准报告的 container_image）")
+    pfr.set_defaults(func=cmd_freeze)
+
+    pra = sub.add_parser(
+        "regression-attest",
+        help="真跑 T2/T3 回归测试，落绑定冻结闭包的取证件（零 POST）")
+    _root_args(pra)
+    pra.add_argument("--python", default=None,
+                     help="解释器（缺省 sys.executable）")
+    pra.set_defaults(func=cmd_regression_attest)
+
+    psg = sub.add_parser("sign", help="签 validation LOCK（报告/实现/画像绑定）")
+    _root_args(psg)
+    psg.add_argument("--role", required=True, choices=list(LK.VALIDATION_ROLES))
+    psg.add_argument("--actor", required=True)
+    psg.add_argument("--decision", required=True, choices=list(LK.DECISIONS))
+    psg.add_argument("--rationale", default="")
+    psg.set_defaults(func=cmd_sign)
+
+    pv = sub.add_parser("verify", help="终局校验 LOCK + 三签绑定")
+    _root_args(pv)
+    pv.set_defaults(func=cmd_verify)
+
+    pst = sub.add_parser("state", help="操作者推进 root（仅 AUTHORIZED/CALIBRATED）")
+    _root_args(pst)
+    pst.add_argument("--to", required=True)
+    pst.add_argument("--reason", default=None)
+    pst.set_defaults(func=cmd_state)
+
+    pvp = sub.add_parser(
+        "validate-production",
+        help="零 POST 全链演练：正式 CLI/装配/DockerRunner + 公开消费者")
+    _root_args(pvp)
+    pvp.add_argument("--image", default=None, help="镜像 pin（缺省取 LOCK 内 pin）")
+    pvp.add_argument("--only", nargs="*", default=None,
+                     help="只跑指定套件（调试用；子集报告判 INCOMPLETE、"
+                          "不得签署——六套全跑才算验收）")
+    pvp.set_defaults(func=cmd_validate_production)
     return p
+
+
+# ---------------------------------------------------------------------------
+# T5：离线生产准入 → 冻结（validation LOCK）→ 演练 → 三签 → 终局 verify
+# ---------------------------------------------------------------------------
+
+def _r12_ctx(root: Path, envelope_id: str) -> "R12Context":
+    return R12Context(root, envelope_id)
+
+
+def _ledger_path(root: Path) -> Path:
+    return root / "quota" / "ledger.jsonl"
+
+
+def cmd_prereg(args: argparse.Namespace) -> int:
+    """仪器预注册（先注册后跑；幂等且漂移即拒）。"""
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    doc = PREREG.write_prereg(
+        ctx, envelope_id=str(envelope["envelope_id"]),
+        plan_sha256=str(envelope["plan_sha256"]),
+        model_config_sha256=envelope.get("model_config_sha256"))
+    print(f"prereg ok  envelope={envelope['envelope_id']}")
+    print(f"  registered_at : {doc['registered_at_utc']}")
+    print(f"  document_sha  : {doc['document_sha256'][:16]}…")
+    print(f"  rubric_sha    : {doc['rubric_sha256'][:16]}…")
+    return 0
+
+
+def cmd_authorize_offline(args: argparse.Namespace) -> int:
+    """写不可变离线授权件 + 固定套注册件（零 POST；root INIT→AUTHORIZED）。"""
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    auth = OV.authorize_offline(
+        ctx, repo_root=LK.REPO_ROOT, ledger_path=_ledger_path(root),
+        consumer_path=OV.consumer_source(LK.REPO_ROOT))
+    spec = OV.suite_spec_document(
+        ctx, authorization_sha256=C.canonical_sha256(auth))
+    ctx.write_json(OV.SPEC_RELPATH, spec)
+    print(f"authorize-offline ok  envelope={envelope['envelope_id']}")
+    print(f"  consumer_sha256 : {(auth.get('consumer') or {}).get('sha256', '')[:16]}…")
+    print(f"  profile_sha256  : {str(auth.get('profile_sha256'))[:16]}…")
+    print(f"  suites          : {sorted(spec['suites'])}")
+    print(f"  root            : {ST.ResearchState(ctx).root_state()}")
+    return 0
+
+
+def _publish_public_view(root: Path, envelope: Mapping[str, Any]) -> "dict[str, str]":
+    """``contract/`` → ``public/`` 的逐字节投影（唯一源校验后复制）。"""
+    src_json = root / CONTRACT_JSON_RELPATH
+    src_md = root / CONTRACT_MD_RELPATH
+    for path in (src_json, src_md):
+        if not path.is_file():
+            raise Cli12Error("FILE_ABSENT", f"文件不存在：{path}")
+    json_text = src_json.read_text(encoding="utf-8")
+    json_sha = _sha256_bytes(json_text.encode("utf-8"))
+    if json_sha != str(envelope.get("public_contract_sha256")):
+        raise Cli12Error(
+            "PUBLIC_CONTRACT_TAMPERED",
+            f"{CONTRACT_JSON_RELPATH} 哈希 {json_sha[:16]}… 与 "
+            f"envelope.public_contract_sha256 不符")
+    md_text = src_md.read_text(encoding="utf-8")
+    ensure_private_dir(root / "public")
+    atomic_write_text(root / PUBLIC_VIEW_JSON_RELPATH, json_text, mode=0o600)
+    atomic_write_text(root / PUBLIC_VIEW_MD_RELPATH, md_text, mode=0o600)
+    return {"json_sha256": json_sha,
+            "md_sha256": _sha256_bytes(md_text.encode("utf-8"))}
+
+
+def _verify_public_view(root: Path, envelope: Mapping[str, Any]) -> None:
+    """freeze 前闸：公开视图必须在场且与 ``contract/`` 源件逐字节相等。"""
+    for rel in (PUBLIC_VIEW_JSON_RELPATH, PUBLIC_VIEW_MD_RELPATH):
+        if not (root / rel).is_file():
+            raise Cli12Error(
+                "PUBLIC_VIEW_MISSING",
+                f"{rel} 缺件（生产链读 public/；先跑 publish-public）")
+    expect_json = (root / CONTRACT_JSON_RELPATH).read_bytes()
+    actual_json = (root / PUBLIC_VIEW_JSON_RELPATH).read_bytes()
+    if actual_json != expect_json:
+        raise Cli12Error(
+            "PUBLIC_VIEW_DRIFT",
+            "public/public_contract.json 与 contract/public_contract.json "
+            "不是逐字节相等（重跑 publish-public）")
+    expect_md = (root / CONTRACT_MD_RELPATH).read_bytes()
+    if (root / PUBLIC_VIEW_MD_RELPATH).read_bytes() != expect_md:
+        raise Cli12Error(
+            "PUBLIC_VIEW_DRIFT",
+            "public/public_contract.md 与 contract/public_contract.md "
+            "不是逐字节相等（重跑 publish-public）")
+    if _sha256_bytes(actual_json) != str(envelope.get("public_contract_sha256")):
+        raise Cli12Error(
+            "PUBLIC_CONTRACT_TAMPERED",
+            "public/public_contract.json 哈希与 envelope 绑定值不符")
+
+
+def cmd_publish_public(args: argparse.Namespace) -> int:
+    """把 ``contract/`` 的唯一源公开合同逐字节投影到候选可见面 ``public/``。
+
+    生产链（``protocol._seed_public`` / ``assembly._design_inputs``）读的是
+    ``public/public_contract.json``；R1.2 的权威件在 ``contract/``。发布是
+    **派生投影**：源件哈希必须与 envelope 绑定值一致，投影逐字节相等，
+    不重新渲染、不夹带私有信息。幂等（重复发布结果不变）。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    result = _publish_public_view(root, envelope)
+    print(f"publish-public ok  envelope={envelope['envelope_id']}")
+    print(f"  contract sha256 : {str(envelope.get('public_contract_sha256'))[:16]}…")
+    print(f"  public json     : {PUBLIC_VIEW_JSON_RELPATH}  "
+          f"sha256={result['json_sha256'][:16]}…")
+    print(f"  public md       : {PUBLIC_VIEW_MD_RELPATH}  "
+          f"sha256={result['md_sha256'][:16]}…")
+    return 0
+
+
+def cmd_freeze(args: argparse.Namespace) -> int:
+    """冻结 validation LOCK（不可变）并把 root 推到 FROZEN。
+
+    三签不在这一步：验证 LOCK 的签名绑定对象（离线验证报告）要等演练跑完
+    才存在，见 ``lock.verify_lock(require_signatures=...)`` 的引导期说明。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    if envelope.get("mode") != "offline_validation":
+        raise Cli12Error(
+            "OFFLINE_MODE_REQUIRED",
+            f"freeze 只用于离线验证根（envelope.mode={envelope.get('mode')!r}）")
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    state = ST.ResearchState(ctx)
+    if state.root_state() != ST.ROOT_CALIBRATED:
+        raise Cli12Error("ROOT_STATE",
+                         f"freeze 需要 root={ST.ROOT_CALIBRATED}，"
+                         f"当前 {state.root_state()}（先跑 controls --real-containers）")
+    # 冻结前公开视图必须已在候选可见面发布且与唯一源逐字节一致：
+    # 生产链（_seed_public/_design_inputs）只读 public/，缺件在 freeze 就拦。
+    _verify_public_view(root, envelope)
+    frozen = LK.freeze_lock(ctx, repo_root=LK.REPO_ROOT,
+                            image_pin=args.image)
+    state.advance_root(ST.ROOT_FROZEN, reason="validation LOCK 已冻结（零 POST）")
+    print(f"freeze ok  lock_sha256={frozen['sha256']}")
+    print(f"  purpose : {LK.lock_purpose(frozen['doc'])}")
+    print(f"  roles   : {list(LK.VALIDATION_ROLES)}（演练跑完后签）")
+    print(f"  root    : {state.root_state()}")
+    return 0
+
+
+def cmd_sign(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    doc = LK.sign_lock(ctx, role=str(args.role), actor=str(args.actor),
+                       decision=str(args.decision),
+                       rationale=str(args.rationale or ""))
+    print(f"sign ok  role={doc['role']}  actor={doc['actor']}  "
+          f"decision={doc['decision']}")
+    print(f"  report_sha256         : {str(doc.get('report_sha256'))[:16]}…")
+    print(f"  implementation_sha256 : "
+          f"{str(doc.get('implementation_sha256'))[:16]}…")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    result = LK.verify_lock(ctx, repo_root=LK.REPO_ROOT)
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_state(args: argparse.Namespace) -> int:
+    """操作者显式推进 root（只有 AUTHORIZED/CALIBRATED 两档；FROZEN 走 freeze）。"""
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    state = ST.ResearchState(ctx)
+    target = str(args.to).upper()
+    if target not in (ST.ROOT_AUTHORIZED, ST.ROOT_CALIBRATED):
+        raise Cli12Error("STATE_OPERATOR_SCOPE",
+                         f"操作者只能推进 {[ST.ROOT_AUTHORIZED, ST.ROOT_CALIBRATED]}"
+                         f"（FROZEN 由 freeze 推）")
+    if state.root_state() == target:
+        print(f"state ok  root={target}（已是目标，幂等）")
+        return 0
+    state.advance_root(target, reason=args.reason or f"操作者推进 → {target}")
+    print(f"state ok  {target}")
+    return 0
+
+
+def _local_counter() -> "Any":
+    """离线用的本地 token 估算（只过 20000 token 请求门，不参与计费/判决）。"""
+    def count(text: str) -> int:
+        return max(1, len(text) // 4)
+    return count
+
+
+def cmd_regression_attest(args: argparse.Namespace) -> int:
+    """真跑失败矩阵登记的回归测试，落绑定冻结闭包的取证件（零 POST）。
+
+    必须在 ``freeze`` 之后、``validate-production`` 之前跑：先 ``verify_closure``
+    证明当前代码就是 LOCK 冻结的那一份，再跑测试，取证件的 ``closure_sha256``
+    直接取 LOCK 闭包值。演练面只认闭包相等且 returncode==0 的取证件。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    if envelope.get("mode") != "offline_validation":
+        raise Cli12Error("OFFLINE_MODE_REQUIRED",
+                         f"envelope.mode={envelope.get('mode')!r}")
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    lock_doc = ctx.read_json(LK.LOCK_RELPATH)
+    closure = lock_doc.get("closure") or {}
+    # 组表口径与 ``freeze_lock`` 同源：取 envelope 的 profile_id（不硬编码 R12），
+    # 否则 legacy 根在此处会拿错组表、把「代码没变」误判成闭包漂移。
+    profile_id = str(envelope.get("profile_id") or P.PROFILE_LEGACY)
+    groups_key = P.profile_by_id(profile_id).closure_groups_key
+    LK.verify_closure(closure, LK.REPO_ROOT, groups_key=groups_key)
+    closure_sha = str(closure.get("closure_sha256") or "")
+    if not closure_sha:
+        raise Cli12Error("CLOSURE_MISSING", "LOCK.closure.closure_sha256 缺失")
+    doc = OV.run_regression_attestation(
+        ctx, closure_sha256=closure_sha, python=args.python)
+    failed = [f for f, rec in (doc.get("files") or {}).items()
+              if int(rec.get("failed") or 0) or int(rec.get("passed") or 0) == 0]
+    print(f"regression-attest {'ok' if not failed else 'FAIL'}  "
+          f"closure={closure_sha[:16]}…  rc={doc['returncode']}")
+    for rel, rec in sorted((doc.get("files") or {}).items()):
+        print(f"  {rel:44s} passed={rec.get('passed')} "
+              f"failed={rec.get('failed')} skipped={rec.get('skipped')}")
+    print(f"  evidence: {OV.REGRESSION_EVIDENCE_RELPATH}")
+    return 0 if (doc["returncode"] == 0 and not failed) else 3
+
+
+def cmd_validate_production(args: argparse.Namespace) -> int:
+    """零 POST 全链演练：正式 CLI/装配/DockerRunner + 公开消费者。
+
+    拒绝在付费闸打开的状态下运行（``SIMPRAXIS_ALLOW_PAID=1`` 一律 BLOCKED）：
+    本模式永远不构造生产 gateway，模型面只允许确定性公开消费者/脚本回合。
+    """
+    if os.environ.get("SIMPRAXIS_ALLOW_PAID") == "1":
+        raise Cli12Error(
+            "OFFLINE_MODE_REFUSES_PAID",
+            "validate-production 禁止在 SIMPRAXIS_ALLOW_PAID=1 下运行")
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    if envelope.get("mode") != "offline_validation":
+        raise Cli12Error("OFFLINE_MODE_REQUIRED",
+                         f"envelope.mode={envelope.get('mode')!r}")
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    lock_doc = ctx.read_json(LK.LOCK_RELPATH)
+    # 演练前置（独立评审）：先在**当前树**上复算闭包——改过代码没重建 LOCK 时
+    # 立刻拒（几秒），而不是跑满 40 分钟再在签名面发现。组表口径取 envelope 的
+    # profile_id（与 ``freeze_lock`` 同源），不硬编码 R12。
+    _groups_key = P.profile_by_id(
+        str(envelope.get("profile_id") or P.PROFILE_LEGACY)).closure_groups_key
+    LK.verify_closure(lock_doc.get("closure") or {}, LK.REPO_ROOT,
+                      groups_key=_groups_key)
+    locked_pin = str((lock_doc.get("image") or {}).get("pin") or "")
+    image = str(args.image or locked_pin or "")
+    if not image:
+        raise Cli12Error("IMAGE_PIN_INVALID", "LOCK 未登记镜像 pin 且未给 --image")
+    # 锁内适配（2026-11-12 T5 独立评审 MAJOR-4）：`--image` 不是自由覆盖——
+    # 冻结镜像 pin 必须与实际运行镜像逐字相等（run_validation 里还有第二道同判）。
+    if locked_pin and image != locked_pin:
+        raise Cli12Error("IMAGE_MISMATCH",
+                         f"--image {image} ≠ LOCK {locked_pin}")
+    runs = OS.run_validation(
+        ctx, image=image, runner_factory=SANDBOX.DockerRunner,
+        counter=_local_counter(), ledger_path=_ledger_path(root),
+        repo_root=LK.REPO_ROOT, only=args.only)
+    authorization = OV.load_authorization(ctx)
+    reasons = [f"{k}: {v.get('expected')} → {v.get('status')}"
+               for k, v in runs["suites"].items() if v.get("status") != "PASS"]
+    missing = list(runs.get("missing_suites") or [])
+    if missing:
+        reasons.append(f"未跑套件（--only 子集不得作为验收报告）：{missing}")
+    verdict = str(runs["verdict"])
+    # MINOR-3：零 POST 用**报告生成时实测**的账本行数，不再抄调用方字面量；
+    # 缺键/非严格 int 一律拒（`or 0` 会把缺席读成零 POST 证据）。
+    measured_rows = runs.get("ledger_call_rows")
+    if isinstance(measured_rows, bool) or not isinstance(measured_rows, int):
+        raise Cli12Error("VALIDATION_REPORT_INCOMPLETE",
+                         f"run_validation 未给出实测 ledger_call_rows："
+                         f"{measured_rows!r}")
+    reasons.extend(str(r) for r in (runs.get("reasons") or []))
+    doc = OV.report_document(
+        ctx=ctx, authorization=authorization,
+        lock_sha256=str(runs["lock_sha256"]), suites=runs["suites"],
+        turns=runs.get("turn_entries") or [], verdict=verdict,
+        reasons=reasons, ledger_call_rows=measured_rows,
+        suites_required=runs.get("suites_required") or [],
+        suites_run=runs.get("suites_run") or [],
+        complete=bool(runs.get("complete")),
+        profile_sha256=str(runs.get("profile_sha256") or ""),
+        image=str(runs.get("image") or image),
+        failure_matrix=runs.get("failure_matrix"),
+        suite_spec_sha256=str(runs.get("suite_spec_sha256") or ""))
+    doc["signatures_required"] = False   # 本报告是签名绑定对象，先于三签产生
+    report_sha = OV.write_report(ctx, doc)
+    print(f"validate-production {verdict}  envelope={envelope['envelope_id']}")
+    for name, row in runs["suites"].items():
+        print(f"  {name:32s} {row.get('status')}")
+    print(f"  report : {OV.REPORT_RELPATH}  sha256={report_sha[:16]}…")
+    print(f"  turns  : {len(doc['turns']['request_sha256'])}  "
+          f"ledger_call_rows={doc['ledger_call_rows']}")
+    return 0 if verdict == "PASS" else 3
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -746,7 +1144,9 @@ def main(argv: "list[str] | None" = None) -> int:
         return int(args.func(args))
     except (Cli12Error, C.ContractError, FAM.FamilyError, P.ProfileError,
             RP.RsiR12CampaignUnsetError, HE.HumanEventError,
-            RT.CampaignWriteRefused, OSError, CAL.CalibrationError) as exc:
+            RT.CampaignWriteRefused, OSError, CAL.CalibrationError,
+            LK.LockError, OV.OfflineValidationError, OS.OfflineSuiteError,
+            PREREG.PreregError, ST.StateError, RS.ResourceError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

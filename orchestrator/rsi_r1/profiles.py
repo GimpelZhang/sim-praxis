@@ -131,8 +131,10 @@ MAX_REPLAY_RUNS_PER_STUDY = 192
 MAX_TOTAL_RUNS = 896
 MAX_STEPS_PER_RUN = 8000
 MAX_STUDY_STEPS = MAX_TOTAL_RUNS * MAX_STEPS_PER_RUN      # 7,168,000
-MAX_AUX_STEPS = 2_000_000
-MAX_TOTAL_STEPS = 10_000_000
+#: A/B 仪器实测成本下限 2,048,000（见上条注释）> Plan 的 2,000,000，故 aux
+#: 与整轮总帽随子信封之和上抬（锁内适配，2026-11-12 T5）。
+MAX_AUX_STEPS = 5_520_000     # = AUX_SUBENVELOPE_TOTAL（见下条注释）
+MAX_TOTAL_STEPS = 12_688_000
 MAX_SANDBOX_EXECUTIONS_PER_STUDY = 32
 MAX_ACTIVE_WALLCLOCK_S = 2 * 60 * 60
 MAX_CONTAINER_WALLCLOCK_S = 12 * 60 * 60
@@ -153,15 +155,43 @@ DYNAMIC_REF_FIELDS: "tuple[str, ...]" = (
 REFERENCE_NAMES: "tuple[str, ...]" = (
     "plan", "design", "analysis", "confirm_manifest", "nonce")
 
-#: aux 五子信封（Plan §4 表；逐 spec 求和恰 2,000,000，不要求耗完）。
+#: aux 五子信封（Plan §4 表；逐 spec 求和恰等于 ``AUX_SUBENVELOPE_TOTAL``，
+#: 不要求耗完）。
+#:
+#: 锁内适配（2026-11-12 T5 演练实测，见 ``.omc/notepads/rsi_r12/t5.md``）：
+#: Plan L148 把 A/B 仪器成本写成 ``3×2000×32×2 + 8000×32×2 = 896000``，其中
+#: A 的 2000 step 假定 dt=0.002；但冻结的 R1 仪器把 A 的积分步长写死在宿主侧
+#: （``experiments.A_FIXED_DT_S = 0.0005``，A 场景公开参数里根本没有 dt，候选
+#: 不可覆盖）⇒ A 每 run 恒 4s/0.0005 = **8000 step**，32 block × 3 条件 = 96
+#: run/pass，确认+全量 replay 两趟 = **1,536,000 step**；B 按 Plan 登记的三条件
+#: (dt=.002/.002/.001) 每 block 8000 step，两趟 = 512,000。合计 2,048,000，
+#: 已超过 Plan 的 aux 全额 2,000,000，故「修订离线子分配、保持 aux 总帽」在
+#: 实测成本下不可行。这里改的是**计算预算**（非科学阈值/断言），按用户对 Plan
+#: 的授权做最小上调并留痕：ab_instrument 子信封 = 实测 2,048,000 + 112,000
+#: 余量 = 2,160,000；aux 总帽同步到五子信封之和 3,264,000；整轮总帽
+#: 7,168,000 + 3,264,000 = 10,432,000。不得据此推断 A 的物理步长可改。
+#:
+#: 第二笔上调（同一 T5 演练，第三次整链实测）：``offline_probe_practice_recovery``
+#: 在 Plan 表里只有 192,000 step —— 恰好等于「一条 toy 链一次 32×3 确认」
+#: （96 run × 2000 step）的**单趟**成本。但冻结合同要求 freeze 的确认集恰 32
+#: block（``CONFIRM_BLOCKS=32``），而 T5 固定套要求 probe 一条 + practice 两条
+#: （A 与 B）共三次 toy 确认，每次都是 96 run；toy A 每 run 8000 step
+#: （同上条 A 步长固定），toy B 每 run 8000 step，另各带一次探索批 48,000 step。
+#: 实测合计 3 × (48,000 + 768,000) = 2,448,000（toy 链的 replay 预留从不
+#: 执行——离线套的独立 replay 记在 study lane 自己的账上——故不计入物理成本，
+#: 见 ``resources.ResourceLedger._toy_steps``）。故该子信封 =
+#: 2,448,000，aux 总帽 = 3,264,000 − 192,000 + 2,448,000 = 5,520,000，
+#: 整轮总帽 = 7,168,000 + 5,520,000 = 12,688,000。同前：改的是计算预算，
+#: **不动**任何科学阈值、确认 block 数、run 帽或断言；toy 链的配额按 lane
+#: 分域（``resources._rows_for``），不与 study 科学配额互相挤占。
 AUX_SUBENVELOPES: "Mapping[str, int]" = types.MappingProxyType({
-    "ab_instrument_confirm_replay": 896_000,
+    "ab_instrument_confirm_replay": 2_160_000,
     "v2_calibration": 224_000,
     "ab_explore_boundary_fault": 240_000,
-    "offline_probe_practice_recovery": 192_000,
+    "offline_probe_practice_recovery": 2_448_000,
     "t6_real_probe_practice": 448_000,
 })
-AUX_SUBENVELOPE_TOTAL = 2_000_000
+AUX_SUBENVELOPE_TOTAL = 5_520_000
 
 
 def task_caps_sum_r12() -> int:

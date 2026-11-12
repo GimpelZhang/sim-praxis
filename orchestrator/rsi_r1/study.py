@@ -112,7 +112,8 @@ def build_study_parts(
         ctx: Any, *, study: str, spend: A.SpendContract, lock: L.LockDocument,
         transport_factory: Callable[[], Callable[[T.Request], L.Reply]],
         runner: Any, image: str, counter: Callable[[str], int],
-        backend_factory: "Callable[[str], Any] | None" = None) -> StudyParts:
+        backend_factory: "Callable[[str], Any] | None" = None,
+        profile: Any = None, resource_ledger: Any = None) -> StudyParts:
     """按生产面装配一条研究链；root 门由 ``CampaignAdmission`` 二次把守。"""
     if study not in S.STUDIES:
         raise StudyError("STUDY_UNKNOWN", repr(study))
@@ -121,7 +122,8 @@ def build_study_parts(
         ctx, runner=runner, image=image, lane=lane)
     admission, slots, dispatcher, state = A.build_campaign_parts(
         ctx, spend=spend, lane=lane, study=study, runner=runner, image=image,
-        backend_factory=factory, lock_sha256=lock.sha256)
+        backend_factory=factory, lock_sha256=lock.sha256,
+        profile=profile, resource_ledger=resource_ledger)
     store = L.EventStore(state, study=study)
     envelope = A.Envelope.from_ctx(ctx)
     sender = L.build_production_sender(
@@ -159,10 +161,18 @@ def drive_study(parts: StudyParts, *, cap: int) -> StudyResult:
         try:
             outcome = parts.loop.turn()
         except L.LoopError as exc:  # 准入/槽的终止类拒绝（含 PAUSED）
+            # 锁内适配（2026-11-12 T5）：被拦下的终止类拒绝必须留下**明细**。
+            # 旧实现只记 code，演练里 ``STATE_UNKNOWN`` 不带 detail 时无法区分
+            # 是 lane 门、动作绑定还是历史缺口，只能靠猜——证据面不许这样。
+            detail = str(getattr(exc, "detail", "") or "")
+            try:
+                parts.store.stop_or_block(code=exc.code, detail=detail)
+            except Exception:  # noqa: BLE001 —— 落证据失败不改变判定
+                pass
             result.actions.append({"n": len(result.actions) + 1,
                                    "action": None, "ok": False,
-                                   "code": exc.code, "terminal": True,
-                                   "raised": True})
+                                   "code": exc.code, "detail": detail,
+                                   "terminal": True, "raised": True})
             result.stopped = exc.code
             result.terminal = True
             break
@@ -213,6 +223,7 @@ def run_study(
         counter: Callable[[str], int],
         clock: Callable[[], str] = utc_now_iso_z,
         backend_factory: "Callable[[str], Any] | None" = None,
+        profile: Any = None, resource_ledger: Any = None,
 ) -> "dict[str, Any]":
     """跑一个正式研究 study 并落 ``studies/report_<study>.json``。
 
@@ -240,7 +251,8 @@ def run_study(
         parts = build_study_parts(
             ctx, study=study, spend=spend, lock=lock,
             transport_factory=transport_factory, runner=runner, image=image,
-            counter=counter, backend_factory=backend_factory)
+            counter=counter, backend_factory=backend_factory,
+            profile=profile, resource_ledger=resource_ledger)
         result = drive_study(parts, cap=cap)
     finally:
         pump.stop()

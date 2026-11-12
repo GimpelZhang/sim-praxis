@@ -222,19 +222,33 @@ class ResourceLedger:
 
     @staticmethod
     def _rows_for(rows: Iterable[Mapping[str, Any]], study: str, *,
-                  event: str, kind: "str | None" = None
+                  event: str, kind: "str | None" = None,
+                  lane: "str | None" = None
                   ) -> "list[Mapping[str, Any]]":
+        # 锁内适配（2026-11-12 T5 全量演练实测）：配额按 **(study, lane)** 作用域。
+        # 冻结的 R1 仪器让 probe/practice 两条 toy 链各跑一次
+        # freeze_confirm（合同要求恰 32 block × 3 条件 ⇒ 96 run / 768000 step），
+        # 而 Plan 的每 study 确认帽只有 192 run：若不按 lane 分域，两轮 toy 演练
+        # 就会把 study A 的科学配额吃光，正式 A/B 链永远 RESOURCE_EXCEEDED
+        # （演练实测 seq6/seq7 + seq14/seq15 各 96 run ⇒ 余量 0）。
+        # 分域后：每条 lane 各自受同一组帽约束（不放宽任何上限），
+        # toy 链的物理成本由 aux 子信封 ``offline_probe_practice_recovery`` 兜底，
+        # 且 toy lane 不计入「整轮 study run」全局帽（那是科学 run 的帽子）。
         return [r for r in rows
                 if r.get("study") == study and r.get("event") == event
-                and (kind is None or r.get("kind") == kind)]
+                and (kind is None or r.get("kind") == kind)
+                # 无 lane 标记的行（早期单元夹具 / 历史账）在任何作用域都计入；
+                # 显式标了 lane 的行只在本 lane 作用域计入。
+                and (lane is None or r.get("lane") in (None, lane))]
 
-    def _used(self, rows: Iterable[Mapping[str, Any]], study: str) -> "dict[str, int]":
+    def _used(self, rows: Iterable[Mapping[str, Any]], study: str, *,
+              lane: "str | None" = None) -> "dict[str, int]":
         rows = tuple(rows)
         explore = self._rows_for(rows, study, event=EVENT_RESERVE,
-                                 kind=KIND_EXPLORE)
-        consumes = self._rows_for(rows, study, event=EVENT_CONSUME)
-        freezes = self._rows_for(rows, study, event=EVENT_FREEZE)
-        sandbox = self._rows_for(rows, study, event=EVENT_SANDBOX)
+                                 kind=KIND_EXPLORE, lane=lane)
+        consumes = self._rows_for(rows, study, event=EVENT_CONSUME, lane=lane)
+        freezes = self._rows_for(rows, study, event=EVENT_FREEZE, lane=lane)
+        sandbox = self._rows_for(rows, study, event=EVENT_SANDBOX, lane=lane)
         wall = self._rows_for(rows, study, event=EVENT_WALLCLOCK)
         aux = self._rows_for(rows, study, event=EVENT_AUX)
         explore_runs = sum(int(r["runs"]) for r in explore)
@@ -287,10 +301,33 @@ class ResourceLedger:
     def _global_aux(self, rows: Iterable[Mapping[str, Any]]) -> int:
         return sum(int(r["steps"]) for r in rows if r.get("event") == EVENT_AUX)
 
+    @staticmethod
+    def _toy_steps(rows: Iterable[Mapping[str, Any]]) -> int:
+        """已占额的 toy lane **物理**步数（探索预留 + 冻结确认步数）。
+
+        只计会被真正执行的量：toy 链的 replay 预留从不消费（离线套的
+        独立 replay 走 study lane 自己的账），把它计进物理成本会让同一批
+        算力被记两遍。占额看的是「已承诺且会执行」的算力。
+        """
+        total = 0
+        for r in rows:
+            if r.get("lane") not in TOY_LANES:
+                continue
+            if r.get("event") == EVENT_FREEZE:
+                total += int(r.get("confirm_steps") or 0)
+            elif (r.get("event") == EVENT_RESERVE
+                  and r.get("kind") == KIND_EXPLORE):
+                total += int(r.get("steps") or 0)
+        return total
+
     def _global_runs(self, rows: Iterable[Mapping[str, Any]]) -> "dict[str, int]":
         used = 0
         reserved = 0
         for r in rows:
+            # toy lane（probe/practice）是仪器演练，不是科学 run：整轮帽
+            # ``total_runs`` 只约束 study lane（见 _rows_for 的锁内适配注释）。
+            if r.get("lane") in TOY_LANES:
+                continue
             if r.get("event") == EVENT_RESERVE and r.get("kind") == KIND_EXPLORE:
                 used += int(r["runs"])
             elif r.get("event") == EVENT_CONSUME:
@@ -313,8 +350,13 @@ class ResourceLedger:
 
     def reserve_explore(self, study: str, specs: Sequence[Any], *,
                         batch_id: "str | None" = None,
-                        phase: str = "explore") -> Reservation:
-        """run_batch 前原子预留（累计 64 run / 8 batch / 步数 / 全局 run）。"""
+                        phase: str = "explore",
+                        lane: "str | None" = None) -> Reservation:
+        """run_batch 前原子预留（累计 64 run / 8 batch / 步数 / 全局 run）。
+
+        ``lane`` 是配额作用域（见 ``_rows_for``）：toy lane 与 study lane 各受
+        同一组帽约束但互不挤占；toy lane 不计入整轮 study run 全局帽。
+        """
         runs = len(specs)
         if runs <= 0:
             raise ResourceError("RESOURCE_EXCEEDED", "空矩阵不能预留")
@@ -334,7 +376,7 @@ class ResourceLedger:
         limits = self.limits
 
         def _payload(rows: "tuple[dict[str, Any], ...]") -> Mapping[str, Any]:
-            totals = self._used(rows, study)
+            totals = self._used(rows, study, lane=lane)
             self._check_reserved_nonnegative(totals, where=study)
             remaining_runs = limits.explore_runs_per_study - totals["explore_runs"]
             if runs > remaining_runs:
@@ -346,7 +388,8 @@ class ResourceLedger:
             batches = totals["explore_batches"]
             new_batch = batch_id not in (None, "") and batch_id not in {
                 str(r.get("batch_id")) for r in self._rows_for(
-                    rows, study, event=EVENT_RESERVE, kind=KIND_EXPLORE)}
+                    rows, study, event=EVENT_RESERVE, kind=KIND_EXPLORE,
+                    lane=lane)}
             if new_batch and batches + 1 > limits.explore_batches_per_study:
                 raise ResourceError(
                     "RESOURCE_EXCEEDED",
@@ -370,7 +413,8 @@ class ResourceLedger:
                     f"全局 run {global_runs['used']}+{global_runs['reserved']}+{runs} "
                     f"> 整轮帽 {limits.total_runs}")
             return {"study": study, "kind": KIND_EXPLORE, "runs": runs,
-                    "steps": steps, "batch_id": batch_id, "phase": phase}
+                    "steps": steps, "batch_id": batch_id, "phase": phase,
+                    "lane": lane}
 
         doc = self._appender(EVENT_RESERVE, _payload)
         return Reservation(seq=int(doc["seq"]), study=study, kind=KIND_EXPLORE,
@@ -444,7 +488,7 @@ class ResourceLedger:
                 f"{limits.steps_per_run}")
 
         def _payload(rows: "tuple[dict[str, Any], ...]") -> Mapping[str, Any]:
-            totals = self._used(rows, study)
+            totals = self._used(rows, study, lane=lane)
             self._check_reserved_nonnegative(totals, where=study)
             room_confirm = (limits.confirm_runs_per_study
                             - totals["confirm_used"] - totals["confirm_reserved"])
@@ -475,6 +519,20 @@ class ResourceLedger:
                 raise ResourceError(
                     "RESOURCE_EXCEEDED",
                     f"freeze 后全局 run 超过整轮帽 {limits.total_runs}")
+            if lane in TOY_LANES:
+                # toy lane 的物理成本不在 study 科学帽里，而由 aux 子信封
+                # ``offline_probe_practice_recovery`` 兜底（Plan L148「另列」）。
+                # 这里执行前先占额：累计 toy **物理**步数（探索 + 确认；toy 的
+                # replay 预留从不执行，不计）必须落在子信封帽内，超了就在
+                # 发下一呼之前拒绝。
+                cap = int(P.AUX_SUBENVELOPES["offline_probe_practice_recovery"])
+                toy = self._toy_steps(rows)
+                if toy + confirm_steps > cap:
+                    raise ResourceError(
+                        "RESOURCE_EXCEEDED",
+                        f"toy lane 累计 {toy + confirm_steps} step"
+                        f" > aux 子信封帽 {cap}"
+                        "（offline_probe_practice_recovery）")
             return {"study": study, "kind": "freeze", "lane": lane,
                     "confirm_blocks": int(blocks), "n_conditions": int(n_conditions),
                     "confirm_runs": confirm_runs, "replay_runs": replay_runs,
@@ -491,8 +549,12 @@ class ResourceLedger:
             post_margin=margin, sha256=str(doc["sha256"]))
 
     def consume_confirm(self, study: str, *, kind: str, runs: int, steps: int,
-                        batch_id: "str | None" = None) -> Reservation:
-        """从 freeze 预留里扣减实际确认/复跑执行（不新增 runs 计费）。"""
+                        batch_id: "str | None" = None,
+                        lane: "str | None" = None) -> Reservation:
+        """从 freeze 预留里扣减实际确认/复跑执行（不新增 runs 计费）。
+
+        ``lane`` 与 freeze 侧同一作用域：只能消费**本 lane** 的预留。
+        """
         if kind not in (KIND_CONFIRM, KIND_REPLAY):
             raise ResourceError("RESOURCE_EXCEEDED", f"consume kind={kind!r}")
         runs = int(runs)
@@ -505,7 +567,7 @@ class ResourceLedger:
                 f"consume 步数 {steps} > {runs}×{self.limits.steps_per_run}")
 
         def _payload(rows: "tuple[dict[str, Any], ...]") -> Mapping[str, Any]:
-            totals = self._used(rows, study)
+            totals = self._used(rows, study, lane=lane)
             self._check_reserved_nonnegative(totals, where=study)
             key = "confirm_reserved" if kind == KIND_CONFIRM else "replay_reserved"
             if runs > int(totals[key]):
@@ -520,7 +582,7 @@ class ResourceLedger:
                     "STEP_LIMIT",
                     f"{kind} 执行步数 {steps} > freeze 未消费步数预留 {totals[skey]}")
             return {"study": study, "kind": kind, "runs": runs, "steps": steps,
-                    "batch_id": batch_id}
+                    "batch_id": batch_id, "lane": lane}
 
         doc = self._appender(EVENT_CONSUME, _payload)
         return Reservation(seq=int(doc["seq"]), study=study, kind=kind,
@@ -530,17 +592,18 @@ class ResourceLedger:
     # -- 沙盒 / 墙钟 / aux ----------------------------------------------
 
     def reserve_sandbox(self, study: str, *, purpose: str,
-                        rejected_before_execution: bool = False) -> Reservation:
+                        rejected_before_execution: bool = False,
+                        lane: "str | None" = None) -> Reservation:
         """候选沙盒执行一次；被前执行拒绝的设计调用也计数（Plan §2.1）。"""
         def _payload(rows: "tuple[dict[str, Any], ...]") -> Mapping[str, Any]:
-            totals = self._used(rows, study)
+            totals = self._used(rows, study, lane=lane)
             if totals["sandbox"] + 1 > self.limits.sandbox_executions_per_study:
                 raise ResourceError(
                     "RESOURCE_EXCEEDED",
                     f"沙盒执行 {totals['sandbox'] + 1} > 每 study 帽 "
                     f"{self.limits.sandbox_executions_per_study}")
             return {"study": study, "kind": "sandbox", "runs": 0, "steps": 0,
-                    "purpose": purpose,
+                    "purpose": purpose, "lane": lane,
                     "rejected_before_execution": bool(rejected_before_execution)}
 
         doc = self._appender(EVENT_SANDBOX, _payload)
@@ -618,10 +681,14 @@ class ResourceLedger:
 
     # -- 公开快照 --------------------------------------------------------
 
-    def snapshot(self, study: str, *, phase: "str | None" = None) -> "dict[str, Any]":
-        """精确 used/reserved/remaining（可见状态与最终请求共用同一份数）。"""
+    def snapshot(self, study: str, *, phase: "str | None" = None,
+                 lane: "str | None" = None) -> "dict[str, Any]":
+        """精确 used/reserved/remaining（可见状态与最终请求共用同一份数）。
+
+        ``lane`` 给定时只统计**本 lane** 的配额行（toy lane 与 study lane 分域）。
+        """
         rows = self.rows()
-        totals = self._used(rows, study)
+        totals = self._used(rows, study, lane=lane)
         self._check_reserved_nonnegative(totals, where=study)
         limits = self.limits
         glob_runs = self._global_runs(rows)
@@ -719,7 +786,8 @@ class ResourceLedger:
 def validate_matrix_v2(matrix_json: Any, plan: C.ResearchPlan, *,
                        ledger: ResourceLedger, study: str,
                        batch_id: "str | None" = None,
-                       phase: str = "explore"
+                       phase: str = "explore",
+                       lane: "str | None" = None
                        ) -> "tuple[tuple[Any, ...], Reservation]":
     """R1.2 探索矩阵闸：形状/域/重复/step 由 ``validate_matrix`` 判，
     **累计** 64 run / 8 batch / 整轮 run 与步数由资源账在 run_batch 前原子预留。
@@ -732,7 +800,7 @@ def validate_matrix_v2(matrix_json: Any, plan: C.ResearchPlan, *,
         max_steps=limits.study_steps)
     specs = E.validate_matrix(matrix_json, plan, proxy)
     reservation = ledger.reserve_explore(study, specs, batch_id=batch_id,
-                                         phase=phase)
+                                         phase=phase, lane=lane)
     return specs, reservation
 
 

@@ -293,18 +293,18 @@ def test_wallclock_per_study_and_global_caps(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC57：aux 五子信封逐 spec 与合计 ≤2,000,000
+# AC57：aux 五子信封逐 spec 与合计 = AUX_SUBENVELOPE_TOTAL（单一真值）
 # ---------------------------------------------------------------------------
 
 def test_aux_subenvelopes_per_spec_and_total(tmp_path) -> None:
     led = _ledger(tmp_path)
-    assert sum(P.AUX_SUBENVELOPES.values()) == 2_000_000
+    assert sum(P.AUX_SUBENVELOPES.values()) == P.AUX_SUBENVELOPE_TOTAL
     for name, cap in P.AUX_SUBENVELOPES.items():
         led.reserve_aux("A", envelope=name, steps=cap)
         with pytest.raises(RS.ResourceError):
             led.reserve_aux("A", envelope=name, steps=1)
     snap = led.snapshot("A")
-    assert snap["aux"]["total"]["used"] == 2_000_000
+    assert snap["aux"]["total"]["used"] == P.AUX_SUBENVELOPE_TOTAL
     assert snap["aux"]["total"]["remaining"] == 0
     with pytest.raises(RS.ResourceError):
         led.reserve_aux("A", envelope="unknown", steps=1)
@@ -375,7 +375,7 @@ def test_limits_document_is_single_source_projection() -> None:
     assert doc["limits"]["replay_runs_per_study"] == 192
     assert doc["total_posts"] == P.PROFILE_R12_DEF.hard_cap == 124
     assert doc["family_cap"] == P.FAMILY_CAP == 155
-    assert doc["aux_total"] == 2_000_000
+    assert doc["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
     assert doc["confirm_post_margin"] == 8
     assert doc["protocol_post_margin"] == 2
     assert len(doc["limits_sha256"]) == 64
@@ -437,3 +437,60 @@ def test_dispatcher_visible_state_v2_uses_snapshot(tmp_path) -> None:
     for key in ("study", "state", "artifacts", "last_batch",
                 "budget_slots_remaining", "confirm_token", "plan", "nonce"):
         assert key in public
+
+
+def test_toy_lanes_do_not_consume_study_science_quotas(tmp_path) -> None:
+    """probe/practice 的 toy 演练按 lane 分域，不挤占 study 科学配额。
+
+    2026-11-12 T5 全量演练实测：probe（study A）+ practice（study A/B）各做
+    一次 32×3 toy 确认，三次 96 run 全记在 study A/B 名下 ⇒ 正式 study A 的
+    「确认 96 run > 余量 0（帽 192）」拒冻结（RESOURCE_EXCEEDED/R1-S5-04）。
+    冻结合同要求确认恰 32 block（toy 链不能缩水），toy 物理成本归 aux 子信封
+    ``offline_probe_practice_recovery``；科学 run 帽只约束 study lane。
+    """
+    led = _ledger(tmp_path)
+    steps = 32 * 3 * 8000          # A：96 run × 8000 step（宿主固定 dt=0.0005）
+    for lane, study in (("probe", "A"), ("practice", "A"), ("practice", "B")):
+        led.reserve_explore(study, _specs(6, 8000), batch_id=f"{lane}-{study}",
+                            lane=lane)
+        led.reserve_freeze(study, lane=lane, blocks=32, n_conditions=3,
+                           replay_runs=96, confirm_steps=steps,
+                           replay_steps=steps, posts_remaining_after_charge=2)
+    # 科学配额未被 toy 演练吃掉：study A 仍可整额冻结一次确认 + 复跑
+    res = led.reserve_freeze("A", lane="study_A", blocks=32, n_conditions=3,
+                             replay_runs=96, confirm_steps=steps,
+                             replay_steps=steps, posts_remaining_after_charge=8)
+    assert res.confirm_runs == 96 and res.replay_runs == 96
+    snap_study = led.snapshot("A", lane="study_A")
+    snap_toy = led.snapshot("A", lane="probe")
+    assert snap_study["confirm"]["reserved"] == 96
+    assert snap_study["confirm"]["used"] == 0
+    assert snap_toy["confirm"]["reserved"] == 96
+    # 整轮 study run 帽只数 study lane（toy 的 192×3 不计入）
+    snap_any = led.snapshot("A")
+    assert snap_any["runs_total"]["used"] + snap_any["runs_total"]["reserved"] == 192
+
+
+def test_toy_freeze_steps_capped_by_aux_subenvelope(tmp_path) -> None:
+    """toy lane 的**物理**步数由 aux 子信封兜底：超帽在执行前拒绝。
+
+    toy 物理成本 2,448,000 = 3 × (48,000 探索 + 768,000 确认)，恰好塞满
+    ``offline_probe_practice_recovery``；第 4 条 toy 链（probe/study B）的
+    确认预留会被子信封帽拒绝——即便它自己在 per-lane/per-study 帽内。
+    """
+    led = _ledger(tmp_path)
+    cap = int(P.AUX_SUBENVELOPES["offline_probe_practice_recovery"])
+    steps = 32 * 3 * 8000
+    assert cap == 3 * (steps + 6 * 8000)          # 先钉死这笔算术
+    for lane, study in (("probe", "A"), ("practice", "A"), ("practice", "B")):
+        led.reserve_explore(study, _specs(6, 8000), batch_id=f"{lane}-{study}",
+                            lane=lane)
+        led.reserve_freeze(study, lane=lane, blocks=32, n_conditions=3,
+                           replay_runs=96, confirm_steps=steps,
+                           replay_steps=steps, posts_remaining_after_charge=2)
+    with pytest.raises(RS.ResourceError) as exc:
+        led.reserve_freeze("B", lane="probe", blocks=32, n_conditions=3,
+                           replay_runs=96, confirm_steps=steps,
+                           replay_steps=steps, posts_remaining_after_charge=2)
+    assert exc.value.code == "RESOURCE_EXCEEDED"
+    assert "offline_probe_practice_recovery" in str(exc.value)

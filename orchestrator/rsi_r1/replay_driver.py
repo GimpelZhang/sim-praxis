@@ -285,7 +285,12 @@ def _r12_replay_analysis(
             text, entries, evidence_root=ctx.subdir("observations"),
             work_root=ctx.subdir("trials") / f"replay-analysis-{study}",
             runner=runner, image=image, retain_bytes=True,
-            analysis_context=context)
+            analysis_context=context,
+            # 锁内适配（2026-11-12 T5 全量演练）：复跑视图必须与生产 analyze
+            # 同构——同一份冻结分析源码按公开合同从视图读计划来配对，缺
+            # plan-<sha12>.json 时合规脚本只能 ``expected exactly one plan``
+            # 退出。宿主输入走 assembly 的唯一构造点，逐字节同源。
+            extra_files=A.analysis_host_inputs(ctx, plan))
     except SB.SandboxError as exc:
         # 视图/作用域等**执行前**拒绝：不产生 receipt，直接是驱动错误。
         raise ReplayDriverError(exc.code, exc.detail) from exc
@@ -327,7 +332,10 @@ def _r12_replay_analysis(
                "relative_path": e.relpath, "sha256": e.sha256}
               for e in entries]
     art = _artifact_binding(ctx, source_sha)
-    producer = str(art.get("producer") or "")
+    # 锁内适配（2026-11-12 T5 全量演练）：注册表词汇 ``candidate_model`` 不能
+    # 直塞凭据 schema（只认 candidate/maintainer）。与 analyze/confirm 共用
+    # ``assembly.receipt_producer`` 唯一映射；未知词汇 ⇒ 空串 ⇒ 凭据 fail-closed。
+    producer = A.receipt_producer(art)
     reply_id = art.get("response_id")
     action_id = art.get("action_sha256")
     receipt = AR.build_receipt(
@@ -433,7 +441,7 @@ def run_replay(
         detail = getattr(exc, "detail", None) or str(exc)
         raise ReplayDriverError(code, detail) from exc
 
-    budget = C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json"))
+    budget = C.budget_from_dict(ctx.read_json("contract/budget.json"))
     steps_cap = int(max_steps if max_steps is not None
                     else budget.max_steps)
     factory = backend_factory or (
