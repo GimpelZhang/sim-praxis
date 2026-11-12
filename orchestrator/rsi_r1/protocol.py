@@ -1200,8 +1200,8 @@ def approval_doc(*, batch_id: str, lane: str, approved: int,
 
 
 def ensure_approval(ctx: Any, *, batch_id: str, lane: str, approved: int,
-                    note: str = "") -> Path:
-    """幂等落批准件（RSI-R1 账套 2903）。
+                    note: str = "", namespace: Any = None) -> Path:
+    """幂等落批准件（缺省 RSI-R1 账套 2903；R1.2 传 2904 namespace）。
 
     唯一写入口是 ``QuotaLedger.write_approval``（拒绝覆盖）；已存在时逐键复核
     ``batch_id/task/stage/approved``，不一致即 ``APPROVAL_DRIFT``（不静默复用
@@ -1209,9 +1209,10 @@ def ensure_approval(ctx: Any, *, batch_id: str, lane: str, approved: int,
     """
     from orchestrator.gateway import quota_ledger as QL
 
+    ns = QL.RSI_R1_NAMESPACE if namespace is None else namespace
     want = approval_doc(batch_id=batch_id, lane=lane, approved=approved,
                         note=note)
-    path = QL.RSI_R1_NAMESPACE.approvals_dir_fn() / f"{want['batch_id']}.json"
+    path = ns.approvals_dir_fn() / f"{want['batch_id']}.json"
     # approvals 目录是 ``<campaign>/quota/approvals``：逐段比对而不是数
     # ``.parent`` 层数（数层数容易错一层，把误投的票当成合法票）。
     expected_dir = ctx.root.resolve() / "quota" / "approvals"
@@ -1230,7 +1231,7 @@ def ensure_approval(ctx: Any, *, batch_id: str, lane: str, approved: int,
     return QL.write_approval(
         batch_id=want["batch_id"], task=int(want["task"]),
         stage=str(want["stage"]), approved=int(approved), beyond_normal=False,
-        note=str(want["note"]), namespace=QL.RSI_R1_NAMESPACE)
+        note=str(want["note"]), namespace=ns)
 
 
 __all__ = [

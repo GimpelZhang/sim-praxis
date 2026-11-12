@@ -45,6 +45,10 @@ VALIDATION_ROLES = ("executor", "reviewer", "verifier")
 VALIDATION_SIG_DIR = "contract/validation_signatures"
 VALIDATION_REPORT_RELPATH = "contract/offline_validation_report.json"
 VALIDATION_AUTH_RELPATH = "contract/offline_authorization.json"
+#: RSI-R1.2 T6：付费 LOCK 对 T5 验证件的**单向绑定**（Plan L212/L247）。
+#: 绑定只存在于付费 LOCK 文档里；T5 根不反向引用付费根（T5 不依赖尚不存在的
+#: 付费 LOCK）。付费 LOCK 带该键时摘要覆盖整份文档（见 loop.LockDocument）。
+PAID_BINDING_SCHEMA = "simpraxis.rsi_r1.paid_validation_binding.v1"
 PURPOSES = ("paid", "validation")
 DECISIONS = ("APPROVE", "REJECT")
 
@@ -305,9 +309,236 @@ def _dependencies(repo_root: Path) -> "dict[str, str]":
 # freeze / sign / verify
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# T6：付费 LOCK 的 T5 单向绑定
+# ---------------------------------------------------------------------------
+
+class _RootView:
+    """锁库内部的**只读**根视图（核验 T5 根用；任何写一律拒绝）。
+
+    只实现 ``verify_lock`` 实际消费的面。付费冻结绝不回头改 T5 根——T5 的
+    三签绑定对象是它自己的报告，改一个字节就会让 T5 三签 stale。
+    """
+
+    readonly = True
+
+    def __init__(self, root: "Path | str") -> None:
+        self.root = Path(root)
+        env_path = self.root / "contract/envelope.json"
+        try:
+            envelope = json.loads(env_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise LockError("VALIDATION_BINDING_MISSING",
+                            f"T5 根缺 envelope：{env_path}") from None
+        except ValueError as exc:
+            raise LockError("VALIDATION_BINDING_MISSING",
+                            f"T5 根 envelope 坏 JSON：{exc}") from None
+        self.envelope_id = str(envelope.get("envelope_id") or "")
+
+    def relative(self, relpath: "str | Path") -> Path:
+        rel = Path(relpath)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise LockError("VALIDATION_BINDING_PATH", f"只接受根内相对路径：{rel}")
+        return self.root / rel
+
+    def exists(self, relpath: "str | Path") -> bool:
+        return self.relative(relpath).is_file()
+
+    def read_json(self, relpath: "str | Path") -> Any:
+        return json.loads(self.relative(relpath).read_text(encoding="utf-8"))
+
+    def write_text(self, *_a: Any, **_k: Any) -> Path:
+        raise LockError("VALIDATION_BINDING_READONLY",
+                        "T5 根在付费绑定核验中只读")
+
+    def write_json(self, *_a: Any, **_k: Any) -> Path:
+        raise LockError("VALIDATION_BINDING_READONLY",
+                        "T5 根在付费绑定核验中只读")
+
+
+def _binding_signature_files(ctx: Any) -> "dict[str, dict[str, Any]]":
+    out: "dict[str, dict[str, Any]]" = {}
+    for role in VALIDATION_ROLES:
+        rel = f"{VALIDATION_SIG_DIR}/{role}.json"
+        if not ctx.exists(rel):
+            raise LockError("VALIDATION_BINDING_SIGNATURES",
+                            f"T5 根缺 {role} 签名")
+        doc = ctx.read_json(rel)
+        out[role] = {
+            "actor": doc.get("actor"),
+            "decision": doc.get("decision"),
+            "signed_at_utc": doc.get("signed_at_utc"),
+            "sha256": _sha256_file(ctx.relative(rel)),
+        }
+    return out
+
+
+def build_validation_binding(validation_root: "Path | str", *,
+                             now: "Callable[[], str] | None" = None
+                             ) -> "dict[str, Any]":
+    """核验 T5 根（闭包/依赖/报告/三签对**当前源码**）并生成长效绑定件。
+
+    绑定是**单向**的：付费 LOCK 记下 T5 的 LOCK/报告/三签/实现身份，T5 根
+    不因付费冻结改动一个字节。任何一步不过即 ``LockError``（不降级）。
+    """
+    from orchestrator.common import runtime_paths as _RP
+
+    root = Path(validation_root)
+    ctx = _RootView(root)
+    if not ctx.exists(LOCK_RELPATH):
+        raise LockError("VALIDATION_BINDING_MISSING",
+                        f"{root} 不是已冻结的验证根（缺 {LOCK_RELPATH}）")
+    t5_doc = ctx.read_json(LOCK_RELPATH)
+    if lock_purpose(t5_doc) != "validation":
+        raise LockError("VALIDATION_BINDING_PURPOSE",
+                        "T5 根 LOCK 不是 purpose=validation")
+    # 全量复核：闭包与依赖对**当前源码**重算、报告 verdict/矩阵重算、三签
+    # 绑定逐项复核。源码在 T5 之后改过一个字节，这里就红。
+    result = verify_lock(ctx, repo_root=REPO_ROOT)
+    if not ctx.exists(VALIDATION_REPORT_RELPATH):
+        raise LockError("VALIDATION_REPORT_MISSING", VALIDATION_REPORT_RELPATH)
+    family = Path(_RP.rsi_r12_root()).resolve(strict=False)
+    t5_root = root.resolve(strict=False)
+    if t5_root == family or family not in t5_root.parents:
+        raise LockError("VALIDATION_BINDING_ROOT",
+                        f"T5 根 {t5_root} 不在 R1.2 家族根 {family} 之内")
+    return {
+        "schema": PAID_BINDING_SCHEMA,
+        "schema_version": 1,
+        "validation_root": t5_root.relative_to(family).as_posix(),
+        "validation_envelope_id": ctx.envelope_id,
+        "lock_sha256": result["lock_sha256"],
+        "closure_sha256": result["closure_sha256"],
+        "image_pin": str((t5_doc.get("image") or {}).get("pin") or ""),
+        "report_relpath": VALIDATION_REPORT_RELPATH,
+        "report_sha256": _sha256_file(ctx.relative(VALIDATION_REPORT_RELPATH)),
+        "implementation_sha256":
+            _signature_bindings(ctx, t5_doc)["implementation_sha256"],
+        "profile_sha256":
+            str((t5_doc.get("validation") or {}).get("profile_sha256") or ""),
+        "signatures": _binding_signature_files(ctx),
+        "bound_at_utc": (now or utc_now_iso_z)(),
+    }
+
+
+def verify_paid_validation_binding(ctx: Any, doc: Mapping[str, Any], *,
+                                   repo_root: "Path | str | None" = None) -> None:
+    """付费 LOCK 的 T5 绑定逐项复核（冻结后每次 ``verify``/准入都会走）。
+
+    只信**现场重算**：T5 根重新全量验签、报告/签名文件重新算 sha，再与
+    付费 LOCK 里冻结的绑定值逐键比对；任何一项不等即拒。
+    """
+    from orchestrator.common import runtime_paths as _RP
+
+    binding = doc.get("validation_binding")
+    if not isinstance(binding, Mapping) or not binding:
+        raise LockError("PAID_BINDING_MISSING",
+                        "付费 LOCK 缺 validation_binding（T6 冻结须绑定 T5 报告与三签）")
+    if binding.get("schema") != PAID_BINDING_SCHEMA:
+        raise LockError("PAID_BINDING_SCHEMA", repr(binding.get("schema")))
+    family = Path(_RP.rsi_r12_root()).resolve(strict=False)
+    rel_root = str(binding.get("validation_root") or "")
+    t5_root = (family / rel_root).resolve(strict=False) if rel_root else family
+    if not rel_root or t5_root == family or family not in t5_root.parents:
+        raise LockError("PAID_BINDING_ROOT",
+                        f"validation_root={rel_root!r} 不在家族根之内")
+    if t5_root == Path(ctx.root).resolve(strict=False):
+        raise LockError("PAID_BINDING_ROOT", "T5 根不得是付费根自身")
+    t5 = _RootView(t5_root)
+    if not t5.exists(LOCK_RELPATH):
+        raise LockError("VALIDATION_BINDING_MISSING",
+                        f"T5 根 {t5_root} 的 LOCK 不在场")
+    t5_doc = t5.read_json(LOCK_RELPATH)
+    if lock_purpose(t5_doc) != "validation":
+        raise LockError("VALIDATION_BINDING_PURPOSE",
+                        "绑定的 T5 LOCK 不是 purpose=validation")
+    result = verify_lock(t5, repo_root=repo_root)
+    expect = {
+        "lock_sha256": result["lock_sha256"],
+        "closure_sha256": result["closure_sha256"],
+        "image_pin": str((t5_doc.get("image") or {}).get("pin") or ""),
+        "report_sha256": _sha256_file(t5.relative(VALIDATION_REPORT_RELPATH)),
+        "implementation_sha256":
+            _signature_bindings(t5, t5_doc)["implementation_sha256"],
+        "profile_sha256":
+            str((t5_doc.get("validation") or {}).get("profile_sha256") or ""),
+        "validation_envelope_id": t5.envelope_id,
+    }
+    for key, want in expect.items():
+        if binding.get(key) != want:
+            raise LockError("PAID_BINDING_DRIFT",
+                            f"binding.{key}={binding.get(key)!r} ≠ 现场 {want!r}")
+    if dict(binding.get("signatures") or {}) != _binding_signature_files(t5):
+        raise LockError("PAID_BINDING_DRIFT", "binding.signatures 与 T5 现场签名不符")
+    paid_image = str((doc.get("image") or {}).get("pin") or "")
+    if paid_image != expect["image_pin"]:
+        raise LockError("PAID_BINDING_IMAGE",
+                        f"付费 LOCK 镜像 {paid_image!r} ≠ T5 冻结镜像 "
+                        f"{expect['image_pin']!r}")
+    if ctx.exists("contract/envelope.json"):
+        paid_profile = str(ctx.read_json("contract/envelope.json")
+                           .get("profile_sha256") or "")
+        if paid_profile != expect["profile_sha256"]:
+            raise LockError("PAID_BINDING_PROFILE",
+                            f"付费根画像 {paid_profile!r} ≠ T5 画像 "
+                            f"{expect['profile_sha256']!r}")
+
+
+def build_calibration_import(validation_root: "Path | str", *,
+                             report_path: "Path | str | None" = None,
+                             now: "Callable[[], str] | None" = None
+                             ) -> "tuple[dict[str, Any], bytes]":
+    """核验 T5 根的 v2 校准件并生成**导入取证件**（Plan L212/AC55）。
+
+    返回 ``(provenance, report_bytes)``。来源根必须是已三签的验证 LOCK 根，
+    且报告必须是该 LOCK ``calibration`` 字段绑定的那一件——付费根只导入
+    「同一源码/镜像/场景/校准 spec 哈希」下的**原字节**，不冒称自己重跑过。
+    """
+    binding = build_validation_binding(validation_root, now=now)
+    root = Path(validation_root)
+    ctx = _RootView(root)
+    t5_doc = ctx.read_json(LOCK_RELPATH)
+    cal = t5_doc.get("calibration") or {}
+    rel = str(cal.get("path") or "")
+    if not ctx.exists(rel):
+        raise LockError("CALIBRATION_IMPORT_MISSING",
+                        f"T5 LOCK 登记的校准报告 {rel!r} 不在场")
+    if report_path is not None:
+        want = ctx.relative(rel).resolve(strict=False)
+        got = Path(report_path).resolve(strict=False)
+        if got != want:
+            raise LockError(
+                "CALIBRATION_IMPORT_PATH",
+                f"--import-verified 指向 {got}，而 T5 LOCK 绑定的是 {want}")
+    sha = _sha256_file(ctx.relative(rel))
+    if sha != cal.get("sha256"):
+        raise LockError("CALIBRATION_IMPORT_DRIFT",
+                        f"{rel} sha256={sha[:16]}… ≠ T5 LOCK {str(cal.get('sha256'))[:16]}…")
+    provenance = {
+        "schema": "simpraxis.rsi_r1.calibration_import.v1",
+        "schema_version": 1,
+        "validation_root": binding["validation_root"],
+        "validation_envelope_id": binding["validation_envelope_id"],
+        "validation_lock_sha256": binding["lock_sha256"],
+        "closure_sha256": binding["closure_sha256"],
+        "image_pin": binding["image_pin"],
+        "profile_sha256": binding["profile_sha256"],
+        "report_relpath": rel,
+        "report_sha256": sha,
+        "report_verdict": cal.get("verdict"),
+        "imported_at_utc": (now or utc_now_iso_z)(),
+        "note": ("离线校准件按同闭包/同镜像/同画像验签导入（未在付费根重跑）；"
+                 "来源为已三签的验证 LOCK 根"),
+    }
+    return provenance, ctx.relative(rel).read_bytes()
+
+
 def freeze_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
                 image_pin: "str | None" = None,
-                now: "Callable[[], str] | None" = None) -> "dict[str, Any]":
+                purpose: "str | None" = None,
+                validation_binding: "Mapping[str, Any] | None" = None,
+                now: "Callable[[], str] | None" = None,
+                ) -> "dict[str, Any]":
     """写不可变 LOCK（已存在即拒绝）。返回 ``{doc, sha256, lock}``。"""
     root = Path(repo_root) if repo_root is not None else REPO_ROOT
     if ctx.exists(LOCK_RELPATH) or ctx.exists(LOCK_SHA_RELPATH):
@@ -320,8 +551,13 @@ def freeze_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
         raise LockError("BUDGET_DRIFT",
                         f"envelope.budget_sha256={envelope.get('budget_sha256')!r} "
                         f"!= budget.sha256={budget_sha}")
-    purpose = ("validation"
-               if envelope.get("mode") == "offline_validation" else "paid")
+    derived_purpose = ("validation"
+                       if envelope.get("mode") == "offline_validation" else "paid")
+    if purpose is not None and purpose != derived_purpose:
+        raise LockError(
+            "LOCK_PURPOSE",
+            f"purpose={purpose!r} 与 envelope.mode 推导的 {derived_purpose!r} 不符")
+    purpose = derived_purpose
     auth_doc: "dict[str, Any] | None" = None
     if purpose == "validation":
         if not ctx.exists(VALIDATION_AUTH_RELPATH):
@@ -392,6 +628,17 @@ def freeze_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
             "roles": list(VALIDATION_ROLES),
             "report_relpath": VALIDATION_REPORT_RELPATH,
         }
+    elif str(envelope.get("profile_id") or "") == _P.PROFILE_R12:
+        # R1.2 付费 LOCK **必须**绑定 T5 验证件（Plan L247/L333）：不绑定的
+        # 付费冻结等于绕开生产准入。冻结前按现场重算一次（T5 根全量验签 +
+        # 报告 sha + 实现身份），通过后才写盘；旧 R1 付费根不经过这一支，
+        # 逐字节行为不变。
+        if not isinstance(validation_binding, Mapping) or not validation_binding:
+            raise LockError(
+                "PAID_BINDING_MISSING",
+                "R1.2 付费冻结必须给 --validation-report（绑定 T5 报告与三签）")
+        doc["validation_binding"] = dict(validation_binding)
+        verify_paid_validation_binding(ctx, doc, repo_root=root)
     lock = L.LockDocument.from_doc(doc)  # 与运行期同一解析口径（fail-closed）
     _write_locked(ctx.relative(LOCK_RELPATH),
                   (C.canonical_json(doc) + "\n").encode("utf-8"))
@@ -737,6 +984,19 @@ def verify_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
                     raise LockError(
                         "SIGNATURE_BINDING",
                         f"{role}.{key} 与当前实现/报告不符（实现改了必须重签）")
+    else:
+        # T6：R1.2 付费 LOCK 必须携带 T5 绑定；未带绑定的 R1.2 付费 LOCK 按
+        # 「缺生产准入」拒（旧 R1 付费 LOCK 无 profile 键，不走这一支）。
+        is_r12 = False
+        if ctx.exists("contract/envelope.json"):
+            from orchestrator.rsi_r1 import profiles as _P2
+            try:
+                is_r12 = (str(ctx.read_json("contract/envelope.json")
+                              .get("profile_id") or "") == _P2.PROFILE_R12)
+            except (OSError, ValueError):   # 坏 envelope 交给下游 fail-closed
+                is_r12 = False
+        if is_r12 or "validation_binding" in doc:
+            verify_paid_validation_binding(ctx, doc, repo_root=root)
     return {"ok": True, "lock_sha256": lock.sha256, "stage": lock.stage,
             "phase": lock.phase, "purpose": purpose,
             "closure_sha256": closure.get("closure_sha256"),

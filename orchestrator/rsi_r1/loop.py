@@ -623,7 +623,7 @@ class LockDocument:
             if purpose not in ("paid", "validation"):
                 raise LoopError("LOCK_PURPOSE", repr(purpose), terminal=True)
             body["purpose"] = purpose
-        if purpose == "validation":
+        if purpose == "validation" or "validation_binding" in doc:
             # 锁内适配（2026-11-13，R3-M1 补强）：验证 LOCK 的冻结锚点（闭包、
             # 冻结测试字节 regression_tests、注册件、画像/授权、校准/前置件、
             # 镜像）原本落在摘要之外——冻结后同时改 LOCK 与现场文件仍能互洽，
@@ -631,6 +631,12 @@ class LockDocument:
             # lock.sha256 对不上文件（LOAD 即 LOCK_TAMPERED），签后改动则与
             # 三签记录的 lock_sha256 失配（SIGNATURE_STALE）。付费 LOCK 无
             # ``purpose`` 键，摘要口径逐字节不变（旧历史 sha 可复算）。
+            #
+            # 锁内适配（2026-11-13，RSI-R1.2 T6）：付费 LOCK 一旦携带
+            # ``validation_binding``（绑定 T5 验证 LOCK/报告/三签），该绑定同样
+            # 属于冻结锚点——不整份进摘要的话，冻结后替换绑定指向另一份 T5 根
+            # 仍能通过 load_frozen（摘要只算五个旧键）。仅当该键**存在**时整份
+            # 进摘要：旧付费 LOCK 文档没有此键，逐字节口径不变。
             for key, value in doc.items():
                 if key != "schema":
                     body[key] = value

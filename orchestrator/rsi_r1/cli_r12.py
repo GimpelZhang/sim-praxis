@@ -30,17 +30,21 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from orchestrator.common import runtime_paths as RP
-from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.fsutil import (atomic_write_bytes, atomic_write_text,
+                                        ensure_private_dir)
 from orchestrator.gateway import quota_ledger as QL
+from orchestrator.rsi_r1 import assembly as ASM
 from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import family as FAM
+from orchestrator.rsi_r1 import gateway_transport as GT
 from orchestrator.rsi_r1 import human_events as HE
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import offline_suite as OS
 from orchestrator.rsi_r1 import offline_validation as OV
 from orchestrator.rsi_r1 import prereg as PREREG
 from orchestrator.rsi_r1 import profiles as P
+from orchestrator.rsi_r1 import protocol as PT
 from orchestrator.rsi_r1 import resources as RS
 from orchestrator.rsi_r1 import runtime as RT
 from orchestrator.rsi_r1 import sandbox as SANDBOX
@@ -246,10 +250,16 @@ def cmd_init(args: argparse.Namespace) -> int:
             "note": consent.exposure_note or consent.notes,
         }
     elif mode == "paid":
-        raise Cli12Error(
-            "COST_GATE_BLOCKED",
-            "paid 模式必须附 --consent（R1.2 范围 ConsentV2）；"
-            "T0–T5 离线工作不受影响")
+        # 锁内适配（2026-11-13，T6）：Plan §6.1 的顺序是「init(paid 根) 先、
+        # authorize --consent 后」——T0–T5 离线工作期间费用门保持 BLOCKED。
+        # 原实现在 init 阶段就拒「paid 无 consent」，等于逼着先有授权件再建
+        # 根，与 Plan 顺序冲突。改为：init 只建 BLOCKED 门（零 POST），解锁
+        # 必须走 ``authorize --consent``（见 ``cmd_authorize``）。
+        cost_gate = {
+            **cost_gate,
+            "note": ("T6 费用门 BLOCKED：paid 根已建（零 POST），付费须先 "
+                     "``authorize --consent <ConsentV2>`` 解锁"),
+        }
 
     scope_doc = _science_scope_doc(envelope_id, profile)
     scope_sha = _write_json(root / SCOPE_RELPATH, scope_doc)
@@ -590,6 +600,10 @@ def cmd_controls(args: argparse.Namespace) -> int:
     envelope_id = str(envelope["envelope_id"])
     ledger = root / "quota" / "ledger.jsonl"
     ctx = R12Context(root, envelope_id)
+    if getattr(args, "import_verified", None):
+        return _import_verified_calibration(
+            root=root, envelope=envelope, ctx=ctx,
+            report_path=Path(args.import_verified))
     design = CAL.design_for(version)
     oracle_path = ctx.relative(design["oracle_relpath"])
 
@@ -665,6 +679,254 @@ def cmd_controls(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# T6：费用门解锁 → 校准验签导入 → 付费资格检查（probe 12 / practice 16）
+# ---------------------------------------------------------------------------
+
+def _append_jsonl(path: Path, row: Mapping[str, Any]) -> None:
+    """append-only 私有 jsonl（0600；只在尾部追加，整份原子重写）。"""
+    ensure_private_dir(path.parent)
+    old = path.read_text(encoding="utf-8") if path.is_file() else ""
+    line = json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n"
+    atomic_write_text(path, old + line, mode=0o600)
+
+
+def cmd_authorize(args: argparse.Namespace) -> int:
+    """T6 费用门：在已建 paid 根上写入/校验 ConsentV2 并推进 INIT→AUTHORIZED。
+
+    Plan §6.1 的顺序是 init(paid 根) → …离线工作… → ``authorize --consent``。
+    init 只落 BLOCKED 门；本命令是唯一解锁点，且只接受 R1.2 新 schema、绑定
+    当前 Plan 字节的授权件（旧 R1/R0.x 豁免不承继）。幂等：同一授权件重复
+    执行为 no-op；不同字节一律拒（不可覆盖）。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root, args.envelope)
+    if envelope.get("mode") != "paid":
+        raise Cli12Error("MODE_INVALID",
+                         "authorize 只用于 paid 根（离线根用 authorize-offline）")
+    consent = C.consent_from_dict(_read_json(Path(args.consent)))
+    if not isinstance(consent, C.ConsentV2):
+        raise Cli12Error("CONSENT_SCHEMA",
+                         f"R1.2 只接受 {C.CONSENT_SCHEMA_V2}（旧 R1 豁免不承继）")
+    if consent.envelope_id != envelope["envelope_id"]:
+        raise Cli12Error("CONSENT_ENVELOPE",
+                         f"consent.envelope_id={consent.envelope_id!r} 不符")
+    C.verify_consent_binds_plan(consent, plan_path=str(envelope["plan_path"]),
+                                plan_sha256=str(envelope["plan_sha256"]))
+    if not consent.paid_authorized:
+        raise Cli12Error("COST_GATE_BLOCKED",
+                         f"consent.decision={consent.decision!r} 未解锁付费")
+    consent_file = root / CONSENT_RELPATH
+    new_sha = _sha256_bytes(_json_text(consent.to_dict()).encode("utf-8"))
+    first = not consent_file.is_file()
+    if not first:
+        if _file_sha256(consent_file) != new_sha:
+            raise Cli12Error("CONSENT_EXISTS",
+                             f"{CONSENT_RELPATH} 已存在且字节不同（授权件不可覆盖）")
+        consent_sha = new_sha
+    else:
+        consent_sha = _write_json(consent_file, consent.to_dict())
+    gate = dict(envelope.get("cost_gate") or {})
+    gate.update({
+        "decision": consent.decision,
+        "paid_authorized": True,
+        "consent_path": CONSENT_RELPATH,
+        "consent_sha256": consent_sha,
+        "note": consent.exposure_note or consent.notes,
+    })
+    updated = dict(envelope)
+    updated["cost_gate"] = gate
+    C.validate_envelope_v2(updated)
+    _write_json(root / ENVELOPE_RELPATH, updated)
+    if first:
+        _append_jsonl(root / "contract" / "cost_gate_history.jsonl", {
+            "schema": "simpraxis.rsi_r12.cost_gate_event.v1",
+            "schema_version": 1,
+            "envelope_id": envelope["envelope_id"],
+            "decision": consent.decision,
+            "consent_sha256": consent_sha,
+            "plan_sha256": consent.plan_sha256,
+            "at_utc": _utc_now(),
+        })
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    state = ST.ResearchState(ctx)
+    if state.root_state() == ST.ROOT_INIT:
+        state.advance_root(ST.ROOT_AUTHORIZED,
+                           reason="ConsentV2 费用门已解锁（零 POST）")
+    print(f"authorize ok  envelope={envelope['envelope_id']}")
+    print(f"  decision : {consent.decision}")
+    print(f"  consent  : {CONSENT_RELPATH}  sha256={consent_sha[:16]}…")
+    print(f"  plan_sha : {consent.plan_sha256[:16]}…")
+    print(f"  root     : {state.root_state()}")
+    return 0
+
+
+def _import_verified_calibration(*, root: Path, envelope: Mapping[str, Any],
+                                 ctx: "R12Context",
+                                 report_path: Path) -> int:
+    """T4/T6：把 T5 根已三签的 v2 校准件按原字节导入付费根（零 POST）。
+
+    导入不是重跑：逐项核验来源根（验证 LOCK 全量验签、闭包/镜像/画像对当前
+    源码）、报告必须是 T5 LOCK ``calibration`` 绑定的那一件；付费根只落
+    **原字节 + 来源取证件**，不冒称自己跑过。幂等；不同源/不同字节拒绝覆盖。
+    """
+    if envelope.get("mode") != "paid":
+        raise Cli12Error("MODE_INVALID",
+                         "controls --import-verified 只用于 paid 根")
+    provenance, raw = LK.build_calibration_import(
+        _artefact_root(report_path), report_path=report_path)
+    dest_rel = LK.CALIBRATION_REPORTS[0]      # contract/calibration_report_v2.json
+    dest = root / dest_rel
+    import_rel = "contract/calibration_import.json"
+    if dest.is_file():
+        if dest.read_bytes() != raw:
+            raise Cli12Error("CALIBRATION_EXISTS",
+                             f"{dest_rel} 已存在且字节不同（导入件不可覆盖）")
+    else:
+        ensure_private_dir(dest.parent)
+        atomic_write_bytes(dest, raw, mode=0o600)
+    existing = root / import_rel
+    if existing.is_file():
+        old = _read_json(existing)
+        if {k: old.get(k) for k in ("validation_root", "report_sha256")} != {
+                "validation_root": provenance["validation_root"],
+                "report_sha256": provenance["report_sha256"]}:
+            raise Cli12Error("CALIBRATION_IMPORT_EXISTS",
+                             f"{import_rel} 已登记另一来源（不可覆盖）")
+    else:
+        _write_json(existing, provenance)
+    state = ST.ResearchState(ctx)
+    current = state.root_state()
+    if current not in (ST.ROOT_AUTHORIZED, ST.ROOT_CALIBRATED):
+        raise Cli12Error("ROOT_STATE",
+                         f"导入校准件需要 root ∈ {{AUTHORIZED, CALIBRATED}}，"
+                         f"当前 {current}（先 authorize --consent）")
+    if current == ST.ROOT_AUTHORIZED:
+        state.advance_root(
+            ST.ROOT_CALIBRATED,
+            reason=(f"v2 校准验签导入（源 {provenance['validation_root']}，"
+                    f"零 POST）"))
+    print(f"controls import ok  envelope={envelope['envelope_id']}")
+    print(f"  source root : {provenance['validation_root']}")
+    print(f"  source lock : {provenance['validation_lock_sha256'][:16]}…")
+    print(f"  report      : {dest_rel}  sha256={provenance['report_sha256'][:16]}…")
+    print(f"  verdict     : {provenance['report_verdict']}")
+    print(f"  root        : {state.root_state()}")
+    return 0
+
+
+def _tokenizer_counter(path: str, sha256_hex: str):
+    """本地 token 计数（只用于 20000 token 请求门；不参与任何科学判决）。"""
+    raw = Path(path).read_bytes()
+    got = _sha256_bytes(raw)
+    if got != sha256_hex:
+        raise Cli12Error("TOKENIZER_DRIFT",
+                         f"tokenizer sha256 不符：{path} 实为 {got}")
+    from tokenizers import Tokenizer  # 本地文件；不联网
+
+    tok = Tokenizer.from_file(str(path))
+
+    def count(text: str) -> int:
+        return len(tok.encode(text, add_special_tokens=False).ids)
+
+    return count
+
+
+def _paid_gate(root: Path, envelope: Mapping[str, Any]) -> "C.ConsentV2":
+    """付费前置闸：mode/费用门/授权件字节/Plan 绑定逐项复核（不触网）。"""
+    if envelope.get("mode") != "paid":
+        raise Cli12Error("MODE_INVALID",
+                         "付费命令只在 paid 根上运行（离线根用 validate-production）")
+    gate = envelope.get("cost_gate") or {}
+    if not gate.get("paid_authorized"):
+        raise Cli12Error("COST_GATE_BLOCKED",
+                         f"费用门 decision={gate.get('decision')!r}；"
+                         "先 authorize --consent")
+    consent_file = root / CONSENT_RELPATH
+    if not consent_file.is_file():
+        raise Cli12Error("CONSENT_MISSING", CONSENT_RELPATH)
+    if _file_sha256(consent_file) != gate.get("consent_sha256"):
+        raise Cli12Error("CONSENT_DRIFT",
+                         "consent 字节与 envelope.cost_gate.consent_sha256 不符")
+    consent = C.consent_from_dict(_read_json(consent_file))
+    if not isinstance(consent, C.ConsentV2):
+        raise Cli12Error("CONSENT_SCHEMA", "R1.2 只接受 ConsentV2")
+    C.verify_consent_binds_plan(consent, plan_path=str(envelope["plan_path"]),
+                                plan_sha256=str(envelope["plan_sha256"]))
+    return consent
+
+
+def _run_protocol_cmd(args: argparse.Namespace, lane: str) -> int:
+    """T6 唯一付费入口：环境闸 → 费用门 → 批准件 → 网关 → 单链 → 报告。
+
+    与旧 R1 的 probe/practice 同一纪律，但走 R1.2 画像（12/16 帽、单链）、
+    2904 账套与 R1.2 根布局；``--repair`` 在 R1.2 没有入口（``run_protocol``
+    的 bounded 语义直接拒非本 lane 记账）。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root, args.envelope)
+    # 环境闸先于一切副作用（含批准件写入与 tokenizer 加载）：
+    # 没有 SIMPRAXIS_ALLOW_PAID=1 就不动作。
+    GT.require_paid_env(os.environ)
+    batch_id = str(args.batch_id or "").strip()
+    if not batch_id:
+        raise Cli12Error("BATCH_MISSING", "--batch-id 不得为空")
+    if not args.tokenizer or not args.tokenizer_sha256:
+        raise Cli12Error("TOKENIZER_REQUIRED",
+                         "付费运行需要 --tokenizer 与 --tokenizer-sha256")
+    consent = _paid_gate(root, envelope)
+    profile = P.resolve_profile(envelope)
+    envelope_id = str(envelope["envelope_id"])
+    if root.resolve(strict=False) != RP.rsi_r12_campaign_root().resolve(strict=False):
+        raise Cli12Error(
+            "CAMPAIGN_ENV_MISMATCH",
+            f"根 {root} 与 SIMPRAXIS_RSI_R12_CAMPAIGN 解析的 "
+            f"{RP.rsi_r12_campaign_root()} 不一致（账本路径必须与根同源）")
+    ctx = _r12_ctx(root, envelope_id)
+    counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
+    cap = int(profile.lane_post_caps[lane])
+    approval = PT.ensure_approval(
+        ctx, batch_id=batch_id, lane=lane, approved=cap,
+        note=args.note or "", namespace=QL.RSI_R12_NAMESPACE)
+    lock_doc = _read_json(root / LK.LOCK_RELPATH)
+    image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
+    if not image:
+        raise Cli12Error("IMAGE_PIN_INVALID", "缺 --image 且 LOCK 未登记镜像 pin")
+    spend = ASM.SpendContract(mode=ASM.MODE_PAID, consent=consent)
+    gateway = GT.build_gateway(
+        ledger=QL.QuotaLedger.rsi_r12(),
+        pause_state_path=RP.rsi_r12_gateway_state_path())
+    transport = GT.build_transport(
+        gateway=gateway, lane=lane, batch_id=batch_id,
+        thread_id=args.thread_id or f"rsi-r12-{lane}", env=os.environ)
+    report = PT.run_protocol(
+        ctx, lane=lane, spend=spend, transport_factory=lambda: transport,
+        runner=SANDBOX.DockerRunner(), image=image, batch_id=batch_id,
+        counter=counter, profile=profile,
+        resource_ledger=RS.ResourceLedger(root, profile=profile))
+    posts = report.get("posts") or {}
+    print(f"{lane} {report['verdict']}  attempt={report['attempt']}  "
+          f"posts={posts.get('this_attempt')}/{posts.get('allowed')}  "
+          f"root={report['root_after']}")
+    if report.get("reason"):
+        print(f"  reason: {report['reason']}")
+    for study in report.get("studies") or []:
+        print(f"  study {study.get('study')}: {study.get('ok_count')}/8 ok  "
+              f"stopped={study.get('stopped') or '-'}  "
+              f"state={study.get('study_state')}")
+    print(f"  approval={approval}")
+    print(f"  report={ctx.relative(f'protocol/report_{lane}.json')}")
+    return 0 if report["verdict"] == PT.VERDICT_PASS else 2
+
+
+def cmd_probe(args: argparse.Namespace) -> int:
+    return _run_protocol_cmd(args, PT.PROBE)
+
+
+def cmd_practice(args: argparse.Namespace) -> int:
+    return _run_protocol_cmd(args, PT.PRACTICE)
+
+
+# ---------------------------------------------------------------------------
 # parser / main
 # ---------------------------------------------------------------------------
 
@@ -714,6 +976,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="容器镜像（缺省取钉死的校准镜像）")
     pctl.add_argument("--prior-root", default=None,
                       help="旧 R1 campaign 根（只读；v2 必须引用其 v1 历史件）")
+    pctl.add_argument("--import-verified", default=None, metavar="REPORT",
+                      help="T6：导入 T5 根已三签的 v2 校准件（验签+闭包复核，"
+                           "零 POST；只用于 paid 根）")
     pctl.set_defaults(func=cmd_controls)
 
     ph = sub.add_parser("human", help="人工时间/救援令/assisted（T3）")
@@ -786,10 +1051,15 @@ def build_parser() -> argparse.ArgumentParser:
     _root_args(pfr)
     pfr.set_defaults(func=cmd_publish_public)
 
-    pfr = sub.add_parser("freeze", help="冻结 validation LOCK（root → FROZEN）")
+    pfr = sub.add_parser("freeze", help="冻结 LOCK（validation / paid 两种目的）")
     _root_args(pfr)
     pfr.add_argument("--image", default=None,
                      help="镜像 pin（缺省取校准报告的 container_image）")
+    pfr.add_argument("--purpose", default=None, choices=list(LK.PURPOSES),
+                     help="T6：paid 根冻结固定 paid（须配 --validation-report）")
+    pfr.add_argument("--validation-report", default=None, metavar="PATH",
+                     help="T6：T5 根的 offline_validation_report.json（单向绑定"
+                          " T5 LOCK/报告/三签；paid 冻结必填）")
     pfr.set_defaults(func=cmd_freeze)
 
     pra = sub.add_parser(
@@ -800,7 +1070,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="解释器（缺省 sys.executable）")
     pra.set_defaults(func=cmd_regression_attest)
 
-    psg = sub.add_parser("sign", help="签 validation LOCK（报告/实现/画像绑定）")
+    psg = sub.add_parser("sign",
+                         help="签 LOCK（validation 三签 / paid 双签；绑定实现与报告）")
     _root_args(psg)
     psg.add_argument("--role", required=True, choices=list(LK.VALIDATION_ROLES))
     psg.add_argument("--actor", required=True)
@@ -817,6 +1088,29 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("--to", required=True)
     pst.add_argument("--reason", default=None)
     pst.set_defaults(func=cmd_state)
+
+    # ---- T6：费用门 → 校准导入 → 唯一付费资格检查（probe/practice）----
+    pau = sub.add_parser("authorize",
+                         help="T6：写入 ConsentV2 费用授权（INIT → AUTHORIZED）")
+    _root_args(pau)
+    pau.add_argument("--consent", required=True, help="ConsentV2 JSON")
+    pau.set_defaults(func=cmd_authorize)
+
+    for _name, _func, _help in (
+            ("probe", cmd_probe,
+             "T6：probe 链（≤12 POST，单链有界自修；须 SIMPRAXIS_ALLOW_PAID=1）"),
+            ("practice", cmd_practice,
+             "T6：practice 链（≤16 POST，同根依次；须 SIMPRAXIS_ALLOW_PAID=1）")):
+        _p = sub.add_parser(_name, help=_help)
+        _root_args(_p)
+        _p.add_argument("--batch-id", required=True)
+        _p.add_argument("--tokenizer", default=None, help="本地 tokenizer 文件")
+        _p.add_argument("--tokenizer-sha256", default=None)
+        _p.add_argument("--thread-id", default=None)
+        _p.add_argument("--image", default=None,
+                        help="镜像 pin（缺省取 LOCK 内 pin）")
+        _p.add_argument("--note", default="")
+        _p.set_defaults(func=_func)
 
     pvp = sub.add_parser(
         "validate-production",
@@ -945,33 +1239,82 @@ def cmd_publish_public(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_freeze(args: argparse.Namespace) -> int:
-    """冻结 validation LOCK（不可变）并把 root 推到 FROZEN。
+def _artefact_root(path: Path) -> Path:
+    """由「根内产物」路径反推 campaign 根（最近的含 envelope 的祖先）。"""
+    target = path.resolve(strict=False)
+    if not target.is_file():
+        raise Cli12Error("FILE_ABSENT", f"文件不存在：{target}")
+    for parent in target.parents:
+        if (parent / ENVELOPE_RELPATH).is_file():
+            return parent
+    raise Cli12Error("ROOT_UNRESOLVED", f"{target} 不在任何 R1.2 根内")
 
-    三签不在这一步：验证 LOCK 的签名绑定对象（离线验证报告）要等演练跑完
-    才存在，见 ``lock.verify_lock(require_signatures=...)`` 的引导期说明。
+
+def cmd_freeze(args: argparse.Namespace) -> int:
+    """冻结 LOCK（不可变）并把 root 推到 FROZEN。
+
+    离线根 → ``purpose=validation``（原 T5 行为，逐字节不变）；R1.2 付费根 →
+    ``purpose=paid`` **且必须** ``--validation-report <t5-report>``：冻结前按现场
+    重算 T5 根（闭包/依赖对当前源码、报告与三签），把 T5 的 LOCK/报告/三签/
+    实现身份单向绑进付费 LOCK（Plan L212/L247）。
     """
     root = _resolve_root(args.root, args.envelope)
-    envelope = _load_envelope(root)
-    if envelope.get("mode") != "offline_validation":
-        raise Cli12Error(
-            "OFFLINE_MODE_REQUIRED",
-            f"freeze 只用于离线验证根（envelope.mode={envelope.get('mode')!r}）")
+    envelope = _load_envelope(root, args.envelope)
+    mode = envelope.get("mode")
+    purpose = getattr(args, "purpose", None)
+    if purpose is not None and purpose not in LK.PURPOSES:
+        raise Cli12Error("LOCK_PURPOSE", f"--purpose={purpose!r}")
+    report_arg = getattr(args, "validation_report", None)
+    if mode == "offline_validation":
+        if purpose not in (None, "validation"):
+            raise Cli12Error("LOCK_PURPOSE",
+                             f"离线根只能冻结 validation（收到 {purpose!r}）")
+        if report_arg:
+            raise Cli12Error("VALIDATION_BINDING_NOT_PAID",
+                             "离线根不接受 --validation-report（那是付费冻结的绑定面）")
+    else:
+        if purpose not in (None, "paid"):
+            raise Cli12Error("LOCK_PURPOSE",
+                             f"付费根只能冻结 paid（收到 {purpose!r}）")
+        if not report_arg:
+            raise Cli12Error(
+                "PAID_BINDING_MISSING",
+                "R1.2 付费冻结必须给 --validation-report <t5-report>"
+                "（绑定 T5 验证报告与三签，Plan L247）")
     ctx = _r12_ctx(root, str(envelope["envelope_id"]))
     state = ST.ResearchState(ctx)
     if state.root_state() != ST.ROOT_CALIBRATED:
         raise Cli12Error("ROOT_STATE",
                          f"freeze 需要 root={ST.ROOT_CALIBRATED}，"
-                         f"当前 {state.root_state()}（先跑 controls --real-containers）")
+                         f"当前 {state.root_state()}（先跑 controls）")
     # 冻结前公开视图必须已在候选可见面发布且与唯一源逐字节一致：
     # 生产链（_seed_public/_design_inputs）只读 public/，缺件在 freeze 就拦。
     _verify_public_view(root, envelope)
-    frozen = LK.freeze_lock(ctx, repo_root=LK.REPO_ROOT,
-                            image_pin=args.image)
-    state.advance_root(ST.ROOT_FROZEN, reason="validation LOCK 已冻结（零 POST）")
+    if mode == "offline_validation":
+        frozen = LK.freeze_lock(ctx, repo_root=LK.REPO_ROOT,
+                                image_pin=args.image, purpose="validation")
+        reason = "validation LOCK 已冻结（零 POST）"
+        binding = None
+    else:
+        t5_root = _artefact_root(Path(report_arg))
+        binding = LK.build_validation_binding(t5_root)
+        frozen = LK.freeze_lock(
+            ctx, repo_root=LK.REPO_ROOT,
+            image_pin=args.image or binding["image_pin"], purpose="paid",
+            validation_binding=binding)
+        reason = "付费 LOCK 已冻结（绑定 T5 报告与三签）"
+    state.advance_root(ST.ROOT_FROZEN, reason=reason)
     print(f"freeze ok  lock_sha256={frozen['sha256']}")
     print(f"  purpose : {LK.lock_purpose(frozen['doc'])}")
-    print(f"  roles   : {list(LK.VALIDATION_ROLES)}（演练跑完后签）")
+    if binding is None:
+        print(f"  roles   : {list(LK.VALIDATION_ROLES)}（演练跑完后签）")
+    else:
+        print(f"  T5 root : {binding['validation_root']}  "
+              f"lock={binding['lock_sha256'][:16]}…")
+        print(f"  T5 report: {binding['report_relpath']}  "
+              f"sha256={binding['report_sha256'][:16]}…")
+        print(f"  T5 signs: {sorted(binding['signatures'])}  "
+              f"impl={binding['implementation_sha256'][:16]}…")
     print(f"  root    : {state.root_state()}")
     return 0
 
@@ -1146,7 +1489,8 @@ def main(argv: "list[str] | None" = None) -> int:
             RP.RsiR12CampaignUnsetError, HE.HumanEventError,
             RT.CampaignWriteRefused, OSError, CAL.CalibrationError,
             LK.LockError, OV.OfflineValidationError, OS.OfflineSuiteError,
-            PREREG.PreregError, ST.StateError, RS.ResourceError) as exc:
+            PREREG.PreregError, ST.StateError, RS.ResourceError,
+            GT.TransportError, PT.ProtocolError, ASM.AssemblyError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

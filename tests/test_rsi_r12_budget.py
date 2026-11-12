@@ -275,16 +275,35 @@ def test_cli_init_check_zero_post(tmp_path, monkeypatch, capsys):
     assert rc == 2
 
 
-def test_cli_paid_mode_requires_consent(tmp_path, monkeypatch):
+def test_cli_paid_mode_starts_blocked_until_authorize(tmp_path, monkeypatch):
+    """T6（锁内适配，Plan §6.1 顺序）：``init --mode paid`` 先建根、费用门 BLOCKED。
+
+    旧测试钉的是「paid 无 consent 直接拒建根」——那是 T0–T5 阶段权宜，与 Plan
+    §6.1「init(paid) → preprint → authorize --consent」的顺序冲突。现在的判据：
+    根建成、envelope.cost_gate 保持未授权，付费命令仍被 ``_paid_gate`` 拦。
+    """
     root = tmp_path / "rsi_r12"
     root.mkdir()
     monkeypatch.setenv("SIMPRAXIS_RSI_R12_ROOT", str(root))
+    monkeypatch.setenv("SIMPRAXIS_RSI_R12_CAMPAIGN", "env_paid")
+    monkeypatch.delenv("SIMPRAXIS_ALLOW_PAID", raising=False)
     plan = tmp_path / "plan.md"
     plan.write_text("plan bytes", encoding="utf-8")
     rc = cli_r12.main(["init", "--envelope", "env_paid", "--mode", "paid",
                        "--plan", str(plan)])
+    assert rc == 0
+    envelope = json.loads(
+        (root / "env_paid" / "contract" / "envelope.json").read_text(
+            encoding="utf-8"))
+    assert envelope["mode"] == "paid"
+    assert envelope["cost_gate"]["paid_authorized"] is False
+    assert envelope["cost_gate"]["consent_sha256"] is None
+    assert not (root / "env_paid" / "contract" / "consent.json").exists()
+    # 未 authorize：付费命令必须被环境闸/费用门挡住（这里连环境闸都过不去）。
+    rc = cli_r12.main(["probe", "--envelope", "env_paid",
+                       "--batch-id", "b0", "--tokenizer", "/nonexistent",
+                       "--tokenizer-sha256", "0" * 64])
     assert rc == 2
-    assert not (root / "env_paid" / "contract" / "envelope.json").exists()
 
 
 def test_cli_check_detects_tampered_budget(tmp_path, monkeypatch):
