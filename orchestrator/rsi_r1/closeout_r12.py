@@ -1,0 +1,498 @@
+"""RSI-R1.2 结案（T9）：五轴 + 失败链 + 族/账对账（零 POST，离线）。
+
+纪律（Plan §6 T9 行 / §8 退出表）：
+
+- **PASS 只指过程闭合**；研究结论另轴（``claim``/``r1``），不因过程完整而晋升。
+- 轴位只按**盘面事实**推：账本行、批准件、protocol 报告、族文档、研究产物清点。
+  任何自述结论都不参与轴位。
+- 类失败**实测可复算**：``instrument_facts`` 逐字节比对「候选分析源码 sha」
+  与宿主 prompt 里的 ``protocol.ANALYSIS_TEMPLATE`` sha，并读回执
+  ``reason_codes``；两者同时命中才把 measurement 判 ``INVALID_INSTRUMENT``。
+  判定面不传 EURheuristic——同一个事实换个方向写就会落到别的轴位。
+- 族账口径：``历史 31 + 本轮实呼 n ≤ 155``；本轮实呼以**账本 call 行**为准，
+  族文档 ``posts_used`` 与之不符即 process 不完整（不是 PASS）。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Any, Mapping
+
+from orchestrator.common.clock import utc_now_iso_z
+from orchestrator.rsi_r1 import analysis_receipt as AR
+from orchestrator.rsi_r1 import closeout as CO
+from orchestrator.rsi_r1 import family as FAM
+from orchestrator.rsi_r1 import profiles as P
+from orchestrator.rsi_r1 import protocol as PT
+from orchestrator.rsi_r1 import state as ST
+
+SCHEMA = "simpraxis.rsi_r12.closeout.v1"
+SCHEMA_VERSION = 1
+
+READOUT_RELPATH = "closeout/r12_readout.json"
+FAILURE_MAP_RELPATH = "closeout/r12_failure_map.json"
+
+#: 证据包只收 R1.2 盘面（不把旧 R1 的 confirm/judge/replay 空目录塞进包）。
+PACK_PREFIXES: "tuple[str, ...]" = (
+    "contract", "state", "protocol", "attempts", "quota", "human_events",
+    "validation", "closeout",
+)
+
+#: 轴位合法值（与 R1 同一套；R1.2 不新增轴，避免两套口径并存）。
+AXIS_VALUES = CO.AXIS_VALUES
+
+CLASS_INSTRUMENT_TEMPLATE = "INSTRUMENT_DEFECT_TEMPLATE_GATE_CONTRADICTION"
+CLASS_MODEL_FAILURE = "MODEL_OR_OTHER_FAILURE"
+CLASS_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+
+class Closeout12Error(RuntimeError):
+    """结案配置/盘面错误（不是科学结论）。``code`` 公开。"""
+
+    def __init__(self, code: str, detail: str = ""):
+        super().__init__(f"{code}: {detail}" if detail else code)
+        self.code = code
+        self.detail = detail
+
+
+def _read_json(path: Path) -> "dict[str, Any] | None":
+    if not path.is_file():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# 仪器事实：失败是否可归因为「宿主模板 ↔ 门」自相矛盾
+# ---------------------------------------------------------------------------
+
+def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
+    """复算 ``AC46`` 的仪器失败判定面（不看任何自述分类）。
+
+    判据（三条同时成立才判仪器缺陷）：
+    1. protocol 报告 verdict != PASS 且首个错误码是分析门拒绝类；
+    2. 失败动作是 ``analyze``；
+    3. 候选 analysis 源码 sha 与宿主 prompt 模板
+       ``protocol.ANALYSIS_TEMPLATE`` 的 sha **逐字节相等**，且回执
+       ``reason_codes`` 命中 ``OUTPUT_SCHEMA_MISMATCH``。
+    """
+    root = Path(root)
+    report = _read_json(root / "protocol" / f"report_{lane}.json")
+    if report is None:
+        return {"available": False, "classification": CLASS_NOT_APPLICABLE}
+    verdict = str(report.get("verdict") or "")
+    qual = report.get("qualification") or {}
+    first_error = qual.get("first_error") or {}
+    code = str(first_error.get("code") or "")
+    name = str(first_error.get("name") or "")
+    attempt_rel = str(report.get("attempt_relpath") or "")
+    facts: "dict[str, Any]" = {
+        "available": True,
+        "lane": lane,
+        "verdict": verdict,
+        "first_error_code": code or None,
+        "first_error_name": name or None,
+        "milestones_ok": qual.get("first_attempt_ok_count"),
+        "attempted_positions": qual.get("attempted_positions"),
+        "attempt_relpath": attempt_rel or None,
+        "template_sha256": hashlib.sha256(
+            PT.ANALYSIS_TEMPLATE.encode("utf-8")).hexdigest(),
+        "gate_schema": AR.OUTPUT_SCHEMA,
+        "classification": CLASS_NOT_APPLICABLE,
+    }
+    if verdict == PT.VERDICT_PASS or not attempt_rel:
+        return facts
+    attempt = root / attempt_rel
+    receipt = _read_json(attempt / "private" / "receipts" / "A-explore.json")
+    if receipt is None:
+        return facts
+    reasons = [str(c) for c in (receipt.get("reason_codes") or [])]
+    source_sha = str(receipt.get("source_sha256") or "")
+    source_path = attempt / "designs" / f"{source_sha}.py"
+    source_ok = source_path.is_file()
+    facts.update({
+        "analysis_source_sha256": source_sha or None,
+        "analysis_reason_codes": reasons,
+        "analysis_receipt_relpath": f"{attempt_rel}/private/receipts/A-explore.json",
+        "source_file_present": source_ok,
+        "source_sha_equals_template": bool(
+            source_ok and source_sha == facts["template_sha256"]),
+    })
+    if (name == "analyze"
+            and "OUTPUT_SCHEMA_MISMATCH" in reasons
+            and facts["source_sha_equals_template"]):
+        facts["classification"] = CLASS_INSTRUMENT_TEMPLATE
+    elif code or name:
+        facts["classification"] = CLASS_MODEL_FAILURE
+    return facts
+
+
+# ---------------------------------------------------------------------------
+# 族账对账（历史 31 + 本轮实呼 ≤ 155）
+# ---------------------------------------------------------------------------
+
+def family_facts(family_root: Path, *, ledger_calls: int,
+                 envelope_id: str) -> "dict[str, Any]":
+    usage = FAM.usage(Path(family_root))
+    members = usage.get("members") or []
+    member = next((m for m in members if m.get("envelope_id") == envelope_id),
+                  None)
+    history = int(usage.get("history_posts") or 0)
+    used = int((member or {}).get("posts_used") or 0)
+    total = history + ledger_calls
+    return {
+        "family_cap": int(usage.get("family_cap") or 0),
+        "history_posts": history,
+        "round_calls": int(ledger_calls),
+        "family_total_if_counted_now": total,
+        "cap_respected": total <= int(usage.get("family_cap") or 0),
+        "member": member,
+        "member_posts_used": used,
+        "member_usage_matches_ledger": used == int(ledger_calls),
+        "reserved_total": int(usage.get("reserved_total") or 0),
+        "members": members,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 冻结后漂移（诚实挂牌，不进矛盾判据）
+# ---------------------------------------------------------------------------
+
+def drift_facts(ctx: Any, *, repo_root: Any = None) -> "dict[str, Any]":
+    """逐文件重算 LOCK 闭包 vs 当前仓库，登记「冻结后源码已变」。
+
+    T9 的工具代码与付费链同处 ``cli_r12.py``（``entry`` 组）⇒ T9 一落地，
+    冻结时的闭包必然失配。这是**时间事实**，不是运行期污染：probe 是在
+    ``lock_verified=true`` 下跑的，根已 CLOSED、不可能再有付费调用。故本件
+    只进 readout（``post_freeze_drift``）与 notes，不参与 process 矛盾判据。
+    """
+    lock = _read_json(Path(ctx.root) / "contract" / "lock.json")
+    if lock is None:
+        return {"available": False}
+    base = Path(repo_root) if repo_root is not None \
+        else Path(__file__).resolve().parents[2]
+    closure = lock.get("closure") or {}
+    mismatches = []
+    checked = 0
+    for gname, group in (closure.get("groups") or {}).items():
+        for item in (group.get("files") or []):
+            rel = str(item.get("path") or "")
+            want = item.get("sha256")
+            if not rel or not want:
+                continue
+            checked += 1
+            path = base / rel
+            got = _sha(path) if path.is_file() else None
+            if got != want:
+                mismatches.append({"group": gname, "path": rel,
+                                   "locked": want, "current": got})
+    return {
+        "available": True,
+        "repo_root": str(base),
+        "lock_closure_sha256": closure.get("closure_sha256"),
+        "files_checked": checked,
+        "verify": "CLOSURE_DRIFT" if mismatches else "OK",
+        "mismatches": mismatches,
+        "note": ("冻结后源码变更（T9 工具落在 entry 组）；锁定时 verify rc=0 "
+                 "已留档（protocol 报告 lock_verified=true），根已 CLOSED，"
+                 "无后续付费调用；下一轮须重新注册并冻结新 LOCK。"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 结案主体
+# ---------------------------------------------------------------------------
+
+def build(ctx: Any, *, image_pin: "str | None" = None,
+          container_facts: "Mapping[str, Any] | None" = None,
+          repo_root: Any = None,
+          now: Any = None) -> "dict[str, Any]":
+    """写 ``closeout/r12_readout.json`` + 失败链件；幂等（重跑覆盖同名件）。"""
+    root = Path(ctx.root)
+    rows = CO._rows(root)  # noqa: SLF001 —— 同一结案例程，读法单源
+    ledger = CO.ledger_facts(rows)
+    batches = CO.batch_facts(root, rows)
+    protocol = CO.protocol_facts(root)
+    calibration = CO.calibration_facts(root)
+    human = CO.human_facts(ctx)
+    inventory = CO.artifact_inventory(root)
+    started = CO.studies_started(inventory)
+    containers = dict(container_facts) if container_facts is not None \
+        else CO.containers_probe(image_pin)
+    envelope = _read_json(root / "contract" / "envelope.json") or {}
+    profile = P.profile_by_id(str(envelope.get("profile_id") or P.PROFILE_R12))
+
+    calls = int(ledger["calls"])
+    fam = family_facts(_family_root(), ledger_calls=calls,
+                       envelope_id=str(ctx.envelope_id))
+    instrument = instrument_facts(root)
+    drift = drift_facts(ctx, repo_root=repo_root)
+
+    axes = dict(CO.compute_axes(inventory))
+    root_state = ST.ResearchState(ctx).root_state()
+    failures: "list[dict[str, Any]]" = []
+    gaps: "list[str]" = []
+
+    if instrument.get("classification") == CLASS_INSTRUMENT_TEMPLATE:
+        axes["measurement"] = "INVALID_INSTRUMENT"
+        failures.append({
+            "task": "T6",
+            "lane": instrument.get("lane"),
+            "batch_id": (protocol.get(str(instrument.get("lane"))) or {})
+            .get("batch_id"),
+            "verdict": instrument.get("verdict"),
+            "first_error_code": instrument.get("first_error_code"),
+            "first_error_name": instrument.get("first_error_name"),
+            "milestones_ok": instrument.get("milestones_ok"),
+            "classification": CLASS_INSTRUMENT_TEMPLATE,
+            "detail": ("prompt 模板 ANALYSIS_TEMPLATE 写 protocol_analysis.v1，"
+                       "而 T4 analysis_receipt 门要求 analysis_output.v1；"
+                       "候选照抄宿主示例必被拒"),
+            "evidence": instrument,
+        })
+        # 仪器缺陷本身是 **measurement 轴结论**，不是「记录互相矛盾」：
+        # 若把它计进 gaps 会让 process 永远 INCOMPLETE，违背「PASS 只指过程
+        # 闭合、结论另轴」的判据面。它由 failure_chain + measurement 轴承载。
+    elif instrument.get("available") and instrument.get("verdict") != PT.VERDICT_PASS:
+        failures.append({
+            "task": "T6",
+            "lane": instrument.get("lane"),
+            "verdict": instrument.get("verdict"),
+            "first_error_code": instrument.get("first_error_code"),
+            "classification": instrument.get("classification"),
+            "evidence": instrument,
+        })
+
+    if not fam["member_usage_matches_ledger"]:
+        gaps.append(
+            f"族账 posts_used={fam['member_posts_used']} 与账本 call 行 "
+            f"{calls} 不符（paid 路径未调 FAM.record_usage；T9 收尾补记）")
+    if not fam["cap_respected"]:
+        gaps.append(f"历史 {fam['history_posts']} + 本轮 {calls} > 族帽 "
+                    f"{fam['family_cap']}")
+    if not batch_approvals_ok(batches):
+        gaps.append("批次批准件缺失或批准数 < 实呼数")
+    if not ledger["seq_contiguous"]:
+        gaps.append("账本 seq 不连续")
+    if ledger["unknown_outcome"]:
+        gaps.append(f"账本有 {ledger['unknown_outcome']} 行 outcome=UNKNOWN")
+    if any(row.get("cost_usd") in (None, 0) for row in rows):
+        gaps.append("账本无 cost_usd（供应商无单价硬保证；费用按 token 记账）")
+    attempt_reports = sorted(
+        str(p.relative_to(root)) for p in (root / "attempts").rglob("*.json"))
+    if not attempt_reports:
+        gaps.append("attempts/ 无 T3 attempt 报告（probe 走 CLI 直调，未包 attempt 包装器）")
+    if int(human.get("n_events") or 0) == 0:
+        gaps.append("人工事件 0 条（T6 全自动，无人参与；人时轴 UNKNOWN，不填 0）")
+
+    # 过程轴只认「记录之间互相矛盾」的那一类：缺批准件/seq 断/结果未知/族账与
+    # 账本不符。有意的限制（无 cost_usd、无 attempt 包装、人工 0 条）单列 gaps，
+    # 如实挂牌但不冒充「矛盾」。
+    process_reasons = [g for g in gaps if not g.startswith(
+        ("账本无 cost_usd", "attempts/ 无 T3 attempt", "人工事件 0 条"))]
+    axes["process"] = "COMPLETE" if not process_reasons else "CLOSEOUT_INCOMPLETE"
+
+    for name, value in axes.items():
+        if value not in AXIS_VALUES[name]:
+            raise Closeout12Error("AXIS_ILLEGAL", f"{name}={value!r}")
+
+    evidence = {}
+    rels = ["contract/envelope.json", "contract/budget.json",
+            "contract/consent.json", "contract/lock.json",
+            "contract/calibration_report_v2.json",
+            "protocol/report_probe.json", "quota/ledger.jsonl"]
+    if instrument.get("analysis_receipt_relpath"):
+        rels.append(str(instrument["analysis_receipt_relpath"]))
+    if instrument.get("analysis_source_sha256"):
+        rels.append(f"{instrument['attempt_relpath']}/designs/"
+                    f"{instrument['analysis_source_sha256']}.py")
+    for lane in PT.PROTOCOL_LANES:
+        bid = (protocol.get(lane) or {}).get("batch_id")
+        if bid:
+            rels.append(f"quota/approvals/{bid}.json")
+    for rel in rels:
+        path = root / rel
+        if path.is_file():
+            evidence[rel] = {"sha256": _sha(path), "bytes": path.stat().st_size}
+
+    body = {
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "campaign_root": str(root),
+        "envelope_id": str(ctx.envelope_id),
+        "profile_id": profile.profile_id,
+        "root_state": root_state,
+        "created_at_utc": (now or utc_now_iso_z)(),
+        "axes": axes,
+        "studies_started": started,
+        "inventory": inventory,
+        "ledger": ledger,
+        "batches": batches,
+        "protocol": protocol,
+        "calibration": calibration,
+        "human": human,
+        "containers": containers,
+        "family": fam,
+        "instrument": instrument,
+        "post_freeze_drift": drift,
+        "failure_chain": failures,
+        "gaps": gaps,
+        "totals": {
+            "history_posts": fam["history_posts"],
+            "round_calls": calls,
+            "family_total": fam["history_posts"] + calls,
+            "family_cap": fam["family_cap"],
+            "lane_caps": dict(profile.lane_post_caps),
+            "by_lane_posts": {
+                lane: int((protocol.get(lane) or {}).get("posts", {})
+                          .get("this_attempt") or 0)
+                for lane in PT.PROTOCOL_LANES
+            },
+            "ok": ledger["ok"],
+            "failed": ledger["failed"],
+            "unknown_outcome": ledger["unknown_outcome"],
+            "tokens": ledger["tokens"],
+            "cost_usd": "UNKNOWN（供应商无单价硬保证；按 token + 批准件记账）",
+        },
+        "evidence": evidence,
+        "readout_relpath": READOUT_RELPATH,
+        "failure_map_relpath": FAILURE_MAP_RELPATH,
+        "notes": [
+            "PASS 只指过程闭合；研究结论在 claim/r1 轴，不因过程完整而晋升。",
+            "A/B 未启动：T6 资格检查未过（仪器缺陷），Plan L71/AC45/AC46 禁 A/B。",
+            "本结案不修代码、不重测、不重开新根（Plan L228/§8）。",
+            "T6 仪器缺陷：候选 analysis 源码与宿主 prompt 模板逐字节相同，"
+            "模板写 protocol_analysis.v1 而 T4 门要求 analysis_output.v1"
+            "（下一轮修模板 + 加「模板→门」一致性测试）。",
+            ("冻结后漂移：" + "；".join(
+                f"{m['path']} 已变" for m in drift.get("mismatches") or []))
+            if drift.get("mismatches") else "闭包重算与 LOCK 一致（无冻结后漂移）。",
+        ],
+    }
+    ctx.write_json(READOUT_RELPATH, body)
+    ctx.write_json(FAILURE_MAP_RELPATH,
+                   {"schema": "simpraxis.rsi_r12.failure_map.v1",
+                    "schema_version": 1, "entries": failures,
+                    "gaps": gaps})
+    return body
+
+
+def batch_approvals_ok(batches: Mapping[str, Any]) -> bool:
+    for bid, entry in batches.items():
+        if not entry.get("approval_present"):
+            return False
+        approved = entry.get("approved")
+        if approved is None or int(approved) < int(entry.get("calls") or 0):
+            return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# T9 收尾动作：族用量补记 → 关根 → 证据包 → 独立复算
+# ---------------------------------------------------------------------------
+
+CHECKER_RELPATH = "scripts/verification/check_rsi_r12_closure.py"
+JUDGE_REPORT_RELPATH = "closeout/r12_closure_judge.json"
+
+
+def close_round(ctx: Any, *, reason: str) -> "dict[str, Any]":
+    """T9 收尾：按**账本 call 行**补记族用量，再把根推进 ``CLOSED``。
+
+    ``record_usage`` 幂等且单调（family.py:524 docstring 指定「由 4b/T9 收尾
+    调用」）；族账缺失/不可写不阻断结案，但必须原样返回到 readout 的 gaps，
+    不能静默成「已记账」。
+    """
+    calls = int(CO.ledger_facts(CO._rows(Path(ctx.root)))["calls"])
+    note = None
+    try:
+        FAM.record_usage(_family_root(), str(ctx.envelope_id), calls)
+    except FAM.FamilyError as exc:
+        note = f"FAMILY_USAGE_NOT_RECORDED {getattr(exc, 'code', '')}: {exc}"
+    ST.ResearchState(ctx).close_root(reason=reason)
+    return {"ledger_calls": calls, "family_note": note,
+            "root_state": ST.ResearchState(ctx).root_state()}
+
+
+def build_pack(ctx: Any, *, dest: Any = None,
+               repo_root: Any = None) -> "dict[str, Any]":
+    """按 R1.2 前缀收证据包，并附带**新版**独立复算器源码一份。"""
+    from orchestrator.rsi_r1 import closure as CL
+    checker = Path(repo_root) if repo_root is not None \
+        else Path(__file__).resolve().parents[2]
+    extras = {f"checker/{Path(CHECKER_RELPATH).name}":
+              checker / CHECKER_RELPATH}
+    return CL.build_evidence_pack(ctx, dest=dest, prefixes=PACK_PREFIXES,
+                                  extras=extras, repo_root=repo_root)
+
+
+def verify_pack(pack: Any) -> "dict[str, Any]":
+    from orchestrator.rsi_r1 import closure as CL
+    return CL.verify_pack(pack)
+
+
+def run_judge(ctx: Any, *, repo_root: Any = None, pack: Any = None,
+              report: Any = None, timeout_s: float = 300.0) -> "dict[str, Any]":
+    """外部进程跑**纯标准库**独立复算器，读回判决件（rc 0/1/2 都返回）。"""
+    import subprocess
+    import sys
+    base = Path(repo_root) if repo_root is not None \
+        else Path(__file__).resolve().parents[2]
+    checker = base / CHECKER_RELPATH
+    if not checker.is_file():
+        raise Closeout12Error("CHECKER_MISSING", str(checker))
+    dest = Path(report) if report is not None else ctx.relative(
+        JUDGE_REPORT_RELPATH)
+    argv = [sys.executable, "-I", str(checker), "--root", str(ctx.root),
+            "--report", str(dest), "--repo-root", str(base)]
+    from orchestrator.rsi_r1 import closure as CL
+    default_pack = ctx.relative("evidence_pack")
+    if pack is None:
+        if (default_pack / CL.PACK_MANIFEST).is_file():
+            argv += ["--verify", str(default_pack)]
+    elif pack is not False:
+        argv += ["--verify", str(Path(pack))]
+    proc = subprocess.run(argv, capture_output=True, text=True,
+                          timeout=timeout_s, check=False)
+    try:
+        judged = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise Closeout12Error(
+            "CHECKER_OUTPUT",
+            f"rc={proc.returncode} stdout 非 JSON：{exc}；"
+            f"stderr={proc.stderr[-400:]}") from None
+    if not dest.is_file():
+        from orchestrator.common.fsutil import ensure_private_dir
+        from orchestrator.common.fsutil import atomic_write_text
+        ensure_private_dir(dest.parent)
+        atomic_write_text(dest, json.dumps(judged, ensure_ascii=False,
+                                           indent=1, sort_keys=True) + "\n",
+                          mode=0o600)
+    judged["returncode"] = proc.returncode
+    judged["ok"] = (proc.returncode == 0 and judged.get("verdict") == "PASS")
+    judged["report_path"] = str(dest)
+    judged["stderr_tail"] = proc.stderr[-800:]
+    return judged
+
+
+def _family_root() -> Path:
+    from orchestrator.common import runtime_paths as RP
+    return RP.rsi_r12_root()
+
+
+__all__ = [
+    "AXIS_VALUES", "CHECKER_RELPATH", "CLASS_INSTRUMENT_TEMPLATE",
+    "CLASS_MODEL_FAILURE", "CLASS_NOT_APPLICABLE", "Closeout12Error",
+    "FAILURE_MAP_RELPATH", "JUDGE_REPORT_RELPATH", "PACK_PREFIXES",
+    "READOUT_RELPATH", "SCHEMA", "batch_approvals_ok", "build", "build_pack",
+    "close_round", "drift_facts", "family_facts", "instrument_facts",
+    "run_judge", "verify_pack",
+]

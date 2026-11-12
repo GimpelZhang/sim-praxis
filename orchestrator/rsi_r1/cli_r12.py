@@ -35,6 +35,8 @@ from orchestrator.common.fsutil import (atomic_write_bytes, atomic_write_text,
 from orchestrator.gateway import quota_ledger as QL
 from orchestrator.rsi_r1 import assembly as ASM
 from orchestrator.rsi_r1 import calibration as CAL
+from orchestrator.rsi_r1 import closeout_r12 as CO12
+from orchestrator.rsi_r1 import closure as CLOSURE
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import family as FAM
 from orchestrator.rsi_r1 import gateway_transport as GT
@@ -1190,6 +1192,34 @@ def build_parser() -> argparse.ArgumentParser:
                      help="只跑指定套件（调试用；子集报告判 INCOMPLETE、"
                           "不得签署——六套全跑才算验收）")
     pvp.set_defaults(func=cmd_validate_production)
+
+    pco = sub.add_parser(
+        "closeout",
+        help="T9：结案（五轴/失败链/族账对账；补记族用量并关根，零 POST）")
+    _root_args(pco)
+    pco.add_argument("--reason", default=None, help="关根理由（写进 state journal）")
+    pco.add_argument("--image", default=None, help="镜像 pin（容器回收探针用）")
+    pco.add_argument("--repo-root", default=None,
+                     help="仓库根（冻结后漂移重算用；缺省为本包所在仓库）")
+    pco.set_defaults(func=cmd_closeout)
+
+    ppk = sub.add_parser(
+        "pack", help="T9：复制进 evidence_pack/ 并写逐件 sha256 manifest（零 POST）")
+    _root_args(ppk)
+    ppk.add_argument("--dest", default=None,
+                     help="包目录（缺省 <root>/evidence_pack）")
+    ppk.add_argument("--repo-root", default=None)
+    ppk.set_defaults(func=cmd_pack)
+
+    pjd = sub.add_parser(
+        "judge", help="T9：外部进程跑独立复算器（可选同时核对证据包）")
+    _root_args(pjd)
+    pjd.add_argument("--report", default=None)
+    pjd.add_argument("--repo-root", default=None)
+    pjd.add_argument("--verify-pack", default=None, help="核对指定证据包目录")
+    pjd.add_argument("--no-pack", action="store_true",
+                     help="明确不核对证据包（缺省：存在 <root>/evidence_pack 就核）")
+    pjd.set_defaults(func=cmd_judge)
     return p
 
 
@@ -1549,6 +1579,78 @@ def cmd_validate_production(args: argparse.Namespace) -> int:
     return 0 if verdict == "PASS" else 3
 
 
+# ---------------------------------------------------------------------------
+# T9：结案（五轴 + 失败链）→ 证据包 → 独立复算（全程零 POST）
+# ---------------------------------------------------------------------------
+
+def cmd_closeout(args: argparse.Namespace) -> int:
+    """T9 结案：按账本补记族用量 → 关根 → 写 readout/失败链。
+
+    rc：0=过程闭合（process=COMPLETE），1=记录互相矛盾（CLOSEOUT_INCOMPLETE）。
+    研究结论在 claim/r1 轴，永不由本命令晋升。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    closed = CO12.close_round(
+        ctx, reason=str(args.reason or "T9 结案：按账本补记族用量并关闭本轮"))
+    body = CO12.build(ctx, image_pin=args.image, repo_root=args.repo_root)
+    axes = body["axes"]
+    if closed.get("family_note"):
+        print(f"WARN {closed['family_note']}", file=sys.stderr)
+    print(f"closeout ok  envelope={body['envelope_id']}  "
+          f"root_state={body['root_state']}")
+    print(f"  axes: process={axes['process']} measurement={axes['measurement']} "
+          f"study_execution={axes['study_execution']} claim={axes['claim']} "
+          f"r1={axes['r1']}")
+    print(f"  posts: history={body['totals']['history_posts']} "
+          f"round={body['totals']['round_calls']} "
+          f"family_total={body['totals']['family_total']} "
+          f"cap={body['totals']['family_cap']}")
+    print(f"  failures={len(body['failure_chain'])} gaps={len(body['gaps'])}")
+    for gap in body["gaps"]:
+        print(f"    gap: {gap}")
+    print(f"  readout={ctx.relative(CO12.READOUT_RELPATH)}")
+    return 0 if axes["process"] == "COMPLETE" else 1
+
+
+def cmd_pack(args: argparse.Namespace) -> int:
+    """把 R1.2 盘面逐件复制进 ``evidence_pack/``（含新版独立复算器源码）。"""
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    dest = Path(args.dest).expanduser() if args.dest else None
+    manifest = CO12.build_pack(ctx, dest=dest, repo_root=args.repo_root)
+    checked = CO12.verify_pack(dest or ctx.relative("evidence_pack"))
+    print(f"pack ok  envelope={envelope['envelope_id']}  "
+          f"n_files={manifest['n_files']}  total_bytes={manifest['total_bytes']}")
+    print(f"  pack   : {dest or ctx.relative('evidence_pack')}")
+    print(f"  verify : ok={checked['ok']}  problems={len(checked['problems'])}")
+    for problem in checked["problems"][:10]:
+        print(f"    - {problem}")
+    return 0 if checked["ok"] else 1
+
+
+def cmd_judge(args: argparse.Namespace) -> int:
+    """外部进程跑独立复算器（第二遍由 ``-I`` 纯标准库进程执行）。"""
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root)
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    pack = False if args.no_pack else (Path(args.verify_pack) if args.verify_pack
+                                       else None)
+    judged = CO12.run_judge(
+        ctx, repo_root=args.repo_root, pack=pack,
+        report=Path(args.report).expanduser() if args.report else None)
+    print(f"judge {judged.get('verdict')}  rc={judged.get('returncode')}  "
+          f"envelope={envelope['envelope_id']}")
+    print(f"  problems={len(judged.get('problems') or [])}  "
+          f"gaps={len(judged.get('gaps') or [])}")
+    for problem in (judged.get("problems") or [])[:10]:
+        print(f"    - {problem}")
+    print(f"  report={judged.get('report_path')}")
+    return 0 if judged.get("ok") else 1
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1559,7 +1661,8 @@ def main(argv: "list[str] | None" = None) -> int:
             RT.CampaignWriteRefused, OSError, CAL.CalibrationError,
             LK.LockError, OV.OfflineValidationError, OS.OfflineSuiteError,
             PREREG.PreregError, ST.StateError, RS.ResourceError,
-            GT.TransportError, PT.ProtocolError, ASM.AssemblyError) as exc:
+            GT.TransportError, PT.ProtocolError, ASM.AssemblyError,
+            CO12.Closeout12Error, CLOSURE.ClosureError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 
