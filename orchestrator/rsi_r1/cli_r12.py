@@ -927,6 +927,66 @@ def cmd_practice(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# family（换轮）：关闭离线验证轮 → 释放 124 预留 → 付费轮才能登记
+# ---------------------------------------------------------------------------
+
+def cmd_family_close(args: argparse.Namespace) -> int:
+    """关闭离线验证轮（Plan §5.2/§6.1 的换轮闸；零 POST）。
+
+    只允许 ``mode=offline_validation`` 的根：付费根关闭走 T9 closeout，不在
+    本命令范围。关闭前现场全量复核 validation LOCK（闭包/依赖/校准/报告
+    三签，``verify_lock``）且验证报告 verdict=PASS；随后 root→CLOSED 并
+    ``family.close_member`` 释放该成员 124 预留（族帽占用回到 31）。
+    幂等：成员已 closed 时重复执行 no-op。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root, args.envelope)
+    if envelope.get("mode") != "offline_validation":
+        raise Cli12Error(
+            "FAMILY_CLOSE_SCOPE",
+            f"family close 只关闭离线验证根（mode={envelope.get('mode')!r}）")
+    reason = getattr(args, "reason", None)
+    if not isinstance(reason, str) or not reason.strip():
+        raise Cli12Error("FAMILY_CLOSE_REASON_REQUIRED", "关闭必须有 --reason")
+    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
+    state = ST.ResearchState(ctx)
+    cur = state.root_state()
+    if cur != ST.ROOT_CLOSED:
+        # 现场复核：LOCK 必须是最新的 validation LOCK 且三签齐（闭包零漂移）。
+        ver = LK.verify_lock(ctx, repo_root=LK.REPO_ROOT)
+        if ver.get("purpose") != "validation":
+            raise Cli12Error("FAMILY_CLOSE_LOCK_PURPOSE",
+                             f"LOCK purpose={ver.get('purpose')!r} 非 validation")
+        report = _read_json(ctx.root / OV.REPORT_RELPATH)
+        if str(report.get("verdict")) != "PASS":
+            raise Cli12Error(
+                "FAMILY_CLOSE_REPORT_NOT_PASS",
+                f"验证报告 verdict={report.get('verdict')!r}，不得关闭换轮")
+        state.close_root(reason=f"family close：{reason}")
+    lock_doc = LK.load_frozen(ctx)
+    report_sha = _sha256_bytes((ctx.root / OV.REPORT_RELPATH).read_bytes())
+    fam_doc = FAM.close_member(
+        _family_root(), str(envelope["envelope_id"]), reason=reason,
+        evidence={
+            "mode": str(envelope["mode"]),
+            "root_state_at_close": ST.ResearchState(ctx).root_state(),
+            "lock_sha256": lock_doc.sha256,
+            "report_relpath": OV.REPORT_RELPATH,
+            "report_sha256": report_sha,
+        })
+    member = next(m for m in fam_doc["members"]
+                  if m["envelope_id"] == envelope["envelope_id"])
+    reserved_active = sum(int(m["posts_reserved"]) for m in fam_doc["members"]
+                          if m.get("state") != FAM.MEMBER_CLOSED)
+    print(f"family close ok  envelope={envelope['envelope_id']}")
+    print(f"  state  : {member.get('state')}  closed_at={member.get('closed_at_utc')}")
+    print(f"  lock   : {lock_doc.sha256[:16]}…  report: {report_sha[:16]}…")
+    print(f"  family : history={fam_doc['history']['total_call_rows']} + "
+          f"active_reserved={reserved_active} / cap={fam_doc['family_cap']}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # parser / main
 # ---------------------------------------------------------------------------
 
@@ -1088,6 +1148,15 @@ def build_parser() -> argparse.ArgumentParser:
     pst.add_argument("--to", required=True)
     pst.add_argument("--reason", default=None)
     pst.set_defaults(func=cmd_state)
+
+    # ---- 换轮：关闭离线验证轮（释放 124 预留；付费轮登记前必经）----
+    pfam = sub.add_parser("family", help="族账操作（换轮：close 离线验证成员）")
+    fam_sub = pfam.add_subparsers(dest="family_cmd", required=True)
+    pfc = fam_sub.add_parser(
+        "close", help="关闭离线验证轮（核 LOCK 三签+报告 PASS，root→CLOSED）")
+    _root_args(pfc)
+    pfc.add_argument("--reason", required=True)
+    pfc.set_defaults(func=cmd_family_close)
 
     # ---- T6：费用门 → 校准导入 → 唯一付费资格检查（probe/practice）----
     pau = sub.add_parser("authorize",

@@ -17,6 +17,9 @@ RSI-R1.2 Plan §1.1 的落地模块。事实基础：
 * 成员已登记则幂等返回同一许可；族帽余额不足 → ``FAMILY_CAP_EXCEEDED``；
 * 同一 profile 只允许一个活动成员（本轮 124 + 历史 31 = 155 已无余额，
   第二轮在本轮关闭前必须被拒，而不是等付费时才发现没预算）；
+  **关闭** = ``close_member``：只对已冻结且验证 PASS 的离线根执行，把成员
+  标 ``closed`` 并**释放其 124 预留**，之后同一 profile 才能登记新一轮成员
+  （T5 验证根关闭 → T6 付费根登记，Plan §5.2/§6.1 的既定换轮路径）。
 * 许可（permit）是 T6 付费门的必要件：绑定族文档字节哈希 + 成员预留数；
   族文档漂移 → ``FAMILY_PERMIT_INVALID``。
 
@@ -53,6 +56,12 @@ FAMILY_DOC_NAME = "family.json"
 FAMILY_LOCK_NAME = "family.lock"
 
 _ENVELOPE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+# 成员状态：``registered``（活动）/ ``exhausted``（用满预留）/ ``closed``
+# （本轮关闭，预留已释放；只有它能解除「同 profile 单活动成员」）。
+MEMBER_REGISTERED = "registered"
+MEMBER_EXHAUSTED = "exhausted"
+MEMBER_CLOSED = "closed"
 
 
 class FamilyError(RuntimeError):
@@ -294,8 +303,10 @@ def _assert_envelope_id(envelope_id: str) -> str:
 
 
 def _reserved_total(doc: Mapping[str, Any]) -> int:
+    """族帽占用 = 历史块 + 活动成员的预留（``closed`` 成员的预留已释放）。"""
     return int(doc["history"]["total_call_rows"]) + sum(
-        int(m["posts_reserved"]) for m in doc["members"])
+        int(m["posts_reserved"]) for m in doc["members"]
+        if m.get("state") != MEMBER_CLOSED)
 
 
 def _build_permit(doc: Mapping[str, Any], member: Mapping[str, Any],
@@ -374,7 +385,9 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
                     f"{envelope_id} 已预留 {member['posts_reserved']} != {reserved}")
             return _build_permit(doc, member, now=now)
 
-        others = [m for m in members if m["profile_id"] == profile.profile_id]
+        others = [m for m in members
+                  if m["profile_id"] == profile.profile_id
+                  and m.get("state") != MEMBER_CLOSED]
         if others:
             raise FamilyError(
                 "FAMILY_ROUND_OPEN",
@@ -399,6 +412,43 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
         doc["updated_at_utc"] = _utc_now(now)
         _write_doc(family_root, doc)
         return _build_permit(doc, member, now=now)
+
+
+def close_member(family_root: Path, envelope_id: str, *, reason: str,
+                 evidence: Mapping[str, Any] | None = None,
+                 now: "datetime | None" = None) -> "dict[str, Any]":
+    """关闭本轮成员并释放其预留（幂等；只有 ``closed`` 解除单成员约束）。
+
+    只登记事实，不判根状态：调用方（``cli_r12 family close``）必须先在
+    **离线验证根**上核完 LOCK/报告/三签并把根推到 ``CLOSED``，再把证据
+    传进来落账。关闭后 ``_reserved_total`` 不再计该成员预留，同 profile
+    可登记下一轮成员（Plan §5.2：T5 验证轮关闭 → T6 付费轮登记）。
+    """
+    envelope_id = _assert_envelope_id(envelope_id)
+    if not isinstance(reason, str) or not reason.strip():
+        raise FamilyError("FAMILY_CLOSE_REASON_REQUIRED", "关闭必须有 reason")
+    with _family_lock(family_root):
+        doc = load_family_doc(family_root)
+        if doc is None:
+            raise FamilyError("FAMILY_ABSENT", "族账不存在")
+        members = list(doc["members"])
+        hit = [m for m in members if m["envelope_id"] == envelope_id]
+        if not hit:
+            raise FamilyError("FAMILY_ABSENT", f"族账无成员 {envelope_id}")
+        member = hit[0]
+        if member.get("state") == MEMBER_CLOSED:
+            return doc
+        new_member = dict(member)
+        new_member["state"] = MEMBER_CLOSED
+        new_member["closed_at_utc"] = _utc_now(now)
+        new_member["close_reason"] = str(reason)
+        new_member["close_evidence"] = dict(evidence or {})
+        new_doc = dict(doc)
+        new_doc["members"] = [new_member if m["envelope_id"] == envelope_id
+                              else m for m in members]
+        new_doc["updated_at_utc"] = _utc_now(now)
+        _write_doc(family_root, new_doc)
+        return new_doc
 
 
 def _assert_history_unchanged(doc: Mapping[str, Any],
