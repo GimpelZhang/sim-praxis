@@ -239,3 +239,81 @@ def iter_block_pairs(rows: Iterable[Mapping[str, Any]], *,
     if not pairs:
         raise StatisticsError("EMPTY", "没有可配对的 block")
     return pairs
+
+
+# ---------------------------------------------------------------------------
+# 公开统计方法（§5.1「方法不是隐藏答案」）
+# ---------------------------------------------------------------------------
+
+METHOD_SCHEMA = "simpraxis.rsi_r1.statistics_method.v1"
+
+
+def public_method_document() -> "dict[str, Any]":
+    """公开精确估计法/随机算法/排序/分位数/容差——独立 public consumer 据此复现。
+
+    只发布**方法**：不含任何观测值、配对差、效应或答案。document 里的每个数都
+    从 rubric 常量与本模块 seed 派生，不复制字面量。
+    """
+    return {
+        "schema": METHOD_SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "metric_scope": "paired_block_difference",
+        "estimator": {
+            "unit": "block",
+            "input": "block_id → (treatment_value, control_value)",
+            "per_block": "diff[block_id] = float(treatment_value) - float(control_value)",
+            "effect": "effect = float(numpy.asarray(values, dtype=numpy.float64).mean())",
+            "denominator": ("block_id 键集合本身即分母；缺块不是“少一个样本”而是分母"
+                            "偷换，直接拒绝"),
+            "min_blocks": 2,
+            "requires_finite": True,
+            "rejects": ["非有限值", "布尔冒充数值", "空分母", "block 少于 2"],
+        },
+        "sample_order": {
+            "rule": "按 block_id 的字符串升序（Python sorted）排列；该行序决定重抽样数组的行号",
+            "note": "键是规范化字符串 block_id；不得以插入序/字典偶然序替代",
+        },
+        "bootstrap": {
+            "method": "percentile",
+            "resamples": int(R.BOOTSTRAP_RESAMPLES),
+            "unit": str(R.BOOTSTRAP_UNIT),
+            "seed": int(STATISTICS_SEED),
+            "rng": {
+                "generator": "numpy.random.Generator",
+                "bit_generator": "PCG64",
+                "construction": "rng = numpy.random.default_rng(numpy.random.PCG64(seed))",
+                "seed_is_fixed": True,
+                "draw": "idx = rng.integers(0, n, size=(resamples, n))  # 每行一次有放回重抽样",
+                "statistic": "means = values[idx].mean(axis=1)  # 行均值，即每次重抽样的效应",
+            },
+            "interval": {
+                "quantile_method": str(R.BOOTSTRAP_QUANTILE),
+                "alpha": "alpha = (1 - level) / 2（Decimal 精确计算后转 float）",
+                "bounds": "numpy.quantile(means, [alpha, 1 - alpha], method=quantile_method)",
+                "levels": {"primary": str(R.CI_PRIMARY), "negative": str(R.CI_NEGATIVE)},
+                "level_rule": ("阴性等价结论必须用 negative 级别 90% 区间；"
+                               "不得以 p>0.05 当作阴性判据"),
+            },
+            "dtype": str(R.BOOTSTRAP_DTYPE),
+        },
+        "tolerance": {
+            "formula": "tolerance(ref) = abs_tol + rel_tol * abs(ref)",
+            "abs_tol": str(R.CLAIM_ABS_TOL),
+            "rel_tol": str(R.CLAIM_REL_TOL),
+            "applies_to": ["estimate", "lower", "upper"],
+            "judge_rule": "逐字段与宿主独立重算值比较；超出容差即数值不一致",
+        },
+        "claim_classification": {
+            "scale": ("δ 只取自冻结指标目录（rubric.METRICS 的 delta）；候选不得扩界或自定界"),
+            "propositions": list(R.PROPOSITIONS),
+            "rules": {
+                "decrease_gt": "upper < -δ → SUPPORTED；lower >= -δ → REFUTED；否则 INCONCLUSIVE",
+                "increase_gt": "lower > δ → SUPPORTED；upper <= δ → REFUTED；否则 INCONCLUSIVE",
+                "equivalent": ("lower > -δ 且 upper < δ → SUPPORTED；"
+                               "upper <= -δ 或 lower >= δ → REFUTED；否则 INCONCLUSIVE"),
+            },
+            "interval_check": "lower > upper 视为区间倒置，直接拒绝",
+        },
+        "finite_sample_note": ("percentile bootstrap 是有限样本近似：不宣称频率派覆盖率保证，"
+                               "也不因重跑而“调参救场”"),
+    }

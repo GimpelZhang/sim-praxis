@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from orchestrator.rsi_r1 import analysis_receipt as AR
 from orchestrator.rsi_r1 import contracts as C
 
 EVENT_SCHEMA = "simpraxis.rsi_r1.event.v1"
@@ -259,6 +260,12 @@ class ConfirmLock:
     primary_id: str
     metric_id: str
     token: str
+    #: R1.2（T4）：冻结时绑定的候选来源与探索分析凭据（legacy 恒 None）。
+    analysis_reply_id: "str | None" = None
+    analysis_action_id: "str | None" = None
+    analysis_receipt_sha256: "str | None" = None
+    design_reply_id: "str | None" = None
+    design_action_id: "str | None" = None
 
     def as_dict(self) -> "dict[str, Any]":
         return {"study": self.study, "plan_sha256": self.plan_sha256,
@@ -266,7 +273,12 @@ class ConfirmLock:
                 "analysis_source_sha256": self.analysis_source_sha256,
                 "distribution_sha256": self.distribution_sha256,
                 "block_count": self.block_count, "primary_id": self.primary_id,
-                "metric_id": self.metric_id, "token": self.token}
+                "metric_id": self.metric_id, "token": self.token,
+                "analysis_reply_id": self.analysis_reply_id,
+                "analysis_action_id": self.analysis_action_id,
+                "analysis_receipt_sha256": self.analysis_receipt_sha256,
+                "design_reply_id": self.design_reply_id,
+                "design_action_id": self.design_action_id}
 
 
 @dataclass(frozen=True)
@@ -335,10 +347,16 @@ class ResearchState:
             if ev.event == "artifact" and p.get("study") == study:
                 artifacts[str(p["kind"])].append(str(p["source_sha256"]))
             elif ev.event == "confirm_lock" and p.get("study") == study:
-                lock = ConfirmLock(**{k: p[k] for k in (
+                base = {k: p[k] for k in (
                     "study", "plan_sha256", "design_source_sha256",
                     "analysis_source_sha256", "distribution_sha256", "block_count",
-                    "primary_id", "metric_id", "token")})
+                    "primary_id", "metric_id", "token")}
+                for key in ("analysis_reply_id", "analysis_action_id",
+                            "analysis_receipt_sha256", "design_reply_id",
+                            "design_action_id"):
+                    if p.get(key) is not None:
+                        base[key] = p[key]
+                lock = ConfirmLock(**base)
             elif ev.event == "confirm_intent" and p.get("study") == study:
                 intent = Intent(intent_id=str(p["intent_id"]), study=study,
                                 token=str(p["token"]), specs_sha256=str(p["specs_sha256"]),
@@ -525,6 +543,26 @@ class ResearchState:
                 return str(ev.payload.get("producer") or "")
         return None
 
+    def _artifact_event(self, source_sha: str) -> "dict[str, Any]":
+        for ev in reversed(self._events()):
+            if ev.event == "artifact" \
+                    and ev.payload.get("source_sha256") == source_sha:
+                return dict(ev.payload)
+        raise StateError("UNBOUND_SOURCE", f"{source_sha[:12]} 未登记为产物")
+
+    def _latest_explore_plan_sha(self, study: str) -> "str | None":
+        latest = None
+        for ev in self._events():
+            if ev.event == "plan_revision" \
+                    and ev.payload.get("study") == study:
+                doc = ev.payload.get("doc") or {}
+                if doc.get("phase") == "explore":
+                    try:
+                        latest = C.ResearchPlan.from_dict(doc).sha256
+                    except C.ContractError:
+                        latest = None
+        return latest
+
     # ---- 计划修订 ----
 
     def append_plan(self, study: str, plan: Mapping[str, Any]) -> "dict[str, Any]":
@@ -555,6 +593,7 @@ class ResearchState:
 
     def freeze_confirm(self, *, study: str, plan: Mapping[str, Any],
                        design_sha256: str, analysis_sha256: str,
+                       r12: bool = False,
                        ) -> ConfirmLock:
         _require_study(study)
         state = self.study_state(study)
@@ -573,6 +612,55 @@ class ResearchState:
             if self._artifact_producer(sha) is None:
                 raise StateError("UNBOUND_SOURCE",
                                  f"{label} 源码 {sha[:12]} 未登记为产物")
+        binding: "dict[str, Any]" = {}
+        if r12:
+            # T4：plan/制品登记/实际文件字节/探索凭据 四者一致；确认后
+            # 不允许同路径换源码、也不允许 plan 指向另一个合法 hash。
+            if doc.analysis_source_sha != analysis_sha256:
+                raise StateError(
+                    "SOURCE_SHA_MISMATCH",
+                    "plan.analysis_source_sha 与 freeze.analysis_sha256 不一致")
+            if doc.design_source_sha != design_sha256:
+                raise StateError(
+                    "SOURCE_SHA_MISMATCH",
+                    "plan.design_source_sha 与 freeze.design_sha256 不一致")
+            for sha, label in ((design_sha256, "design"),
+                               (analysis_sha256, "analysis")):
+                path = self.ctx.relative(f"designs/{sha}.py")
+                if not path.is_file():
+                    raise StateError("SOURCE_FILE_MISSING", f"designs/{sha[:12]}.py")
+                if hashlib.sha256(path.read_bytes()).hexdigest() != sha:
+                    raise StateError("SOURCE_FILE_DRIFT",
+                                     f"{label} 登记 hash 与磁盘字节不一致")
+            art = self._artifact_event(analysis_sha256)
+            receipt_rel = f"private/receipts/{study}-explore.json"
+            if not self.ctx.exists(receipt_rel):
+                raise StateError("ANALYSIS_RECEIPT_MISSING",
+                                 "冻结前必须有探索期分析执行凭据")
+            receipt = self.ctx.read_json(receipt_rel)
+            if not isinstance(receipt, Mapping) \
+                    or receipt.get("schema") != AR.SCHEMA:
+                raise StateError("ANALYSIS_RECEIPT_INVALID", "凭据结构非法")
+            if receipt.get("source_sha256") != analysis_sha256 \
+                    or receipt.get("phase") != "explore":
+                raise StateError("SOURCE_SHA_MISMATCH",
+                                 "探索凭据不属于冻结的分析源码")
+            if not receipt.get("validity"):
+                raise StateError("ANALYSIS_INVALID",
+                                 "探索期分析未通过执行有效门")
+            explore_sha = self._latest_explore_plan_sha(study)
+            if explore_sha is None or receipt.get("plan_sha256") != explore_sha:
+                raise StateError("RECEIPT_PLAN_MISMATCH",
+                                 "探索凭据的 plan sha 不是当前探索计划")
+            binding = {
+                "analysis_reply_id": art.get("response_id"),
+                "analysis_action_id": art.get("action_sha256"),
+                "analysis_receipt_sha256": hashlib.sha256(
+                    self.ctx.relative(receipt_rel).read_bytes()).hexdigest(),
+            }
+            design_art = self._artifact_event(design_sha256)
+            binding["design_reply_id"] = design_art.get("response_id")
+            binding["design_action_id"] = design_art.get("action_sha256")
         lock_payload = {
             "study": study, "plan_sha256": doc.sha256,
             "design_source_sha256": design_sha256,
@@ -584,10 +672,11 @@ class ResearchState:
         }
         payload = dict(lock_payload)
         payload["token"] = _sha_doc(lock_payload)[:32]
+        payload.update(binding)
         payload["checks"] = [list(c) for c in check.checks]
         self.journal.append("confirm_lock", payload)
         self._advance_study(study, ST_CONFIRM_LOCKED, reason="freeze_confirm")
-        return ConfirmLock(**lock_payload, token=payload["token"])
+        return ConfirmLock(**lock_payload, token=payload["token"], **binding)
 
     def confirm_lock(self, study: str) -> "ConfirmLock":
         doc = self.study_status(study)["confirm_lock"]

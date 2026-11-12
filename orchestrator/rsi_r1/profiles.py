@@ -572,6 +572,16 @@ def resolve_profile(envelope_doc: Mapping[str, Any] | None = None, *,
 # 公开资源合同（§2.1 的单一真值；渲染/最终请求审计共用）
 # ---------------------------------------------------------------------------
 
+def _public_method_sections() -> "dict[str, Any]":
+    """公开方法段（lazy import：profiles 模块级保持零第三方依赖，且规避环）。"""
+    from orchestrator.rsi_r1 import analysis_receipt as AR
+    from orchestrator.rsi_r1 import statistics as ST
+    return {
+        "statistics": ST.public_method_document(),
+        "analysis_output": AR.public_output_schema(),
+    }
+
+
 def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
                              budget_sha256: str,
                              scenes: "tuple[str, ...]" = (),
@@ -720,6 +730,7 @@ def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
         },
         "scenes": list(scenes),
     }
+    doc.update(_public_method_sections())
     return doc
 
 
@@ -729,7 +740,8 @@ def assert_public_contract_v2_complete(doc: Mapping[str, Any]) -> None:
         raise ProfileError("PUBLIC_CONTRACT_INVALID", f"schema={doc.get('schema')!r}")
     required = ("profile_id", "budget_sha256", "family", "posts", "compute",
                 "aux_subenvelopes", "units", "dynamic_sha", "error_classes",
-                "recovery", "science", "refusal_policy")
+                "recovery", "science", "refusal_policy", "statistics",
+                "analysis_output")
     for key in required:
         if key not in doc:
             raise ProfileError("PUBLIC_CONTRACT_INVALID", f"缺必需段 {key!r}")
@@ -752,6 +764,51 @@ def assert_public_contract_v2_complete(doc: Mapping[str, Any]) -> None:
         raise ProfileError("PUBLIC_CONTRACT_INVALID", "动态 SHA 字段为空")
     if set(doc["error_classes"]["recoverable"]) & set(doc["error_classes"]["terminal"]):
         raise ProfileError("PUBLIC_CONTRACT_INVALID", "可恢复/终态错误码有交集")
+    _assert_public_method_sections(doc)
+
+
+def _assert_public_method_sections(doc: Mapping[str, Any]) -> None:
+    """公开方法段必须与代码常量逐值同源（防渲染件与实现漂移）。"""
+    from orchestrator.rsi_r1 import analysis_receipt as AR
+    from orchestrator.rsi_r1 import rubric as R
+    from orchestrator.rsi_r1 import statistics as ST
+    stats = doc["statistics"]
+    if stats.get("schema") != ST.METHOD_SCHEMA:
+        raise ProfileError("PUBLIC_CONTRACT_INVALID",
+                           f"statistics.schema={stats.get('schema')!r}")
+    boot = stats.get("bootstrap") or {}
+    if boot.get("resamples") != int(R.BOOTSTRAP_RESAMPLES):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "bootstrap resamples 与 rubric 不符")
+    if boot.get("unit") != str(R.BOOTSTRAP_UNIT):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "bootstrap unit 与 rubric 不符")
+    if boot.get("seed") != int(ST.STATISTICS_SEED):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "bootstrap seed 与实现不符")
+    rng = boot.get("rng") or {}
+    if rng.get("bit_generator") != "PCG64" or rng.get("seed_is_fixed") is not True:
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "bootstrap RNG 描述不完整")
+    interval = boot.get("interval") or {}
+    if interval.get("quantile_method") != str(R.BOOTSTRAP_QUANTILE):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "quantile 约定与 rubric 不符")
+    levels = interval.get("levels") or {}
+    if levels.get("primary") != str(R.CI_PRIMARY) or \
+            levels.get("negative") != str(R.CI_NEGATIVE):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "区间水平与 rubric 不符")
+    tol = stats.get("tolerance") or {}
+    if tol.get("abs_tol") != str(R.CLAIM_ABS_TOL) or \
+            tol.get("rel_tol") != str(R.CLAIM_REL_TOL):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "容差与 rubric 不符")
+    cls = stats.get("claim_classification") or {}
+    if cls.get("propositions") != list(R.PROPOSITIONS):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "主张类型表与 rubric 不符")
+    output = doc["analysis_output"]
+    if output.get("output_schema") != AR.OUTPUT_SCHEMA:
+        raise ProfileError("PUBLIC_CONTRACT_INVALID",
+                           f"analysis_output.output_schema="
+                           f"{output.get('output_schema')!r}")
+    if output.get("fields") != list(AR.CONTRAST_FIELDS):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "输出字段表与解析器不符")
+    if output.get("statuses") != list(AR.STATUSES):
+        raise ProfileError("PUBLIC_CONTRACT_INVALID", "状态表与解析器不符")
 
 
 def render_public_contract_v2(doc: Mapping[str, Any]) -> str:
@@ -824,6 +881,42 @@ def render_public_contract_v2(doc: Mapping[str, Any]) -> str:
         "",
         "## 11. 单位",
         *[f"- {k}: {v}" for k, v in doc["units"].items()],
+        "",
+        "## 12. 公开统计方法（方法不是隐藏答案；可独立复现）",
+        f"- 估计对象: {doc['statistics']['metric_scope']}；抽样单位 "
+        f"{doc['statistics']['bootstrap']['unit']}",
+        f"- 效应: {doc['statistics']['estimator']['effect']}",
+        f"- 样本排序: {doc['statistics']['sample_order']['rule']}",
+        f"- bootstrap: percentile，{doc['statistics']['bootstrap']['resamples']} 次重抽样，"
+        f"{doc['statistics']['bootstrap']['rng']['bit_generator']}，"
+        f"seed={doc['statistics']['bootstrap']['seed']}（固定）",
+        f"- 随机数: {doc['statistics']['bootstrap']['rng']['construction']}；"
+        f"{doc['statistics']['bootstrap']['rng']['draw']}；"
+        f"{doc['statistics']['bootstrap']['rng']['statistic']}",
+        f"- 区间: {doc['statistics']['bootstrap']['interval']['bounds']}，"
+        f"quantile={doc['statistics']['bootstrap']['interval']['quantile_method']}，"
+        f"dtype={doc['statistics']['bootstrap']['dtype']}",
+        f"- 区间水平: 主 {doc['statistics']['bootstrap']['interval']['levels']['primary']}"
+        f" / 阴性 {doc['statistics']['bootstrap']['interval']['levels']['negative']}"
+        f"（{doc['statistics']['bootstrap']['interval']['level_rule']}）",
+        f"- 容差: {doc['statistics']['tolerance']['formula']}，"
+        f"abs={doc['statistics']['tolerance']['abs_tol']}, "
+        f"rel={doc['statistics']['tolerance']['rel_tol']}",
+        f"- 分类: δ 只取自冻结目录；主张 {'/'.join(doc['statistics']['claim_classification']['propositions'])}",
+        *[f"  - {k}: {v}" for k, v in
+          doc["statistics"]["claim_classification"]["rules"].items()],
+        f"- {doc['statistics']['finite_sample_note']}",
+        "",
+        "## 13. 候选分析输出 schema",
+        f"- schema 必须逐字等于 {doc['analysis_output']['output_schema']}",
+        f"- 顶层键: schema / run_ids / contrasts（"
+        f"{doc['analysis_output']['top_level']['run_ids']}）",
+        f"- run_ids: {doc['analysis_output']['run_ids_rule']['identity']}",
+        f"- 每条对比字段: {', '.join(doc['analysis_output']['fields'])}",
+        f"- status 枚举: {', '.join(doc['analysis_output']['statuses'])}",
+        f"- 宿主比较: {doc['analysis_output']['host_comparison']['policy']}；"
+        f"{doc['analysis_output']['host_comparison']['response']}",
+        f"- {doc['analysis_output']['no_host_values']}",
         "",
     ]
     return "\n".join(lines)

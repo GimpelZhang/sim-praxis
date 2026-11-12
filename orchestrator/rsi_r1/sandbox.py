@@ -92,6 +92,48 @@ class ViewEntry:
             raise SandboxError("INPUT_INVALID", "ViewEntry.sha256 必须是 64 位小写 hex")
 
 
+@dataclass(frozen=True)
+class AnalysisContext:
+    """R1.2 分析执行的 typed 作用域（Plan §5.1 第三条接缝）。
+
+    ``phase`` 与 ``max_runs`` 由宿主按 profile 的 typed limits 构造，**候选不能
+    自报 phase 扩权**：把 192 个确认 run 塞进 explore（帽 64）会在视图构造后、
+    容器启动前被拒绝；合法 192 确认也不会被截断成 64。
+    """
+
+    phase: str
+    max_runs: int
+    allowed_run_ids: "tuple[str, ...]"
+
+    def run_ids_of(self, entries: "Iterable[ViewEntry]") -> "set[str]":
+        ids: "set[str]" = set()
+        for entry in entries:
+            name = Path(entry.relpath).name
+            if name.endswith(".meta.json"):
+                ids.add(name[: -len(".meta.json")])
+            elif name.endswith(".jsonl"):
+                ids.add(name[: -len(".jsonl")])
+        return ids
+
+    def check(self, entries: "Iterable[ViewEntry]") -> None:
+        entries = list(entries)
+        if len(entries) > int(self.max_runs) * 2:
+            raise SandboxError(
+                "ANALYSIS_SCOPE",
+                f"phase={self.phase} 视图 {len(entries)} 文件 > 帽 {self.max_runs} run")
+        got = self.run_ids_of(entries)
+        if len(got) > int(self.max_runs):
+            raise SandboxError(
+                "ANALYSIS_SCOPE",
+                f"phase={self.phase} 视图 {len(got)} run > 帽 {self.max_runs}")
+        allowed = {str(r) for r in self.allowed_run_ids}
+        if allowed and got != allowed:
+            raise SandboxError(
+                "ANALYSIS_SCOPE",
+                f"phase={self.phase} 视图 run 集合与授权集合不等："
+                f"缺 {sorted(allowed - got)[:4]} 多 {sorted(got - allowed)[:4]}")
+
+
 def _safe_parts(relpath: str) -> "tuple[str, ...]":
     if "\x00" in relpath:
         raise SandboxError("PATH_TRAVERSAL", "relpath 含 NUL")
@@ -541,14 +583,21 @@ def run_design(source: "str | bytes", inputs: Iterable[ViewEntry], *,
 def run_analysis(source: "str | bytes", allowed_manifest: Iterable[ViewEntry], *,
                  evidence_root: "Path | str", work_root: "Path | str",
                  runner: ContainerRunner, image: str,
-                 retain_bytes: bool = False) -> SandboxEvidence:
+                 retain_bytes: bool = False,
+                 analysis_context: "AnalysisContext | None" = None) -> SandboxEvidence:
     """分析代码：只挂 ``allowed_manifest`` 列出的 run 文件（同构安全面）。
 
     锁内适配（RSI-R1 T5）：同 ``run_design``，``retain_bytes`` 供调度层
     读取分析输出字节（主张复算的唯一来源）。
+
+    R1.2（T4）：``analysis_context`` 是宿主 typed 作用域；非空时在容器启动前
+    校验 phase/帽/完整 run 集合。旧路径不传，行为逐字节不变。
     """
+    entries = list(allowed_manifest)
+    if analysis_context is not None:
+        analysis_context.check(entries)
     return _run_in_sandbox(kind="analysis", source=source,
-                           entries=allowed_manifest,
+                           entries=entries,
                            evidence_root=evidence_root, work_root=work_root,
                            runner=runner, image=image, retain_bytes=retain_bytes)
 

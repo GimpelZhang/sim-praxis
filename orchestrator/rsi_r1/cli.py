@@ -53,6 +53,7 @@ from orchestrator.rsi_r1 import gateway_transport as GT
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import observations as OBS
 from orchestrator.rsi_r1 import prereg as PREREG
+from orchestrator.rsi_r1 import profiles as PPROF
 from orchestrator.rsi_r1 import protocol as PT
 from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import replay_driver as RPD
@@ -794,7 +795,7 @@ def cmd_replay(args: argparse.Namespace) -> int:
     root≥STUDY_A、study B 需 root≥STUDY_B，且**目标 study** 的判据/主张件齐备。
     """
     envelope = C.require_safe_id(args.envelope, where="--envelope")
-    ctx, _ = _load_envelope_contract(envelope)
+    ctx, env_doc = _load_envelope_contract(envelope)
     study = str(args.id).strip().upper()
     if study not in ST.STUDIES:
         raise CliError(f"--id 只能是 A 或 B，收到 {args.id!r}")
@@ -805,9 +806,12 @@ def cmd_replay(args: argparse.Namespace) -> int:
     image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
     if not image:
         raise CliError("缺 --image 且 LOCK 未登记镜像 pin")
+    # R1.2 复跑还要执行冻结候选分析并生成新 receipt（Plan §5.1/AC53）；
+    # legacy 根解析为 legacy profile，行为逐字节不变。
+    profile = PPROF.resolve_profile(env_doc)
     report = RPD.run_replay(
         ctx, study=study, runner=SANDBOX.DockerRunner(), image=image,
-        batch_id=args.batch_id, max_steps=args.max_steps)
+        batch_id=args.batch_id, max_steps=args.max_steps, profile=profile)
     print(f"replay {study} {report['status']}  runs={report['n_runs_used']}/"
           f"{report['n_expected']}  root={report.get('root_after')}  "
           f"attempt={report['attempt']}")
@@ -817,6 +821,10 @@ def cmd_replay(args: argparse.Namespace) -> int:
               f"identical={s2['identical']}  problems={len(report['problems'])}")
     else:
         print("  blocked=infra：无比对件，修复后可在同一 root 重试")
+    if report.get("analysis") is not None:
+        print(f"  analysis ok={report['analysis_ok']}  "
+              f"reasons={report['analysis'].get('reason_codes') or '-'}")
+        print(f"  receipt={ctx.relative(report['analysis_receipt_relpath'])}")
     print(f"  report={ctx.relative(RPD.report_relpath(study))}"
           + (f"  comparison={ctx.relative(RPD.comparison_relpath(study))}"
              if report.get("comparison_relpath") else ""))

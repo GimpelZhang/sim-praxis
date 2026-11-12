@@ -32,6 +32,7 @@ from typing import Any, Mapping
 from orchestrator.common import runtime_paths as RP
 from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.gateway import quota_ledger as QL
+from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import family as FAM
 from orchestrator.rsi_r1 import human_events as HE
@@ -461,6 +462,175 @@ def cmd_human_assisted(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# controls（T4 / AC56）：新根 v2 校准（零模型 POST）
+# ---------------------------------------------------------------------------
+
+class R12Context:
+    """校准模块所需的 campaign ctx 面（R1.2 根；写守卫同族纪律）。
+
+    ``readonly=True`` 用于旧 R1 campaign 根（历史件只读，任何写直接拒绝）。
+    """
+
+    is_r12 = True
+
+    def __init__(self, root: Path, envelope_id: str, *,
+                 readonly: bool = False) -> None:
+        self.root = Path(root)
+        self.envelope_id = envelope_id
+        self.readonly = readonly
+
+    def subdir(self, name: str) -> Path:
+        if name not in RP.RSI_R12_CAMPAIGN_SUBDIRS:
+            raise Cli12Error("SUBDIR_UNKNOWN", f"未知 R1.2 子目录：{name!r}")
+        return self.root / name
+
+    def relative(self, relpath: "str | Path") -> Path:
+        rel = Path(relpath)
+        if rel.is_absolute() or ".." in rel.parts:
+            raise Cli12Error("REL_PATH_REFUSED", f"只接受根内相对路径：{rel}")
+        return self.root / rel
+
+    def _assert_write_allowed(self, target: Path) -> None:
+        if self.readonly:
+            raise Cli12Error("PRIOR_ROOT_READONLY",
+                             f"旧 root 只读，拒绝写入：{target}")
+        base = self.root.resolve(strict=False)
+        rp = target.resolve(strict=False)
+        if rp != base and base not in rp.parents:
+            raise Cli12Error("WRITE_OUTSIDE_ROOT", f"写路径越出根：{rp}")
+        for name, prot in RP.rsi_r12_protected_write_roots().items():
+            prot_r = Path(prot).resolve(strict=False)
+            if rp == prot_r or prot_r in rp.parents:
+                raise Cli12Error("WRITE_PROTECTED_ROOT",
+                                 f"写路径落进 {name}（{prot_r}）")
+
+    def write_text(self, relpath: "str | Path", text: str) -> Path:
+        target = self.relative(relpath)
+        self._assert_write_allowed(target)
+        ensure_private_dir(target.parent)
+        atomic_write_text(target, text, mode=0o600)
+        return target
+
+    def write_json(self, relpath: "str | Path", obj: Any) -> Path:
+        return self.write_text(
+            relpath, json.dumps(obj, ensure_ascii=False, indent=1,
+                                sort_keys=True, allow_nan=False) + "\n")
+
+    def read_json(self, relpath: "str | Path") -> Any:
+        return _read_json(self.relative(relpath))
+
+    def exists(self, relpath: "str | Path") -> bool:
+        return self.relative(relpath).is_file()
+
+
+def _readonly_prior_context(prior_root: "str | None", envelope_id: str
+                            ) -> "R12Context":
+    if not prior_root:
+        raise Cli12Error(
+            "PRIOR_ROOT_REQUIRED",
+            "v2 校准必须给 --prior-root（旧 R1 campaign 根；只读引用其 v1 "
+            "预注册/报告/oracle/raw，不在新根重跑 v1）")
+    root = Path(prior_root)
+    if not root.is_dir():
+        raise Cli12Error("PRIOR_ROOT_ABSENT", f"旧 root 不存在：{root}")
+    resolved = root.resolve(strict=False)
+    family = _family_root().resolve(strict=False)
+    if resolved == family or family in resolved.parents:
+        raise Cli12Error("PRIOR_ROOT_INSIDE_R12", f"旧 root 不得位于 R1.2 家族根内：{root}")
+    return R12Context(resolved, envelope_id, readonly=True)
+
+
+def cmd_controls(args: argparse.Namespace) -> int:
+    """AC56：``--calibration-version v2`` 新 profile 分派。
+
+    前置（fail-closed，任一不成立即停，不调界/不换 seed）：
+
+    * 版本只接受 v2；v1 是历史件，不在新根重跑；
+    * 当前 root 的 R1.2 账（2904）无任何 call 行——族历史 31 不是当前 root 付费，
+      不参与本判定；
+    * 零 POST permit：paid LOCK 不存在 + 生产装配入口机械证明 LOCK_MISSING；
+    * 来源/镜像/矩阵/量表/oracle 身份逐项核验（import 加载 + sha 对账）。
+    """
+    version = str(args.calibration_version)
+    if version != "v2":
+        raise Cli12Error(
+            "R12_CALIBRATION_VERSION",
+            f"R1.2 只接受 --calibration-version v2（得到 {version!r}）；"
+            "v1 是旧根历史件，不在新根重跑")
+    root = _resolve_root(args.root, args.envelope)
+    envelope = _load_envelope(root, args.envelope)
+    profile = P.resolve_profile(envelope)
+    envelope_id = str(envelope["envelope_id"])
+    ledger = root / "quota" / "ledger.jsonl"
+    ctx = R12Context(root, envelope_id)
+    design = CAL.design_for(version)
+    oracle_path = ctx.relative(design["oracle_relpath"])
+
+    if args.prepare_only:
+        prior_ctx = _readonly_prior_context(args.prior_root, envelope_id)
+        prior = CAL.prior_attempt_manifest(prior_ctx)
+        equivalence = CAL.assert_oracle_v2_equivalence_paths(
+            prior_ctx.relative(CAL.DESIGN_V1["oracle_relpath"]), oracle_path)
+        prior = {**prior, "oracle_equivalence": equivalence}
+        v1_prereg = prior_ctx.read_json(CAL.PREREG_RELPATH)
+        v1_report = prior_ctx.read_json(CAL.REPORT_RELPATH)
+        supersedes = {
+            "prereg_schema": CAL.PREREG_SCHEMA,
+            "prereg_relpath": CAL.PREREG_RELPATH,
+            "prereg_file_sha256": CAL.oracle_sha256(
+                prior_ctx.relative(CAL.PREREG_RELPATH)),
+            "prereg_document_sha256": v1_prereg.get("document_sha256"),
+            "report_relpath": CAL.REPORT_RELPATH,
+            "report_file_sha256": CAL.oracle_sha256(
+                prior_ctx.relative(CAL.REPORT_RELPATH)),
+            "report_verdict": v1_report.get("verdict"),
+            "gap_relpath": CAL.GAP_RELPATH,
+            "gap_file_sha256": CAL.oracle_sha256(
+                prior_ctx.relative(CAL.GAP_RELPATH)),
+            "prior_root": str(prior_ctx.root),
+        }
+        doc = CAL.build_calibration_prereg(
+            ctx=ctx, oracle_path=oracle_path, design=design,
+            supersedes=supersedes, prior_attempt=prior)
+        path = CAL.write_calibration_prereg(ctx, doc, design)
+        permit = CAL.issue_zero_post_permit(ctx, ledger_path=ledger)
+        print(f"controls prepare ok  envelope={envelope_id} design=v2 root={ctx.root}")
+        print(f"  prereg  : {path}")
+        print(f"  sha256  : {doc['document_sha256'][:16]}…")
+        print(f"  oracle  : {doc['oracle']['sha256'][:16]}…")
+        print(f"  prior   : root={prior_ctx.root} files={prior['n_files']} "
+              f"raws={prior['n_raws']} files_sha={prior['files_sha256'][:16]}… "
+              f"raws_sha={prior['raws_sha256'][:16]}…")
+        print(f"  oracle≡v1 max|ΔRMSE|={equivalence['max_abs_diff']!r}（8 block）")
+        print(f"  permit  : {permit['kind']} posts={permit['model_posts_allowed']} "
+              f"refusal={permit['sender_refusal']['code']}")
+        print(f"  ledger  : {ledger} call_rows=0（族历史不计入当前 root）")
+        return 0
+
+    if not args.real_containers:
+        print("BLOCKED 校准会真跑容器：需显式 --real-containers（无模型 POST）",
+              file=sys.stderr)
+        return 2
+    from orchestrator.rsi_r1 import sandbox as SANDBOX
+
+    prior_ctx = None
+    if args.prior_root:
+        prior_ctx = _readonly_prior_context(args.prior_root, envelope_id)
+    report = CAL.run_calibration(
+        ctx, runner=SANDBOX.DockerRunner(), image=args.image or CAL.CAL_IMAGE,
+        ledger_path=ledger, design=design, prior_ctx=prior_ctx,
+        notes=[f"R1.2 v2 校准（envelope={envelope_id}）沿正式 dispatcher/"
+               f"raw/资源账；零项目模型 POST"])
+    print(f"controls envelope={envelope_id} design=v{report['schema_version']}  "
+          f"verdict={report['verdict']}")
+    print(f"  runs={len(report['runs'])} checks={len(report['checks'])} "
+          f"failures={len(report['failures'])}")
+    print(f"  budget runs={report['budget']['total_runs']} "
+          f"steps={report['budget']['total_steps']}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # parser / main
 # ---------------------------------------------------------------------------
 
@@ -494,6 +664,23 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--envelope", default=None)
     pk.add_argument("--json", action="store_true")
     pk.set_defaults(func=cmd_contract)
+
+    pctl = sub.add_parser(
+        "controls",
+        help="T4 校准：新根 v2（--calibration-version v2）；零模型 POST")
+    pctl.add_argument("--root", default=None)
+    pctl.add_argument("--envelope", default=None)
+    pctl.add_argument("--calibration-version", default="v2", choices=("v2",),
+                      help="R1.2 只接受 v2（v1 是旧根历史件，不重跑）")
+    pctl.add_argument("--prepare-only", action="store_true",
+                      help="只写 v2 预注册 + 零 POST permit（不跑容器）")
+    pctl.add_argument("--real-containers", action="store_true",
+                      help="显式确认真跑容器（仍不发任何模型 POST）")
+    pctl.add_argument("--image", default=None,
+                      help="容器镜像（缺省取钉死的校准镜像）")
+    pctl.add_argument("--prior-root", default=None,
+                      help="旧 R1 campaign 根（只读；v2 必须引用其 v1 历史件）")
+    pctl.set_defaults(func=cmd_controls)
 
     ph = sub.add_parser("human", help="人工时间/救援令/assisted（T3）")
     hsub = ph.add_subparsers(dest="human_cmd", required=True)
@@ -559,7 +746,7 @@ def main(argv: "list[str] | None" = None) -> int:
         return int(args.func(args))
     except (Cli12Error, C.ContractError, FAM.FamilyError, P.ProfileError,
             RP.RsiR12CampaignUnsetError, HE.HumanEventError,
-            RT.CampaignWriteRefused, OSError) as exc:
+            RT.CampaignWriteRefused, OSError, CAL.CalibrationError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

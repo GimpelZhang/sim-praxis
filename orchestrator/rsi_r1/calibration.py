@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import sys
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -325,7 +326,13 @@ def load_oracle(path: "Path | str",
     if spec is None or spec.loader is None:
         raise CalibrationError("ORACLE_LOAD", f"{p} 不是可加载的 Python 件")
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # 读只读根（如 R1.2 引用旧 R1 root）时不得落 __pycache__：import 侧零写。
+    prev_bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prev_bytecode
     for attr in ("ORACLE_SCHEMA", "study_a_oracle", "study_b_rmse"):
         if not hasattr(mod, attr):
             raise CalibrationError("ORACLE_INTERFACE", f"oracle 缺 {attr}")
@@ -415,9 +422,22 @@ def verify_prior_attempt(ctx: Any,
 def assert_oracle_v2_equivalence(ctx: Any, *,
                                  design_v1: Mapping[str, Any] = DESIGN_V1,
                                  design_v2: Mapping[str, Any] = DESIGN_V2) -> "dict[str, Any]":
-    """v2 oracle 的 B 参考必须与 v1 逐位相等（≤1e-12）；不等即拒绝签发 v2。"""
-    p1 = _oracle_path(ctx, design_v1)
-    p2 = _oracle_path(ctx, design_v2)
+    """同根版：v1/v2 oracle 都在当前 campaign 下（R1 历史路径）。"""
+    return assert_oracle_v2_equivalence_paths(
+        _oracle_path(ctx, design_v1), _oracle_path(ctx, design_v2),
+        design_v1=design_v1, design_v2=design_v2)
+
+
+def assert_oracle_v2_equivalence_paths(
+        p1: "Path | str", p2: "Path | str", *,
+        design_v1: Mapping[str, Any] = DESIGN_V1,
+        design_v2: Mapping[str, Any] = DESIGN_V2) -> "dict[str, Any]":
+    """v2 oracle 的 B 参考必须与 v1 逐位相等（≤1e-12）；不等即拒绝签发 v2。
+
+    路径版供 R1.2 使用：v1 oracle 在旧（封存只读）root，v2 oracle 在新 root。
+    """
+    p1 = Path(p1)
+    p2 = Path(p2)
     o1 = load_oracle(p1, schema=design_v1["oracle_schema"])
     o2 = load_oracle(p2, schema=design_v2["oracle_schema"])
     out: "dict[str, float]" = {}
@@ -1129,8 +1149,13 @@ def collect_run_checks(*, a_entries, a_specs, ev_a, a_metas,
 def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
                     ledger_path: "Path | str | None" = None,
                     notes: "Iterable[str]" = (),
-                    design: Mapping[str, Any] = DESIGN_V1) -> "dict[str, Any]":
-    """沿正式 dispatcher 跑固定校准组合；返回并落盘报告。"""
+                    design: Mapping[str, Any] = DESIGN_V1,
+                    prior_ctx: Any = None) -> "dict[str, Any]":
+    """沿正式 dispatcher 跑固定校准组合；返回并落盘报告。
+
+    ``prior_ctx``：v2 的 v1 历史件所在根（R1.2 新根场景下旧 root 只读），
+    缺省与 ``ctx`` 相同（R1 同根语义）。
+    """
     ledger = Path(ledger_path) if ledger_path is not None else _default_ledger(ctx)
     prereg = load_calibration_prereg(ctx, design)
     oracle_path = _oracle_path(ctx, design)
@@ -1176,7 +1201,9 @@ def run_calibration(ctx: Any, *, runner: Any, image: str = CAL_IMAGE,
     prior_now = None
     if design["version"] >= 2:
         try:
-            prior_now = verify_prior_attempt(ctx, prereg.get("prior_attempt") or {})
+            prior_now = verify_prior_attempt(
+                prior_ctx if prior_ctx is not None else ctx,
+                prereg.get("prior_attempt") or {})
         except CalibrationError as exc:
             prior_err = str(exc)
 
@@ -1327,6 +1354,8 @@ def _fill_b_saturation(ev_b: "E.BatchEvidence", b_specs,
 
 def _default_ledger(ctx: Any) -> Path:
     from orchestrator.common import runtime_paths as RP
+    if getattr(ctx, "is_r12", False):  # R1.2 profile：独立账 2904
+        return RP.rsi_r12_ledger_path()
     return RP.rsi_r1_ledger_path()
 
 

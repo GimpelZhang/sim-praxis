@@ -27,6 +27,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+from orchestrator.rsi_r1 import analysis_receipt as AR
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import experiments as E
 from orchestrator.rsi_r1 import observations as O
@@ -616,6 +617,150 @@ def _report(plan: C.ResearchPlan, manifest: E.ConfirmManifest,
                     if per_run is not None else None),
         "verdict": ("JUDGE_REJECT" if (not schema_ok or not evidence_ok or not claims_ok)
                     else "JUDGE_OK"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# R1.2 判决：三门 AND（凭据 → 数值 → claim）
+# ---------------------------------------------------------------------------
+
+def judge_study_r12(*, plan: C.ResearchPlan, manifest: E.ConfirmManifest,
+                    artifacts: Mapping[str, Mapping[str, Any]],
+                    submission: "Mapping[str, Any] | None",
+                    receipt_ok: bool, receipt_reasons: Sequence[str],
+                    output: "Mapping[str, Any] | None",
+                    output_error: str = "") -> "dict[str, Any]":
+    """R1.2 判决入口：先凭据、再数值、最后 claim，三者 AND。
+
+    与 legacy 的差别只在**输入来源**：候选数值来自它自己的分析产物（已由
+    ``analysis_receipt`` 校验过来源/视图/执行），宿主从 trusted raw 独立重算
+    后逐字段比对。本函数**不**把维护侧的 ``reference_claims`` 用于任何回包或
+    判决输出；宿主数值只出现在调用方另行落盘的私有件里。
+    """
+    problems: "list[str]" = []
+    checks: "list[dict[str, Any]]" = []
+    if not receipt_ok:
+        problems.append("INVALID_ANALYSIS")
+        checks.append({"id": "R12-RECEIPT", "ok": False,
+                       "detail": list(receipt_reasons)[:8]})
+    else:
+        checks.append({"id": "R12-RECEIPT", "ok": True, "detail": ""})
+    if output is None:
+        if output_error:
+            problems.append(output_error)
+        problems.append("INVALID_ANALYSIS")
+        checks.append({"id": "R12-OUTPUT", "ok": False, "detail": output_error})
+        return _report_r12(plan, manifest, checks, None, problems)
+
+    specs = build_specs(plan, manifest)
+    checks.extend(_check_manifest(plan, manifest, specs))
+    missing = sorted(set(specs) - set(artifacts))
+    extra = sorted(set(artifacts) - set(specs))
+    checks.append({"id": "J-RUN-SET", "ok": not missing and not extra,
+                   "detail": f"missing={missing[:5]} extra={extra[:5]}"})
+    if missing or extra:
+        problems.append("EVIDENCE_INVALID")
+        return _report_r12(plan, manifest, checks, None, problems)
+
+    per_run = recompute_metrics(plan=plan, artifacts=artifacts, specs=specs)
+    host: "dict[str, dict[str, Any]]" = {}
+    for contrast in _contrasts(plan):
+        ref = _judge_contrast(plan, per_run, contrast, [])
+        # 宿主内部以 effect 命名；候选输出/比较器用 estimate——统一别名，
+        # 避免 compare_values 读不到参考数值而崩（而不是安静放过）。
+        host[contrast.id] = {**ref, "estimate": ref.get("effect")}
+
+    numeric_problems: "list[str]" = []
+    # parse_output 规范化后 contrasts 是 {cid: item}；replay_driver 按输出
+    # schema 原样回存为 list。两种合法形态都接，非法形态留给逐项比较报错。
+    raw_contrasts = (output or {}).get("contrasts") or {}
+    if isinstance(raw_contrasts, Mapping):
+        cand = {str(k): v for k, v in raw_contrasts.items()}
+    else:
+        cand = {str(item.get("contrast_id")): item
+                for item in raw_contrasts if isinstance(item, Mapping)}
+    for cid, reference in sorted(host.items()):
+        got = cand.get(cid)
+        if got is None:
+            numeric_problems.append(f"output.{cid}.missing")
+            continue
+        numeric_problems.extend(
+            AR.compare_contrast_identity(got, reference, where=f"output.{cid}"))
+        numeric_problems.extend(
+            AR.compare_values(got, reference, where=f"output.{cid}"))
+        if str(got.get("status")) != str(reference.get("status")):
+            numeric_problems.append(f"output.{cid}.status")
+    checks.append({"id": "R12-NUMERICS", "ok": not numeric_problems,
+                   "detail": numeric_problems[:8]})
+    if numeric_problems:
+        problems.extend(numeric_problems[:8])
+        problems.append("INVALID_NUMERICS")
+
+    schemas = _schema_check(plan, submission, manifest_sha=manifest.sha256)
+    hypotheses = {h.id: {"contrast_id": h.contrast_id,
+                         "metric_id": (plan.primary.metric
+                                       if h.contrast_id == plan.primary.id
+                                       else plan.negative_control.metric
+                                       if plan.negative_control is not None
+                                       else ""),
+                         "proposition": (plan.primary.proposition
+                                         if h.contrast_id == plan.primary.id
+                                         else plan.negative_control.proposition
+                                         if plan.negative_control is not None
+                                         else "")}
+                  for h in plan.hypotheses}
+    claim_problems = ([]
+                      if not submission else
+                      AR.claim_consistency(submission.get("claims") or [],
+                                           output or {}, hypotheses=hypotheses))
+    checks.append({"id": "R12-CLAIM", "ok": not claim_problems,
+                   "detail": claim_problems[:8]})
+    if claim_problems:
+        problems.extend(claim_problems[:8])
+    claim_status = "MATCH" if not claim_problems else "CLAIM_INVALID"
+    if not schemas.get("schema_accepted"):
+        problems.append("SCHEMA_REJECTED")
+    if not bool(schemas.get("schema_accepted")) or claim_status != "MATCH":
+        problems.append("CLAIM_INVALID" if claim_status != "MATCH"
+                        else "SCHEMA_REJECTED")
+    report = _report_r12(plan, manifest, checks, host, problems,
+                         schema=schemas, claim_status=claim_status,
+                         claim_mismatches=claim_problems)
+    return report
+
+
+def _report_r12(plan: C.ResearchPlan, manifest: E.ConfirmManifest,
+                checks: "list[dict[str, Any]]",
+                host: "Mapping[str, Mapping[str, Any]] | None",
+                problems: Sequence[str], *,
+                schema: "Mapping[str, Any] | None" = None,
+                claim_status: str = "MISSING",
+                claim_mismatches: Sequence[str] = ()) -> "dict[str, Any]":
+    """R1.2 判决件：**不含任何维护侧数值**（宿主数值只走私有件）。"""
+    del host  # 私有数值由调用方另行落盘，绝不进本报告
+    by_id = {c["id"]: bool(c["ok"]) for c in checks}
+    layers = {
+        "schema_accepted": bool((schema or {}).get("schema_accepted")),
+        "schema_detail": (schema or {}).get("schema_detail"),
+        "receipt_valid": by_id.get("R12-RECEIPT", False),
+        "evidence_valid": all(c["ok"] for c in checks
+                              if not c["id"].startswith("R12-")),
+        "numerics_valid": by_id.get("R12-NUMERICS", False),
+        "claim_status": claim_status,
+    }
+    ok = (layers["schema_accepted"] and layers["receipt_valid"]
+          and layers["evidence_valid"] and layers["numerics_valid"]
+          and claim_status == "MATCH" and not problems)
+    return {
+        "schema": JUDGE_SCHEMA, "schema_version": SCHEMA_VERSION,
+        "study_id": plan.study_id, "plan_sha256": plan.sha256,
+        "confirm_manifest_sha256": manifest.sha256,
+        "rubric_sha256": R.rubric_sha256(),
+        "layers": layers,
+        "reason_codes": list(dict.fromkeys(str(p) for p in problems)),
+        "claim_mismatches": list(claim_mismatches),
+        "checks": checks,
+        "verdict": "JUDGE_OK" if ok else "JUDGE_REJECT",
     }
 
 

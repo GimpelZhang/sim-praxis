@@ -35,6 +35,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import ensure_private_dir
+from orchestrator.rsi_r1 import analysis_receipt as AR
 from orchestrator.rsi_r1 import closure as CL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import experiments as E
@@ -587,6 +588,12 @@ class CampaignDispatcher:
     def _do_write_artifact(self, action: L.Action) -> "dict[str, Any]":
         response_id, action_sha = self._binding(action)
         doc = action.doc
+        if self._r12() and str(doc["kind"]) in ("design", "analysis") \
+                and self.state.study_state(self.study) != S.ST_EXPLORING:
+            # 冻结后换源码 = 换研究；R1.2 一律拒绝（legacy 语义不变）。
+            return self._fail("SOURCE_FROZEN",
+                              "确认冻结后不得再登记 design/analysis 源码",
+                              side_effect_status="NONE")
         rec = self.state.register_artifact(
             study=self.study, kind=str(doc["kind"]), source=str(doc["source"]),
             response_id=response_id, action_sha256=action_sha)
@@ -681,6 +688,8 @@ class CampaignDispatcher:
 
     # -- 4) analyze ------------------------------------------------------
     def _do_analyze(self, action: L.Action) -> "dict[str, Any]":
+        if self._r12():
+            return self._r12_analyze(action)
         self._binding(action)
         source_sha = _require_sha256(action.doc["source_sha256"],
                                      where="source_sha256")
@@ -727,6 +736,183 @@ class CampaignDispatcher:
         # 真实分析结果」）；这里回传的是宿主原样保存的同一份文档。
         return self._ok(analysis_relpath=rel, n_runs=len(wanted),
                         analysis=doc)
+
+    # -- R1.2 分析凭据（T4） --------------------------------------------
+    def _r12(self) -> bool:
+        return self.profile is not None and bool(
+            getattr(self.profile, "is_r12", False))
+
+    def _artifact_event(self, source_sha: str) -> "dict[str, Any]":
+        for ev in reversed(self.state.journal.events()):
+            if ev.event == "artifact" \
+                    and ev.payload.get("source_sha256") == source_sha:
+                return dict(ev.payload)
+        raise L.LoopError("UNBOUND_SOURCE", f"{source_sha[:12]} 未登记",
+                          terminal=True)
+
+    def _analysis_source(self, source_sha: str) -> str:
+        text = self._source_text(source_sha)
+        actual = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if actual != source_sha:
+            raise L.LoopError("SOURCE_FILE_DRIFT",
+                              "登记源码与磁盘字节不一致", terminal=True)
+        return text
+
+    def _analysis_context(self, phase: str,
+                          allowed: Sequence[str]) -> "SB.AnalysisContext":
+        limits = self.profile.resource_limits
+        if phase == "explore":
+            cap = int(limits.explore_runs_per_study)
+        elif phase == "confirm":
+            cap = int(limits.confirm_runs_per_study)
+        elif phase == "replay":
+            cap = int(limits.replay_runs_per_study)
+        else:
+            raise AssemblyError("PHASE_INVALID", repr(phase))
+        return SB.AnalysisContext(phase=phase, max_runs=cap,
+                                  allowed_run_ids=tuple(sorted(allowed)))
+
+    def _receipt_rel(self, study: str, phase: str) -> str:
+        # host 私有凭据：0600，候选不可写；固定文件名按 study/phase 唯一。
+        return f"private/receipts/{study}-{phase}.json"
+
+    def _store_receipt(self, receipt: Mapping[str, Any]) -> "dict[str, Any]":
+        rel = self._receipt_rel(str(receipt["study_id"]), str(receipt["phase"]))
+        data = (json.dumps(dict(receipt), ensure_ascii=False, sort_keys=True,
+                           indent=1, allow_nan=False) + "\n").encode("utf-8")
+        _write_private(self.ctx.relative(rel), data)
+        return {"relpath": rel, "sha256": AR.sha256_bytes(data),
+                "validity": bool(receipt.get("validity")),
+                "phase": receipt.get("phase"),
+                "reason_codes": list(receipt.get("reason_codes") or [])}
+
+    @staticmethod
+    def _entry_run_id(entry: "SB.ViewEntry") -> str:
+        name = Path(entry.relpath).name
+        if name.endswith(".meta.json"):
+            return name[: -len(".meta.json")]
+        if name.endswith(".jsonl"):
+            return name[: -len(".jsonl")]
+        return name
+
+    @classmethod
+    def _entries_run_ids(cls, entries: Sequence["SB.ViewEntry"]) -> "list[str]":
+        return sorted({cls._entry_run_id(e) for e in entries})
+
+    @classmethod
+    def _entry_inputs(cls, entries: Sequence["SB.ViewEntry"]
+                      ) -> "list[dict[str, Any]]":
+        return [{"run_id": cls._entry_run_id(entry),
+                 "relative_path": entry.relpath, "sha256": entry.sha256}
+                for entry in entries]
+
+    def _r12_plan_contrast_ids(self, plan: C.ResearchPlan) -> "list[str]":
+        ids = [plan.primary.id]
+        if plan.negative_control is not None:
+            ids.append(plan.negative_control.id)
+        return ids
+
+    def _r12_analysis(self, *, phase: str, source_sha: str,
+                      run_ids: Sequence[str], plan: C.ResearchPlan,
+                      manifest_sha: "str | None") -> "tuple[dict[str, Any], dict[str, Any], bytes]":
+        """执行冻结分析并落凭据；返回 ``(output_doc, receipt_summary, bytes)``。
+
+        预执行拒绝（视图/作用域）抛 ``SandboxError``；执行后失败由调用方按
+        ``SandboxError`` 转成公开回包。凭据只在结构/身份/执行全过时才 validity。
+        """
+        entries: "list[SB.ViewEntry]" = []
+        for run_id in run_ids:
+            entries.extend(self._run_view_entries(run_id))
+        context = self._analysis_context(phase, run_ids)
+        text = self._analysis_source(source_sha)
+        if self.resource_ledger is not None:
+            self.resource_ledger.reserve_sandbox(
+                self.study, purpose=f"analysis-{phase}")
+        ev = SB.run_analysis(
+            text, entries, evidence_root=self.ctx.subdir("observations"),
+            work_root=self.ctx.subdir("trials") / f"analysis-{phase}-{source_sha[:12]}",
+            runner=self.runner, image=self.image, retain_bytes=True,
+            analysis_context=context)
+        payload = ev.blobs.get(ANALYSIS_OUTPUT)
+        output_doc: "dict[str, Any] | None" = None
+        reasons: "list[str]" = []
+        if ev.timed_out:
+            reasons.append("ANALYSIS_TIMEOUT")
+        if int(ev.exit_code) != 0:
+            reasons.append("ANALYSIS_EXIT_NONZERO")
+        if payload is None:
+            reasons.append("ANALYSIS_OUTPUT_MISSING")
+        else:
+            try:
+                raw_doc = json.loads(payload.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                reasons.append("ANALYSIS_OUTPUT_BAD_JSON")
+            else:
+                try:
+                    parsed = AR.parse_output(
+                        raw_doc, expected_run_ids=run_ids,
+                        expected_contrasts=self._r12_plan_contrast_ids(plan))
+                    output_doc = dict(raw_doc)
+                    output_doc["contrasts"] = [
+                        parsed["contrasts"][cid]
+                        for cid in self._r12_plan_contrast_ids(plan)]
+                except AR.ReceiptError as exc:
+                    reasons.append(exc.code)
+        output_bytes = payload or b""
+        art = self._artifact_event(source_sha)
+        receipt = AR.build_receipt(
+            profile_id=str(self.profile.profile_id), study_id=self.study,
+            phase=phase, plan_sha256=plan.sha256,
+            confirm_manifest_sha256=manifest_sha,
+            source_sha256=source_sha,
+            registered_reply_id=art.get("response_id"),
+            registered_action_id=art.get("action_sha256"),
+            producer=str(art.get("producer") or ""),
+            inputs=self._entry_inputs(entries),
+            execution_id=ev.container, sandbox_status=("failed" if reasons else "ok"),
+            exit_code=int(ev.exit_code), timed_out=bool(ev.timed_out),
+            output_bytes=output_bytes, output_doc=output_doc,
+            validity=not reasons, reason_codes=reasons)
+        summary = self._store_receipt(receipt)
+        if output_doc is not None:
+            rel = f"analysis/{phase}-{source_sha[:12]}-{_sha_doc(output_doc)[:12]}.json"
+            self.ctx.write_json(rel, output_doc)
+            summary["output_relpath"] = rel
+            pointer = {"schema": "simpraxis.rsi_r1.analysis_pointer.v1",
+                       "schema_version": 1, "study_id": self.study,
+                       "phase": phase, "relpath": rel,
+                       "sha256": AR.sha256_bytes(output_bytes)}
+            data = (json.dumps(pointer, ensure_ascii=False, sort_keys=True,
+                               indent=1) + "\n").encode("utf-8")
+            _write_private(self.ctx.relative(
+                f"private/analysis/{self.study}-{phase}.json"), data)
+        return (output_doc or {}), summary, output_bytes
+
+    def _r12_analyze(self, action: L.Action) -> "dict[str, Any]":
+        self._binding(action)
+        source_sha = _require_sha256(action.doc["source_sha256"],
+                                     where="source_sha256")
+        plan = self._current_plan(phase="explore")
+        wanted = [str(r) for r in action.doc["run_ids"]]
+        if not wanted:
+            return self._fail("ANALYSIS_RUNS_MISMATCH", "run_ids 为空",
+                              side_effect_status="NONE")
+        try:
+            output, summary, _ = self._r12_analysis(
+                phase="explore", source_sha=source_sha, run_ids=wanted,
+                plan=plan, manifest_sha=None)
+        except SB.SandboxError as exc:
+            # 视图/作用域等**执行前**拒绝：零副作用，可自修。
+            return self._fail(exc.code, exc.detail, side_effect_status="NONE")
+        if not summary["validity"]:
+            tail = next((str(c) for c in summary["reason_codes"]), "")
+            return self._fail("ANALYSIS_FAILED",
+                              f"{tail}; 候选分析未通过执行有效门",
+                              side_effect_status="KNOWN_COMPLETE")
+        # 只回候选自己的输出与它的凭据摘要；宿主不填参考答案。
+        return self._ok(analysis_relpath=summary.get("output_relpath"),
+                        n_runs=len(wanted), analysis=output,
+                        analysis_receipt=summary)
 
     # -- 5) freeze_confirm ----------------------------------------------
     def _do_freeze_confirm(self, action: L.Action) -> "dict[str, Any]":
@@ -793,7 +979,8 @@ class CampaignDispatcher:
             self.admission.require_lane_space(confirm_runs=n, replay_runs=n)
         lock = self.state.freeze_confirm(study=self.study, plan=plan.to_dict(),
                                          design_sha256=design_sha,
-                                         analysis_sha256=analysis_sha)
+                                         analysis_sha256=analysis_sha,
+                                         r12=self._r12())
         if seed_is_new:
             _write_private(seed_path, (seed + "\n").encode("utf-8"))
         # 冻结件只留 plan sha；确认计划原文落到 confirm/ 供重入与判据复算
@@ -865,6 +1052,10 @@ class CampaignDispatcher:
         self.last_batch = {"phase": "confirm", "n_runs": len(run_ids),
                            "blocked": False, "run_ids": run_ids[:64],
                            "manifest_sha256": _sha_doc(manifest_out)}
+        if self._r12():
+            # R1.2：自动在**确认批完整视图**上执行冻结分析并落凭据；
+            # 不再回灌任何维护侧参考值（§5.1）。
+            return self._r12_confirm_payload(run_ids, result_sha, plan, manifest)
         # 第 8 步 claims 要逐字段复现宿主从**确认批**重算的值，但候选从未见过
         # 确认批的数值（观测只在容器里、run_confirm 只回 id）：不把宿主用公开
         # 估计量算出的参考值回灌，submit 分支在物理上不可能通过。这里给的是
@@ -874,8 +1065,36 @@ class CampaignDispatcher:
         return self._ok(run_ids_head=run_ids[:8], n_runs=len(ordered),
                         result_sha256=result_sha, references=references)
 
+    def _r12_confirm_payload(self, run_ids: "list[str]", result_sha: str,
+                             plan: C.ResearchPlan,
+                             manifest: "E.ConfirmManifest") -> "dict[str, Any]":
+        lock = self.state.confirm_lock(self.study)
+        source_sha = str(lock.analysis_source_sha256)
+        if plan.analysis_source_sha is not None \
+                and plan.analysis_source_sha != source_sha:
+            return self._fail("SOURCE_SHA_MISMATCH",
+                              "冻结计划与 LOCK 的分析源码不一致",
+                              side_effect_status="KNOWN_COMPLETE")
+        try:
+            output, summary, _ = self._r12_analysis(
+                phase="confirm", source_sha=source_sha, run_ids=run_ids,
+                plan=plan, manifest_sha=manifest.sha256)
+        except SB.SandboxError as exc:
+            return self._fail(exc.code, exc.detail,
+                              side_effect_status="KNOWN_COMPLETE")
+        if not summary["validity"]:
+            return self._fail("ANALYSIS_FAILED",
+                              "确认批冻结分析未通过执行有效门；"
+                              "候选不得借用宿主数值继续提交",
+                              side_effect_status="KNOWN_COMPLETE")
+        return self._ok(run_ids_head=run_ids[:8], n_runs=len(run_ids),
+                        result_sha256=result_sha,
+                        candidate_output=output, analysis_receipt=summary)
+
     # -- 7) submit_claim -------------------------------------------------
     def _do_submit_claim(self, action: L.Action) -> "dict[str, Any]":
+        if self._r12():
+            return self._r12_submit(action)
         response_id, _ = self._binding(action)
         claims = [dict(c) for c in action.doc["claims"]]
         report_text = str(action.doc["report_text"])
@@ -906,6 +1125,121 @@ class CampaignDispatcher:
         return self._ok(judge_verdict=report["verdict"], verdict=verdict,
                         claim_status=report["layers"].get("claim_status"),
                         evidence_valid=report["layers"].get("evidence_valid"))
+
+    def _r12_submit(self, action: L.Action) -> "dict[str, Any]":
+        """R1.2 提交：凭据 → 数值 → claim 三门 AND；回包不含宿主数值。"""
+        response_id, _ = self._binding(action)
+        claims = [dict(c) for c in action.doc["claims"]]
+        report_text = str(action.doc["report_text"])
+        plan = self._current_plan(phase="confirm")
+        manifest = self.confirm_manifest or self._frozen_manifest_raw()
+        if manifest is None:
+            return self._fail("CONFIRM_NOT_LOCKED", "缺确认 manifest",
+                              side_effect_status="NONE")
+        lock = self.state.confirm_lock(self.study)
+        source_sha = str(lock.analysis_source_sha256)
+        submission = {
+            "schema": J.SUBMISSION_SCHEMA, "study_id": self.study,
+            "plan_sha256": plan.sha256,
+            "confirm_manifest_sha256": manifest.sha256,
+            "primary_contrast_id": plan.primary.id, "claims": claims}
+
+        receipt = None
+        receipt_rel = self._receipt_rel(self.study, "confirm")
+        if self.ctx.exists(receipt_rel):
+            doc = self.ctx.read_json(receipt_rel)
+            receipt = dict(doc) if isinstance(doc, Mapping) else None
+        output_bytes = b""
+        output_norm: "dict[str, Any] | None" = None
+        output_error = "ANALYSIS_OUTPUT_MISSING"
+        pointer_rel = f"private/analysis/{self.study}-confirm.json"
+        pointer = (dict(self.ctx.read_json(pointer_rel))
+                   if self.ctx.exists(pointer_rel) else {})
+        if pointer:
+            out_rel = str(pointer.get("relpath") or "")
+            try:
+                output_bytes = self.ctx.relative(out_rel).read_bytes()
+            except OSError:
+                output_bytes = b""
+                output_error = "ANALYSIS_OUTPUT_MISSING"
+            else:
+                try:
+                    raw = json.loads(output_bytes.decode("utf-8"))
+                    output_norm = AR.parse_output(
+                        raw, expected_run_ids=sorted(self._confirm_artifacts()),
+                        expected_contrasts=self._r12_plan_contrast_ids(plan))
+                    output_error = ""
+                except (ValueError, UnicodeDecodeError):
+                    output_error = "ANALYSIS_OUTPUT_BAD_JSON"
+                except AR.ReceiptError as exc:
+                    output_error = exc.code
+
+        run_ids = sorted(self._confirm_artifacts())
+        entries: "list[SB.ViewEntry]" = []
+        for run_id in run_ids:
+            entries.extend(self._run_view_entries(run_id))
+        try:
+            source_file_sha = hashlib.sha256(
+                self.ctx.relative(f"designs/{source_sha}.py").read_bytes()
+            ).hexdigest()
+        except OSError:
+            source_file_sha = ""
+        art = self._artifact_event(source_sha)
+        expect = AR.ReceiptExpectation(
+            study_id=self.study, phase="confirm", plan_sha256=plan.sha256,
+            source_sha256=source_sha, source_file_sha256=source_file_sha,
+            producer=str(art.get("producer") or ""),
+            registered_reply_id=art.get("response_id"),
+            registered_action_id=art.get("action_sha256"),
+            confirm_manifest_sha256=manifest.sha256,
+            allowed_run_ids=tuple(run_ids),
+            expected_inputs=tuple(self._entry_inputs(entries)),
+            output_bytes=output_bytes,
+            execution_id=str((receipt or {}).get("execution_id") or ""),
+            exit_code=int((receipt or {}).get("exit_code", -1)),
+            timed_out=bool((receipt or {}).get("timed_out", False)))
+        if receipt is None:
+            receipt_ok, receipt_reasons = False, ["NO_CONFIRM_RECEIPT"]
+        else:
+            receipt_ok, receipt_reasons = AR.validate_receipt(receipt, expect)
+
+        report = J.judge_study_r12(
+            plan=plan, manifest=manifest, artifacts=self._confirm_artifacts(),
+            submission=submission, receipt_ok=receipt_ok,
+            receipt_reasons=receipt_reasons, output=output_norm,
+            output_error=output_error)
+        self.state.submit_claim(study=self.study, claims=claims,
+                                report_text=report_text,
+                                response_id=response_id)
+        CL.write_claim_submission(self.ctx, self.study, submission)
+        CL.write_judge_report(self.ctx, self.study, report)
+        verdict = self._verdict_r12(report)
+        self.state.conclude(self.study, verdict,
+                            reason=f"judge {report['verdict']}")
+        layers = report.get("layers") or {}
+        return self._ok(
+            judge_verdict=report["verdict"], verdict=verdict,
+            claim_status=layers.get("claim_status"),
+            receipt_valid=layers.get("receipt_valid"),
+            numerics_valid=layers.get("numerics_valid"),
+            evidence_valid=layers.get("evidence_valid"),
+            reason_codes=list(report.get("reason_codes") or [])[:8],
+            claim_mismatches=list(report.get("claim_mismatches") or [])[:8])
+
+    def _verdict_r12(self, report: Mapping[str, Any]) -> str:
+        layers = report.get("layers") or {}
+        if not layers.get("schema_accepted"):
+            return S.ST_INVALID
+        if not layers.get("receipt_valid"):
+            return S.ST_INVALID
+        if not layers.get("numerics_valid"):
+            return S.ST_INVALID
+        if not layers.get("evidence_valid"):
+            return S.ST_INVALID
+        if report.get("verdict") == "JUDGE_OK" \
+                and layers.get("claim_status") == "MATCH":
+            return S.ST_VERIFIED
+        return S.ST_VALID_FAIL
 
     def _verdict(self, report: Mapping[str, Any]) -> str:
         layers = report.get("layers") or {}
