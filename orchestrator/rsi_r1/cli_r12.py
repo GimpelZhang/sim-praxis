@@ -34,7 +34,9 @@ from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.gateway import quota_ledger as QL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import family as FAM
+from orchestrator.rsi_r1 import human_events as HE
 from orchestrator.rsi_r1 import profiles as P
+from orchestrator.rsi_r1 import runtime as RT
 
 PLAN_PATH_R12 = Path.home() / "文档" / "RSI_R1.2_Plan_detailed.md"
 
@@ -382,6 +384,83 @@ def cmd_contract(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# human（T3）：人工时间/救援令/assisted 的真实 CLI 面
+# ---------------------------------------------------------------------------
+
+def _human_log(root: Path) -> HE.HumanEventLog:
+    _load_envelope(root)
+    ctx = RT.CampaignContext(envelope_id=str(root.name), root=root,
+                             protected_roots=RT.protected_roots_tuple())
+    return HE.load(ctx)
+
+
+def cmd_human_begin(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    log = _human_log(root)
+    ev = log.begin(kind=args.kind, actor=args.actor, reason=args.reason,
+                   artifact_refs=tuple(args.artifact or ()),
+                   start_utc=args.start_utc, study=args.study,
+                   touch=args.touch)
+    print(json.dumps(ev.as_dict(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_human_end(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    ev = _human_log(root).end(event_id=args.event_id, end_utc=args.end_utc)
+    print(json.dumps(ev.as_dict(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_human_rescue(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    ev = _human_log(root).record_rescue_order(
+        actor=args.actor, reason=args.reason, order_ref=args.order_ref,
+        start_utc=args.start_utc, end_utc=args.end_utc, study=args.study,
+        touch=args.touch)
+    print(json.dumps(ev.as_dict(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_human_adjudicate(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    success = bool(args.success)
+    if args.failure:
+        success = False
+    ev = _human_log(root).adjudicate_rescue(
+        event_id=args.event_id, success=success, actor=args.actor,
+        evidence_ref=args.evidence_ref)
+    print(json.dumps(ev.as_dict(), ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_human_summary(args: argparse.Namespace) -> int:
+    root = _resolve_root(args.root, args.envelope)
+    summary = _human_log(root).summary()
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_human_assisted(args: argparse.Namespace) -> int:
+    """把关键解释/代码修订（可选含实质救援）推进为 ``ASSISTED``。
+
+    ``assisted`` 是单向门：推进后不可由本 CLI 清除；纯运维不得触发。
+    """
+    root = _resolve_root(args.root, args.envelope)
+    log = _human_log(root)
+    from orchestrator.rsi_r1.state import load_state  # 局部导入避免环
+    state = load_state(RT.CampaignContext(
+        envelope_id=str(root.name), root=root,
+        protected_roots=RT.protected_roots_tuple()))
+    applied = log.apply_assisted_rule(state, args.event_id,
+                                      include_rescue=bool(args.include_rescue))
+    print(json.dumps({"event_id": args.event_id, "assisted": applied,
+                      "include_rescue": bool(args.include_rescue)},
+                     ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # parser / main
 # ---------------------------------------------------------------------------
 
@@ -415,6 +494,61 @@ def build_parser() -> argparse.ArgumentParser:
     pk.add_argument("--envelope", default=None)
     pk.add_argument("--json", action="store_true")
     pk.set_defaults(func=cmd_contract)
+
+    ph = sub.add_parser("human", help="人工时间/救援令/assisted（T3）")
+    hsub = ph.add_subparsers(dest="human_cmd", required=True)
+
+    def _root_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--root", default=None)
+        p.add_argument("--envelope", default=None)
+
+    hb = hsub.add_parser("begin", help="开始一条人工事件（未结束不填 0）")
+    _root_args(hb)
+    hb.add_argument("--kind", required=True, choices=list(HE.KINDS))
+    hb.add_argument("--actor", required=True)
+    hb.add_argument("--reason", required=True)
+    hb.add_argument("--study", default=None)
+    hb.add_argument("--touch", default=None, choices=list(HE.ASSISTED_TOUCHES))
+    hb.add_argument("--artifact", action="append", default=None)
+    hb.add_argument("--start-utc", default=None)
+    hb.set_defaults(func=cmd_human_begin)
+
+    hd = hsub.add_parser("end", help="结束一条人工事件")
+    _root_args(hd)
+    hd.add_argument("--event-id", required=True)
+    hd.add_argument("--end-utc", default=None)
+    hd.set_defaults(func=cmd_human_end)
+
+    hr = hsub.add_parser("rescue", help="登记救援令（success 恒 False，需裁决）")
+    _root_args(hr)
+    hr.add_argument("--actor", required=True)
+    hr.add_argument("--reason", required=True)
+    hr.add_argument("--order-ref", required=True)
+    hr.add_argument("--study", default=None)
+    hr.add_argument("--touch", default=None, choices=list(HE.ASSISTED_TOUCHES))
+    hr.add_argument("--start-utc", default=None)
+    hr.add_argument("--end-utc", default=None)
+    hr.set_defaults(func=cmd_human_rescue)
+
+    ha = hsub.add_parser("adjudicate", help="外部裁决救援令成败（一次性）")
+    _root_args(ha)
+    ha.add_argument("--event-id", required=True)
+    ha.add_argument("--success", action="store_true")
+    ha.add_argument("--failure", action="store_true")
+    ha.add_argument("--actor", required=True)
+    ha.add_argument("--evidence-ref", required=True)
+    ha.set_defaults(func=cmd_human_adjudicate)
+
+    hs = hsub.add_parser("summary", help="人工时间汇总（未知事件不填 0）")
+    _root_args(hs)
+    hs.set_defaults(func=cmd_human_summary)
+
+    has_ = hsub.add_parser("assisted", help="实质接触 → ASSISTED（单向）")
+    _root_args(has_)
+    has_.add_argument("--event-id", required=True)
+    has_.add_argument("--include-rescue", action="store_true",
+                      help="实质救援（touch=code/interpretation）也算接触")
+    has_.set_defaults(func=cmd_human_assisted)
     return p
 
 
@@ -424,7 +558,8 @@ def main(argv: "list[str] | None" = None) -> int:
     try:
         return int(args.func(args))
     except (Cli12Error, C.ContractError, FAM.FamilyError, P.ProfileError,
-            RP.RsiR12CampaignUnsetError, OSError) as exc:
+            RP.RsiR12CampaignUnsetError, HE.HumanEventError,
+            RT.CampaignWriteRefused, OSError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

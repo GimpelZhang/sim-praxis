@@ -19,6 +19,7 @@ R1 campaign，语义按 Plan §8.4 重写；旧模块保持不动）：
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -28,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from orchestrator.rsi_r1 import attempts as ATT
+
 HEARTBEAT_INTERVAL_S = 60
 SILENCE_LIMIT_S = 300
 
@@ -35,12 +38,16 @@ STATE_HEARTBEAT = "worker_heartbeat.json"
 STATE_WATCHER = "watchdog.json"
 STATE_TEARDOWN = "watchdog_teardown.json"
 STATE_PAUSE = "pause.json"
+STATE_COMPLETED = "worker_completed.json"
 EVENTS = "watchdog_events.jsonl"
 
 ALIVE = "ALIVE"
 DEATH = "DEATH"
 SILENCE = "SILENCE"
 MISSING = "MISSING"
+COMPLETED = "COMPLETED"
+
+CRASH_SCHEMA = "simpraxis.rsi_r1.watcher_crash_note.v1"
 
 
 def utc_now_z() -> str:
@@ -109,10 +116,15 @@ class Heartbeat:
     """worker 侧心跳写入器：每 60 秒一次，批次内逐 run 也走这里。"""
 
     def __init__(self, state_dir: "Path | str", *, owner: str = "worker",
-                 now: Callable[[], str] = utc_now_z) -> None:
+                 now: Callable[[], str] = utc_now_z,
+                 envelope_id: str = "", lane: str = "",
+                 attempt_id: str = "") -> None:
         self.state_dir = Path(state_dir)
         self.owner = owner
         self.now = now
+        self.envelope_id = str(envelope_id)
+        self.lane = str(lane)
+        self.attempt_id = str(attempt_id)
         self.path = self.state_dir / STATE_HEARTBEAT
         self._n = 0
 
@@ -122,6 +134,10 @@ class Heartbeat:
         doc = {"schema": "simpraxis.rsi_r1.heartbeat.v1", "schema_version": 1,
                "owner": self.owner, "pid": os.getpid(),
                "ts_iso": self.now(), "seq": self._n, "phase": str(phase),
+               # T3 握手身份：哪一次尝试的心跳。旧测试不填则为空串。
+               "envelope_id": self.envelope_id, "lane": self.lane,
+               "attempt_id": self.attempt_id,
+               "process_start": ATT.process_start_identity(),
                "detail": dict(detail or {})}
         _atomic_json(self.path, doc)
         return doc
@@ -176,6 +192,114 @@ def resume_dispatch(state_dir: "Path | str", *, actor: str, reason: str,
     _append_jsonl(state / EVENTS, {"ts_iso": now(), "event": "resumed",
                                    "actor": actor, "reason": reason})
     return {"resumed": True, "actor": actor}
+
+
+# ---------------------------------------------------------------------------
+# 完成握手（T3）：worker 写 completed 件并引用终态报告 sha256
+# ---------------------------------------------------------------------------
+
+def _safe_component(value: Any) -> bool:
+    text = str(value or "")
+    return bool(text) and text not in (".", "..") and "/" not in text \
+        and "\\" not in text and "\x00" not in text
+
+
+def read_completion(state_dir: "Path | str") -> "dict[str, Any] | None":
+    return _read_json(Path(state_dir) / STATE_COMPLETED)
+
+
+def validate_completion(state_dir: "Path | str",
+                        beat: "Mapping[str, Any] | None"
+                        ) -> "tuple[bool, str, dict[str, Any] | None]":
+    """校验完成握手：返回 ``(ok, reason, doc)``。
+
+    绑定四件事：心跳与完成件是**同一次尝试**（envelope/lane/attempt/pid），
+    报告路径由身份推导（不信自述 relpath），报告字节 sha 与完成件一致，
+    报告的终态字段与完成件自述一致。任一不符即无效——旧尝试的心跳不能
+    给新尝试作证，也不能凭一个孤立文件宣告完成。
+    """
+    doc = read_completion(state_dir)
+    if doc is None:
+        return False, "no_completion", None
+    if doc.get("schema") != ATT.COMPLETION_SCHEMA:
+        return False, "schema_mismatch", doc
+    lane, attempt = doc.get("lane"), doc.get("attempt_id")
+    if not _safe_component(lane) or not _safe_component(attempt):
+        return False, "identity_invalid", doc
+    if beat is not None:
+        if not _safe_component(beat.get("attempt_id")):
+            return False, "heartbeat_without_attempt", doc
+        if beat.get("attempt_id") != attempt:
+            return False, "attempt_mismatch", doc
+        if beat.get("lane") != lane:
+            return False, "lane_mismatch", doc
+        if doc.get("envelope_id") != beat.get("envelope_id"):
+            return False, "envelope_mismatch", doc
+        if beat.get("pid") != doc.get("pid"):
+            return False, "pid_mismatch", doc
+        beat_start, doc_start = beat.get("process_start"), doc.get("process_start")
+        if beat_start and doc_start and beat_start != doc_start:
+            # 同 pid 不同进程（pid 复用）：旧心跳不能给新进程的完成件作证
+            return False, "process_start_mismatch", doc
+    root = Path(state_dir).parent
+    relpath = f"attempts/{lane}/{attempt}/report.json"
+    if doc.get("report_relpath") != relpath:
+        return False, "relpath_mismatch", doc
+    report = root / "attempts" / lane / attempt / "report.json"
+    try:
+        report.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False, "report_outside_root", doc
+    if not report.is_file():
+        return False, "report_missing", doc
+    sha = hashlib.sha256(report.read_bytes()).hexdigest()
+    if sha != doc.get("report_sha256"):
+        return False, "report_sha_mismatch", doc
+    report_doc = _read_json(report) or {}
+    if report_doc.get("attempt_id") != attempt \
+            or report_doc.get("lane") != lane:
+        return False, "report_identity_mismatch", doc
+    if report_doc.get("status") not in ATT.CLEAN_STATUSES:
+        return False, "report_not_terminal", doc
+    if report_doc.get("ended_at_utc") != doc.get("completed_at_utc"):
+        return False, "timestamp_mismatch", doc
+    return True, "", doc
+
+
+def write_crash_note(state_dir: "Path | str", *, outcome: str,
+                     beat: "Mapping[str, Any] | None",
+                     completion_reason: str,
+                     now: Callable[[], str] = utc_now_z
+                     ) -> "dict[str, Any] | None":
+    """监护者代写的崩溃补记：一次尝试只写一次，命名由尝试 id 推导。
+
+    报告缺失时**不编造** worker 完成时间/结果：只记录监护者看到了什么。
+    """
+    attempt = "unknown"
+    if beat is not None and _safe_component(beat.get("attempt_id")):
+        attempt = str(beat["attempt_id"])
+    path = Path(state_dir) / f"crash_{attempt}.json"
+    if path.exists():
+        return _read_json(path)
+    doc = {"schema": CRASH_SCHEMA, "schema_version": 1,
+           "attempt_id": attempt,
+           "lane": str((beat or {}).get("lane") or ""),
+           "outcome": str(outcome),
+           "watcher_pid": os.getpid(),
+           "ts_iso": now(),
+           "worker_authored": False,
+           "authored_by": "watchdog",
+           "completion_reason": str(completion_reason),
+           "heartbeat": dict(beat or {}),
+           "note": "worker 未留下有效完成握手即消失；完成时刻与结果未知，"
+                   "由看门狗补记，不伪造 worker 报告。"}
+    _atomic_json(path, doc)
+    _append_jsonl(Path(state_dir) / EVENTS, {"ts_iso": doc["ts_iso"],
+                                             "event": "crash_note",
+                                             "attempt_id": attempt,
+                                             "completion_reason":
+                                                 completion_reason})
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -235,10 +359,16 @@ class Watcher:
         if not self._state.first_seen_utc:
             self._state.first_seen_utc = now_z
         beat = _read_json(self.state_dir / STATE_HEARTBEAT)
+        comp_ok, comp_reason, comp_doc = validate_completion(self.state_dir, beat)
         outcome = ALIVE
         detail: "dict[str, Any]" = {}
         last_beat_ts = None
-        if beat is None:
+        if comp_ok:
+            # 完成握手有效：这是**干净结束**，先于死 pid 判定，且绝不暂停。
+            outcome = COMPLETED
+            detail.update({"attempt_id": (comp_doc or {}).get("attempt_id"),
+                           "completion_reason": comp_reason})
+        elif beat is None:
             outcome = MISSING
             age = (now - parse_z(self._state.first_seen_utc)).total_seconds()
             detail["since_first_seen_s"] = age
@@ -267,6 +397,13 @@ class Watcher:
             _append_jsonl(self.evidence_path, {
                 "ts_iso": now_z, "event": outcome.lower(), "detail": detail,
                 "ticks": self._state.ticks})
+        if outcome == DEATH:
+            # 进程被强杀/消失且没有有效完成握手 → 监护者代写崩溃补记
+            # （worker 自己不写；完成时刻未知，不伪造）。
+            detail["crash_note"] = (
+                write_crash_note(self.state_dir, outcome=outcome, beat=beat,
+                                 completion_reason=comp_reason,
+                                 now=self.config.now) or {}).get("schema", "")
         if outcome in (DEATH, SILENCE) and self.config.pause_on_silence:
             pause_dispatch(self.state_dir, reason=outcome.lower(),
                            source="watchdog", evidence=detail, now=self.config.now)
@@ -276,10 +413,12 @@ class Watcher:
             "schema": "simpraxis.rsi_r1.watchdog_state.v1", "schema_version": 1,
             "pid": os.getpid(), "ts_iso": now_z, "ticks": self._state.ticks,
             "state": outcome, "detail": detail,
+            "completed": comp_ok, "completion_reason": comp_reason,
             "heartbeat_interval_s": self.config.heartbeat_interval_s,
             "silence_limit_s": self.config.silence_limit_s,
             "first_seen_utc": self._state.first_seen_utc})
         return {"state": outcome, "detail": detail, "ticks": self._state.ticks,
+                "completed": comp_ok,
                 "paused": read_pause(self.state_dir) is not None}
 
     # ---- 生命周期 ----
@@ -299,9 +438,14 @@ class Watcher:
 
     def _loop(self) -> None:
         try:
-            self.tick()
-            while not self._stop.wait(self.config.poll_s):
-                self.tick()
+            while True:
+                result = self.tick()
+                if result["state"] == COMPLETED:
+                    # worker 已留下有效完成握手：监护者退场，不暂停。
+                    self._teardown("worker_completed")
+                    return
+                if self._stop.wait(self.config.poll_s):
+                    return
         except BaseException as exc:  # noqa: BLE001 —— 任何异常都必须 teardown
             self._tick_error = exc
             self._teardown("exception", detail=repr(exc))
@@ -320,7 +464,9 @@ class Watcher:
         """前台监护循环：SIGINT/异常/正常完成都写 teardown。"""
         try:
             while max_ticks is None or self._state.ticks < max_ticks:
-                self.tick()
+                result = self.tick()
+                if result["state"] == COMPLETED:
+                    return self._teardown("worker_completed")
                 if max_ticks is not None and self._state.ticks >= max_ticks:
                     break
                 time.sleep(self.config.poll_s)

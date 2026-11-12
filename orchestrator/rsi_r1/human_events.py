@@ -204,7 +204,8 @@ class HumanEventLog:
     def record_rescue_order(self, *, actor: str, reason: str,
                             order_ref: str, start_utc: "str | None" = None,
                             end_utc: "str | None" = None,
-                            study: "str | None" = None) -> HumanEvent:
+                            study: "str | None" = None,
+                            touch: "str | None" = None) -> HumanEvent:
         """登记一条救援令：``success`` 恒为 ``False``，且单独成行。
 
         救援令**不是**科学成功，也**不**自动解锁储备；只有另一次显式裁决
@@ -214,7 +215,7 @@ class HumanEventLog:
             raise HumanEventError("MISSING_KEY", "order_ref 不得为空")
         ev = self.begin(kind="rescue", actor=actor, reason=reason,
                         artifact_refs=(order_ref,), start_utc=start_utc,
-                        study=study)
+                        study=study, touch=touch)
         return self.end(event_id=ev.event_id,
                         end_utc=end_utc or start_utc or self.journal.clock())
 
@@ -275,14 +276,19 @@ class HumanEventLog:
                 f"未结束人工事件 {summary['unknown_event_ids'][:5]}；"
                 "结案不得填 0、不得估算")
 
-    def apply_assisted_rule(self, state: Any, event_id: str) -> bool:
+    def apply_assisted_rule(self, state: Any, event_id: str, *,
+                            include_rescue: bool = False) -> bool:
         """关键解释/代码修订触发 ``ASSISTED``；纯运维不触发。
 
-        返回是否实际把 study 推进到 ``ASSISTED``。``state`` 是
+        ``include_rescue=True`` 时，**实质性救援**（touch 为 code/interpretation）
+        同样触发（R1.2 T3）；无效救援/运维命令仍不触发。返回是否实际把 study
+        推进到 ``ASSISTED``。``state`` 是
         :class:`orchestrator.rsi_r1.state.ResearchState`（鸭子类型即可）。
         """
         ev = self.get(event_id)
-        if ev.kind != "scientific_review":
+        kinds = ("scientific_review", "rescue") if include_rescue \
+            else ("scientific_review",)
+        if ev.kind not in kinds:
             return False
         if ev.touch not in ASSISTED_TOUCHES:
             return False
