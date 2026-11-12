@@ -549,8 +549,16 @@ class CampaignDispatcher:
         out.update(fields)
         return out
 
-    def _fail(self, code: str, message: str = "") -> "dict[str, Any]":
-        return {"ok": False, "code": code, "message": message}
+    def _fail(self, code: str, message: str = "", *,
+              side_effect_status: str = "UNKNOWN") -> "dict[str, Any]":
+        """失败回包。
+
+        ``side_effect_status`` 是给 R1.2 有界自修判别用的**宿主证据**：
+        前执行校验/沙盒内候选失败显式标 ``NONE``；缺省 ``UNKNOWN``（fail-closed，
+        判别层据此直接 terminal，不让「不知道有没有执行」的失败被当可自修）。
+        """
+        return {"ok": False, "code": code, "message": message,
+                "side_effect_status": side_effect_status}
 
     # -- 入口 ------------------------------------------------------------
     def execute_once(self, action: L.Action,
@@ -608,7 +616,8 @@ class CampaignDispatcher:
         self._binding(action)
         plan = self._current_plan(phase="explore")
         if str(action.doc["plan_sha256"]) != plan.sha256:
-            return self._fail("PLAN_MISMATCH", "plan_sha256 不是当前修订")
+            return self._fail("PLAN_MISMATCH", "plan_sha256 不是当前修订",
+                              side_effect_status="NONE")
         design_sha = _require_sha256(action.doc["design_sha256"],
                                      where="design_sha256")
         source = self._source_text(design_sha)
@@ -627,14 +636,16 @@ class CampaignDispatcher:
             tail = " ".join(str(ev.stderr_tail or "").split())[-600:]
             return self._fail(
                 "DESIGN_FAILED",
-                f"exit={ev.exit_code} timeout={ev.timed_out} stderr={tail!r}")
+                f"exit={ev.exit_code} timeout={ev.timed_out} stderr={tail!r}",
+                side_effect_status="NONE")
         payload = ev.blobs.get(MATRIX_OUTPUT)
         if payload is None:
-            return self._fail("MATRIX_MISSING", f"design 未写 {MATRIX_OUTPUT}")
+            return self._fail("MATRIX_MISSING", f"design 未写 {MATRIX_OUTPUT}",
+                              side_effect_status="NONE")
         try:
             matrix = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
-            return self._fail("MATRIX_INVALID", str(exc))
+            return self._fail("MATRIX_INVALID", str(exc), side_effect_status="NONE")
         if self.resource_ledger is not None:
             # 逐 cell 形状仍由 experiments.validate_matrix 单一实现裁决；
             # 累计 run/batch/步数/沙盒由资源账在 run_batch 前原子预留。
@@ -648,7 +659,8 @@ class CampaignDispatcher:
                 - self.runs_used["explore"]
             if len(specs) > explore_cap:
                 return self._fail("RESOURCE_EXCEEDED",
-                                  f"{len(specs)} runs > 探索余量 {explore_cap}")
+                                  f"{len(specs)} runs > 探索余量 {explore_cap}",
+                                  side_effect_status="NONE")
         backend = self.backend_factory(
             f"explore-{self.study}-{self.runs_used['explore']}")
         book = E.ResourceBook(max_runs=explore_cap,
@@ -691,21 +703,24 @@ class CampaignDispatcher:
             tail = " ".join(str(ev.stderr_tail or "").split())[-600:]
             return self._fail(
                 "ANALYSIS_FAILED",
-                f"exit={ev.exit_code} timeout={ev.timed_out} stderr={tail!r}")
+                f"exit={ev.exit_code} timeout={ev.timed_out} stderr={tail!r}",
+                side_effect_status="NONE")
         payload = ev.blobs.get(ANALYSIS_OUTPUT)
         if payload is None:
             return self._fail("ANALYSIS_MISSING",
-                              f"analysis 未写 {ANALYSIS_OUTPUT}")
+                              f"analysis 未写 {ANALYSIS_OUTPUT}",
+                              side_effect_status="NONE")
         try:
             doc = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
-            return self._fail("ANALYSIS_INVALID", str(exc))
+            return self._fail("ANALYSIS_INVALID", str(exc), side_effect_status="NONE")
         produced = doc.get("n_runs") if isinstance(doc, Mapping) else None
         if not isinstance(produced, int) or produced != len(wanted):
             return self._fail(
                 "ANALYSIS_RUNS_MISMATCH",
                 f"analysis.n_runs={produced!r} != 请求的 {len(wanted)} 个 run"
-                "（观测视图是**平铺**的 `*.jsonl`，不是 `*/*.jsonl`）")
+                "（观测视图是**平铺**的 `*.jsonl`，不是 `*/*.jsonl`）",
+                side_effect_status="NONE")
         rel = f"analysis/{source_sha[:12]}-{_sha_doc(doc)[:12]}.json"
         self.ctx.write_json(rel, doc)
         # 候选必须看到自己程序的真实输出才能写 claims（§8.1「submit 必须消费
@@ -729,22 +744,27 @@ class CampaignDispatcher:
             return self._fail(
                 "PARENT_MISSING",
                 "尚无探索计划：confirm 计划必须以探索计划的 sha 为 parent_sha"
-                "（先 propose_plan + run_batch，或写 \"host\" 前提是已有探索计划）")
+                "（先 propose_plan + run_batch，或写 \"host\" 前提是已有探索计划）",
+                side_effect_status="NONE")
         if plan_doc.get("parent_sha") == L.HOST_PLAN_SHA:
             plan_doc["parent_sha"] = expect_parent
         plan = C.ResearchPlan.from_dict(plan_doc)
         if plan.phase != "confirm":
-            return self._fail("PLAN_PHASE_INVALID", "freeze 需要 confirm 计划")
+            return self._fail("PLAN_PHASE_INVALID", "freeze 需要 confirm 计划",
+                                  side_effect_status="NONE")
         if plan.study_id != self.study:
-            return self._fail("STUDY_MISMATCH", plan.study_id)
+            return self._fail("STUDY_MISMATCH", plan.study_id,
+                                  side_effect_status="NONE")
         if plan.parent_sha != expect_parent:
             return self._fail(
                 "PARENT_SHA_MISMATCH",
                 f"parent_sha={plan.parent_sha} 不是当前探索计划的 sha "
-                f"（{expect_parent}）；可写 \"host\" 由宿主代填")
+                f"（{expect_parent}）；可写 \"host\" 由宿主代填",
+                side_effect_status="NONE")
         claimed = str(action.doc["plan_sha256"])
         if claimed != L.HOST_PLAN_SHA and plan.sha256 != claimed:
-            return self._fail("PLAN_MISMATCH", "plan 文档 sha 与字段不符")
+            return self._fail("PLAN_MISMATCH", "plan 文档 sha 与字段不符",
+                                  side_effect_status="NONE")
         design_sha = _require_sha256(action.doc["design_sha256"],
                                      where="design_sha256")
         analysis_sha = _require_sha256(action.doc["analysis_sha256"],
@@ -862,7 +882,8 @@ class CampaignDispatcher:
         plan = self._current_plan(phase="confirm")
         manifest = self.confirm_manifest or self._frozen_manifest_raw()
         if manifest is None:
-            return self._fail("CONFIRM_NOT_LOCKED", "缺确认 manifest")
+            return self._fail("CONFIRM_NOT_LOCKED", "缺确认 manifest",
+                                  side_effect_status="NONE")
         submission = {
             "schema": J.SUBMISSION_SCHEMA, "study_id": self.study,
             "plan_sha256": plan.sha256,

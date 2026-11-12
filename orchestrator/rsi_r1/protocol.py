@@ -46,6 +46,8 @@ from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import lanes as LANES
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import loop as L
+from orchestrator.rsi_r1 import profiles as P
+from orchestrator.rsi_r1 import recovery as RCV
 from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import scenes as SC
 from orchestrator.rsi_r1 import state as S
@@ -659,30 +661,44 @@ class ChainResult:
     completed: bool = False
     #: 游标所在位置（0..8）：报告里用它说明「走到第几个规范动作」。
     stage: int = 0
+    #: R1.2 资格检查块（首次率/可恢复失败/里程碑）；legacy 路径恒为 None。
+    qualification: "dict[str, Any] | None" = None
 
     def as_dict(self) -> "dict[str, Any]":
-        return {"study": self.study, "actions": list(self.actions),
-                "ok_count": self.ok_count, "stopped": self.stopped,
-                "terminal": bool(self.terminal),
-                "completed": bool(self.completed),
-                "stage": int(self.stage),
-                "study_state": self.study_state,
-                "judge_verdict": self.judge_verdict,
-                "study_verdict": self.study_verdict}
+        doc = {"study": self.study, "actions": list(self.actions),
+               "ok_count": self.ok_count, "stopped": self.stopped,
+               "terminal": bool(self.terminal),
+               "completed": bool(self.completed),
+               "stage": int(self.stage),
+               "study_state": self.study_state,
+               "judge_verdict": self.judge_verdict,
+               "study_verdict": self.study_verdict}
+        if self.qualification is not None:
+            doc["qualification"] = self.qualification
+        return doc
 
 
-def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
+def drive_chain(parts: LaneParts, *, strict: bool, cap: int,
+                policy: "P.ProtocolPolicy | None" = None) -> ChainResult:
     """跑一条 8 动作链。
 
     ``strict=True``（probe）：出现第一个非 ok 回合即停，**不再发下一呼**；
     ``strict=False``（practice/正式 study）：允许合同内自修，直到八个规范动作
     按序全部成功或额度用尽为止。终止类拒绝（``terminal``）两种策略都立即停。
 
+    ``policy`` 给定时是 R1.2 的有界自修语义（``bounded_recovery``）：完成判据
+    仍是规范动作游标，但每次失败都要过 ``recovery.classify_failure`` 的证据
+    判别（缺证据默认 terminal），并且每次发送前按依赖图算
+    ``min_remaining_actions``，剩余不足即 ``BUDGET_UNREACHABLE`` 不发明知无法
+    闭合的调用。旧调用不传 ``policy``，行为逐字节不变。
+
     完成判据是**规范动作游标**而不是「ok 计数」：合同内自修一定会产生额外的
     同名动作（如 run_batch 资源超额后重写 design 再来一次），按 ok 计数会在
     run_confirm 之后提前凑满 8 个 ok，把 submit_claim 整个跳过去——2026-11-11
     practice A 链就是这样空跑到 B 链（B 拿到 A 的上下文后提交 A 的 claim）。
     """
+    if policy is not None and policy.mode == "bounded_recovery":
+        return _drive_chain_bounded(parts, policy=policy, cap=cap)
     result = ChainResult(study=parts.study)
     lane = parts.billing_lane
     stage = 0
@@ -730,6 +746,115 @@ def drive_chain(parts: LaneParts, *, strict: bool, cap: int) -> ChainResult:
     return result
 
 
+def _failure_evidence(parts: LaneParts, outcome: L.StepOutcome,
+                      policy: "P.ProtocolPolicy") -> RCV.FailureEvidence:
+    """把一次失败回合转成**宿主证据**（状态/意图/副作用均取自宿主面）。"""
+    del policy
+    status: "dict[str, Any]" = {}
+    try:
+        status = parts.state.study_status(parts.study)
+    except Exception:  # noqa: BLE001 —— 状态不可读本身是缺证据（→ terminal）
+        status = {}
+    result = dict(outcome.result or {})
+    code = str(outcome.code or result.get("code") or "").strip()
+    phase = str(result.get("phase") or "").strip()
+    if not phase:
+        phase = "confirm" if outcome.action in ("run_confirm", "submit_claim") \
+            else "explore"
+    effect = str(result.get("side_effect_status") or RCV.EFFECT_UNKNOWN)
+    return RCV.FailureEvidence(
+        phase=phase,
+        frozen=bool(status.get("confirm_lock")),
+        open_intent=bool(status.get("open_intent")),
+        effect_status=effect,
+        code=code,
+        error_class=str(result.get("exception_type") or ""),
+        transport=bool(result.get("transport_failure")),
+        budget_exhausted=code == "BUDGET_REFUSED",
+        method_change=bool(result.get("method_change")),
+    )
+
+
+def _drive_chain_bounded(parts: LaneParts, *, policy: "P.ProtocolPolicy",
+                         cap: int) -> ChainResult:
+    """R1.2 有界自修驱动：证据判别 + 里程碑游标 + 依赖余量门。
+
+    与 legacy ``drive_chain`` 的差别：
+    * 失败不按 ``strict`` 一刀切，而是逐次过 ``classify_failure``；
+    * 可恢复失败**不重发原请求**、也不跳步：候选必须在同一 attempt 自己修正，
+      每次额外调用照计 POST 与沙盒；
+    * 每次发送前算 ``min_remaining_actions``；剩余不足即
+      ``BUDGET_UNREACHABLE``（不发明知无法闭合的调用）；
+    * 报告带 ``qualification``：八位置首次尝试 + 最终完成两面分开输出。
+    """
+    result = ChainResult(study=parts.study)
+    milestones = RCV.MilestoneState(policy=policy)
+    lane = parts.billing_lane
+    while not milestones.completed:
+        used = parts.admission.posts_used(lane)
+        remaining = int(cap) - used
+        need = milestones.min_remaining_actions()
+        if remaining <= 0:
+            result.stopped = "POSTS_EXHAUSTED"
+            break
+        if remaining < need:
+            milestones.note_budget_stop(need=need, remaining=remaining)
+            result.stopped = RCV.CODE_BUDGET_UNREACHABLE
+            break
+        try:
+            outcome = parts.loop.turn()
+        except L.LoopError as exc:  # 准入/槽的终止类拒绝（含 PAUSED）
+            result.actions.append({"n": len(result.actions) + 1,
+                                   "action": None, "ok": False,
+                                   "code": exc.code, "terminal": True,
+                                   "raised": True})
+            result.stopped = exc.code
+            result.terminal = True
+            break
+        doc = outcome.as_dict()
+        doc["n"] = len(result.actions) + 1
+        result.actions.append(doc)
+        if outcome.ok:
+            result.ok_count += 1
+            event = milestones.record_success(
+                action=outcome.action, result=dict(outcome.result or {}),
+                action_index=len(result.actions))
+            if event.get("terminal"):
+                doc["recovery"] = {"kind": RCV.RECOVERY_TERMINAL,
+                                   "code": event["terminal"],
+                                   "reason": event.get("detail", ""),
+                                   "recoverable": False}
+                result.stopped = str(event["terminal"])
+                result.terminal = True
+                break
+            continue
+        decision = RCV.classify_failure(
+            _failure_evidence(parts, outcome, policy), policy=policy)
+        doc["recovery"] = decision.as_dict()
+        milestones.note_failure(action=outcome.action,
+                                result=dict(outcome.result or {}),
+                                decision=decision,
+                                action_index=len(result.actions))
+        if decision.kind != RCV.RECOVERY_RECOVERABLE:
+            result.stopped = decision.code or outcome.code or "TERMINAL"
+            result.terminal = True
+            break
+    result.stage = milestones.cursor
+    result.completed = milestones.completed
+    result.study_state = parts.state.study_state(parts.study) \
+        if hasattr(parts.state, "study_state") else ""
+    result.qualification = milestones.qualification(
+        total_actions=len(result.actions), posts_cap=int(cap))
+    claim = None
+    for act in result.actions:
+        if act.get("action") == "submit_claim":
+            claim = dict(act.get("result") or {})
+    if claim is not None:
+        result.judge_verdict = claim.get("judge_verdict")
+        result.study_verdict = claim.get("verdict")
+    return result
+
+
 def _check_gate(ctx: Any, lane: str, *, billing_lane: "str | None" = None
                 ) -> "tuple[L.LockDocument, dict[str, Any], dict[str, Any] | None]":
     """过门前复核：主 root 必须在门位，LOCK 必须已冻结且双签有效。
@@ -766,7 +891,8 @@ def posts_used(ctx: Any, *, lane: str, lock: L.LockDocument,
     """lane 已用 POST 数（槽预留 ∪ 账本实呼取大者，与准入同口径）。"""
     admission = A.CampaignAdmission(
         ctx=ctx, state=S.ResearchState(ctx),
-        budget=C.BudgetSpec.from_dict(ctx.read_json("contract/budget.json")),
+        # 按 schema 分派：R1.2 根写 budget.v2（12/16/48/48），旧根写 v1。
+        budget=C.budget_from_dict(ctx.read_json("contract/budget.json")),
         lock_sha256=lock.sha256, spend=spend, lane=lane)
     # 槽表必须挂上：``posts_used`` 取「已预留槽 ∪ 台账实呼」的较大者，
     # 缺了槽表就只剩台账行——零付费演练会恒读 0，把 8/16 呼判成没发生。
@@ -815,6 +941,13 @@ class HeartbeatPump:
         self._thread = None
 
 
+def r12_studies(lane: str, policy: "P.ProtocolPolicy") -> "tuple[str, ...]":
+    """一条 lane 要跑几条玩具链（R1.2 两 lane 各**一条**，不是 A+B）。"""
+    if policy.single_practice_chain:
+        return (S.STUDIES[0],)
+    return (S.STUDIES[0],) if lane == PROBE else PRACTICE_STUDIES
+
+
 def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
                  transport_factory: Callable[[], Callable[[T.Request], L.Reply]],
                  runner: Any, image: str, batch_id: str,
@@ -822,18 +955,29 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
                  clock: Callable[[], str] = utc_now_iso_z,
                  backend_factory: "Callable[[str], Any] | None" = None,
                  billing_lane: "str | None" = None,
+                 profile: "P.CampaignProfile | None" = None,
                  ) -> "dict[str, Any]":
     """跑一条协议链并落 ``protocol/report_<lane>.json``，PASS 时推进主 root。
 
     ``billing_lane=repair_reserve`` 是 §8.1 的仪器修复重做：协议动作/报告仍按
     ``lane``（probe/practice）组织，但**全部 POST 记 repair_reserve 槽**，且
     每协议只允许 attempt 1 一次。
+
+    ``profile`` 给 R1.2 profile 时走有界自修语义（Plan §3.1）：两 lane 各
+    **一条**玩具链、帽取 profile 的 12/16、PASS 判据是「游标走完 + 无终止停 +
+    实呼 ≤ 帽」，绝不要求恰好 12 或 16；``--repair`` 在该 profile 下没有入口。
     """
+    policy = profile.protocol_policy if profile is not None else P.LEGACY_POLICY
+    bounded = policy.mode == "bounded_recovery"
     if lane not in PROTOCOL_LANES:
         raise ProtocolError("LANE_UNKNOWN", repr(lane))
     billing = lane if billing_lane is None else str(billing_lane)
     if billing not in LANES.LANE_ORDER:
         raise ProtocolError("LANE_UNKNOWN", repr(billing))
+    if bounded and billing != lane:
+        raise ProtocolError(
+            "REPAIR_NOT_AVAILABLE",
+            "RSI-R1.2 无 repair_reserve；付费后宿主缺陷只能整轮停，不得边改边测")
     if billing != lane and billing != RPR.LANE:
         raise ProtocolError(
             "LANE_UNKNOWN", f"只有 {RPR.LANE!r} 可作为重做记账 lane，收到 {billing!r}")
@@ -850,9 +994,14 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
     wanted_posts = PROBE_POSTS if lane == PROBE else PRACTICE_POSTS
     # 正常链路用 lane 的绝对帽（probe 8 / practice 16）；修复重做按「本 lane
     # 已用 + 本协议额度」封闭，绝不把 repair 的余量借给未发生的动作。
-    cap = wanted_posts
-    studies = (S.STUDIES[0],) if lane == PROBE else PRACTICE_STUDIES
-    strict = lane == PROBE
+    # R1.2：帽取 profile 的 12/16（Plan §1.1），不是旧 8/16 等值判据。
+    if profile is not None and bounded:
+        cap = int(profile.lane_post_caps[billing])
+    else:
+        cap = wanted_posts
+    studies = r12_studies(lane, policy) if bounded else (
+        (S.STUDIES[0],) if lane == PROBE else PRACTICE_STUDIES)
+    strict = lane == PROBE and not bounded
 
     used_before = posts_used(ctx, lane=billing, lock=lock, spend=spend)
     if billing != lane:
@@ -869,7 +1018,8 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
                 lock=lock, transport_factory=lambda: transport, runner=runner,
                 image=image, counter=counter, backend_factory=backend_factory,
                 billing_lane=billing)
-            chains.append(drive_chain(parts, strict=strict, cap=cap))
+            chains.append(drive_chain(parts, strict=strict, cap=cap,
+                                      policy=policy if bounded else None))
             if chains[-1].stopped:
                 break
     finally:
@@ -879,13 +1029,24 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
 
     ok_chains = all(c.completed and not c.stopped for c in chains)
     posts = used_after - used_before
-    passed = bool(ok_chains and len(chains) == len(studies) and posts == wanted_posts)
-    if passed:
-        verdict, reason = VERDICT_PASS, (
-            f"{len(chains)}×{CHAIN_ACTIONS} 动作全 ok，恰好 {posts} 呼")
+    if bounded:
+        # R1.2：完成判据 = 游标走完 + 无终止停 + POST ≤ 帽（不要求恰好 12/16）。
+        passed = bool(ok_chains and len(chains) == len(studies) and posts <= cap)
+        if passed:
+            verdict, reason = VERDICT_PASS, (
+                f"{len(chains)}×{CHAIN_ACTIONS} 规范动作全走完，实呼 {posts} ≤ 帽 {cap}")
+        else:
+            verdict = VERDICT_NOT_MEASURED
+            reason = _not_measured_reason_bounded(chains, posts, cap)
     else:
-        verdict = VERDICT_NOT_MEASURED
-        reason = _not_measured_reason(chains, posts, wanted_posts)
+        passed = bool(ok_chains and len(chains) == len(studies)
+                      and posts == wanted_posts)
+        if passed:
+            verdict, reason = VERDICT_PASS, (
+                f"{len(chains)}×{CHAIN_ACTIONS} 动作全 ok，恰好 {posts} 呼")
+        else:
+            verdict = VERDICT_NOT_MEASURED
+            reason = _not_measured_reason(chains, posts, wanted_posts)
 
     report = {
         "schema": REPORT_SCHEMA, "schema_version": SCHEMA_VERSION,
@@ -899,15 +1060,23 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
         "verdict": verdict, "reason": reason,
         "policy": {"strict_first_error": bool(strict),
                    "chain_actions": CHAIN_ACTIONS,
-                   "posts_allowed": wanted_posts, "post_cap": cap},
+                   "posts_allowed": wanted_posts, "post_cap": cap,
+                   "mode": policy.mode,
+                   "completion": ("cursor_and_cap" if bounded
+                                  else "all_ok_and_exact_posts"),
+                   "single_practice_chain": bool(policy.single_practice_chain)},
         "posts": {"used_before": used_before, "used_after": used_after,
-                  "this_attempt": posts, "allowed": wanted_posts},
+                  "this_attempt": posts,
+                  "allowed": cap if bounded else wanted_posts},
         "root_before": root_before, "root_after": root_before,
         "studies": [c.as_dict() for c in chains],
         "attempt_relpath": attempt_prefix(lane, attempt),
+        "qualification": _campaign_qualification(chains) if bounded else None,
         "notes": ("协议演练：只判动作路径是否走通，不产生科学结论；"
                   "submit_claim 的判据输出原样记录，不因演练而改写。"),
     }
+    if report["qualification"] is None:
+        del report["qualification"]
     if passed:
         state = S.ResearchState(ctx)
         state.advance_root(ROOT_NEXT[lane],
@@ -930,6 +1099,48 @@ def _repair_block(auth: "dict[str, Any] | None",
             "prior_root": auth.get("prior_root"),
             "carryover_relpath": auth.get("carryover_relpath"),
             "single_use": True}
+
+
+def _campaign_qualification(chains: "list[ChainResult]") -> "dict[str, Any]":
+    """整条 lane 的资格检查汇总（逐 studiy 明细 + 合计两面分开报）。"""
+    studies = [{"study": c.study, "qualification": c.qualification}
+               for c in chains]
+    positions = [row for c in chains
+                 for row in ((c.qualification or {}).get("positions") or [])]
+    attempted = [p for p in positions if p.get("first_attempt_ok") is not None]
+    return {
+        "schema": RCV.QUALIFICATION_SCHEMA,
+        "studies": studies,
+        "first_attempt_ok_count": sum(
+            1 for p in attempted if p.get("first_attempt_ok")),
+        "attempted_positions": len(attempted),
+        "first_error": next((c.qualification.get("first_error") for c in chains
+                             if (c.qualification or {}).get("first_error")), None),
+        "recoverable_failures": [f for c in chains
+                                 for f in ((c.qualification or {})
+                                           .get("recoverable_failures") or [])],
+        "note": ("小样本资格检查（两 lane 各一条链），只报首次尝试与最终完成两面；"
+                 "不构成稳定成功率估计。"),
+    }
+
+
+def _not_measured_reason_bounded(chains: "list[ChainResult]", posts: int,
+                                 cap: int) -> str:
+    """R1.2：按里程碑游标与帽报原因（不是「实呼 != 允许」的等值判据）。"""
+    parts: "list[str]" = []
+    for chain in chains:
+        if chain.stopped:
+            parts.append(f"study {chain.study} 停于 {chain.stopped}"
+                         f"（里程碑 {chain.stage}/{CHAIN_ACTIONS}）")
+        elif not chain.completed:
+            parts.append(f"study {chain.study} 只走完里程碑 "
+                         f"{chain.stage}/{CHAIN_ACTIONS}")
+        note = (chain.qualification or {}).get("stop_note")
+        if note:
+            parts.append(str(note))
+    if posts > cap:
+        parts.append(f"实呼 {posts} > 帽 {cap}")
+    return "；".join(parts) or "链未走通"
 
 
 def _not_measured_reason(chains: "list[ChainResult]", posts: int,
@@ -1013,5 +1224,5 @@ __all__ = [
     "attempt_prefix", "backend_factory_for", "build_lane_parts", "drive_chain",
     "ensure_approval", "mirror_root", "next_attempt", "posts_used",
     "render_protocol_brief", "repo_sha", "HeartbeatPump",
-    "render_study_brief", "run_protocol", "toy_plan_doc",
+    "render_study_brief", "run_protocol", "toy_plan_doc", "r12_studies",
 ]
