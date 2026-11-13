@@ -54,3 +54,12 @@ def test_replay_requires_real_containers_flag(monkeypatch, tmp_path: Path):
     with pytest.raises(cli_r12.Cli12Error) as exc:
         cli_r12.cmd_replay(args)
     assert exc.value.code == "REPLAY_REAL_CONTAINERS_REQUIRED"
+
+
+def test_sandbox_memory_limit_covers_real_confirm_volume():
+    """D-6 回归：内存帽必须覆盖实测（模板峰值 695 MB@96 runs/278 MB）。"""
+    from orchestrator.rsi_r1 import sandbox as SB
+
+    raw = SB.MEMORY_LIMIT.strip().lower()
+    assert raw.endswith("g"), "内存帽必须 ≥1g（512m 在真实确认批上 OOM）"
+    assert float(raw[:-1]) >= 2, "实测峰值 695 MB，至少 2g 余量"

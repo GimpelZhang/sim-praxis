@@ -36,7 +36,10 @@ from typing import Any, Iterable, Mapping, Protocol
 
 #: 容器安全常量（§5.4 逐项）
 WALL_CLOCK_S = 30
-MEMORY_LIMIT = "512m"
+# 锁内适配（2026-11-13 轮 D 实测，D-6）：512m 下宿主公开分析模板在真实确认批
+# （96 runs / 278 MB 原始 JSONL）峰值 RSS ≈ 695 MB，容器被 OOM 杀（exit 137）。
+# 离线演练的合成 run 小，照不出这个容量墙；抬到 2g 给真实数据量留余量。
+MEMORY_LIMIT = "2g"
 PIDS_LIMIT = 64
 CPU_LIMIT = "1.0"
 OUTPUT_MAX_BYTES = 1 << 20          # 1 MiB（候选 design/analysis）

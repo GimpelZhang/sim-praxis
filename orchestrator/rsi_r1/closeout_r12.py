@@ -26,6 +26,7 @@ from orchestrator.rsi_r1 import closeout as CO
 from orchestrator.rsi_r1 import family as FAM
 from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import protocol as PT
+from orchestrator.rsi_r1 import sandbox as SB
 from orchestrator.rsi_r1 import state as ST
 
 SCHEMA = "simpraxis.rsi_r12.closeout.v1"
@@ -53,6 +54,10 @@ PROMPT_MISDIRECT_POINTER = "analysis_output.schema"
 #: 候选侧**合同违背**码（不是仪器缺陷，也不是传输未知）：仪器正常工作了，
 #: 只是候选没按公开合同动作 ⇒ measurement 仍 VALID，研究 NOT_STARTED。
 CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
+#: 沙盒容量缺陷（2026-11-13 轮 D 实测）：宿主的公开分析模板在真实确认批数据上
+#: 峰值内存 > 沙盒 MEMORY_LIMIT，容器被 OOM 杀（exit 137）——离线演练的合成
+#: 数据量小，照不出这个容量墙。
+CLASS_INSTRUMENT_CAPACITY = "INSTRUMENT_DEFECT_SANDBOX_CAPACITY"
 CONTRACT_VIOLATION_CODES = frozenset({
     "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
     "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
@@ -131,6 +136,13 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
     if verdict == PT.VERDICT_PASS or not attempt_rel:
         return facts
     attempt = root / attempt_rel
+    confirm_receipt = _read_json(
+        attempt / "private" / "receipts" / "A-confirm.json")
+    if confirm_receipt is not None:
+        facts["_confirm_receipt"] = {
+            "reason_codes": list(confirm_receipt.get("reason_codes") or []),
+            "exit_code": confirm_receipt.get("exit_code"),
+        }
     receipt = _read_json(attempt / "private" / "receipts" / "A-explore.json")
     if receipt is None:
         # 没走到分析门：按首个拒绝码定性（合同违背 vs 其他）。
@@ -186,6 +198,69 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
 # ---------------------------------------------------------------------------
 # 族账对账（历史 31 + 已关闭轮实花 + 本轮实呼 ≤ 族帽 160）
 # ---------------------------------------------------------------------------
+
+def _peak_rss_kb(image_dir: Path, out_dir: Path) -> "tuple[int | None, str]":
+    """用宿主公开模板在给定视图上实测峰值 RSS（KB）；失败返回 (None, 错误)。"""
+    import resource
+    import subprocess
+    import sys
+    import tempfile
+
+    script = Path(tempfile.mkdtemp()) / "analysis.py"
+    script.write_text(PT.ANALYSIS_TEMPLATE, encoding="utf-8")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run([sys.executable, str(script), str(image_dir), str(out_dir)],
+                       capture_output=True, text=True, timeout=600, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+        return None, f"{type(exc).__name__}: {exc}"
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return int(usage.ru_maxrss), ""
+
+
+def capacity_facts(attempt: Path, *, memory_limit: str) -> "dict[str, Any]":
+    """实测宿主模板在**本轮确认批真实数据**上的峰值内存 vs 沙盒上限。"""
+    import tempfile
+
+    confirm_dirs = sorted((attempt / "observations").glob("confirm-*"))
+    if not confirm_dirs:
+        return {"available": False, "note": "无确认批观测目录"}
+    data = confirm_dirs[0]
+    plan = sorted((attempt / "public").glob("plan-*.json"))
+    work = Path(tempfile.mkdtemp())
+    view = work / "view"
+    view.mkdir()
+    total_bytes = 0
+    for path in sorted(data.iterdir()):
+        if path.is_file():
+            (view / path.name).write_bytes(path.read_bytes())
+            total_bytes += path.stat().st_size
+    if plan:
+        (view / plan[0].name).write_bytes(plan[0].read_bytes())
+    peak, error = _peak_rss_kb(view, work / "out")
+    limit_kb = None
+    raw = str(memory_limit).strip().lower()
+    try:
+        if raw.endswith("g"):
+            limit_kb = int(float(raw[:-1]) * 1024 * 1024)
+        elif raw.endswith("m"):
+            limit_kb = int(float(raw[:-1]) * 1024)
+        elif raw.endswith("k"):
+            limit_kb = int(float(raw[:-1]))
+        else:
+            limit_kb = int(float(raw))  # docker 默认单位是字节
+    except ValueError:
+        limit_kb = None
+    return {
+        "available": peak is not None,
+        "confirm_data_bytes": total_bytes,
+        "peak_rss_kb": peak,
+        "memory_limit": memory_limit,
+        "memory_limit_kb": limit_kb,
+        "exceeds_limit": bool(peak and limit_kb and peak > limit_kb),
+        "error": error,
+    }
+
 
 def family_facts(family_root: Path, *, ledger_calls: int,
                  envelope_id: str) -> "dict[str, Any]":
@@ -286,6 +361,17 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
     fam = family_facts(_family_root(), ledger_calls=calls,
                        envelope_id=str(ctx.envelope_id))
     instrument = instrument_facts(root)
+    capacity: "dict[str, Any]" = {"available": False}
+    if instrument.get("attempt_relpath"):
+        capacity = capacity_facts(root / str(instrument["attempt_relpath"]),
+                                  memory_limit=SB.MEMORY_LIMIT)
+    if (instrument.get("available")
+            and instrument.get("first_error_name") == "run_confirm"
+            and str((instrument.get("_confirm_receipt") or {}).get("exit_code"))
+            == "137"
+            and capacity.get("exceeds_limit")):
+        instrument = dict(instrument)
+        instrument["classification"] = CLASS_INSTRUMENT_CAPACITY
     drift = drift_facts(ctx, repo_root=repo_root)
 
     axes = dict(CO.compute_axes(inventory))
@@ -293,7 +379,8 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
     failures: "list[dict[str, Any]]" = []
     gaps: "list[str]" = []
 
-    instrument_classes = (CLASS_INSTRUMENT_TEMPLATE, CLASS_INSTRUMENT_MISDIRECT)
+    instrument_classes = (CLASS_INSTRUMENT_TEMPLATE, CLASS_INSTRUMENT_MISDIRECT,
+                          CLASS_INSTRUMENT_CAPACITY)
     if instrument.get("classification") in instrument_classes:
         axes["measurement"] = "INVALID_INSTRUMENT"
         failures.append({
@@ -307,14 +394,22 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "milestones_ok": instrument.get("milestones_ok"),
             "classification": instrument.get("classification"),
             "detail": (
-                "prompt 模板 ANALYSIS_TEMPLATE 写 protocol_analysis.v1，"
-                "而 T4 analysis_receipt 门要求 analysis_output.v1；候选照抄宿主示例必被拒"
+                ("沙盒容量缺陷：宿主公开分析模板在真实确认批数据上峰值 RSS "
+                 "超过 MEMORY_LIMIT，容器被 OOM 杀（exit 137）")
+                if instrument.get("classification") == CLASS_INSTRUMENT_CAPACITY
+                else ("prompt 模板 ANALYSIS_TEMPLATE 写 protocol_analysis.v1，"
+                      "而 T4 analysis_receipt 门要求 analysis_output.v1；"
+                      "候选照抄宿主示例必被拒")
                 if instrument.get("classification") == CLASS_INSTRUMENT_TEMPLATE
                 else ("prompt 把候选指向合同自身的 schema 键 "
                       "`analysis_output.schema`（值是合同文档 schema "
                       "`analysis_output_schema.v1`），而门要求输出 schema "
                       "`analysis_output.v1`；按宿主指示读取即被门拒")),
-            "evidence": instrument,
+            "evidence": {
+                "instrument": {k: v for k, v in instrument.items()
+                               if not str(k).startswith("_")},
+                "capacity": capacity,
+            },
         })
         # 仪器缺陷本身是 **measurement 轴结论**，不是「记录互相矛盾」：
         # 若把它计进 gaps 会让 process 永远 INCOMPLETE，违背「PASS 只指过程

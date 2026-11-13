@@ -56,6 +56,7 @@ GATE_REASON = "OUTPUT_SCHEMA_MISMATCH"
 CLASS_MISDIRECT = "INSTRUMENT_DEFECT_CONTRACT_KEY_MISDIRECTION"
 MISDIRECT_POINTER = "analysis_output.schema"
 CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
+CLASS_CAPACITY = "INSTRUMENT_DEFECT_SANDBOX_CAPACITY"
 CONTRACT_VIOLATION_CODES = frozenset({
     "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
     "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
@@ -253,6 +254,53 @@ def instrument_facts(root: Path, lane: str = "probe", repo_root=None):
     return facts
 
 
+def capacity_facts(root: Path, rel: str, repo_root):
+    """复核容量缺陷的**可复算面**：确认批字节数、exit 137、内存帽常量。
+
+    峰值 RSS 是宿主实测值（numpy 引导测量），checker 不复算它，只核对它与
+    上限的关系以及唯一可独立重算的量（确认批总字节 / 沙箱 MEMORY_LIMIT 常量）。
+    """
+    receipt = _read_json(root / rel / "private" / "receipts" / "A-confirm.json")
+    if not isinstance(receipt, dict):
+        return {"available": False}
+    confirm = sorted((root / rel / "observations").glob("confirm-*"))
+    data_bytes = 0
+    if confirm:
+        data_bytes = sum(p.stat().st_size for p in confirm[0].iterdir()
+                         if p.is_file())
+    limit = None
+    if repo_root is not None:
+        sandbox = Path(repo_root) / "orchestrator" / "rsi_r1" / "sandbox.py"
+        try:
+            text = sandbox.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("MEMORY_LIMIT"):
+                value = line.split("=", 1)[1].strip().strip('"')
+                raw = value.lower()
+                try:
+                    if raw.endswith("g"):
+                        limit = int(float(raw[:-1]) * 1024 * 1024)
+                    elif raw.endswith("m"):
+                        limit = int(float(raw[:-1]) * 1024)
+                    elif raw.endswith("k"):
+                        limit = int(float(raw[:-1]))
+                    else:
+                        limit = int(float(raw))
+                except ValueError:
+                    limit = None
+                break
+    return {
+        "available": True,
+        "reason_codes": [str(c) for c in (receipt.get("reason_codes") or [])],
+        "exit_code": receipt.get("exit_code"),
+        "confirm_data_bytes": data_bytes,
+        "memory_limit_kb": limit,
+    }
+
+
 def studies_started(root: Path) -> bool:
     for study in STUDIES:
         for rel in STUDY_ARTIFACTS.values():
@@ -438,7 +486,24 @@ def judge(root: Path, pack: "Path | None" = None,
 
     # 仪器失败判定面
     ins = instrument_facts(root, repo_root=repo_root)
-    recomputed["instrument"] = ins
+    cap = {"available": False}
+    if ins.get("available") and ins.get("attempt_relpath"):
+        cap = capacity_facts(root, str(ins["attempt_relpath"]), repo_root)
+    recomputed["capacity"] = cap
+    if (ins.get("available")
+            and str(ins.get("first_error_name")) == "run_confirm"
+            and cap.get("exit_code") == 137 and cap.get("available")):
+        rd_ev = ((readout.get("failure_chain") or [{}])[0].get("evidence") or {})
+        rd_cap = (rd_ev.get("capacity") or {})
+        peak = rd_cap.get("peak_rss_kb")
+        limit = cap.get("memory_limit_kb")
+        if not (isinstance(peak, int) and limit and peak > limit):
+            problems.append("run_confirm exit 137 但缺少「实测峰值 > 内存帽」证据")
+        if int(rd_cap.get("confirm_data_bytes") or -1) != int(
+                cap.get("confirm_data_bytes") or -2):
+            problems.append("容量证据的确认批字节数与重算不符")
+        ins["classification"] = CLASS_CAPACITY
+        recomputed["instrument"] = ins
     rd_ins = readout.get("instrument") or {}
     if ins.get("available"):
         if ins.get("classification") != rd_ins.get("classification"):
