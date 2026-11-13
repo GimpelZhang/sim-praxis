@@ -96,7 +96,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert ev["lane_caps"] == {lane: PROFILE.lane_post_caps[lane]
                                for lane in PROFILE.lane_order}
     assert ev["posts_total"] == PROFILE.hard_cap == 124
-    assert ev["family_cap"] == PROFILE.family_cap == 293
+    assert ev["family_cap"] == PROFILE.family_cap == 321
     assert ev["family_history"] == PROFILE.family_history_posts == 31
     assert ev["aux_subenvelopes"] == dict(P.AUX_SUBENVELOPES)
     assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL

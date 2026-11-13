@@ -87,7 +87,7 @@ def campaign(tmp_path: Path, monkeypatch):
         "output_run_ids": [], "validity": False, "exit_code": 0,
     })
     _write(family / "family" / "family.json", {
-        "schema": "simpraxis.rsi_r12.family.v1", "family_cap": 293,
+        "schema": "simpraxis.rsi_r12.family.v1", "family_cap": 321,
         "history": {"total_call_rows": 31},
         "members": [{"envelope_id": ENVELOPE, "profile_id": "rsi-r1.2",
                      "posts_reserved": 124, "posts_used": 2,

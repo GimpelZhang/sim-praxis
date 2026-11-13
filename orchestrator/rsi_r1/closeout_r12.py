@@ -553,7 +553,8 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "reason_codes": keys,
             "posts": rep.get("posts"),
             "classification": ("TRANSPORT_UNKNOWN"
-                               if rep.get("stopped") == "EmptyResponseError"
+                               if rep.get("stopped") in ("EmptyResponseError",
+                                                         "PAUSED")
                                else "SCIENTIFIC_OR_PROTOCOL_FAILURE"),
             "detail": ("研究未产出可判读结果或判据拒绝；失败分母保留，"
                        "不调阈值、不换题"),
