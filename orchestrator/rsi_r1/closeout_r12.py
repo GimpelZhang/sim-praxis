@@ -443,6 +443,23 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "evidence": instrument,
         })
 
+    # 练习 lane（probe PASS 之后才会跑）：非 PASS 必须进失败链，不能被 probe 的
+    # PASS 掩盖（轮 E 实测：probe PASS、practice 因模型原生工具标记终止）。
+    practice = instrument_facts(root, lane=PT.PRACTICE)
+    if practice.get("available") and practice.get("verdict") != PT.VERDICT_PASS:
+        failures.append({
+            "task": "T6",
+            "lane": practice.get("lane"),
+            "verdict": practice.get("verdict"),
+            "first_error_code": practice.get("first_error_code"),
+            "first_error_name": practice.get("first_error_name"),
+            "milestones_ok": practice.get("milestones_ok"),
+            "classification": practice.get("classification"),
+            "detail": ("练习资格失败：首个拒绝见 first_error_code"
+                       "（工具/传输未知按 fail-closed 终止，研究未启动）"),
+            "evidence": practice,
+        })
+
     if not fam["member_usage_matches_ledger"]:
         gaps.append(
             f"族账 posts_used={fam['member_posts_used']} 与账本 call 行 "
