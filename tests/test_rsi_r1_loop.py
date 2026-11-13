@@ -611,3 +611,39 @@ def test_gateway_error_becomes_terminal_step_not_crash(monkeypatch) -> None:
     assert dispatcher.seen == [], "网关错误不应进入分派器"
     assert store.stops and store.stops[-1]["code"] == "EmptyResponseError"
     assert budget.resolved and budget.resolved[-1].is_actionable is False
+
+
+def test_empty_response_retried_once_then_proceeds() -> None:
+    """D-9：空回答零副作用 ⇒ 原样重发一次（另计 POST），第二次成功即继续。"""
+    from orchestrator.gateway.router import EmptyResponseError
+
+    text = json.dumps(_all_actions()["run_batch"])
+    calls = []
+
+    def flaky(request):
+        calls.append(request)
+        if len(calls) == 1:
+            raise EmptyResponseError("空回答")
+        return L.Reply(text=text, response_id="resp-2", attempts_http=1)
+
+    loop, store, dispatcher, budget, _ = _loop(reply_text=text, transport=flaky)
+    out = loop.turn()
+    assert out.ok and not out.terminal
+    assert len(calls) == 2, "空回答后必须原样重发一次"
+    assert len(budget.reserved) == 2, "重发另计一次 POST 预留"
+
+
+def test_empty_response_twice_is_terminal() -> None:
+    from orchestrator.gateway.router import EmptyResponseError
+
+    seen = []
+
+    def always_empty(request):
+        seen.append(request)
+        raise EmptyResponseError("空回答")
+
+    loop, store, _, budget, _ = _loop(reply_text="{}", transport=always_empty)
+    out = loop.turn()
+    assert out.terminal is True
+    assert out.code == "EmptyResponseError"
+    assert len(seen) == 2

@@ -716,7 +716,10 @@ class LockedSender:
         if fresh != permit:
             raise LoopError("LOCK_MISMATCH", "准入复核结果与 permit 不一致",
                             terminal=True)
-        if reservation.call_id != f"{permit.envelope_id}:{request.sha256[:16]}":
+        expected = f"{permit.envelope_id}:{request.sha256[:16]}"
+        # D-9：空回答重发另计一次 POST，call_id 带 ":a<attempt>" 后缀；其余规则不变。
+        if not (reservation.call_id == expected
+                or reservation.call_id.startswith(expected + ":a")):
             raise LoopError("LOCK_MISMATCH", "reservation.call_id 与请求不匹配",
                             terminal=True)
         reply = self._transport(request)
@@ -790,34 +793,53 @@ class ResearchLoop:
                                      detail=accounting.verdict)
             return StepOutcome(ok=False, code="INPUT_LIMIT", terminal=True)
 
-        permit = self.admission.check_all(envelope=self.envelope,
-                                          root_lock=self.root_lock,
-                                          phase=self.phase,
-                                          spend_contract=self.spend_contract)
-        call_id = f"{permit.envelope_id}:{request.sha256[:16]}"
-        reservation = self.budget.reserve_atomic(call_id=call_id, permit=permit)
-        try:
-            reply = self.sender.send_once(request, reservation)
-        except LoopError as exc:
-            self.budget.resolve_or_pause(Reply(text="", response_id="", is_actionable=False,
-                                               reason=exc.code))
-            self.store.stop_or_block(code=exc.code, detail=exc.detail)
-            return StepOutcome(ok=False, code=exc.code, terminal=True)
-        except Exception as exc:  # noqa: BLE001 —— 先分类，非网关错照旧上抛
-            # 网关层异常（如 HTTP 200 空回答的 EmptyResponseError）在账本里
-            # 已有 ok=false 行；这里必须把它变成可机读的停止回合，而不是让
-            # 异常穿出 drive_chain 把整条 lane 崩掉（2026-11-11 practice 实跑
-            # 就是这样 rc=1、连协议报告都没写）。语义按「回复不可动作」处理：
-            # 写暂停件、停止本链、报告照落盘，修复后由操作者显式 resume。
-            from orchestrator.gateway.router import GatewayError
+        # D-9（2026-11-13 轮 E/F/H 实测）：网关 **空回答**（零内容、零副作用）
+        # 允许在同一回合原样重发**一次**，重发另计一次 POST（新 call_id → 新预留），
+        # 第二次仍空回答才按传输未知终止。超时/截断/其它网关错误语义不变。
+        # 这是对 AC23「不重发」的窄化偏差：只有「证明无副作用」的空回答适用。
+        from orchestrator.gateway.router import EmptyResponseError
 
-            if not isinstance(exc, GatewayError):
-                raise
-            code = type(exc).__name__
-            self.budget.resolve_or_pause(Reply(text="", response_id="",
-                                               is_actionable=False, reason=code))
-            self.store.stop_or_block(code=code, detail=str(exc))
-            return StepOutcome(ok=False, code=code, terminal=True)
+        attempt = 0
+        while True:
+            permit = self.admission.check_all(
+                envelope=self.envelope, root_lock=self.root_lock,
+                phase=self.phase, spend_contract=self.spend_contract)
+            call_id = f"{permit.envelope_id}:{request.sha256[:16]}:a{attempt}"
+            reservation = self.budget.reserve_atomic(call_id=call_id,
+                                                     permit=permit)
+            try:
+                reply = self.sender.send_once(request, reservation)
+                break
+            except LoopError as exc:
+                self.budget.resolve_or_pause(
+                    Reply(text="", response_id="", is_actionable=False,
+                          reason=exc.code))
+                self.store.stop_or_block(code=exc.code, detail=exc.detail)
+                return StepOutcome(ok=False, code=exc.code, terminal=True)
+            except EmptyResponseError as exc:
+                # 空回答零内容、零副作用：记一次失败 POST，原样重发一次。
+                self.budget.resolve_or_pause(
+                    Reply(text="", response_id="", is_actionable=False,
+                          reason="EmptyResponseError"))
+                if attempt >= 1:
+                    self.store.stop_or_block(code="EmptyResponseError",
+                                             detail=str(exc))
+                    return StepOutcome(ok=False, code="EmptyResponseError",
+                                       terminal=True)
+                attempt += 1
+                continue
+            except Exception as exc:  # noqa: BLE001 —— 先分类，非网关错照旧上抛
+                # 网关层异常（超时/连接错误等）在账本里已有 ok=false 行；必须
+                # 变成可机读的停止回合，而不是让异常穿出 drive_chain 崩掉整条 lane。
+                from orchestrator.gateway.router import GatewayError
+
+                if not isinstance(exc, GatewayError):
+                    raise
+                code = type(exc).__name__
+                self.budget.resolve_or_pause(Reply(text="", response_id="",
+                                                   is_actionable=False, reason=code))
+                self.store.stop_or_block(code=code, detail=str(exc))
+                return StepOutcome(ok=False, code=code, terminal=True)
 
         self.store.record_reply(response_id=reply.response_id, text=reply.text,
                                 phase=self.phase, nonce=_nonce_of(request))
