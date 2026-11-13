@@ -52,7 +52,7 @@ def test_close_releases_reservation_and_allows_next_round(fam_root):
     assert member["closed_at_utc"].endswith("Z")
     usage = FAM.usage(fam_root)
     assert usage["reserved_total"] == 31          # 历史块仍在，124 已释放
-    assert usage["remaining"] == 129
+    assert usage["remaining"] == 134
 
     doc2 = FAM.register(fam_root, P.PROFILE_R12_DEF, "env-round2")
     assert doc2["posts_reserved"] == 124
@@ -166,12 +166,12 @@ def test_closed_round_usage_still_occupies_family_cap(fam_root):
     FAM.close_member(fam_root, "env-round1", reason="仪器缺陷轮结案")
     usage = FAM.usage(fam_root)
     assert usage["reserved_total"] == 31 + 5     # 历史 + 已关闭轮实花
-    assert usage["remaining"] == 160 - 36
+    assert usage["remaining"] == 165 - 36
 
     FAM.register(fam_root, P.PROFILE_R12_DEF, "env-round2")
     usage = FAM.usage(fam_root)
-    assert usage["reserved_total"] == 31 + 5 + 124 == 160
-    assert usage["remaining"] == 0
+    assert usage["reserved_total"] == 31 + 5 + 124 == 160  # 本轮只计已关闭轮 5
+    assert usage["remaining"] == 165 - 160
     with pytest.raises(FAM.FamilyError) as exc:
         FAM.register(fam_root, P.PROFILE_R12_DEF, "env-round3")
     assert exc.value.code == "FAMILY_ROUND_OPEN"   # 先被单活动成员挡住
@@ -187,17 +187,17 @@ def test_migrate_cap_backfills_old_members_and_is_idempotent(fam_root):
     FAM.register(fam_root, P.PROFILE_R12_DEF, "env-round1")
     path = fam_root / "family" / "family.json"
     doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["family_cap"] = 155                      # 模拟迁移前的老文档
+    doc["family_cap"] = 160                      # 模拟迁移前的老文档
     for m in doc["members"]:
         m.pop("family_cap_at_registration", None)
     path.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
 
-    migrated = FAM.migrate_cap(fam_root, reason="用户裁决 155→160",
+    migrated = FAM.migrate_cap(fam_root, reason="用户裁决 160→165",
                                evidence={"decision": "AskUserQuestion"})
-    assert migrated["family_cap"] == 160
-    assert migrated["members"][0]["family_cap_at_registration"] == 155
+    assert migrated["family_cap"] == 165
+    assert migrated["members"][0]["family_cap_at_registration"] == 160
     assert migrated["cap_history"] == [{
-        "from_cap": 155, "to_cap": 160, "reason": "用户裁决 155→160",
+        "from_cap": 160, "to_cap": 165, "reason": "用户裁决 160→165",
         "evidence": {"decision": "AskUserQuestion"},
         "at_utc": migrated["cap_history"][0]["at_utc"],
     }]
@@ -210,7 +210,7 @@ def test_cli_family_migrate_cap(fam_root, capsys):
     FAM.register(fam_root, P.PROFILE_R12_DEF, "env-round1")
     path = fam_root / "family" / "family.json"
     doc = json.loads(path.read_text(encoding="utf-8"))
-    doc["family_cap"] = 155                      # 模拟迁移前的老文档
+    doc["family_cap"] = 160                      # 模拟迁移前的老文档
     for m in doc["members"]:
         m.pop("family_cap_at_registration", None)
     path.write_text(json.dumps(doc, sort_keys=True), encoding="utf-8")
@@ -219,11 +219,11 @@ def test_cli_family_migrate_cap(fam_root, capsys):
     assert cli_r12.cmd_family_migrate_cap(args) == 0
     out = capsys.readouterr().out
     assert "family migrate-cap ok" in out
-    assert "155→160" in out
+    assert "160→165" in out
     doc = json.loads((fam_root / "family" / "family.json")
                      .read_text(encoding="utf-8"))
-    assert doc["family_cap"] == 160
-    assert doc["members"][0]["family_cap_at_registration"] == 155
+    assert doc["family_cap"] == 165
+    assert doc["members"][0]["family_cap_at_registration"] == 160
 
 
 def test_abandon_closes_failed_drill_without_signatures(fam_root, monkeypatch):
