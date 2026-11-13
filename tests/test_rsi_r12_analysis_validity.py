@@ -567,7 +567,8 @@ def _template_view(tmp_path):
             (view / f"{run_id}.jsonl").write_text(
                 json.dumps(rec) + "\n", encoding="utf-8")
             (view / f"{run_id}.meta.json").write_text(
-                json.dumps({"run_id": run_id, "condition_id": cond}),
+                json.dumps({"run_id": run_id, "condition_id": cond,
+                            "initial_x_m": 0.0}),
                 encoding="utf-8")
             if cond == "handling":
                 diffs["c-main"].setdefault(f"blk-{block:02d}", [0.0, 0.0])[0] = value

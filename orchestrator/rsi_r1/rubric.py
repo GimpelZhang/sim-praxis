@@ -48,7 +48,8 @@ METRICS: "Mapping[str, Mapping[str, Any]]" = {
         "delta": Decimal("0.001"),
         "study": "A",
         "censoring": "none",
-        "description": "4 s 内刚体沿 x 方向的净位移",
+        "description": ("4 s 内刚体沿 x 方向的净位移：x(t_end) − 声明的初始位置 "
+                        "meta.initial_x_m（t=0；**不是**首个采样 qpos[0]）"),
     },
     "stop_time_s": {
         "unit": "s",

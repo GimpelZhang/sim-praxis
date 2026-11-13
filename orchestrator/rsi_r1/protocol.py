@@ -333,7 +333,7 @@ SEED = 20261111          # 公开统计 seed（固定、与数据无关，见公
 RESAMPLES = 10000
 
 
-def metric_value(record, metric_id):
+def metric_value(record, metric_id, initial_x=None):
     qpos = record["qpos"]
     if metric_id == "normalized_tracking_rmse":
         target = record["target_q"]
@@ -343,8 +343,12 @@ def metric_value(record, metric_id):
             sq += d * d
         amp = max(abs(float(b[0])) for b in target) or 1.0
         return math.sqrt(sq / len(qpos)) / amp
-    if metric_id == "displacement_x_m":
-        return float(qpos[-1][0]) - float(qpos[0][0])
+    if metric_id in ("displacement_x_m", "displacement_x_m_negative_equivalence"):
+        # 锚点 = 声明的初始位置（meta.initial_x_m，t=0）；**不要**用 qpos[0]
+        # （那是第一个采样，t=0.0005 s，已前进 ~2e-4 m——2026-11-13 实测因此
+        # 判 INVALID_NUMERICS）。缺 meta 时才回退到 qpos[0]。
+        anchor = float(initial_x) if initial_x is not None else float(qpos[0][0])
+        return float(qpos[-1][0]) - anchor
     raise SystemExit("unknown metric: %s" % metric_id)
 
 
@@ -400,9 +404,13 @@ def main() -> int:
         return 0
     plan = json.loads(plans[0].read_text(encoding="utf-8"))
     condition = {}
+    initial_x = {}
     for meta in sorted(view.glob("*.meta.json")):
         doc = json.loads(meta.read_text(encoding="utf-8"))
-        condition[meta.name[: -len(".meta.json")]] = doc["condition_id"]
+        rid = meta.name[: -len(".meta.json")]
+        condition[rid] = doc["condition_id"]
+        if "initial_x_m" in doc:
+            initial_x[rid] = doc["initial_x_m"]
     specs = [plan["primary"]]
     if plan.get("negative_control"):
         specs.append(plan["negative_control"])
@@ -412,7 +420,7 @@ def main() -> int:
         by_block = {}
         for run_id, rec in records.items():
             by_block.setdefault(rec["block_id"], {})[condition[run_id]] = \
-                metric_value(rec, metric_id)
+                metric_value(rec, metric_id, initial_x.get(run_id))
         first, second = spec["condition_ids"]
         diffs = [pair[first] - pair[second] for _, pair in sorted(by_block.items())]
         level = 0.90 if spec["kind"] == "negative" else 0.95

@@ -42,10 +42,11 @@ MAX_PACK_FILE_BYTES = 10 * 1024 * 1024
 
 #: 当前宿主 prompt 模板逐字节钉死（2026-11-13 D-1 修复后：模板与门单一源）。
 TEMPLATE_SHA256 = (
-    "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592")
+    "afcaa68ffdd051560968f751f6d108b97927e5beb1fca76b6bb195f3242fe9a5")
 #: 历史模板 sha（`r12-paid-20261113a` 那轮公开的旧示例；该轮证据按当时字节判）。
 TEMPLATE_SHA256_HISTORY = (
     "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
+    "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592",
     TEMPLATE_SHA256)
 #: T4 分析门要求的输出 schema（与宿主模板写的 protocol_analysis.v1 冲突）。
 GATE_SCHEMA = "simpraxis.rsi_r1.analysis_output.v1"
@@ -57,6 +58,7 @@ CLASS_MISDIRECT = "INSTRUMENT_DEFECT_CONTRACT_KEY_MISDIRECTION"
 MISDIRECT_POINTER = "analysis_output.schema"
 CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
 CLASS_CAPACITY = "INSTRUMENT_DEFECT_SANDBOX_CAPACITY"
+CLASS_ANCHOR = "INSTRUMENT_DEFECT_METRIC_ANCHOR"
 CONTRACT_VIOLATION_CODES = frozenset({
     "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
     "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
@@ -308,6 +310,60 @@ def capacity_facts(root: Path, rel: str, repo_root):
     }
 
 
+def study_a_anchor_facts(root: Path):
+    """复算 A 的两种锚点均值，判别候选输出用的是哪个锚点（纯标准库）。"""
+    plans = []
+    for path in sorted((root / "public").glob("plan-*.json")):
+        doc = _read_json(path) or {}
+        if doc.get("phase") == "confirm" and doc.get("study_id") == "A":
+            plans.append(doc)
+    confirm = sorted((root / "observations").glob("confirm-A-*"))
+    raw_path = root / "private" / "analysis" / "A-confirm.raw.json"
+    if not plans or not confirm or not raw_path.is_file():
+        return {"available": False}
+    primary = plans[0].get("primary") or {}
+    conds = list(primary.get("condition_ids") or [])
+    if len(conds) != 2:
+        return {"available": False}
+    by_block = {}
+    for meta in sorted(confirm[0].glob("*.meta.json")):
+        rid = meta.name[: -len(".meta.json")]
+        doc = _read_json(meta) or {}
+        try:
+            rec = json.loads((confirm[0] / f"{rid}.jsonl").read_text(
+                encoding="utf-8").splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            return {"available": False}
+        qpos = rec.get("qpos") or []
+        if not qpos:
+            return {"available": False}
+        x_last = float(qpos[-1][0])
+        initial = float(doc.get("initial_x_m", qpos[0][0]))
+        slot = by_block.setdefault(str(rec.get("block_id")), {})
+        slot[str(doc.get("condition_id"))] = (x_last - initial, x_last - float(qpos[0][0]))
+    t_cond, c_cond = conds
+    d_init, d_q0 = [], []
+    for pair in by_block.values():
+        if t_cond in pair and c_cond in pair:
+            d_init.append(pair[t_cond][0] - pair[c_cond][0])
+            d_q0.append(pair[t_cond][1] - pair[c_cond][1])
+    if not d_init:
+        return {"available": False}
+    cand = None
+    for item in (_read_json(raw_path) or {}).get("contrasts") or []:
+        if str(item.get("contrast_id")) == str(primary.get("id")):
+            cand = item.get("estimate")
+    if cand is None:
+        return {"available": False}
+    mean_init = sum(d_init) / len(d_init)
+    mean_q0 = sum(d_q0) / len(d_q0)
+    return {"available": True, "candidate_estimate": float(cand),
+            "mean_initial_anchor": mean_init, "mean_qpos0_anchor": mean_q0,
+            "matches_qpos0": abs(float(cand) - mean_q0) <= 1e-9,
+            "matches_initial": abs(float(cand) - mean_init) <= 1e-9,
+            "n_blocks": len(d_init)}
+
+
 def studies_started(root: Path) -> bool:
     for study in STUDIES:
         for rel in STUDY_ARTIFACTS.values():
@@ -492,6 +548,12 @@ def judge(root: Path, pack: "Path | None" = None,
                 f"readout.totals.family_total={rd_tot.get('family_total')!r} "
                 f"≠ 重算 {want_total}")
 
+    anchor = study_a_anchor_facts(root)
+    recomputed["metric_anchor"] = anchor
+    if anchor.get("available") and anchor.get("matches_qpos0") \
+            and not anchor.get("matches_initial"):
+        recomputed["metric_anchor_defect"] = True
+
     # 仪器失败判定面
     ins = instrument_facts(root, repo_root=repo_root)
     cap = {"available": False}
@@ -547,6 +609,10 @@ def judge(root: Path, pack: "Path | None" = None,
     if ins.get("classification") == "INSTRUMENT_DEFECT_TEMPLATE_GATE_CONTRADICTION":
         if axes.get("measurement") != "INVALID_INSTRUMENT":
             problems.append("仪器缺陷但 measurement 不是 INVALID_INSTRUMENT")
+    if recomputed.get("metric_anchor_defect"):
+        if axes.get("measurement") != "INVALID_INSTRUMENT":
+            problems.append(
+                "指标锚点矛盾（候选输出=qpos[0]锚点）但 measurement 不是 INVALID_INSTRUMENT")
     if ins.get("classification") == CLASS_PROTOCOL_VIOLATION:
         if axes.get("measurement") != "VALID":
             problems.append("合同违背（测量有效）但 measurement 不是 VALID")

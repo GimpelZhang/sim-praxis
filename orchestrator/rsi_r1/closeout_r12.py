@@ -58,6 +58,10 @@ CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
 #: 峰值内存 > 沙盒 MEMORY_LIMIT，容器被 OOM 杀（exit 137）——离线演练的合成
 #: 数据量小，照不出这个容量墙。
 CLASS_INSTRUMENT_CAPACITY = "INSTRUMENT_DEFECT_SANDBOX_CAPACITY"
+#: 指标锚点矛盾（2026-11-13 轮 G 实测）：prompt 模板按 qpos[0] 算位移，
+#: judge 按 meta.initial_x_m 算；两者逐 run 差 ~2e-4，配对后均值差 1.4e-6，
+#: 恒超 3e-8 容差。候选照抄模板必被判 INVALID_NUMERICS。
+CLASS_INSTRUMENT_METRIC_ANCHOR = "INSTRUMENT_DEFECT_METRIC_ANCHOR"
 CONTRACT_VIOLATION_CODES = frozenset({
     "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
     "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
@@ -69,6 +73,7 @@ CLASS_NOT_APPLICABLE = "NOT_APPLICABLE"
 #: 不靠 sha 列表猜——sha 列表只回答「这是不是宿主历史上公开过的模板」。
 TEMPLATE_SHA256_HISTORY = (
     "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
+    "afcaa68ffdd051560968f751f6d108b97927e5beb1fca76b6bb195f3242fe9a5",
     "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592")
 
 
@@ -259,6 +264,71 @@ def capacity_facts(attempt: Path, *, memory_limit: str) -> "dict[str, Any]":
         "memory_limit_kb": limit_kb,
         "exceeds_limit": bool(peak and limit_kb and peak > limit_kb),
         "error": error,
+    }
+
+
+def _study_a_anchor_facts(root: Path, study: str = "A") -> "dict[str, Any]":
+    """用确认批 raw 复算两种锚点的 primary 均值，与候选输出逐值对照。
+
+    纯数据复算（不跑 bootstrap）：均值对锚点线性，足以判别候选用了哪个锚点。
+    """
+    plans = []
+    for path in sorted((root / "public").glob("plan-*.json")):
+        doc = _read_json(path) or {}
+        if doc.get("phase") == "confirm" and doc.get("study_id") == study:
+            plans.append(doc)
+    confirm = sorted((root / "observations").glob(f"confirm-{study}-*"))
+    raw_path = root / "private" / "analysis" / f"{study}-confirm.raw.json"
+    if not plans or not confirm or not raw_path.is_file():
+        return {"available": False}
+    primary = (plans[0].get("primary") or {})
+    conds = list(primary.get("condition_ids") or [])
+    if len(conds) != 2:
+        return {"available": False}
+    by_block: "dict[str, dict[str, list[float]]]" = {}
+    for meta in sorted(confirm[0].glob("*.meta.json")):
+        rid = meta.name[: -len(".meta.json")]
+        doc = _read_json(meta) or {}
+        raw = confirm[0] / f"{rid}.jsonl"
+        try:
+            rec = json.loads(raw.read_text(encoding="utf-8").splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            return {"available": False}
+        qpos = rec.get("qpos") or []
+        if not qpos:
+            return {"available": False}
+        x_last = float(qpos[-1][0])
+        initial = float(doc.get("initial_x_m", qpos[0][0]))
+        x0 = float(qpos[0][0])
+        slot = by_block.setdefault(str(rec.get("block_id")), {})
+        slot.setdefault(str(doc.get("condition_id")), {"initial": x_last - initial,
+                                                       "qpos0": x_last - x0})
+    t_cond, c_cond = conds
+    d_init, d_q0 = [], []
+    for block, pair in sorted(by_block.items()):
+        if t_cond in pair and c_cond in pair:
+            d_init.append(pair[t_cond]["initial"] - pair[c_cond]["initial"])
+            d_q0.append(pair[t_cond]["qpos0"] - pair[c_cond]["qpos0"])
+    if not d_init:
+        return {"available": False}
+    mean_init = sum(d_init) / len(d_init)
+    mean_q0 = sum(d_q0) / len(d_q0)
+    out = _read_json(raw_path) or {}
+    cand = None
+    for item in out.get("contrasts") or []:
+        if str(item.get("contrast_id")) == str(primary.get("id")):
+            cand = item.get("estimate")
+    if cand is None:
+        return {"available": False}
+    tol = 1e-9
+    return {
+        "available": True,
+        "candidate_estimate": float(cand),
+        "mean_initial_anchor": mean_init,
+        "mean_qpos0_anchor": mean_q0,
+        "matches_qpos0": abs(float(cand) - mean_q0) <= tol,
+        "matches_initial": abs(float(cand) - mean_init) <= tol,
+        "n_blocks": len(d_init),
     }
 
 
@@ -488,6 +558,19 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "detail": ("研究未产出可判读结果或判据拒绝；失败分母保留，"
                        "不调阈值、不换题"),
         })
+
+    # 指标锚点矛盾判定：A 判 INVALID_NUMERICS 且候选数值与 qpos[0]-锚点逐值相符、
+    # 与 initial_x-锚点不符 ⇒ 仪器缺陷（候选照抄了 prompt 模板的锚点）。
+    anchor = _study_a_anchor_facts(root)
+    if (anchor.get("available") and anchor.get("matches_qpos0")
+            and not anchor.get("matches_initial")):
+        axes["measurement"] = "INVALID_INSTRUMENT"
+        for item in failures:
+            if item.get("task") == "T7" and item.get("study") == "A":
+                item["classification"] = CLASS_INSTRUMENT_METRIC_ANCHOR
+                item["detail"] = ("指标锚点矛盾：prompt 模板用 qpos[0]，judge 用 "
+                                  "meta.initial_x_m；候选数值与模板锚点逐值相符")
+                item["evidence"] = {"anchor": anchor}
 
     if not fam["member_usage_matches_ledger"]:
         gaps.append(
