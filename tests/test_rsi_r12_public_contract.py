@@ -96,7 +96,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert ev["lane_caps"] == {lane: PROFILE.lane_post_caps[lane]
                                for lane in PROFILE.lane_order}
     assert ev["posts_total"] == PROFILE.hard_cap == 124
-    assert ev["family_cap"] == PROFILE.family_cap == 190
+    assert ev["family_cap"] == PROFILE.family_cap == 244
     assert ev["family_history"] == PROFILE.family_history_posts == 31
     assert ev["aux_subenvelopes"] == dict(P.AUX_SUBENVELOPES)
     assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
@@ -447,4 +447,15 @@ def test_prompt_discloses_invalidation_rule():
     assert "失效规则" in block
     for token in ("改写 design", "propose_plan", "改写 plan", "run_batch",
                   "改写 analysis", "analyze", "只烧预算"):
+        assert token in block, token
+
+
+def test_prompt_requires_bitwise_estimator_reuse():
+    """2026-11-13 A 轮实测：必须逐字复用宿主估计量（差 1.4e-6 即拒）。"""
+    from orchestrator.rsi_r1 import protocol as PT
+
+    block = PT._ACTIONS_BLOCK
+    assert "数值复现" in block
+    for token in ("metric_value()", "interval()", "float64", "20261111",
+                  "linear", "不要 round"):
         assert token in block, token
