@@ -817,11 +817,13 @@ class ResearchLoop:
                 self.store.stop_or_block(code=exc.code, detail=exc.detail)
                 return StepOutcome(ok=False, code=exc.code, terminal=True)
             except EmptyResponseError as exc:
-                # 空回答零内容、零副作用：记一次失败 POST，原样重发一次。
-                self.budget.resolve_or_pause(
-                    Reply(text="", response_id="", is_actionable=False,
-                          reason="EmptyResponseError"))
+                # 空回答零内容、零副作用：该次预留已占槽（账本已有 ok=false 行），
+                # **不能**调 resolve_or_pause（非可动作回复会写暂停件，把重发挡在
+                # 准入外——2026-11-13 轮 I 实测 PAUSED）。直接原样重发一次。
                 if attempt >= 1:
+                    self.budget.resolve_or_pause(
+                        Reply(text="", response_id="", is_actionable=False,
+                              reason="EmptyResponseError"))
                     self.store.stop_or_block(code="EmptyResponseError",
                                              detail=str(exc))
                     return StepOutcome(ok=False, code="EmptyResponseError",
