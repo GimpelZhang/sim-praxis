@@ -80,10 +80,20 @@ RSI_R12_TASK_CAPS: "Mapping[int, int]" = types.MappingProxyType({
     LANE_TASK_ID_R12[lane]: LANE_POST_CAPS_R12[lane] for lane in LANE_ORDER_R12
 })
 
-#: 跨轮研究族硬帽：历史 31（R1 9 + R1.1 22，两独立 envelope 的最终根实呼）+
-#: 本轮 124 = 155。历史 31 的逐字节导入在 ``family.py``。
-FAMILY_CAP = 155
+#: 跨轮研究族硬帽：历史 31（R1 9 + R1.1 22，两独立 envelope 的最终根实呼）
+#: + 已关闭轮实花 5（`r12-paid-20261113a`，仪器缺陷轮，花掉的不归还）
+#: + 本轮 124 = **160**。历史 31 的逐字节导入在 ``family.py``。
+#:
+#: 锁内适配（2026-11-13，用户逐字裁决）：原帽 155 = 31 + 124，上一轮以
+#: INVALID_INSTRUMENT 结案时已真实花掉 5 呼；若仍按 155 开新轮，31+124=155
+#: 会把已花的 5 呼算成「不存在」。用户裁决把帽抬到 160 使
+#: 「历史 + 已关闭轮实花 + 新轮」恰好闭合（Plan 明写「改变 155 需新用户裁决」）。
+FAMILY_CAP = 160
 FAMILY_HISTORY_POSTS = 31
+#: 已关闭轮的实花（只能由族文档的 closed 成员逐行复算，不得手填）。
+FAMILY_CLOSED_ROUND_POSTS = 5
+#: 历史族帽取值（旧 envelope/consent 仍须可读；新轮一律用当前 ``FAMILY_CAP``）。
+FAMILY_CAP_HISTORY: "tuple[int, ...]" = (155, FAMILY_CAP)
 FAMILY_NEW_ROUND_POSTS = RSI_R12_HARD_CAP
 
 #: 历史来源的**两本最终根账**（Plan §0 基线；行数/哈希在 family.py 复核）。
@@ -213,9 +223,11 @@ def assert_r12_table_consistent() -> None:
         raise AssertionError("R1.2 无 repair_reserve，正常预算必须等于硬帽 124")
     if "repair_reserve" in LANE_POST_CAPS_R12:
         raise AssertionError("R1.2 不得登记 repair_reserve（付费后无本轮修复入口）")
-    if FAMILY_CAP != FAMILY_HISTORY_POSTS + RSI_R12_HARD_CAP:
+    if FAMILY_CAP != (FAMILY_HISTORY_POSTS + FAMILY_CLOSED_ROUND_POSTS
+                      + RSI_R12_HARD_CAP):
         raise AssertionError(
-            f"族帽 {FAMILY_CAP} != 历史 {FAMILY_HISTORY_POSTS} + 本轮 {RSI_R12_HARD_CAP}")
+            f"族帽 {FAMILY_CAP} != 历史 {FAMILY_HISTORY_POSTS} + 已关闭轮 "
+            f"{FAMILY_CLOSED_ROUND_POSTS} + 本轮 {RSI_R12_HARD_CAP}")
     if sum(int(s["call_rows"]) for s in HISTORY_SOURCES) != FAMILY_HISTORY_POSTS:
         raise AssertionError("历史来源行数和 != 31")
     if sum(AUX_SUBENVELOPES.values()) != AUX_SUBENVELOPE_TOTAL:
@@ -638,12 +650,15 @@ def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
         "family": {
             "cap_posts": profile.family_cap,
             "history_posts": profile.family_history_posts,
+            "closed_rounds_posts": FAMILY_CLOSED_ROUND_POSTS,
             "used_before_this_round": family_used_before,
             "remaining_including_this_round":
                 profile.family_cap - family_used_before,
             "this_round_cap_posts": profile.hard_cap,
             "note": ("历史 31 呼 = R1 9 + R1.1 22（两独立 envelope 的最终根实呼，"
-                     "carryover 不重复计）；本轮不重置家族余额"),
+                     "carryover 不重复计）；已关闭轮实花 5 呼（"
+                     "`r12-paid-20261113a`，花掉的不归还）；族帽 160 由 2026-11-13 "
+                     "用户裁决设立；本轮不重置家族余额"),
         },
         "posts": {
             "per_lane": lanes,
@@ -781,7 +796,8 @@ def assert_public_contract_v2_complete(doc: Mapping[str, Any]) -> None:
     if dict(doc["posts"]["per_lane"]) != dict(LANE_POST_CAPS_R12):
         raise ProfileError("PUBLIC_CONTRACT_INVALID", "posts.per_lane 与 lane 表不符")
     if doc["family"]["cap_posts"] != FAMILY_CAP:
-        raise ProfileError("PUBLIC_CONTRACT_INVALID", "family.cap_posts 不等于 155")
+        raise ProfileError("PUBLIC_CONTRACT_INVALID",
+                           f"family.cap_posts != {FAMILY_CAP}")
     if doc["compute"]["explore"]["max_runs_per_study"] != MAX_EXPLORE_RUNS_PER_STUDY:
         raise ProfileError("PUBLIC_CONTRACT_INVALID", "explore 帽不是 64")
     if doc["compute"]["explore"]["cell"] != ["condition_id", "block_id"]:

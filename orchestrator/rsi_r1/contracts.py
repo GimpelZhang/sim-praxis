@@ -709,11 +709,12 @@ def assert_single_truth_v2(budget: BudgetSpecV2, *,
     if family_cap != _p12.FAMILY_CAP:
         raise ContractError("BUDGET_DRIFT",
                             f"族帽 {family_cap} != {_p12.FAMILY_CAP}")
-    if family_cap != _p12.FAMILY_HISTORY_POSTS + budget.total_posts:
+    if family_cap != (_p12.FAMILY_HISTORY_POSTS + _p12.FAMILY_CLOSED_ROUND_POSTS
+                      + budget.total_posts):
         raise ContractError(
             "BUDGET_DRIFT",
-            f"族帽 {family_cap} != 历史 {_p12.FAMILY_HISTORY_POSTS} + 本轮 "
-            f"{budget.total_posts}")
+            f"族帽 {family_cap} != 历史 {_p12.FAMILY_HISTORY_POSTS} + 已关闭轮 "
+            f"{_p12.FAMILY_CLOSED_ROUND_POSTS} + 本轮 {budget.total_posts}")
     # 旧合同数值（144/224/228）绝不能被混进来当 R1.2 真值。
     if budget.total_posts in (144, 224, 228):
         raise ContractError("BUDGET_DRIFT",
@@ -932,9 +933,11 @@ class ConsentV2:
                 c not in "0123456789abcdef" for c in self.plan_sha256):
             raise ContractError("CONSENT_STALE",
                                 "consent.plan_sha256 必须是 64 位小写十六进制")
-        if self.family_cap != _p12.FAMILY_CAP:
-            raise ContractError("FAMILY_CAP_EXCEEDED",
-                                f"family_cap={self.family_cap} != {_p12.FAMILY_CAP}")
+        if self.family_cap not in _p12.FAMILY_CAP_HISTORY:
+            raise ContractError(
+                "FAMILY_CAP_EXCEEDED",
+                f"family_cap={self.family_cap} 不在历史取值 "
+                f"{_p12.FAMILY_CAP_HISTORY} 内")
         if self.history_posts != _p12.FAMILY_HISTORY_POSTS:
             raise ContractError("HISTORY_DRIFT",
                                 f"history_posts={self.history_posts} != "
@@ -1119,8 +1122,11 @@ def validate_envelope_v2(doc: Any, *, envelope_id: "str | None" = None) -> "dict
     if {k: require_int(v, where=f"envelope.lane_caps.{k}") for k, v in lanes.items()} \
             != dict(_p12.LANE_POST_CAPS_R12):
         raise ContractError("BUDGET_DRIFT", "envelope.lane_caps 与 profile 表不符")
-    if require_int(doc["family_cap"], where="envelope.family_cap") != _p12.FAMILY_CAP:
-        raise ContractError("FAMILY_CAP_EXCEEDED", "envelope.family_cap 不等于 155")
+    cap = require_int(doc["family_cap"], where="envelope.family_cap")
+    if cap not in _p12.FAMILY_CAP_HISTORY:
+        raise ContractError(
+            "FAMILY_CAP_EXCEEDED",
+            f"envelope.family_cap={cap} 不在历史取值 {_p12.FAMILY_CAP_HISTORY} 内")
     if require_int(doc["history_posts"], where="envelope.history_posts") \
             != _p12.FAMILY_HISTORY_POSTS:
         raise ContractError("HISTORY_DRIFT", "envelope.history_posts 不等于 31")

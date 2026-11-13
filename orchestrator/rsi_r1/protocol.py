@@ -40,6 +40,7 @@ from typing import Any, Callable, Mapping
 from orchestrator.common import research_transport as T
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.runtime_paths import RSI_R1_CAMPAIGN_SUBDIRS
+from orchestrator.rsi_r1 import analysis_receipt as AR
 from orchestrator.rsi_r1 import assembly as A
 from orchestrator.rsi_r1 import backend as BK
 from orchestrator.rsi_r1 import contracts as C
@@ -314,49 +315,135 @@ if __name__ == "__main__":
     raise SystemExit(main())
 '''
 
-ANALYSIS_TEMPLATE = '''\
+_ANALYSIS_TEMPLATE_SOURCE = '''\
+"""候选分析程序示例（**形状完整**：产出必须过宿主 analysis_receipt 门）。
+
+argv[1] = 只读观测视图（run 文件与 ``<run_id>.meta.json`` 平铺在根目录，
+          另有宿主放入的 ``plan-<sha12>.json``，对比定义与 δ 从中读取）；
+argv[2] = 输出目录，必须写 ``analysis.json``。
+"""
 import json
 import math
 import sys
 from pathlib import Path
 
+import numpy as np
 
-def metric(record):
+SEED = 20261111          # 公开统计 seed（固定、与数据无关，见公开合同）
+RESAMPLES = 10000
+
+
+def metric_value(record, metric_id):
     qpos = record["qpos"]
-    if "target_q" in record:
+    if metric_id == "normalized_tracking_rmse":
         target = record["target_q"]
         sq = 0.0
         for a, b in zip(qpos, target):
             d = float(a[0]) - float(b[0])
             sq += d * d
         amp = max(abs(float(b[0])) for b in target) or 1.0
-        return {"metric_id": "normalized_tracking_rmse",
-                "value": math.sqrt(sq / len(qpos)) / amp, "n_samples": len(qpos)}
-    return {"metric_id": "displacement_x_m",
-            "value": float(qpos[-1][0]) - float(qpos[0][0]),
-            "n_samples": len(qpos)}
+        return math.sqrt(sq / len(qpos)) / amp
+    if metric_id == "displacement_x_m":
+        return float(qpos[-1][0]) - float(qpos[0][0])
+    raise SystemExit("unknown metric: %s" % metric_id)
+
+
+def interval(values, level):
+    arr = np.asarray(values, dtype=np.float64)
+    rng = np.random.default_rng(np.random.PCG64(SEED))
+    idx = rng.integers(0, arr.shape[0], size=(RESAMPLES, arr.shape[0]))
+    means = arr[idx].mean(axis=1)
+    alpha = (1.0 - level) / 2.0
+    lo, hi = np.quantile(means, [alpha, 1.0 - alpha], method="linear")
+    return float(lo), float(hi)
+
+
+def verdict(proposition, delta, lower, upper):
+    if proposition == "decrease_gt":
+        if upper < -delta:
+            return "SUPPORTED"
+        if lower >= -delta:
+            return "REFUTED"
+    elif proposition == "increase_gt":
+        if lower > delta:
+            return "SUPPORTED"
+        if upper <= delta:
+            return "REFUTED"
+    else:  # equivalent
+        if lower > -delta and upper < delta:
+            return "SUPPORTED"
+        if upper <= -delta or lower >= delta:
+            return "REFUTED"
+    return "INCONCLUSIVE"
 
 
 def main() -> int:
     view = Path(sys.argv[1])
     out = Path(sys.argv[2])
-    runs = {}
-    for path in sorted(view.rglob("*.jsonl")):
+    plans = sorted(view.glob("plan-*.json"))
+    records = {}
+    for path in sorted(view.glob("*.jsonl")):
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             rec = json.loads(line)
-            runs[rec["run_id"]] = {"block_id": rec["block_id"], **metric(rec)}
-    doc = {"schema": "simpraxis.rsi_r1.protocol_analysis.v1",
-           "schema_version": 1, "n_runs": len(runs), "runs": runs}
+            records[rec["run_id"]] = rec
+    if not plans:
+        # 旧 R1 路径的视图不含 plan（R1.2 才由宿主放入）：保持旧行为，只报
+        # run 身份与计数，旧门只查 n_runs。新门不会被走到这条分支。
+        doc = {"schema": "__OUTPUT_SCHEMA__", "schema_version": 1,
+               "n_runs": len(records), "run_ids": sorted(records),
+               "contrasts": []}
+        (out / "analysis.json").write_text(
+            json.dumps(doc, sort_keys=True, allow_nan=False) + "\\n",
+            encoding="utf-8")
+        return 0
+    plan = json.loads(plans[0].read_text(encoding="utf-8"))
+    condition = {}
+    for meta in sorted(view.glob("*.meta.json")):
+        doc = json.loads(meta.read_text(encoding="utf-8"))
+        condition[meta.name[: -len(".meta.json")]] = doc["condition_id"]
+    specs = [plan["primary"]]
+    if plan.get("negative_control"):
+        specs.append(plan["negative_control"])
+    contrasts = []
+    for spec in specs:
+        metric_id = spec["metric"]
+        by_block = {}
+        for run_id, rec in records.items():
+            by_block.setdefault(rec["block_id"], {})[condition[run_id]] = \
+                metric_value(rec, metric_id)
+        first, second = spec["condition_ids"]
+        diffs = [pair[first] - pair[second] for _, pair in sorted(by_block.items())]
+        level = 0.90 if spec["kind"] == "negative" else 0.95
+        effect = float(np.mean(diffs))
+        lower, upper = interval(diffs, level)
+        contrasts.append({
+            "contrast_id": spec["id"],
+            "metric_id": metric_id,
+            "proposition": spec["proposition"],
+            "estimate": effect,
+            "lower": lower,
+            "upper": upper,
+            "status": verdict(spec["proposition"], float(spec["delta"]),
+                              lower, upper),
+            "n_blocks": len(diffs),
+        })
+    doc = {"schema": "__OUTPUT_SCHEMA__", "schema_version": 1,
+           "run_ids": sorted(records), "contrasts": contrasts}
     (out / "analysis.json").write_text(
-        json.dumps(doc, sort_keys=True) + "\\n", encoding="utf-8")
+        json.dumps(doc, sort_keys=True, allow_nan=False) + "\\n", encoding="utf-8")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+
+#: 单一源：模板写出的 schema 与宿主门 ``analysis_receipt.OUTPUT_SCHEMA`` 恒等
+#: （2026-11-13 修 D-1：R1.2 T4 换门后模板仍写旧 schema，导致候选照抄必被拒）。
+ANALYSIS_TEMPLATE = _ANALYSIS_TEMPLATE_SOURCE.replace(
+    "__OUTPUT_SCHEMA__", AR.OUTPUT_SCHEMA)
 
 #: 公开估计量（``statistics.py`` 自述「公开方法，候选可用」；Plan §4.1 固定）。
 ESTIMATOR_SPEC = """\
@@ -403,7 +490,14 @@ _SOURCE_TEMPLATES_BLOCK = (
     "```python\n" + DESIGN_TEMPLATE + "```\n"
     "analysis 程序：argv[1]=只读观测视图（run 文件**平铺**在根目录，"
     "用 `glob(\"*.jsonl\")` 或 `rglob(\"*.jsonl\")`；不是 `*/*.jsonl`），"
-    "argv[2]=输出目录，\n必须写 `analysis.json`（含 `n_runs`，须等于请求的 run 数）。\n"
+    "argv[2]=输出目录，\n必须写 `analysis.json`，字段恒为："
+    "`schema`（= 公开合同 `analysis_output.schema`，示例里已按单一源写好）、"
+    "`run_ids`（本次请求的全部 run，不许多不许少）、"
+    "`contrasts`（按 `plan-<sha12>.json` 里 primary/negative_control 的 "
+    "`id/metric/proposition/condition_ids` 逐条给出 "
+    "`contrast_id, metric_id, proposition, estimate, lower, upper, status, "
+    "n_blocks`；区间用公开估计量：95% 主区间 / 90% 阴性区间，block 重抽样，"
+    "seed 20261111）。\n"
     "```python\n" + ANALYSIS_TEMPLATE + "```\n")
 
 _CLAIMS_BLOCK = (

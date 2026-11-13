@@ -1,4 +1,4 @@
-"""RSI-R1.2 T0（AC04–AC07）：预算 v2、族账 155、历史 31 冻结、占额与许可。
+"""RSI-R1.2 T0（AC04–AC07）：预算 v2、族账 160、历史 31 冻结、占额与许可。
 
 覆盖：
 
@@ -163,7 +163,8 @@ def test_family_imports_history_once(fam_root, tmp_path, copied_sources):
     assert sum(int(m["posts_reserved"]) for m in doc["members"]) == 124
     usage = FAM.usage(fam_root)
     assert usage["reserved_total"] == 155
-    assert usage["remaining"] == 0
+    # 族帽 160 = 历史 31 + 已关闭轮 5 + 本轮 124（2026-11-13 用户裁决）
+    assert usage["remaining"] == 5
     # 幂等：再次登记不加第二次 carryover
     again = FAM.register(fam_root, r12, "env1", history_sources=sources)
     assert again["posts_reserved"] == 124
@@ -258,7 +259,7 @@ def test_cli_init_check_zero_post(tmp_path, monkeypatch, capsys):
     C.validate_envelope_v2(envelope, envelope_id="env_cli")
     assert envelope["ledger_namespace"] == 2904
     assert envelope["hard_cap"] == 124
-    assert envelope["family_cap"] == 155
+    assert envelope["family_cap"] == 160
     assert envelope["mode"] == "offline_validation"
     assert envelope["cost_gate"]["decision"] == "BLOCKED"
     assert envelope["cost_gate"]["paid_authorized"] is False

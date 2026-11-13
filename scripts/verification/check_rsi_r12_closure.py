@@ -9,9 +9,14 @@
 * 逐项**重算**后再与 readout 比对；readout 自述不作为证据；
 * rc：0=PASS（problems 为空），1=FAIL（problems 非空），2=输入不可读。
 
-判据面（T9 行「历史 31 + 新实呼 ≤ 155」）：
+判据面（T9 行「历史 31 + 已关闭轮 + 新实呼 ≤ 族帽」）：
 
-    ROUND_CAP 124   FAMILY_CAP 155   HISTORY_POSTS 31（历史块字面量）
+    ROUND_CAP 124   FAMILY_CAP 160   HISTORY_POSTS 31（历史块字面量）
+
+族帽 160 是 2026-11-13 用户裁决（155 → 160）后的口径：历史 31 + 已关闭轮
+实花（``r12-paid-20261113a`` 5）+ 新轮 124。**已关闭轮的实花由族文档逐行
+重算**（``state=="closed"`` 且非本轮 envelope 的 ``posts_used`` 之和），
+不写死 5；族文档的 ``family_cap`` 仍必须等于字面量 160。
 """
 
 from __future__ import annotations
@@ -27,7 +32,7 @@ SCHEMA = "simpraxis.rsi_r12.closure_judge.v1"
 SCHEMA_VERSION = 1
 
 ROUND_CAP = 124
-FAMILY_CAP = 155
+FAMILY_CAP = 160
 HISTORY_POSTS = 31
 
 READOUT_RELPATH = "closeout/r12_readout.json"
@@ -35,9 +40,13 @@ PACK_MANIFEST = "evidence_manifest.json"
 PACK_SCHEMA = "simpraxis.rsi_r1.evidence_manifest.v1"
 MAX_PACK_FILE_BYTES = 10 * 1024 * 1024
 
-#: 宿主 prompt 模板逐字节钉死（T6 仪器缺陷判定面）。
+#: 当前宿主 prompt 模板逐字节钉死（2026-11-13 D-1 修复后：模板与门单一源）。
 TEMPLATE_SHA256 = (
-    "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63")
+    "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592")
+#: 历史模板 sha（`r12-paid-20261113a` 那轮公开的旧示例；该轮证据按当时字节判）。
+TEMPLATE_SHA256_HISTORY = (
+    "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
+    TEMPLATE_SHA256)
 #: T4 分析门要求的输出 schema（与宿主模板写的 protocol_analysis.v1 冲突）。
 GATE_SCHEMA = "simpraxis.rsi_r1.analysis_output.v1"
 #: 宿主 prompt 模板实际写出的 schema（逐字；用于字节级证明「模板↔门」自相矛盾）。
@@ -141,6 +150,9 @@ def family_facts(campaign_root: Path, envelope_id: str):
     members = doc.get("members") or []
     member = next((m for m in members if m.get("envelope_id") == envelope_id),
                   None)
+    closed_rounds = sum(
+        int(m.get("posts_used") or 0) for m in members
+        if m.get("state") == "closed" and m.get("envelope_id") != envelope_id)
     reserved = sum(int(m.get("posts_reserved") or 0) for m in members
                    if m.get("state") != "closed")
     history = int(((doc.get("history") or {}).get("total_call_rows")) or 0)
@@ -149,7 +161,8 @@ def family_facts(campaign_root: Path, envelope_id: str):
         "path": str(path),
         "family_cap": int(doc.get("family_cap") or 0),
         "history_posts": history,
-        "reserved_total": reserved,
+        "closed_rounds_posts": closed_rounds,
+        "reserved_total": history + closed_rounds + reserved,
         "member": member,
         "member_used": int((member or {}).get("posts_used") or 0),
     }
@@ -182,7 +195,7 @@ def instrument_facts(root: Path, lane: str = "probe"):
         "analysis_reason_codes": reasons,
         "source_file_present": source_present,
         "source_is_host_template": bool(
-            source_present and source_sha == TEMPLATE_SHA256),
+            source_present and source_sha in TEMPLATE_SHA256_HISTORY),
         "gate_schema": receipt.get("output_schema"),
     })
     # 字节级证明：候选源码（== 宿主模板）写出的是旧 schema，且从不写门要的 schema。
@@ -369,17 +382,20 @@ def judge(root: Path, pack: "Path | None" = None,
         elif fam["member_used"] != led["calls"]:
             problems.append(
                 f"族成员 posts_used={fam['member_used']} ≠ 账本 {led['calls']}")
-        total = fam["history_posts"] + led["calls"]
+        total = (fam["history_posts"] + fam["closed_rounds_posts"]
+                 + led["calls"])
         recomputed["family_total"] = total
         if total > FAMILY_CAP:
-            problems.append(f"历史+本轮 {total} > 族帽 {FAMILY_CAP}")
+            problems.append(
+                f"历史+已关闭轮+本轮 {total} > 族帽 {FAMILY_CAP}")
     if led["calls"] > ROUND_CAP:
         problems.append(f"本轮实呼 {led['calls']} > 轮帽 {ROUND_CAP}")
     rd_tot = readout.get("totals") or {}
     if rd_tot.get("round_calls") != led["calls"]:
         problems.append("readout.totals.round_calls 不符")
     if fam["present"]:
-        want_total = fam["history_posts"] + led["calls"]
+        want_total = (fam["history_posts"] + fam["closed_rounds_posts"]
+                      + led["calls"])
         if rd_tot.get("family_total") != want_total:
             problems.append(
                 f"readout.totals.family_total={rd_tot.get('family_total')!r} "
@@ -394,7 +410,8 @@ def judge(root: Path, pack: "Path | None" = None,
             problems.append(
                 f"instrument.classification {rd_ins.get('classification')!r} ≠ "
                 f"重算 {ins.get('classification')!r}")
-        if rd_ins.get("template_sha256") not in (None, TEMPLATE_SHA256):
+        if rd_ins.get("template_sha256") not in (
+                None, *TEMPLATE_SHA256_HISTORY):
             problems.append("readout 模板 sha ≠ 字面量钉死值")
         if (rd_ins.get("gate_schema") not in (None, GATE_SCHEMA)):
             problems.append("readout 门 schema ≠ 字面量钉死值")

@@ -526,3 +526,87 @@ def test_confirm_pointer_binds_raw_bytes_not_normalized_doc(tmp_path) -> None:
     (root / "private" / "analysis" / "A-confirm.raw.json").write_bytes(raw + b" ")
     drift, err = A.read_confirm_output(ctx, "A")
     assert drift == b"" and err == "ANALYSIS_OUTPUT_DRIFT"
+
+
+# ---------------------------------------------------------------------------
+# D-1 修复（2026-11-13）：模板 → 门的往返正控
+# ---------------------------------------------------------------------------
+
+def _template_view(tmp_path):
+    """合成一个最小分析视图：plan + 四个 run（两对比 × 6 block）。"""
+    import subprocess
+    import sys
+
+    from orchestrator.rsi_r1 import protocol as PT
+    from orchestrator.rsi_r1 import statistics as STAT
+
+    view = tmp_path / "view"
+    out = tmp_path / "out"
+    view.mkdir()
+    out.mkdir()
+    plan = {
+        "primary": {"id": "c-main", "kind": "primary",
+                    "metric": "displacement_x_m", "proposition": "increase_gt",
+                    "delta": "0.01", "condition_ids": ["handling", "control"]},
+        "negative_control": {"id": "c-neg", "kind": "negative",
+                             "metric": "displacement_x_m",
+                             "proposition": "equivalent", "delta": "0.05",
+                             "condition_ids": ["noise_a", "noise_b"]},
+    }
+    (view / "plan-abc123.json").write_text(json.dumps(plan), encoding="utf-8")
+    conds = {"handling": 0.05, "control": 0.0, "noise_a": 0.0, "noise_b": 0.002}
+    run_ids = []
+    diffs = {"c-main": {}, "c-neg": {}}
+    for block in range(6):
+        for cond, offset in conds.items():
+            run_id = f"run-{cond}-{block:02d}"
+            run_ids.append(run_id)
+            value = 0.10 + offset + 0.001 * block
+            rec = {"run_id": run_id, "block_id": f"blk-{block:02d}",
+                   "qpos": [[0.0, 0.0], [value, 0.0]]}
+            (view / f"{run_id}.jsonl").write_text(
+                json.dumps(rec) + "\n", encoding="utf-8")
+            (view / f"{run_id}.meta.json").write_text(
+                json.dumps({"run_id": run_id, "condition_id": cond}),
+                encoding="utf-8")
+            if cond == "handling":
+                diffs["c-main"].setdefault(f"blk-{block:02d}", [0.0, 0.0])[0] = value
+            elif cond == "control":
+                diffs["c-main"].setdefault(f"blk-{block:02d}", [0.0, 0.0])[1] = value
+            elif cond == "noise_a":
+                diffs["c-neg"].setdefault(f"blk-{block:02d}", [0.0, 0.0])[0] = value
+            else:
+                diffs["c-neg"].setdefault(f"blk-{block:02d}", [0.0, 0.0])[1] = value
+
+    script = tmp_path / "analysis.py"
+    script.write_text(PT.ANALYSIS_TEMPLATE, encoding="utf-8")
+    proc = subprocess.run([sys.executable, str(script), str(view), str(out)],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    doc = json.loads((out / "analysis.json").read_text(encoding="utf-8"))
+
+    expected = {}
+    for cid, level in (("c-main", "0.95"), ("c-neg", "0.90")):
+        pairs = {b: tuple(v) for b, v in diffs[cid].items()}
+        expected[cid] = STAT.estimate(
+            STAT.paired_diffs(pairs), level=level)
+    return doc, sorted(run_ids), expected
+
+
+def test_analysis_template_passes_host_gate(tmp_path):
+    """模板照抄必须过门，且数值与宿主公开估计量逐位相同（D-1 回归）。"""
+    from orchestrator.rsi_r1 import protocol as PT
+
+    assert AR.OUTPUT_SCHEMA in PT.ANALYSIS_TEMPLATE
+    assert "protocol_analysis.v1" not in PT.ANALYSIS_TEMPLATE
+    doc, run_ids, expected = _template_view(tmp_path)
+    parsed = AR.parse_output(doc, expected_run_ids=run_ids,
+                             expected_contrasts=["c-main", "c-neg"])
+    assert parsed["run_ids"] == run_ids
+    assert set(parsed["contrasts"]) == {"c-main", "c-neg"}
+    for cid, want in expected.items():
+        got = parsed["contrasts"][cid]
+        assert got["estimate"] == want["effect"]
+        assert got["lower"] == want["lower"]
+        assert got["upper"] == want["upper"]
+        assert got["n_blocks"] == want["n_blocks"]

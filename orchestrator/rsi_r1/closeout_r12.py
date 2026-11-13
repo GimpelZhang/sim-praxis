@@ -47,6 +47,14 @@ CLASS_INSTRUMENT_TEMPLATE = "INSTRUMENT_DEFECT_TEMPLATE_GATE_CONTRADICTION"
 CLASS_MODEL_FAILURE = "MODEL_OR_OTHER_FAILURE"
 CLASS_NOT_APPLICABLE = "NOT_APPLICABLE"
 
+#: 历史模板 sha（`r12-paid-20261113a` 那轮的旧示例）。当前模板在 D-1 修复后
+#: 与门单一源，不再写旧 schema；旧轮的仪器判定仍按当时字节可复算。
+#: 模板本身写什么 schema 由源码文本判定（``source_writes_gate_schema``），
+#: 不靠 sha 列表猜——sha 列表只回答「这是不是宿主历史上公开过的模板」。
+TEMPLATE_SHA256_HISTORY = (
+    "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
+    "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592")
+
 
 class Closeout12Error(RuntimeError):
     """结案配置/盘面错误（不是科学结论）。``code`` 公开。"""
@@ -126,10 +134,16 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
         "source_file_present": source_ok,
         "source_sha_equals_template": bool(
             source_ok and source_sha == facts["template_sha256"]),
+        "source_is_known_host_template": bool(
+            source_ok and source_sha in TEMPLATE_SHA256_HISTORY),
     })
+    if source_ok:
+        text = source_path.read_text(encoding="utf-8", errors="replace")
+        facts["source_writes_gate_schema"] = AR.OUTPUT_SCHEMA in text
     if (name == "analyze"
             and "OUTPUT_SCHEMA_MISMATCH" in reasons
-            and facts["source_sha_equals_template"]):
+            and facts["source_is_known_host_template"]
+            and not facts.get("source_writes_gate_schema")):
         facts["classification"] = CLASS_INSTRUMENT_TEMPLATE
     elif code or name:
         facts["classification"] = CLASS_MODEL_FAILURE
@@ -137,7 +151,7 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
 
 
 # ---------------------------------------------------------------------------
-# 族账对账（历史 31 + 本轮实呼 ≤ 155）
+# 族账对账（历史 31 + 已关闭轮实花 + 本轮实呼 ≤ 族帽 160）
 # ---------------------------------------------------------------------------
 
 def family_facts(family_root: Path, *, ledger_calls: int,
@@ -148,10 +162,14 @@ def family_facts(family_root: Path, *, ledger_calls: int,
                   None)
     history = int(usage.get("history_posts") or 0)
     used = int((member or {}).get("posts_used") or 0)
-    total = history + ledger_calls
+    closed_rounds = sum(
+        int(m.get("posts_used") or 0) for m in members
+        if m.get("state") == "closed" and m.get("envelope_id") != envelope_id)
+    total = history + closed_rounds + ledger_calls
     return {
         "family_cap": int(usage.get("family_cap") or 0),
         "history_posts": history,
+        "closed_rounds_posts": closed_rounds,
         "round_calls": int(ledger_calls),
         "family_total_if_counted_now": total,
         "cap_respected": total <= int(usage.get("family_cap") or 0),
@@ -277,7 +295,8 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             f"族账 posts_used={fam['member_posts_used']} 与账本 call 行 "
             f"{calls} 不符（paid 路径未调 FAM.record_usage；T9 收尾补记）")
     if not fam["cap_respected"]:
-        gaps.append(f"历史 {fam['history_posts']} + 本轮 {calls} > 族帽 "
+        gaps.append(f"历史 {fam['history_posts']} + 已关闭轮 "
+                    f"{fam['closed_rounds_posts']} + 本轮 {calls} > 族帽 "
                     f"{fam['family_cap']}")
     if not batch_approvals_ok(batches):
         gaps.append("批次批准件缺失或批准数 < 实呼数")
@@ -348,8 +367,10 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         "gaps": gaps,
         "totals": {
             "history_posts": fam["history_posts"],
+            "closed_rounds_posts": fam["closed_rounds_posts"],
             "round_calls": calls,
-            "family_total": fam["history_posts"] + calls,
+            "family_total": (fam["history_posts"] + fam["closed_rounds_posts"]
+                             + calls),
             "family_cap": fam["family_cap"],
             "lane_caps": dict(profile.lane_post_caps),
             "by_lane_posts": {
@@ -413,12 +434,21 @@ def close_round(ctx: Any, *, reason: str) -> "dict[str, Any]":
     """
     calls = int(CO.ledger_facts(CO._rows(Path(ctx.root)))["calls"])
     note = None
+    closed_member = False
     try:
         FAM.record_usage(_family_root(), str(ctx.envelope_id), calls)
+        # 收尾同时关闭族成员：否则下一轮会被 FAMILY_ROUND_OPEN 挡死。
+        # 关闭只归还未用预留，posts_used 继续占族帽（2026-11-13 口径）。
+        FAM.close_member(
+            _family_root(), str(ctx.envelope_id),
+            reason=f"T9 结案：{reason}",
+            evidence={"ledger_calls": calls, "readout": READOUT_RELPATH})
+        closed_member = True
     except FAM.FamilyError as exc:
         note = f"FAMILY_USAGE_NOT_RECORDED {getattr(exc, 'code', '')}: {exc}"
     ST.ResearchState(ctx).close_root(reason=reason)
     return {"ledger_calls": calls, "family_note": note,
+            "family_member_closed": closed_member,
             "root_state": ST.ResearchState(ctx).root_state()}
 
 

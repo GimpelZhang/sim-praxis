@@ -1,12 +1,14 @@
-"""RSI 研究族账：跨轮 155 POST 硬帽的登记、冻结与许可。
+"""RSI 研究族账：跨轮 160 POST 硬帽的登记、冻结与许可。
 
 RSI-R1.2 Plan §1.1 的落地模块。事实基础：
 
 * RSI-R1（``rsi_r1_repair1/r1_20261111``）9 次实呼全 ok；
 * RSI-R1.1（``rsi_r1_repair2/r1b_20261111``）22 次实呼（21 ok / 1 fail）；
 * 两本账合计 **31**，逐行冻结哈希见 ``profiles.HISTORY_SOURCES``；
-* 本轮 124 → 族帽 **155**。carryover **不重复计**：历史块只在首次登记时导入
-  一次，此后任何一轮都不能重新加一次、也不能改历史行。
+* 已关闭轮 ``r12-paid-20261113a`` 实花 **5**（仪器缺陷轮，花掉的不归还）；
+* 本轮 124 → 族帽 **160 = 31 + 5 + 124**（2026-11-13 用户裁决由 155 抬升）。
+  carryover **不重复计**：历史块只在首次登记时导入一次，此后任何一轮都不能
+  重新加一次、也不能改历史行。
 
 设计约束（Plan §1.1 / §2.3 / AC05–AC07）：
 
@@ -15,10 +17,11 @@ RSI-R1.2 Plan §1.1 的落地模块。事实基础：
 * 历史块在**每次**登记/许可核验时从两本源账**重新逐行重算**并与冻结常量比对；
   源账变化（漂移）→ ``HISTORY_DRIFT``，不静默接受新值；
 * 成员已登记则幂等返回同一许可；族帽余额不足 → ``FAMILY_CAP_EXCEEDED``；
-* 同一 profile 只允许一个活动成员（本轮 124 + 历史 31 = 155 已无余额，
+* 同一 profile 只允许一个活动成员（本轮 124 + 历史 31 + 已关闭轮 5 = 160 无余额，
   第二轮在本轮关闭前必须被拒，而不是等付费时才发现没预算）；
   **关闭** = ``close_member``：只对已冻结且验证 PASS 的离线根执行，把成员
-  标 ``closed`` 并**释放其 124 预留**，之后同一 profile 才能登记新一轮成员
+  标 ``closed`` 并释放其**未用**预留（``posts_used`` 仍占额，花掉的不归还），
+  之后同一 profile 才能登记新一轮成员
   （T5 验证根关闭 → T6 付费根登记，Plan §5.2/§6.1 的既定换轮路径）。
 * 许可（permit）是 T6 付费门的必要件：绑定族文档字节哈希 + 成员预留数；
   族文档漂移 → ``FAMILY_PERMIT_INVALID``。
@@ -303,10 +306,20 @@ def _assert_envelope_id(envelope_id: str) -> str:
 
 
 def _reserved_total(doc: Mapping[str, Any]) -> int:
-    """族帽占用 = 历史块 + 活动成员的预留（``closed`` 成员的预留已释放）。"""
-    return int(doc["history"]["total_call_rows"]) + sum(
-        int(m["posts_reserved"]) for m in doc["members"]
-        if m.get("state") != MEMBER_CLOSED)
+    """族帽占用 = 历史块 + 活动成员预留 + **已关闭成员实花**。
+
+    锁内适配（2026-11-13，用户裁决 155→160）：旧版「关闭即释放全部预留」会把
+    已真实花掉的 POST 从族账里抹掉（``r12-paid-20261113a`` 花 5 却被释放 124），
+    新一轮再按 124 预留就会出现 31+5+124 实际 160 而账面只算 155 的窟窿。
+    现口径：关闭成员按 ``posts_used`` 继续占额，未用部分才归还。
+    """
+    total = int(doc["history"]["total_call_rows"])
+    for m in doc["members"]:
+        if m.get("state") == MEMBER_CLOSED:
+            total += int(m.get("posts_used") or 0)
+        else:
+            total += int(m["posts_reserved"])
+    return total
 
 
 def _build_permit(doc: Mapping[str, Any], member: Mapping[str, Any],
@@ -405,6 +418,8 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
             "posts_reserved": reserved,
             "posts_used": 0,
             "state": "registered",
+            # 该成员登记时的族帽（迁移后旧成员仍保留其历史帽值，判据按轮取用）
+            "family_cap_at_registration": int(doc["family_cap"]),
             "registered_at_utc": _utc_now(now),
         }
         doc = dict(doc)
@@ -446,6 +461,61 @@ def close_member(family_root: Path, envelope_id: str, *, reason: str,
         new_doc = dict(doc)
         new_doc["members"] = [new_member if m["envelope_id"] == envelope_id
                               else m for m in members]
+        new_doc["updated_at_utc"] = _utc_now(now)
+        _write_doc(family_root, new_doc)
+        return new_doc
+
+
+def migrate_cap(family_root: Path, *, reason: str,
+                evidence: Mapping[str, Any] | None = None,
+                now: "datetime | None" = None) -> "dict[str, Any]":
+    """把族文档的族帽抬到当前常量 ``FAMILY_CAP``（只增不减、幂等、留痕）。
+
+    锁内适配（2026-11-13，用户裁决 155→160）。只做三件事：
+    1. 给缺 ``family_cap_at_registration`` 的旧成员回填**迁移前**的帽值
+       （旧轮判据仍按当时的帽复算，不被新帽回溯改写）；
+    2. ``doc["family_cap"]`` 改为当前常量；
+    3. 追加 ``cap_history`` 一条（from/to/reason/evidence/at_utc）。
+
+    不是「悄悄改历史」：迁移件本身是族文档的一部分，随证据包逐字节留档；
+    只增不减（``FAMILY_CAP_REGRESSION``），目标帽必须等于模块常量
+    （``FAMILY_CAP_MISMATCH``），重复调用幂等。
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise FamilyError("FAMILY_CAP_REASON_REQUIRED", "族帽迁移必须有 reason")
+    target = int(FAMILY_CAP)
+    with _family_lock(family_root):
+        doc = load_family_doc(family_root)
+        if doc is None:
+            raise FamilyError("FAMILY_ABSENT", "族账不存在")
+        current = int(doc["family_cap"])
+        if current > target:
+            raise FamilyError(
+                "FAMILY_CAP_REGRESSION",
+                f"族帽回退不允许：{current} → {target}")
+        members = []
+        changed = current != target
+        for m in doc["members"]:
+            row = dict(m)
+            if "family_cap_at_registration" not in row:
+                row["family_cap_at_registration"] = current
+                changed = True
+            members.append(row)
+        if not changed:
+            return doc
+        history = list(doc.get("cap_history") or [])
+        if current != target:
+            history.append({
+                "from_cap": current,
+                "to_cap": target,
+                "reason": str(reason),
+                "evidence": dict(evidence or {}),
+                "at_utc": _utc_now(now),
+            })
+        new_doc = dict(doc)
+        new_doc["members"] = members
+        new_doc["family_cap"] = target
+        new_doc["cap_history"] = history
         new_doc["updated_at_utc"] = _utc_now(now)
         _write_doc(family_root, new_doc)
         return new_doc
@@ -584,6 +654,8 @@ def usage(family_root: Path) -> "dict[str, Any]":
                 "posts_reserved": int(m["posts_reserved"]),
                 "posts_used": int(m["posts_used"]),
                 "state": m["state"],
+                "family_cap_at_registration": int(
+                    m.get("family_cap_at_registration") or doc["family_cap"]),
             }
             for m in doc["members"]
         ],

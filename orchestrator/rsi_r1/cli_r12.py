@@ -35,6 +35,8 @@ from orchestrator.common.fsutil import (atomic_write_bytes, atomic_write_text,
 from orchestrator.gateway import quota_ledger as QL
 from orchestrator.rsi_r1 import assembly as ASM
 from orchestrator.rsi_r1 import calibration as CAL
+from orchestrator.rsi_r1 import closeout as CO
+from orchestrator.rsi_r1 import cli_r12_closeout as CL12C
 from orchestrator.rsi_r1 import closeout_r12 as CO12
 from orchestrator.rsi_r1 import closure as CLOSURE
 from orchestrator.rsi_r1 import contracts as C
@@ -917,6 +919,16 @@ def _run_protocol_cmd(args: argparse.Namespace, lane: str) -> int:
               f"state={study.get('study_state')}")
     print(f"  approval={approval}")
     print(f"  report={ctx.relative(f'protocol/report_{lane}.json')}")
+    # D-2 修复（2026-11-13）：付费路径自己把已用 POST 记进族账，不让「谁忘了
+    # 调 record_usage」变成跨轮账目缺口。以账本 call 行为准（不是 report 自述），
+    # 单调且幂等；记账失败不阻断已完成的研究动作，但必须原样打出来。
+    try:
+        calls = int(CO.ledger_facts(CO._rows(ctx.root))["calls"])
+        FAM.record_usage(_family_root(), envelope_id, calls)
+        print(f"  family : posts_used={calls}（按账本 call 行补记）")
+    except FAM.FamilyError as exc:
+        print(f"  WARN family usage not recorded: "
+              f"{getattr(exc, 'code', '')} {exc}", file=sys.stderr)
     return 0 if report["verdict"] == PT.VERDICT_PASS else 2
 
 
@@ -932,6 +944,32 @@ def cmd_practice(args: argparse.Namespace) -> int:
 # family（换轮）：关闭离线验证轮 → 释放 124 预留 → 付费轮才能登记
 # ---------------------------------------------------------------------------
 
+def cmd_family_migrate_cap(args: argparse.Namespace) -> int:
+    """把族帽抬到当前常量（零 POST、只增不减、幂等、留痕）。
+
+    锁内适配（2026-11-13，用户逐字裁决 155→160）：上一轮以仪器缺陷结案时
+    已真实花掉 5 呼；新口径「族帽占用 = 历史 + 已关闭轮实花 + 活动预留」下，
+    155 无法容纳 31+5+124，故抬到 160。迁移只改族文档（含 ``cap_history``
+    与旧成员 ``family_cap_at_registration`` 回填），不碰任何根、不产生 POST。
+    """
+    reason = str(getattr(args, "reason", "") or "").strip()
+    if not reason:
+        raise Cli12Error("FAMILY_CAP_REASON_REQUIRED", "迁移必须有 --reason")
+    family_root = _family_root()
+    decision = str(getattr(args, "decision", "") or "").strip()
+    doc = FAM.migrate_cap(
+        family_root, reason=reason,
+        evidence={"decision": decision} if decision else {})
+    usage = FAM.usage(family_root)
+    print(f"family migrate-cap ok  cap={doc['family_cap']}  "
+          f"reserved_total={usage['reserved_total']}  "
+          f"remaining={usage['remaining']}")
+    for entry in doc.get("cap_history") or []:
+        print(f"  cap_history {entry['from_cap']}→{entry['to_cap']} "
+              f"{entry['at_utc']}  {entry['reason']}")
+    return 0
+
+
 def cmd_family_close(args: argparse.Namespace) -> int:
     """关闭离线验证轮（Plan §5.2/§6.1 的换轮闸；零 POST）。
 
@@ -943,16 +981,46 @@ def cmd_family_close(args: argparse.Namespace) -> int:
     """
     root = _resolve_root(args.root, args.envelope)
     envelope = _load_envelope(root, args.envelope)
-    if envelope.get("mode") != "offline_validation":
-        raise Cli12Error(
-            "FAMILY_CLOSE_SCOPE",
-            f"family close 只关闭离线验证根（mode={envelope.get('mode')!r}）")
+    mode = envelope.get("mode")
     reason = getattr(args, "reason", None)
     if not isinstance(reason, str) or not reason.strip():
         raise Cli12Error("FAMILY_CLOSE_REASON_REQUIRED", "关闭必须有 --reason")
     ctx = _r12_ctx(root, str(envelope["envelope_id"]))
     state = ST.ResearchState(ctx)
     cur = state.root_state()
+    if mode != "offline_validation":
+        # 锁内适配（2026-11-13，用户裁决全量重跑）：付费轮经 T9 closeout 关根后，
+        # 族成员仍停在 registered，会把下一轮挡在 FAMILY_ROUND_OPEN。付费轮只
+        # 接受「根已 CLOSED + T9 readout 在盘」作为证据（不再复核 LOCK——付费
+        # LOCK 的闭包面已被 T9 工具演进触发 CLOSURE_DRIFT，复核会误报）。
+        if cur != ST.ROOT_CLOSED:
+            raise Cli12Error(
+                "FAMILY_CLOSE_SCOPE",
+                f"付费轮须先由 T9 closeout 关根（root_state={cur}）；"
+                "离线验证根才走 LOCK+报告复核路径")
+        readout_path = ctx.root / CO12.READOUT_RELPATH
+        if not readout_path.exists():
+            raise Cli12Error("FAMILY_CLOSE_NO_READOUT",
+                             f"缺 {CO12.READOUT_RELPATH}，不得关闭付费成员")
+        readout_sha = _sha256_bytes(readout_path.read_bytes())
+        fam_doc = FAM.close_member(
+            _family_root(), str(envelope["envelope_id"]), reason=reason,
+            evidence={
+                "mode": str(mode),
+                "root_state_at_close": cur,
+                "readout_relpath": CO12.READOUT_RELPATH,
+                "readout_sha256": readout_sha,
+            })
+        member = next(m for m in fam_doc["members"]
+                      if m["envelope_id"] == envelope["envelope_id"])
+        print(f"family close ok  envelope={envelope['envelope_id']}（付费轮）")
+        print(f"  state  : {member.get('state')}  "
+              f"closed_at={member.get('closed_at_utc')}")
+        print(f"  readout: {readout_sha[:16]}…")
+        print(f"  family : history={fam_doc['history']['total_call_rows']} + "
+              f"closed_used={member.get('posts_used')} / "
+              f"cap={fam_doc['family_cap']}")
+        return 0
     if cur != ST.ROOT_CLOSED:
         # 现场复核：LOCK 必须是最新的 validation LOCK 且三签齐（闭包零漂移）。
         ver = LK.verify_lock(ctx, repo_root=LK.REPO_ROOT)
@@ -1159,6 +1227,13 @@ def build_parser() -> argparse.ArgumentParser:
     _root_args(pfc)
     pfc.add_argument("--reason", required=True)
     pfc.set_defaults(func=cmd_family_close)
+    pmc = fam_sub.add_parser(
+        "migrate-cap",
+        help="把族帽抬到当前常量（只增不减、留痕；2026-11-13 用户裁决 155→160）")
+    pmc.add_argument("--reason", required=True)
+    pmc.add_argument("--decision", default="",
+                     help="用户裁决引用（原文/出处），写入 cap_history")
+    pmc.set_defaults(func=cmd_family_migrate_cap)
 
     # ---- T6：费用门 → 校准导入 → 唯一付费资格检查（probe/practice）----
     pau = sub.add_parser("authorize",
@@ -1183,6 +1258,36 @@ def build_parser() -> argparse.ArgumentParser:
         _p.add_argument("--note", default="")
         _p.set_defaults(func=_func)
 
+    for _name, _study, _help in (
+            ("study_A", "A",
+             "T7：正式 study A（≤48 POST，真实物理；须 SIMPRAXIS_ALLOW_PAID=1）"),
+            ("study_B", "B",
+             "T7：正式 study B（≤48 POST，须先完成 A；须 SIMPRAXIS_ALLOW_PAID=1）")):
+        _ps = sub.add_parser(_name, help=_help)
+        _root_args(_ps)
+        _ps.add_argument("--batch-id", required=True)
+        _ps.add_argument("--tokenizer", default=None, help="本地 tokenizer 文件")
+        _ps.add_argument("--tokenizer-sha256", default=None)
+        _ps.add_argument("--thread-id", default=None)
+        _ps.add_argument("--image", default=None,
+                         help="镜像 pin（缺省取 LOCK 内 pin）")
+        _ps.add_argument("--note", default="")
+        _ps.set_defaults(func=cmd_study, study=_study)
+
+    prp = sub.add_parser(
+        "replay",
+        help="T8：独立复跑（A/B 各一次；零模型 POST + 真容器）")
+    _root_args(prp)
+    prp.add_argument("--id", dest="replay_id", required=True, choices=["A", "B"])
+    prp.add_argument("--batch-id", required=True,
+                     help="复跑观测批次名（新批次；不得与既有批次重名）")
+    prp.add_argument("--real-containers", action="store_true",
+                     help="显式确认真跑容器（无模型 POST）")
+    prp.add_argument("--max-steps", type=int, default=None)
+    prp.add_argument("--image", default=None,
+                     help="容器镜像 name@sha256:<64>（缺省取 LOCK 登记值）")
+    prp.set_defaults(func=cmd_replay)
+
     pvp = sub.add_parser(
         "validate-production",
         help="零 POST 全链演练：正式 CLI/装配/DockerRunner + 公开消费者")
@@ -1193,33 +1298,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "不得签署——六套全跑才算验收）")
     pvp.set_defaults(func=cmd_validate_production)
 
-    pco = sub.add_parser(
-        "closeout",
-        help="T9：结案（五轴/失败链/族账对账；补记族用量并关根，零 POST）")
-    _root_args(pco)
-    pco.add_argument("--reason", default=None, help="关根理由（写进 state journal）")
-    pco.add_argument("--image", default=None, help="镜像 pin（容器回收探针用）")
-    pco.add_argument("--repo-root", default=None,
-                     help="仓库根（冻结后漂移重算用；缺省为本包所在仓库）")
-    pco.set_defaults(func=cmd_closeout)
-
-    ppk = sub.add_parser(
-        "pack", help="T9：复制进 evidence_pack/ 并写逐件 sha256 manifest（零 POST）")
-    _root_args(ppk)
-    ppk.add_argument("--dest", default=None,
-                     help="包目录（缺省 <root>/evidence_pack）")
-    ppk.add_argument("--repo-root", default=None)
-    ppk.set_defaults(func=cmd_pack)
-
-    pjd = sub.add_parser(
-        "judge", help="T9：外部进程跑独立复算器（可选同时核对证据包）")
-    _root_args(pjd)
-    pjd.add_argument("--report", default=None)
-    pjd.add_argument("--repo-root", default=None)
-    pjd.add_argument("--verify-pack", default=None, help="核对指定证据包目录")
-    pjd.add_argument("--no-pack", action="store_true",
-                     help="明确不核对证据包（缺省：存在 <root>/evidence_pack 就核）")
-    pjd.set_defaults(func=cmd_judge)
+    # T9 收尾命令在冻结面之外（见 cli_r12_closeout 模块 docstring）
+    CL12C.register(sub)
     return p
 
 
@@ -1583,72 +1663,131 @@ def cmd_validate_production(args: argparse.Namespace) -> int:
 # T9：结案（五轴 + 失败链）→ 证据包 → 独立复算（全程零 POST）
 # ---------------------------------------------------------------------------
 
-def cmd_closeout(args: argparse.Namespace) -> int:
-    """T9 结案：按账本补记族用量 → 关根 → 写 readout/失败链。
 
-    rc：0=过程闭合（process=COMPLETE），1=记录互相矛盾（CLOSEOUT_INCOMPLETE）。
-    研究结论在 claim/r1 轴，永不由本命令晋升。
+# ---------------------------------------------------------------------------
+# T7/T8：正式 A/B 研究与独立复跑（2026-11-13 接线，用户裁决全量重跑）
+# ---------------------------------------------------------------------------
+
+def cmd_study(args: argparse.Namespace) -> int:
+    """T7：正式研究单 study（A 48 / B 48；先 A 后 B；真实物理 + 真实 POST）。
+
+    与 probe/practice 同一条付费纪律：环境闸 → 批准件 → 网关 → 研究链 → 报告。
+    前置由 ``study.py`` 的 root gate 强制（A 需 PRACTICED、B 需 STUDY_A）；
+    同一 study 只跑一次（报告件在场即拒）。
     """
+    from orchestrator.rsi_r1 import study as STD
+
+    # 环境闸先于一切副作用（含读 envelope）：无 PAID 许可时零文件 IO。
+    GT.require_paid_env(os.environ)
     root = _resolve_root(args.root, args.envelope)
-    envelope = _load_envelope(root)
-    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
-    closed = CO12.close_round(
-        ctx, reason=str(args.reason or "T9 结案：按账本补记族用量并关闭本轮"))
-    body = CO12.build(ctx, image_pin=args.image, repo_root=args.repo_root)
-    axes = body["axes"]
-    if closed.get("family_note"):
-        print(f"WARN {closed['family_note']}", file=sys.stderr)
-    print(f"closeout ok  envelope={body['envelope_id']}  "
-          f"root_state={body['root_state']}")
-    print(f"  axes: process={axes['process']} measurement={axes['measurement']} "
-          f"study_execution={axes['study_execution']} claim={axes['claim']} "
-          f"r1={axes['r1']}")
-    print(f"  posts: history={body['totals']['history_posts']} "
-          f"round={body['totals']['round_calls']} "
-          f"family_total={body['totals']['family_total']} "
-          f"cap={body['totals']['family_cap']}")
-    print(f"  failures={len(body['failure_chain'])} gaps={len(body['gaps'])}")
-    for gap in body["gaps"]:
-        print(f"    gap: {gap}")
-    print(f"  readout={ctx.relative(CO12.READOUT_RELPATH)}")
-    return 0 if axes["process"] == "COMPLETE" else 1
+    envelope = _load_envelope(root, args.envelope)
+    study = str(args.study).strip().upper()
+    batch_id = str(args.batch_id or "").strip()
+    if not batch_id:
+        raise Cli12Error("BATCH_MISSING", "--batch-id 不得为空")
+    if not args.tokenizer or not args.tokenizer_sha256:
+        raise Cli12Error("TOKENIZER_REQUIRED",
+                         "付费运行需要 --tokenizer 与 --tokenizer-sha256")
+    consent = _paid_gate(root, envelope)
+    profile = P.resolve_profile(envelope)
+    envelope_id = str(envelope["envelope_id"])
+    if root.resolve(strict=False) != RP.rsi_r12_campaign_root().resolve(strict=False):
+        raise Cli12Error(
+            "CAMPAIGN_ENV_MISMATCH",
+            f"根 {root} 与 SIMPRAXIS_RSI_R12_CAMPAIGN 解析的 "
+            f"{RP.rsi_r12_campaign_root()} 不一致（账本路径必须与根同源）")
+    ctx = _r12_ctx(root, envelope_id)
+    counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
+    lane = ASM.STUDY_LANE[study]
+    cap = int(profile.lane_post_caps[lane])
+    approval = PT.ensure_approval(
+        ctx, batch_id=batch_id, lane=lane, approved=cap,
+        note=args.note or "", namespace=QL.RSI_R12_NAMESPACE)
+    lock_doc = _read_json(root / LK.LOCK_RELPATH)
+    image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
+    if not image:
+        raise Cli12Error("IMAGE_PIN_INVALID", "缺 --image 且 LOCK 未登记镜像 pin")
+    spend = ASM.SpendContract(mode=ASM.MODE_PAID, consent=consent)
+    gateway = GT.build_gateway(
+        ledger=QL.QuotaLedger.rsi_r12(),
+        pause_state_path=RP.rsi_r12_gateway_state_path())
+    transport = GT.build_transport(
+        gateway=gateway, lane=lane, batch_id=batch_id,
+        thread_id=args.thread_id or f"rsi-r12-{lane}", env=os.environ)
+    report = STD.run_study(
+        ctx, study=study, spend=spend, transport_factory=lambda: transport,
+        runner=SANDBOX.DockerRunner(), image=image, batch_id=batch_id,
+        counter=counter, profile=profile,
+        resource_ledger=RS.ResourceLedger(root, profile=profile))
+    print(f"study {study} {report['status']}  state={report['study_state']}  "
+          f"posts={report['posts']['this_attempt']}/"
+          f"{report['posts']['allowed']}  root={report['root_after']}  "
+          f"stopped={report['stopped'] or '-'}")
+    print(f"  ok turns={report['ok_count']}  "
+          f"judge={report['judge'].get('verdict') or '-'}  "
+          f"claim={'present' if report['claim_submitted'] else 'missing'}")
+    print(f"  approval={approval}")
+    print(f"  report={ctx.relative(STD.report_relpath(study))}")
+    _record_family_usage(ctx, envelope_id)
+    return 0 if report["status"] == "COMPLETED" else 2
 
 
-def cmd_pack(args: argparse.Namespace) -> int:
-    """把 R1.2 盘面逐件复制进 ``evidence_pack/``（含新版独立复算器源码）。"""
+def cmd_replay(args: argparse.Namespace) -> int:
+    """T8：独立复跑（零模型 POST、真容器；比对件只封一次）。
+
+    不建网关、不占任何 lane 呼量，因此不需要付费环境闸与批准件；但会真跑
+    容器，必须显式 ``--real-containers``。
+    """
+    from orchestrator.rsi_r1 import replay_driver as RPD
+
+    # 显式旗标检查先于文件 IO（fail-closed：没有 --real-containers 就不读根）。
+    if not args.real_containers:
+        raise Cli12Error("REPLAY_REAL_CONTAINERS_REQUIRED",
+                         "复跑会真跑容器：需显式 --real-containers（无模型 POST）")
     root = _resolve_root(args.root, args.envelope)
-    envelope = _load_envelope(root)
+    envelope = _load_envelope(root, args.envelope)
+    study = str(args.replay_id).strip().upper()
+    batch_id = str(args.batch_id or "").strip()
+    if not batch_id:
+        raise Cli12Error("BATCH_MISSING", "--batch-id 不得为空")
     ctx = _r12_ctx(root, str(envelope["envelope_id"]))
-    dest = Path(args.dest).expanduser() if args.dest else None
-    manifest = CO12.build_pack(ctx, dest=dest, repo_root=args.repo_root)
-    checked = CO12.verify_pack(dest or ctx.relative("evidence_pack"))
-    print(f"pack ok  envelope={envelope['envelope_id']}  "
-          f"n_files={manifest['n_files']}  total_bytes={manifest['total_bytes']}")
-    print(f"  pack   : {dest or ctx.relative('evidence_pack')}")
-    print(f"  verify : ok={checked['ok']}  problems={len(checked['problems'])}")
-    for problem in checked["problems"][:10]:
-        print(f"    - {problem}")
-    return 0 if checked["ok"] else 1
+    profile = P.resolve_profile(envelope)
+    lock_doc = _read_json(root / LK.LOCK_RELPATH)
+    image = args.image or str((lock_doc.get("image") or {}).get("pin") or "")
+    if not image:
+        raise Cli12Error("IMAGE_PIN_INVALID", "缺 --image 且 LOCK 未登记镜像 pin")
+    report = RPD.run_replay(
+        ctx, study=study, runner=SANDBOX.DockerRunner(), image=image,
+        batch_id=batch_id, max_steps=args.max_steps, profile=profile)
+    print(f"replay {study} {report['status']}  runs={report['n_runs_used']}/"
+          f"{report['n_expected']}  root={report.get('root_after')}  "
+          f"attempt={report['attempt']}")
+    if report.get("summary"):
+        s2 = report["summary"]
+        print(f"  comparison ok={s2['ok']} failed={s2['failed']} "
+              f"identical={s2['identical']}  problems={len(report['problems'])}")
+    else:
+        print("  blocked=infra：无比对件，修复后可在同一 root 重试")
+    if report.get("analysis") is not None:
+        print(f"  analysis ok={report['analysis_ok']}  "
+              f"reasons={report['analysis'].get('reason_codes') or '-'}")
+        print(f"  receipt={ctx.relative(report['analysis_receipt_relpath'])}")
+    print(f"  report={ctx.relative(RPD.report_relpath(study))}"
+          + (f"  comparison={ctx.relative(RPD.comparison_relpath(study))}"
+             if report.get("comparison_relpath") else ""))
+    return 0 if report["status"] in (RPD.STATUS_COMPLETE,
+                                     RPD.STATUS_MISMATCH) else 2
 
 
-def cmd_judge(args: argparse.Namespace) -> int:
-    """外部进程跑独立复算器（第二遍由 ``-I`` 纯标准库进程执行）。"""
-    root = _resolve_root(args.root, args.envelope)
-    envelope = _load_envelope(root)
-    ctx = _r12_ctx(root, str(envelope["envelope_id"]))
-    pack = False if args.no_pack else (Path(args.verify_pack) if args.verify_pack
-                                       else None)
-    judged = CO12.run_judge(
-        ctx, repo_root=args.repo_root, pack=pack,
-        report=Path(args.report).expanduser() if args.report else None)
-    print(f"judge {judged.get('verdict')}  rc={judged.get('returncode')}  "
-          f"envelope={envelope['envelope_id']}")
-    print(f"  problems={len(judged.get('problems') or [])}  "
-          f"gaps={len(judged.get('gaps') or [])}")
-    for problem in (judged.get("problems") or [])[:10]:
-        print(f"    - {problem}")
-    print(f"  report={judged.get('report_path')}")
-    return 0 if judged.get("ok") else 1
+def _record_family_usage(ctx: Any, envelope_id: str) -> None:
+    """D-2：付费动作完成后按账本 call 行补记族用量（幂等、单调）。"""
+    try:
+        calls = int(CO.ledger_facts(CO._rows(ctx.root))["calls"])
+        FAM.record_usage(_family_root(), envelope_id, calls)
+        print(f"  family : posts_used={calls}（按账本 call 行补记）")
+    except FAM.FamilyError as exc:
+        print(f"  WARN family usage not recorded: "
+              f"{getattr(exc, 'code', '')} {exc}", file=sys.stderr)
 
 
 def main(argv: "list[str] | None" = None) -> int:

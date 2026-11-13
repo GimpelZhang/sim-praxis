@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -25,7 +26,12 @@ from orchestrator.rsi_r1.cli_r12 import R12Context
 REPO = Path(__file__).resolve().parents[1]
 CHECKER = REPO / "scripts" / "verification" / "check_rsi_r12_closure.py"
 ENVELOPE = "r12-test-paid"
-TEMPLATE_SHA = "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63"
+TEMPLATE_SHA = "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592"
+#: `r12-paid-20261113a` 那轮的旧模板（写 protocol_analysis.v1；逐字节取证自
+#: `49eb7bf:orchestrator/rsi_r1/protocol.py`，sha 必须是 daf30754…）。
+OLD_TEMPLATE_TEXT = 'import json\nimport math\nimport sys\nfrom pathlib import Path\n\n\ndef metric(record):\n    qpos = record["qpos"]\n    if "target_q" in record:\n        target = record["target_q"]\n        sq = 0.0\n        for a, b in zip(qpos, target):\n            d = float(a[0]) - float(b[0])\n            sq += d * d\n        amp = max(abs(float(b[0])) for b in target) or 1.0\n        return {"metric_id": "normalized_tracking_rmse",\n                "value": math.sqrt(sq / len(qpos)) / amp, "n_samples": len(qpos)}\n    return {"metric_id": "displacement_x_m",\n            "value": float(qpos[-1][0]) - float(qpos[0][0]),\n            "n_samples": len(qpos)}\n\n\ndef main() -> int:\n    view = Path(sys.argv[1])\n    out = Path(sys.argv[2])\n    runs = {}\n    for path in sorted(view.rglob("*.jsonl")):\n        for line in path.read_text(encoding="utf-8").splitlines():\n            if not line.strip():\n                continue\n            rec = json.loads(line)\n            runs[rec["run_id"]] = {"block_id": rec["block_id"], **metric(rec)}\n    doc = {"schema": "simpraxis.rsi_r1.protocol_analysis.v1",\n           "schema_version": 1, "n_runs": len(runs), "runs": runs}\n    (out / "analysis.json").write_text(\n        json.dumps(doc, sort_keys=True) + "\\n", encoding="utf-8")\n    return 0\n\n\nif __name__ == "__main__":\n    raise SystemExit(main())\n'
+OLD_TEMPLATE_SHA = hashlib.sha256(OLD_TEMPLATE_TEXT.encode("utf-8")).hexdigest()
+assert OLD_TEMPLATE_SHA.startswith("daf30754")
 
 
 def _write(path: Path, doc) -> None:
@@ -70,18 +76,18 @@ def campaign(tmp_path: Path, monkeypatch):
                           "first_error": {"name": "analyze", "code": "UNCLASSIFIED",
                                           "action_index": 5, "position": 4}},
     })
-    src = root / attempt / "designs" / f"{TEMPLATE_SHA}.py"
+    src = root / attempt / "designs" / f"{OLD_TEMPLATE_SHA}.py"
     src.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    src.write_text(PT.ANALYSIS_TEMPLATE, encoding="utf-8")
+    src.write_text(OLD_TEMPLATE_TEXT, encoding="utf-8")
     src.chmod(0o600)
     _write(root / attempt / "private" / "receipts" / "A-explore.json", {
         "schema": "simpraxis.rsi_r1.analysis_receipt.v1",
         "reason_codes": ["OUTPUT_SCHEMA_MISMATCH"],
-        "source_sha256": TEMPLATE_SHA, "output_schema": "",
+        "source_sha256": OLD_TEMPLATE_SHA, "output_schema": "",
         "output_run_ids": [], "validity": False, "exit_code": 0,
     })
     _write(family / "family" / "family.json", {
-        "schema": "simpraxis.rsi_r12.family.v1", "family_cap": 155,
+        "schema": "simpraxis.rsi_r12.family.v1", "family_cap": 160,
         "history": {"total_call_rows": 31},
         "members": [{"envelope_id": ENVELOPE, "profile_id": "rsi-r1.2",
                      "posts_reserved": 124, "posts_used": 2,
@@ -114,7 +120,9 @@ def _judge(root: Path, *extra: str):
 def test_instrument_facts_requires_byte_identity(campaign: Path):
     facts = C12.instrument_facts(campaign)
     assert facts["template_sha256"] == TEMPLATE_SHA
-    assert facts["source_sha_equals_template"] is True
+    assert facts["source_is_known_host_template"] is True
+    assert facts["source_sha_equals_template"] is False  # 旧轮模板 != 当前模板
+    assert facts["source_writes_gate_schema"] is False
     assert facts["analysis_reason_codes"] == ["OUTPUT_SCHEMA_MISMATCH"]
     assert facts["classification"] == C12.CLASS_INSTRUMENT_TEMPLATE
 
@@ -126,7 +134,7 @@ def test_instrument_facts_rejects_non_template_source(campaign: Path):
     doc["source_sha256"] = "0" * 64
     _write(receipt, doc)
     facts = C12.instrument_facts(campaign)
-    assert facts["source_sha_equals_template"] is False
+    assert facts["source_is_known_host_template"] is False
     assert facts["classification"] == C12.CLASS_MODEL_FAILURE
 
 
