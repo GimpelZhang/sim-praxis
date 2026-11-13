@@ -460,6 +460,35 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "evidence": practice,
         })
 
+    # T7 研究与判据事实（轮 F：A 完成但判拒、B 传输未知中断）——研究层的失败
+    # 不能只留在 studies/ 报告里，必须在失败链上可见。
+    for study in ("A", "B"):
+        rep = _read_json(root / "studies" / f"report_{study}.json")
+        if rep is None:
+            continue
+        judge = rep.get("judge") or {}
+        ok = (rep.get("status") == "COMPLETED"
+              and str(judge.get("verdict")) == "JUDGE_OK")
+        if ok:
+            continue
+        keys = []
+        judge_doc = _read_json(root / "judge" / f"report_{study}.json") or {}
+        keys = list(judge_doc.get("reason_codes") or [])
+        failures.append({
+            "task": "T7",
+            "study": study,
+            "status": rep.get("status"),
+            "stopped": rep.get("stopped"),
+            "judge_verdict": judge.get("verdict"),
+            "reason_codes": keys,
+            "posts": rep.get("posts"),
+            "classification": ("TRANSPORT_UNKNOWN"
+                               if rep.get("stopped") == "EmptyResponseError"
+                               else "SCIENTIFIC_OR_PROTOCOL_FAILURE"),
+            "detail": ("研究未产出可判读结果或判据拒绝；失败分母保留，"
+                       "不调阈值、不换题"),
+        })
+
     if not fam["member_usage_matches_ledger"]:
         gaps.append(
             f"族账 posts_used={fam['member_posts_used']} 与账本 call 行 "

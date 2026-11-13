@@ -296,3 +296,20 @@ def test_protocol_violation_is_valid_measurement(campaign: Path):
     assert body["axes"]["measurement"] == "VALID"
     assert body["axes"]["study_execution"] == "NOT_STARTED"
     assert body["axes"]["r1"] == "NOT_MEASURED"
+
+
+def test_study_failures_surface_in_failure_chain(campaign: Path):
+    """T7 研究失败必须进失败链（不能被 T6 的 PASS 掩盖）。"""
+    _write(campaign / "studies" / "report_A.json", {
+        "status": "INCOMPLETE", "stopped": "EmptyResponseError",
+        "posts": {"this_attempt": 18, "allowed": 48},
+        "judge": {"verdict": None},
+    })
+    _write(campaign / "judge" / "report_A.json", {"reason_codes": ["INVALID_NUMERICS"]})
+    _, body = _build(campaign)
+    studies = [f for f in body["failure_chain"] if f.get("task") == "T7"]
+    assert len(studies) == 1
+    rec = studies[0]
+    assert rec["study"] == "A"
+    assert rec["classification"] == "TRANSPORT_UNKNOWN"
+    assert rec["reason_codes"] == ["INVALID_NUMERICS"]

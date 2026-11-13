@@ -136,9 +136,16 @@ def ledger_facts(rows):
             b["ok"] += 1
         elif r.get("ok") is False:
             b["failed"] += 1
+    by_task = {}
+    for r in calls:
+        key = r.get("task")
+        by_task[key] = int(by_task.get(key) or 0) + 1
     return {
         "rows": len(rows),
         "calls": len(calls),
+        "by_task": by_task,
+        "protocol_calls": sum(int(v) for k, v in by_task.items()
+                              if k in (0, 1)),
         "events": len(rows) - len(calls),
         "ok": sum(1 for r in calls if r.get("ok") is True),
         "failed": sum(1 for r in calls if r.get("ok") is False),
@@ -444,8 +451,9 @@ def judge(root: Path, pack: "Path | None" = None,
         if mine["batch_id"] != theirs.get("batch_id"):
             problems.append(f"protocol.{lane}.batch_id 不符")
     posts_sum = sum(int((proto[l] or {}).get("posts") or 0) for l in LANES)
-    if posts_sum != led["calls"]:
-        problems.append(f"协议 posts 合计 {posts_sum} ≠ 账本 call 行 {led['calls']}")
+    if posts_sum != led["protocol_calls"]:
+        problems.append(
+            f"协议 posts 合计 {posts_sum} ≠ probe/practice 账行 {led['protocol_calls']}")
 
     # 族账
     fam = family_facts(root, envelope_id)
