@@ -278,3 +278,21 @@ def test_misdirection_classification(campaign: Path):
     assert facts["classification"] == C12.CLASS_INSTRUMENT_MISDIRECT
     assert facts["contract_analysis_output_schema"] == (
         "simpraxis.rsi_r1.analysis_output_schema.v1")
+
+
+def test_protocol_violation_is_valid_measurement(campaign: Path):
+    """候选违背合同（无分析回执）：仪器正常 ⇒ measurement=VALID，研究未启动。"""
+    receipt = campaign / "protocol/probe/attempt-1/private/receipts/A-explore.json"
+    receipt.unlink()
+    report = campaign / "protocol/report_probe.json"
+    doc = json.loads(report.read_text(encoding="utf-8"))
+    doc["qualification"]["first_error"] = {
+        "name": "run_batch", "code": "UNKNOWN_KEY",
+        "action_index": 3, "position": 2}
+    report.write_text(json.dumps(doc), encoding="utf-8")
+    facts = C12.instrument_facts(campaign)
+    assert facts["classification"] == C12.CLASS_PROTOCOL_VIOLATION
+    _, body = _build(campaign)
+    assert body["axes"]["measurement"] == "VALID"
+    assert body["axes"]["study_execution"] == "NOT_STARTED"
+    assert body["axes"]["r1"] == "NOT_MEASURED"

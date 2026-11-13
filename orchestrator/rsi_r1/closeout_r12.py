@@ -50,6 +50,12 @@ CLASS_MODEL_FAILURE = "MODEL_OR_OTHER_FAILURE"
 #: （`analysis_output.v1`）——照做必被门拒。属于仪器自相矛盾（2026-11-13 实测）。
 CLASS_INSTRUMENT_MISDIRECT = "INSTRUMENT_DEFECT_CONTRACT_KEY_MISDIRECTION"
 PROMPT_MISDIRECT_POINTER = "analysis_output.schema"
+#: 候选侧**合同违背**码（不是仪器缺陷，也不是传输未知）：仪器正常工作了，
+#: 只是候选没按公开合同动作 ⇒ measurement 仍 VALID，研究 NOT_STARTED。
+CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
+CONTRACT_VIOLATION_CODES = frozenset({
+    "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
+    "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
 CLASS_NOT_APPLICABLE = "NOT_APPLICABLE"
 
 #: 历史模板 sha（`r12-paid-20261113a` 那轮的旧示例）。当前模板在 D-1 修复后
@@ -127,6 +133,11 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
     attempt = root / attempt_rel
     receipt = _read_json(attempt / "private" / "receipts" / "A-explore.json")
     if receipt is None:
+        # 没走到分析门：按首个拒绝码定性（合同违背 vs 其他）。
+        if code in CONTRACT_VIOLATION_CODES or code == "BUDGET_UNREACHABLE":
+            facts["classification"] = CLASS_PROTOCOL_VIOLATION
+        elif code or name:
+            facts["classification"] = CLASS_MODEL_FAILURE
         return facts
     reasons = [str(c) for c in (receipt.get("reason_codes") or [])]
     source_sha = str(receipt.get("source_sha256") or "")
@@ -165,6 +176,8 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
           and declared != AR.OUTPUT_SCHEMA
           and facts.get("source_reads_contract_key")):
         facts["classification"] = CLASS_INSTRUMENT_MISDIRECT
+    elif code in CONTRACT_VIOLATION_CODES or code == "BUDGET_UNREACHABLE":
+        facts["classification"] = CLASS_PROTOCOL_VIOLATION
     elif code or name:
         facts["classification"] = CLASS_MODEL_FAILURE
     return facts
@@ -306,6 +319,25 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         # 仪器缺陷本身是 **measurement 轴结论**，不是「记录互相矛盾」：
         # 若把它计进 gaps 会让 process 永远 INCOMPLETE，违背「PASS 只指过程
         # 闭合、结论另轴」的判据面。它由 failure_chain + measurement 轴承载。
+    elif instrument.get("classification") == CLASS_PROTOCOL_VIOLATION:
+        # 仪器正常、候选违背合同（或因此无法在帽内闭合）：这是**测量有效的
+        # 资格失败**，不是仪器阻断；研究仍未启动。
+        axes["measurement"] = "VALID"
+        failures.append({
+            "task": "T6",
+            "lane": instrument.get("lane"),
+            "batch_id": (protocol.get(str(instrument.get("lane"))) or {})
+            .get("batch_id"),
+            "verdict": instrument.get("verdict"),
+            "first_error_code": instrument.get("first_error_code"),
+            "first_error_name": instrument.get("first_error_name"),
+            "milestones_ok": instrument.get("milestones_ok"),
+            "classification": CLASS_PROTOCOL_VIOLATION,
+            "detail": ("候选动作违背公开合同（首错见 first_error_code）；"
+                       "仪器按合同拒绝并可恢复，游标无法在帽内闭合时由 "
+                       "BUDGET_UNREACHABLE 守卫停链——资格失败，研究未启动"),
+            "evidence": instrument,
+        })
     elif instrument.get("available") and instrument.get("verdict") != PT.VERDICT_PASS:
         failures.append({
             "task": "T6",

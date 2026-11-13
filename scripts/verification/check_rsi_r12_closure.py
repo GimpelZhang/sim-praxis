@@ -55,6 +55,10 @@ GATE_REASON = "OUTPUT_SCHEMA_MISMATCH"
 #: 2026-11-13 实测：prompt 把候选指向合同自身的 schema 键，该键值 ≠ 门 schema。
 CLASS_MISDIRECT = "INSTRUMENT_DEFECT_CONTRACT_KEY_MISDIRECTION"
 MISDIRECT_POINTER = "analysis_output.schema"
+CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
+CONTRACT_VIOLATION_CODES = frozenset({
+    "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
+    "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
 
 AXIS_LEGAL = {
     "process": ("COMPLETE", "CLOSEOUT_INCOMPLETE"),
@@ -189,6 +193,12 @@ def instrument_facts(root: Path, lane: str = "probe", repo_root=None):
         return facts
     receipt = _read_json(root / rel / "private" / "receipts" / "A-explore.json")
     if not isinstance(receipt, dict):
+        code = str(first.get("code") or "")
+        name = str(first.get("name") or "")
+        if code in CONTRACT_VIOLATION_CODES or code == "BUDGET_UNREACHABLE":
+            facts["classification"] = CLASS_PROTOCOL_VIOLATION
+        elif code or name:
+            facts["classification"] = "MODEL_OR_OTHER_FAILURE"
         return facts
     reasons = [str(c) for c in (receipt.get("reason_codes") or [])]
     source_sha = str(receipt.get("source_sha256") or "")
@@ -235,6 +245,9 @@ def instrument_facts(root: Path, lane: str = "probe", repo_root=None):
           and declared is not None and declared != GATE_SCHEMA
           and facts.get("source_reads_contract_key")):
         facts["classification"] = CLASS_MISDIRECT
+    elif str(first.get("code") or "") in CONTRACT_VIOLATION_CODES \
+            or str(first.get("code") or "") == "BUDGET_UNREACHABLE":
+        facts["classification"] = CLASS_PROTOCOL_VIOLATION
     else:
         facts["classification"] = "MODEL_OR_OTHER_FAILURE"
     return facts
@@ -461,6 +474,11 @@ def judge(root: Path, pack: "Path | None" = None,
     if ins.get("classification") == "INSTRUMENT_DEFECT_TEMPLATE_GATE_CONTRADICTION":
         if axes.get("measurement") != "INVALID_INSTRUMENT":
             problems.append("仪器缺陷但 measurement 不是 INVALID_INSTRUMENT")
+    if ins.get("classification") == CLASS_PROTOCOL_VIOLATION:
+        if axes.get("measurement") != "VALID":
+            problems.append("合同违背（测量有效）但 measurement 不是 VALID")
+        if axes.get("study_execution") != "NOT_STARTED":
+            problems.append("资格失败但 study_execution 不是 NOT_STARTED")
     # 过程轴：只认记录矛盾
     contradictions = (
         (not led["seq_contiguous"]) or led["unknown"] > 0
