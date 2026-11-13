@@ -256,3 +256,25 @@ def test_post_freeze_drift_is_recorded_and_cross_checked(campaign: Path):
     rc, report = _judge(campaign, "--repo-root", str(REPO))
     assert rc == 1
     assert any("post_freeze_drift" in p for p in report["problems"])
+
+
+def test_misdirection_classification(campaign: Path):
+    """合同键误导：候选按合同 `analysis_output.schema` 取值 ⇒ 仪器缺陷。"""
+    contract_dir = campaign / "public"
+    contract_dir.mkdir(parents=True, exist_ok=True)
+    (contract_dir / "public_contract.json").write_text(json.dumps({
+        "analysis_output": {"schema": "simpraxis.rsi_r1.analysis_output_schema.v1",
+                            "output_schema": "simpraxis.rsi_r1.analysis_output.v1"}
+    }), encoding="utf-8")
+    text = OLD_TEMPLATE_TEXT + "\n# reads contract['analysis_output']['schema']\n"
+    sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    src = campaign / "protocol/probe/attempt-1/designs" / f"{sha}.py"
+    src.write_text(text, encoding="utf-8")
+    receipt = campaign / "protocol/probe/attempt-1/private/receipts/A-explore.json"
+    doc = json.loads(receipt.read_text(encoding="utf-8"))
+    doc["source_sha256"] = sha
+    receipt.write_text(json.dumps(doc), encoding="utf-8")
+    facts = C12.instrument_facts(campaign)
+    assert facts["classification"] == C12.CLASS_INSTRUMENT_MISDIRECT
+    assert facts["contract_analysis_output_schema"] == (
+        "simpraxis.rsi_r1.analysis_output_schema.v1")

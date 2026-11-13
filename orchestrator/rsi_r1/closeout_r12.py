@@ -45,6 +45,11 @@ AXIS_VALUES = CO.AXIS_VALUES
 
 CLASS_INSTRUMENT_TEMPLATE = "INSTRUMENT_DEFECT_TEMPLATE_GATE_CONTRADICTION"
 CLASS_MODEL_FAILURE = "MODEL_OR_OTHER_FAILURE"
+#: 宿主 prompt 把候选指向合同**自身**的 schema 键（`analysis_output.schema`），
+#: 该键值是合同文档 schema（`analysis_output_schema.v1`），而门要求输出 schema
+#: （`analysis_output.v1`）——照做必被门拒。属于仪器自相矛盾（2026-11-13 实测）。
+CLASS_INSTRUMENT_MISDIRECT = "INSTRUMENT_DEFECT_CONTRACT_KEY_MISDIRECTION"
+PROMPT_MISDIRECT_POINTER = "analysis_output.schema"
 CLASS_NOT_APPLICABLE = "NOT_APPLICABLE"
 
 #: 历史模板 sha（`r12-paid-20261113a` 那轮的旧示例）。当前模板在 D-1 修复后
@@ -140,11 +145,26 @@ def instrument_facts(root: Path, *, lane: str = "probe") -> "dict[str, Any]":
     if source_ok:
         text = source_path.read_text(encoding="utf-8", errors="replace")
         facts["source_writes_gate_schema"] = AR.OUTPUT_SCHEMA in text
+        facts["source_reads_contract_key"] = (
+            "analysis_output" in text and "schema" in text)
+    # 合同键误导面：prompt 指 `analysis_output.schema`，而该键是合同文档自身
+    # schema；候选按指示读取即写出错误 schema。
+    contract = _read_json(root / "public" / "public_contract.json") or {}
+    declared = ((contract.get("analysis_output") or {}).get("schema"))
+    facts["contract_analysis_output_schema"] = declared
+    facts["prompt_points_at_contract_schema"] = (
+        PROMPT_MISDIRECT_POINTER in PT._SOURCE_TEMPLATES_BLOCK)
     if (name == "analyze"
             and "OUTPUT_SCHEMA_MISMATCH" in reasons
             and facts["source_is_known_host_template"]
             and not facts.get("source_writes_gate_schema")):
         facts["classification"] = CLASS_INSTRUMENT_TEMPLATE
+    elif (name == "analyze"
+          and "OUTPUT_SCHEMA_MISMATCH" in reasons
+          and declared is not None
+          and declared != AR.OUTPUT_SCHEMA
+          and facts.get("source_reads_contract_key")):
+        facts["classification"] = CLASS_INSTRUMENT_MISDIRECT
     elif code or name:
         facts["classification"] = CLASS_MODEL_FAILURE
     return facts
@@ -260,7 +280,8 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
     failures: "list[dict[str, Any]]" = []
     gaps: "list[str]" = []
 
-    if instrument.get("classification") == CLASS_INSTRUMENT_TEMPLATE:
+    instrument_classes = (CLASS_INSTRUMENT_TEMPLATE, CLASS_INSTRUMENT_MISDIRECT)
+    if instrument.get("classification") in instrument_classes:
         axes["measurement"] = "INVALID_INSTRUMENT"
         failures.append({
             "task": "T6",
@@ -271,10 +292,15 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
             "first_error_code": instrument.get("first_error_code"),
             "first_error_name": instrument.get("first_error_name"),
             "milestones_ok": instrument.get("milestones_ok"),
-            "classification": CLASS_INSTRUMENT_TEMPLATE,
-            "detail": ("prompt 模板 ANALYSIS_TEMPLATE 写 protocol_analysis.v1，"
-                       "而 T4 analysis_receipt 门要求 analysis_output.v1；"
-                       "候选照抄宿主示例必被拒"),
+            "classification": instrument.get("classification"),
+            "detail": (
+                "prompt 模板 ANALYSIS_TEMPLATE 写 protocol_analysis.v1，"
+                "而 T4 analysis_receipt 门要求 analysis_output.v1；候选照抄宿主示例必被拒"
+                if instrument.get("classification") == CLASS_INSTRUMENT_TEMPLATE
+                else ("prompt 把候选指向合同自身的 schema 键 "
+                      "`analysis_output.schema`（值是合同文档 schema "
+                      "`analysis_output_schema.v1`），而门要求输出 schema "
+                      "`analysis_output.v1`；按宿主指示读取即被门拒")),
             "evidence": instrument,
         })
         # 仪器缺陷本身是 **measurement 轴结论**，不是「记录互相矛盾」：

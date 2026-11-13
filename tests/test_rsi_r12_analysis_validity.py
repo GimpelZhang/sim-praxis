@@ -610,3 +610,14 @@ def test_analysis_template_passes_host_gate(tmp_path):
         assert got["lower"] == want["lower"]
         assert got["upper"] == want["upper"]
         assert got["n_blocks"] == want["n_blocks"]
+
+
+def test_prompt_names_output_schema_not_contract_schema():
+    """D-2 回归（2026-11-13 实测）：prompt 只能指向 output_schema。"""
+    from orchestrator.rsi_r1 import protocol as PT
+
+    block = PT._SOURCE_TEMPLATES_BLOCK
+    assert "analysis_output.output_schema" in block
+    # 旧误导措辞（把合同自身 schema 当输出 schema 指给候选）不得复现
+    assert "（= 公开合同 `analysis_output.schema`" not in block
+    assert AR.OUTPUT_SCHEMA in block

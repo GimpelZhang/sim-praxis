@@ -52,6 +52,9 @@ GATE_SCHEMA = "simpraxis.rsi_r1.analysis_output.v1"
 #: 宿主 prompt 模板实际写出的 schema（逐字；用于字节级证明「模板↔门」自相矛盾）。
 TEMPLATE_WRITES_SCHEMA = "simpraxis.rsi_r1.protocol_analysis.v1"
 GATE_REASON = "OUTPUT_SCHEMA_MISMATCH"
+#: 2026-11-13 实测：prompt 把候选指向合同自身的 schema 键，该键值 ≠ 门 schema。
+CLASS_MISDIRECT = "INSTRUMENT_DEFECT_CONTRACT_KEY_MISDIRECTION"
+MISDIRECT_POINTER = "analysis_output.schema"
 
 AXIS_LEGAL = {
     "process": ("COMPLETE", "CLOSEOUT_INCOMPLETE"),
@@ -168,7 +171,7 @@ def family_facts(campaign_root: Path, envelope_id: str):
     }
 
 
-def instrument_facts(root: Path, lane: str = "probe"):
+def instrument_facts(root: Path, lane: str = "probe", repo_root=None):
     report = _read_json(root / "protocol" / f"report_{lane}.json")
     if not isinstance(report, dict):
         return {"available": False, "lane": lane}
@@ -207,12 +210,31 @@ def instrument_facts(root: Path, lane: str = "probe"):
             text = ""
         facts["source_writes_protocol_schema"] = TEMPLATE_WRITES_SCHEMA in text
         facts["source_writes_gate_schema"] = GATE_SCHEMA in text
+        facts["source_reads_contract_key"] = (
+            "analysis_output" in text and "schema" in text)
+    contract = _read_json(root / "public" / "public_contract.json") or {}
+    declared = ((contract.get("analysis_output") or {}).get("schema"))
+    facts["contract_analysis_output_schema"] = declared
+    prompt_text = ""
+    if repo_root is not None:
+        proto = Path(repo_root) / "orchestrator" / "rsi_r1" / "protocol.py"
+        try:
+            prompt_text = proto.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            prompt_text = ""
+    facts["prompt_points_at_contract_schema"] = bool(
+        prompt_text and MISDIRECT_POINTER in prompt_text)
     if (str(first.get("name") or "") == "analyze"
             and GATE_REASON in reasons
             and facts["source_is_host_template"]
             and facts.get("source_writes_protocol_schema")
             and not facts.get("source_writes_gate_schema")):
         facts["classification"] = "INSTRUMENT_DEFECT_TEMPLATE_GATE_CONTRADICTION"
+    elif (str(first.get("name") or "") == "analyze"
+          and GATE_REASON in reasons
+          and declared is not None and declared != GATE_SCHEMA
+          and facts.get("source_reads_contract_key")):
+        facts["classification"] = CLASS_MISDIRECT
     else:
         facts["classification"] = "MODEL_OR_OTHER_FAILURE"
     return facts
@@ -402,7 +424,7 @@ def judge(root: Path, pack: "Path | None" = None,
                 f"≠ 重算 {want_total}")
 
     # 仪器失败判定面
-    ins = instrument_facts(root)
+    ins = instrument_facts(root, repo_root=repo_root)
     recomputed["instrument"] = ins
     rd_ins = readout.get("instrument") or {}
     if ins.get("available"):
