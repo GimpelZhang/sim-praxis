@@ -224,3 +224,43 @@ def test_cli_family_migrate_cap(fam_root, capsys):
                      .read_text(encoding="utf-8"))
     assert doc["family_cap"] == 160
     assert doc["members"][0]["family_cap_at_registration"] == 155
+
+
+def test_abandon_closes_failed_drill_without_signatures(fam_root, monkeypatch):
+    """失败演练根可显式放弃（释放未用预留），PASS 或有签名的根一律拒绝。"""
+    envelope = "r12-abandon-test"
+    root = fam_root / envelope
+    (root / "contract").mkdir(parents=True)
+    (root / "state").mkdir()
+    (root / "contract" / "offline_validation_report.json").write_text(
+        json.dumps({"verdict": "FAIL"}), encoding="utf-8")
+    FAM.register(fam_root, P.PROFILE_R12_DEF, envelope)
+    monkeypatch.setattr(
+        cli_r12, "_load_envelope",
+        lambda root_, envelope_id=None: {"envelope_id": envelope,
+                                         "mode": "offline_validation"})
+    args = type("A", (), {"root": str(root), "envelope": envelope,
+                          "reason": "演练失败换新根", "abandon": True})()
+    assert cli_r12.cmd_family_close(args) == 0
+    member = next(m for m in FAM.usage(fam_root)["members"]
+                  if m["envelope_id"] == envelope)
+    assert member["state"] == "closed"
+    assert FAM.usage(fam_root)["reserved_total"] == 31
+
+    # PASS 报告不得按放弃处理
+    envelope2 = "r12-abandon-pass"
+    root2 = fam_root / envelope2
+    (root2 / "contract").mkdir(parents=True)
+    (root2 / "state").mkdir()
+    (root2 / "contract" / "offline_validation_report.json").write_text(
+        json.dumps({"verdict": "PASS"}), encoding="utf-8")
+    FAM.register(fam_root, P.PROFILE_R12_DEF, envelope2)
+    monkeypatch.setattr(
+        cli_r12, "_load_envelope",
+        lambda root_, envelope_id=None: {"envelope_id": envelope2,
+                                         "mode": "offline_validation"})
+    args2 = type("A", (), {"root": str(root2), "envelope": envelope2,
+                           "reason": "不应允许", "abandon": True})()
+    with pytest.raises(cli_r12.Cli12Error) as exc:
+        cli_r12.cmd_family_close(args2)
+    assert exc.value.code == "FAMILY_ABANDON_PASSED"

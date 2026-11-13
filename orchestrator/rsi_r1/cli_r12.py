@@ -1021,6 +1021,46 @@ def cmd_family_close(args: argparse.Namespace) -> int:
               f"closed_used={member.get('posts_used')} / "
               f"cap={fam_doc['family_cap']}")
         return 0
+    if getattr(args, "abandon", False):
+        # 显式放弃失败的离线演练根（2026-11-13 锁内适配）：演练在根内消耗了
+        # aux 步数帽，重跑必须换新根；但失败根既不能走「报告 PASS 才关闭」，
+        # 也不能占着 124 预留把新根挡在族帽外。只有「报告非 PASS 且零签名」
+        # 的根可放弃；证据按报告 sha 与签名目录留档，不冒充通过。
+        report_path = ctx.root / OV.REPORT_RELPATH
+        report = _read_json(report_path) if report_path.exists() else None
+        if report is None:
+            raise Cli12Error("FAMILY_ABANDON_NO_REPORT",
+                             "放弃失败演练根需要已有的 validation 报告")
+        if str(report.get("verdict")) == "PASS":
+            raise Cli12Error("FAMILY_ABANDON_PASSED",
+                             "报告 PASS 的根不得按「放弃」关闭（走三签流程）")
+        sig_dir = ctx.root / LK.VALIDATION_SIG_DIR
+        if sig_dir.is_dir() and any(sig_dir.glob("*.json")):
+            raise Cli12Error("FAMILY_ABANDON_SIGNED",
+                             "已有签名的根不得按「放弃」关闭")
+        report_sha = _sha256_bytes(report_path.read_bytes())
+        if cur != ST.ROOT_CLOSED:
+            state.close_root(reason=f"family abandon：{reason}")
+        fam_doc = FAM.close_member(
+            _family_root(), str(envelope["envelope_id"]), reason=reason,
+            evidence={
+                "abandoned": True,
+                "mode": str(mode),
+                "report_relpath": OV.REPORT_RELPATH,
+                "report_sha256": report_sha,
+                "report_verdict": report.get("verdict"),
+                "signatures_present": False,
+            })
+        member = next(m for m in fam_doc["members"]
+                      if m["envelope_id"] == envelope["envelope_id"])
+        print(f"family close ok  envelope={envelope['envelope_id']}（放弃失败演练根）")
+        print(f"  state  : {member.get('state')}  "
+              f"report_verdict={report.get('verdict')}  sha={report_sha[:16]}…")
+        print(f"  family : history={fam_doc['history']['total_call_rows']} + "
+              f"closed_used={member.get('posts_used')} / "
+              f"cap={fam_doc['family_cap']}")
+        return 0
+
     if cur != ST.ROOT_CLOSED:
         # 现场复核：LOCK 必须是最新的 validation LOCK 且三签齐（闭包零漂移）。
         ver = LK.verify_lock(ctx, repo_root=LK.REPO_ROOT)
@@ -1226,6 +1266,10 @@ def build_parser() -> argparse.ArgumentParser:
         "close", help="关闭离线验证轮（核 LOCK 三签+报告 PASS，root→CLOSED）")
     _root_args(pfc)
     pfc.add_argument("--reason", required=True)
+    pfc.add_argument(
+        "--abandon", action="store_true",
+        help="显式放弃一次**未通过**的离线演练根（报告非 PASS、零签名），"
+             "释放其未用预留换新轮重来；不得用于通过过的根")
     pfc.set_defaults(func=cmd_family_close)
     pmc = fam_sub.add_parser(
         "migrate-cap",
