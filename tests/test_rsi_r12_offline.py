@@ -1395,3 +1395,18 @@ def test_validation_lock_digest_covers_anchor_fields(tmp_path):
         "budget_sha256": doc["budget_sha256"], "stage": "study",
         "phase": "study", "dependencies": doc["dependencies"],
         "schema": L.LOCK_SCHEMA})
+
+
+def test_parse_junit_rejects_conflicting_duplicate_case(tmp_path):
+    """T5-M2：同名用例状态冲突不得后写覆盖前写。"""
+    from orchestrator.rsi_r1 import offline_validation as OV
+
+    xml = tmp_path / "j.xml"
+    xml.write_text(
+        "<testsuites><testsuite>"
+        "<testcase classname='tests.test_x' name='c1'/>"
+        "<testcase classname='tests.test_x' name='c1'><failure/></testcase>"
+        "</testsuite></testsuites>", encoding="utf-8")
+    with pytest.raises(OV.OfflineValidationError) as exc:
+        OV._parse_junit(xml)
+    assert exc.value.code == "REGRESSION_CASE_CONFLICT"

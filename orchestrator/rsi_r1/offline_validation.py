@@ -694,6 +694,14 @@ def _parse_junit(path: "Path | str") -> "dict[str, dict[str, Any]]":
         rec[status] += 1
         name = str(case.get("name") or "")
         if name:
+            # T5-M2 修复（2026-11-13）：同名用例**状态冲突**不许后写覆盖前写。
+            # pytest 本身保证文件内用例名唯一，此分支只在 junit 被伪造/拼接时
+            # 触发；状态相同则幂等保留。
+            previous = rec["cases"].get(name)
+            if previous is not None and previous != status:
+                raise OfflineValidationError(
+                    "REGRESSION_CASE_CONFLICT",
+                    f"{rel}::{name} 出现冲突状态 {previous!r} vs {status!r}")
             rec["cases"][name] = status
     return out
 

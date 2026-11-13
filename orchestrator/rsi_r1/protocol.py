@@ -479,7 +479,13 @@ _ACTIONS_BLOCK = (
     "7. run_confirm(confirm_token)  ← 返回确认批 run_ids_head 与 references：\n"
     "   references 是宿主用公开估计量从**你这批确认观测**算出的每条假设的\n"
     "   estimate/lower/upper（你自己看不到确认批数值，直接逐字复制即可）\n"
-    "8. submit_claim(claims=[...], report_text=<正文>)\n")
+    "8. submit_claim(claims=[...], report_text=<正文>)\n"
+    "\n"
+    "### 失效规则（2026-11-13 公开；违反不会报错，但后续动作**只烧预算不推进**）\n"
+    "改写某个位置的动作会让它的下游位置失效：改写 design 后必须重新 "
+    "propose_plan 才能推进 run_batch；改写 plan 后必须重新 run_batch；改写 "
+    "analysis 后必须重新 analyze。失效位置已消耗的 POST 不退还；确认冻结后"
+    "禁止改写 design/plan/analysis（terminal）。\n")
 
 _SOURCE_TEMPLATES_BLOCK = (
     "### 格式示例（不是最优设计，只演示输入输出形状）\n"

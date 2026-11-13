@@ -96,7 +96,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert ev["lane_caps"] == {lane: PROFILE.lane_post_caps[lane]
                                for lane in PROFILE.lane_order}
     assert ev["posts_total"] == PROFILE.hard_cap == 124
-    assert ev["family_cap"] == PROFILE.family_cap == 165
+    assert ev["family_cap"] == PROFILE.family_cap == 171
     assert ev["family_history"] == PROFILE.family_history_posts == 31
     assert ev["aux_subenvelopes"] == dict(P.AUX_SUBENVELOPES)
     assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
@@ -421,3 +421,30 @@ def test_audited_sender_refusal_never_calls_transport(tmp_path) -> None:
     stored = json.loads(files[0].read_text())
     assert stored["verdict"] == "refused"
     assert stored["code"] == "PUBLIC_CONTRACT_DRIFT"
+
+
+def test_recovery_invalidate_map_matches_engine_single_source():
+    """D-5：公开合同的失效映射必须与 recovery.INVALIDATE_FROM 同源。"""
+    from orchestrator.rsi_r1 import protocol as PT
+    from orchestrator.rsi_r1 import recovery as RCV
+
+    doc = P.public_contract_document(
+        P.PROFILE_R12_DEF, envelope_id="env-x", budget_sha256="0" * 64,
+        family_used_before=47)
+    rec = doc["recovery"]
+    names = P.CANONICAL_POSITIONS
+    want = {names[pos]: list(names[first:])
+            for pos, first in sorted(RCV.INVALIDATE_FROM.items())}
+    assert rec["invalidate_on"] == want
+    assert "必须重新 propose_plan" in rec["invalidate_rule"]
+
+
+def test_prompt_discloses_invalidation_rule():
+    """D-5：prompt 必须公开「改写 design ⇒ 重提 plan」的失效规则。"""
+    from orchestrator.rsi_r1 import protocol as PT
+
+    block = PT._ACTIONS_BLOCK
+    assert "失效规则" in block
+    for token in ("改写 design", "propose_plan", "改写 plan", "run_batch",
+                  "改写 analysis", "analyze", "只烧预算"):
+        assert token in block, token

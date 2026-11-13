@@ -81,22 +81,23 @@ RSI_R12_TASK_CAPS: "Mapping[int, int]" = types.MappingProxyType({
 })
 
 #: 跨轮研究族硬帽：历史 31（R1 9 + R1.1 22，两独立 envelope 的最终根实呼）
-#: + 已关闭轮实花 10（`r12-paid-20261113a`/`b`，仪器缺陷轮，花掉的不归还）
-#: + 已关闭轮实花 10 + 本轮 124 = **165**（2026-11-13 第二次用户裁决：
-#: 轮 A/轮 B 两轮仪器缺陷各花 5，完整第三轮需 165）。历史 31 的逐字节导入在
-#: ``family.py``。
+#: + 已关闭轮实花 16（`r12-paid-20261113a`/`b`/`c`，花掉的不归还）
+#: + 已关闭轮实花 16 + 本轮 124 = **171**（2026-11-13 用户第三次授权：
+#: 轮 A 5 + 轮 B 5 + 轮 C 6 已花，按复盘 D-5 再跑一轮需 171）。历史 31 的
+#: 逐字节导入在 ``family.py``。
 #:
 #: 锁内适配（2026-11-13，用户逐字裁决）：原帽 155 = 31 + 124，上一轮以
 #: INVALID_INSTRUMENT 结案时已真实花掉 5 呼；若仍按 155 开新轮，31+124=155
 #: 会把已花的 5 呼算成「不存在」。用户裁决把帽抬到 160 使
 #: 「历史 + 已关闭轮实花 + 新轮」恰好闭合（Plan 明写「改变 155 需新用户裁决」）。
-FAMILY_CAP = 165
+FAMILY_CAP = 171
 FAMILY_HISTORY_POSTS = 31
 #: 已关闭轮的实花（只能由族文档的 closed 成员逐行复算，不得手填）：
-#: 轮 A `r12-paid-20261113a` 5 + 轮 B `r12-paid-20261113b` 5 = 10。
-FAMILY_CLOSED_ROUND_POSTS = 10
+#: 轮 A `r12-paid-20261113a` 5 + 轮 B `r12-paid-20261113b` 5 +
+#: 轮 C `r12-paid-20261113c` 6 = 16。
+FAMILY_CLOSED_ROUND_POSTS = 16
 #: 历史族帽取值（旧 envelope/consent 仍须可读；新轮一律用当前 ``FAMILY_CAP``）。
-FAMILY_CAP_HISTORY: "tuple[int, ...]" = (155, 160, FAMILY_CAP)
+FAMILY_CAP_HISTORY: "tuple[int, ...]" = (155, 160, 165, FAMILY_CAP)
 FAMILY_NEW_ROUND_POSTS = RSI_R12_HARD_CAP
 
 #: 历史来源的**两本最终根账**（Plan §0 基线；行数/哈希在 family.py 复核）。
@@ -627,6 +628,16 @@ def _public_method_sections() -> "dict[str, Any]":
     }
 
 
+def _invalidate_on_doc() -> "dict[str, list[str]]":
+    """``recovery.INVALIDATE_FROM`` → 公开的「动作 → 被失效的下游动作」映射。"""
+    from orchestrator.rsi_r1 import recovery as RCV  # 延迟导入避免循环
+
+    names = CANONICAL_POSITIONS
+    assert len(names) == 8, "规范位置数必须是 8"
+    return {names[pos]: list(names[first:])
+            for pos, first in sorted(RCV.INVALIDATE_FROM.items())}
+
+
 def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
                              budget_sha256: str,
                              scenes: "tuple[str, ...]" = (),
@@ -659,9 +670,9 @@ def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
                 profile.family_cap - family_used_before,
             "this_round_cap_posts": profile.hard_cap,
             "note": ("历史 31 呼 = R1 9 + R1.1 22（两独立 envelope 的最终根实呼，"
-                     "carryover 不重复计）；已关闭轮实花 10 呼（"
-                     "`r12-paid-20261113a`/`b`，花掉的不归还）；族帽 165 由 2026-11-13 "
-                     "用户两次裁决设立（155→160→165）；本轮不重置家族余额"),
+                     "carryover 不重复计）；已关闭轮实花 16 呼（"
+                     "`r12-paid-20261113a`/`b`/`c`，花掉的不归还）；族帽 171 由 2026-11-13 "
+                     "用户三次授权设立（155→160→165→171）；本轮不重置家族余额"),
         },
         "posts": {
             "per_lane": lanes,
@@ -758,6 +769,14 @@ def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
             "extra_posts_probe": profile.protocol_policy.max_extra_posts_probe,
             "extra_posts_practice": profile.protocol_policy.max_extra_posts_practice,
             "min_remaining_actions_rule": "每次发送前按依赖图算，不足即 BUDGET_UNREACHABLE",
+            # 2026-11-13 D-5：失效依赖必须公开（轮 C 实测：候选改写 design 后
+            # 未重提 plan，后续动作只烧预算不推进）。映射从
+            # ``recovery.INVALIDATE_FROM`` 派生，不另写字面量。
+            "invalidate_on": _invalidate_on_doc(),
+            "invalidate_rule": ("改写某个位置的动作会让其下游位置失效：改写 design 后"
+                                "必须重新 propose_plan 才能推进 run_batch；改写 plan 后"
+                                "必须重新 run_batch；改写 analysis 后必须重新 analyze。"
+                                "失效位置已消耗的 POST 不退还。"),
         },
         "science": {
             "studies": {

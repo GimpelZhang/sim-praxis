@@ -11,7 +11,7 @@
 
 判据面（T9 行「历史 31 + 已关闭轮 + 新实呼 ≤ 族帽」）：
 
-    ROUND_CAP 124   FAMILY_CAP 165   HISTORY_POSTS 31（历史块字面量）
+    ROUND_CAP 124   FAMILY_CAP 171   HISTORY_POSTS 31（历史块字面量）
 
 族帽 160 是 2026-11-13 用户裁决（155 → 160）后的口径：历史 31 + 已关闭轮
 实花（``r12-paid-20261113a`` 5）+ 新轮 124。**已关闭轮的实花由族文档逐行
@@ -32,7 +32,7 @@ SCHEMA = "simpraxis.rsi_r12.closure_judge.v1"
 SCHEMA_VERSION = 1
 
 ROUND_CAP = 124
-FAMILY_CAP = 165
+FAMILY_CAP = 171
 HISTORY_POSTS = 31
 
 READOUT_RELPATH = "closeout/r12_readout.json"
