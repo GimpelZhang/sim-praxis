@@ -74,6 +74,10 @@ LANE_POST_CAPS_R12: "Mapping[str, int]" = types.MappingProxyType({
     "study_A": 48,
     "study_B": 48,
 })
+#: 2026-11-13 D-10：输出预算（含思考 token）。实测本位点默认思考（无 thinking
+#: 参数时 reasoning_tokens 610–1715），8192 会在长回合被吃光；抬到 32768。
+RSI_R12_OUTPUT_TOKENS = 32768
+
 RSI_R12_HARD_CAP = 124
 RSI_R12_NORMAL_BUDGET = 124  # 无 repair_reserve；正常预算 == 硬帽
 RSI_R12_TASK_CAPS: "Mapping[int, int]" = types.MappingProxyType({
@@ -437,6 +441,10 @@ class CampaignProfile:
     consent_schema: str
     public_contract_schema: str
     closure_groups_key: str = "legacy"
+    #: 单次模型请求的输出 token 上限（2026-11-13 D-10：该端点默认开思考，
+    #: reasoning tokens 计入 completion 预算；8192 在长回合被思考吃光 ⇒ 正文
+    #: 截断/空回答。R1.2 抬到 32768；legacy 保持 8192 不变）。
+    output_tokens: int = 8192
     extra: "Mapping[str, Any]" = field(default_factory=lambda: types.MappingProxyType({}))
 
     # ---- 派生即单一真值 -------------------------------------------------
@@ -534,6 +542,7 @@ PROFILE_R12_DEF = CampaignProfile(
     consent_schema=CONSENT_SCHEMA_V2,
     public_contract_schema=PUBLIC_CONTRACT_SCHEMA_V2,
     closure_groups_key="r12",
+    output_tokens=RSI_R12_OUTPUT_TOKENS,
     extra=types.MappingProxyType({
         "offline_validation_states": (
             "registered", "offline_authorized", "calibrated",
@@ -740,7 +749,8 @@ def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
         "units": {
             "run": "一次物理 rollout（step 数 = ceil(duration/dt)）",
             "step": "一个离散积分步；每 run ≤ 8000 step",
-            "post": "一次模型请求（不计 host 计算/物理执行）",
+            "post": ("一次模型请求（不计 host 计算/物理执行）；单次输出上限 "
+                     f"{profile.output_tokens} tokens（含思考 token）"),
             "block": "一个配对确认单元（条件 × block_id）",
         },
         "dynamic_sha": {

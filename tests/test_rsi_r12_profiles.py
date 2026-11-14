@@ -157,3 +157,12 @@ def test_policy_error_classes_disjoint_and_terminal_contains_transport():
         assert code in P.TERMINAL_ERROR_CODES
     for code in ("RESOURCE_EXCEEDED", "SOURCE_SHA_INVALID", "MALFORMED_JSON"):
         assert code in P.RECOVERABLE_ERROR_CODES
+
+
+def test_output_token_budget_covers_reasoning():
+    """D-10：R1.2 输出预算 32768（含思考 token），legacy 保持 8192。"""
+    assert P.PROFILE_R12_DEF.output_tokens == P.RSI_R12_OUTPUT_TOKENS == 32768
+    assert P.PROFILE_LEGACY_DEF.output_tokens == 8192
+    doc = P.public_contract_document(
+        P.PROFILE_R12_DEF, envelope_id="env-x", budget_sha256="0" * 64)
+    assert "32768" in doc["units"]["post"]

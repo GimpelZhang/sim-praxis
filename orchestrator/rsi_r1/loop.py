@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
@@ -830,6 +831,8 @@ class ResearchLoop:
                     return StepOutcome(ok=False, code="EmptyResponseError",
                                        terminal=True)
                 attempt += 1
+                # 退避：连续空回答多与瞬时抖动相关，立即重发容易撞在同一窗口。
+                time.sleep(min(2.0, 0.5 * attempt))
                 continue
             except Exception as exc:  # noqa: BLE001 —— 先分类，非网关错照旧上抛
                 # 网关层异常（超时/连接错误等）在账本里已有 ok=false 行；必须

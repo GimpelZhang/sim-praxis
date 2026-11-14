@@ -983,9 +983,14 @@ class ModelGateway:
                 # 退避重试不新增 ledger seq；耗尽抛 EmptyResponseError 由出口记一行 ok=false。
                 if not content or not content.strip():
                     if attempt + 1 >= self.max_attempts:
+                        choices = getattr(resp, "choices", None) or []
+                        finish = (getattr(choices[0], "finish_reason", None)
+                                  if choices else None)
+                        usage = _litellm_usage(resp)
                         raise EmptyResponseError(
                             f"stage={stage} 连续 {self.max_attempts} 次 HTTP 200 空回答"
-                            "（empty/thinking-only content），按失败处理（ok=false）")
+                            f"（empty/thinking-only content；finish={finish!r}，"
+                            f"tokens out={usage[1]}），按失败处理（ok=false）")
                     wait = self._retry_wait(attempt)
                     self._check_wait_budget(wait_total, wait, "200 空回答退避")
                     logger.warning("200 空回答 stage=%s 第 %d 次（内部重试不占 seq），"

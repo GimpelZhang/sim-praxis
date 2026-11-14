@@ -136,7 +136,8 @@ def build_study_parts(
         return T.build_request(
             system=system,
             task_brief=L.render_task_brief(dispatcher.visible_state()),
-            turns=store.history(), counter=counter)
+            turns=store.history(), counter=counter,
+            max_tokens=int(getattr(profile, "output_tokens", T.MAX_OUTPUT_TOKENS)))
 
     loop = L.ResearchLoop(
         sender=sender, parser=L.parse_action, dispatcher=dispatcher, store=store,
