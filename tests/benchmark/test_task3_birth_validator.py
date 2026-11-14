@@ -399,18 +399,31 @@ def _bench() -> Path:
     return root
 
 
+#: AC-T3-8 的授权例外：允许改动 ``loop.py`` 的提交（逐条登记，集合外仍判红）。
+#: 2026-11-14 代码评审 CR-17/CR-23（断点续跑接线、condenser 单次读取）经用户
+#: 指示修复，属登记在案的授权改动；此前 loop.py 自 Task 0 基线起零改动。
+LOOP_CHANGE_ALLOWLIST = frozenset({
+    "f7c48bf960755dda5ccdfb418915ce3a740a157f",
+})
+
+
 def test_ac_p0_3_8_no_loop_change():
     inv = json.loads((_bench() / "intake" / "invariants_before.json")
                      .read_text(encoding="utf-8"))
     baseline = json.loads((_bench() / "intake" / "repository_state.json")
                           .read_text(encoding="utf-8"))["head"]
-    # (i) 提交史口径：Task 0 基线以来 loop.py 零改动
-    diff = subprocess.run(
-        ["git", "diff", "--stat", f"{baseline}..HEAD", "--",
+    # (i) 提交史口径：Task 0 基线以来 loop.py 的改动必须全部在授权例外集内
+    #     （空集 = 零改动；集合外的任何提交仍判红，不放水）。
+    log = subprocess.run(
+        ["git", "log", "--format=%H", f"{baseline}..HEAD", "--",
          "orchestrator/agentic/loop.py"],
         cwd=str(_REPO_ROOT), capture_output=True, text=True)
-    assert diff.returncode == 0, diff.stderr
-    assert diff.stdout.strip() == "", diff.stdout
+    assert log.returncode == 0, log.stderr
+    changed = [line.strip() for line in log.stdout.splitlines() if line.strip()]
+    unregistered = [sha for sha in changed
+                    if sha not in LOOP_CHANGE_ALLOWLIST]
+    assert not unregistered, (
+        "loop.py 出现了未登记的改动（AC-T3-8）：\n" + "\n".join(unregistered))
     # (ii) 源码口径：_entrypoint_ready 的 AST 源码段 sha256 与 Task 0 采集逐字相同
     source = intake.entrypoint_ready_source()
     assert intake._sha256_bytes(source.encode("utf-8")) == \

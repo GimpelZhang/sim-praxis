@@ -798,10 +798,11 @@ CALL_CACHE_ALLOWLIST = {
     # Phase 2.6 Task3（§T3.4-K）：RunSpec 第 6 个 agentic 字段 agentic_config
     # （+5 行含溯源注释，全在构造点之前）纯位移 2307→2312；构造表达式
     # CallReplay(phase1_root() / ".call_cache") 逐字未改，0 新增落点。
-    # 2026-11-14 代码评审 CR-02/CR-21（子进程环境白名单 + 进程组 kill/流式
-    # 输出，+85 行，全在构造点之前）纯位移 2312→2397；构造表达式逐字未改，
-    # 0 新增落点、0 新增网关调用。
-    ("orchestrator/agent_runner/runner.py", 2397),
+    # 2026-11-14 代码评审 CR-02/CR-21（子进程环境白名单 + 进程组 kill/有界
+    # 输出，+85 行，全在构造点之前）纯位移 2312→2397；复核补丁（渲染后端
+    # 环境变量，+45 行）再位移 2397→2442；构造表达式逐字未改，0 新增落点、
+    # 0 新增网关调用。
+    ("orchestrator/agent_runner/runner.py", 2442),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。

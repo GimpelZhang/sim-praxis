@@ -121,13 +121,25 @@ def test_cr21_timeout_kills_grandchildren(tmp_path):
 
 
 def test_cr21_output_tail_is_capped():
-    with tempfile.TemporaryFile() as fh:
-        fh.write(b"A" * 100)
-        fh.write(b"B" * (runner_mod._OUTPUT_TAIL_CAP + 50))
-        text = runner_mod._read_tail(fh)
-    assert text.startswith("[…输出前")
+    """尾部缓冲有界：超帽只留尾部、显式标注截断，不落盘也不全量驻留。"""
+    import io
+
+    class _Pipe(io.BytesIO):
+        def read1(self, n):          # 模拟 BufferedReader.read1
+            return self.read(n)
+
+    holder: dict = {}
+    runner_mod._drain_tail(
+        _Pipe(b"A" * 100 + b"B" * (runner_mod._OUTPUT_TAIL_CAP + 50)),
+        runner_mod._OUTPUT_TAIL_CAP, holder)
+    text = runner_mod._tail_text(holder)
+    assert text.startswith("[…输出前部已截断")
     assert text.endswith("B")
     assert len(text) <= runner_mod._OUTPUT_TAIL_CAP + 100
+
+    small: dict = {}
+    runner_mod._drain_tail(_Pipe(b"hello"), runner_mod._OUTPUT_TAIL_CAP, small)
+    assert runner_mod._tail_text(small) == "hello"
 
 
 # ---------------------------------------------------------------------------
@@ -457,10 +469,17 @@ def _trace_row(tracer, *, round_idx, step, tool, observation):
                           "grant_source": "test"}, latency_ms=0)
 
 
+def _mark_attempt_open(tracer) -> None:
+    """复核后语义：只有被外部杀死（kill -9）的尝试才留下中断标记。"""
+    (tracer.root / loop_mod.ATTEMPT_OPEN).write_text(
+        "in-progress\n", encoding="utf-8")
+
+
 def test_cr17_resume_helper_restores_only_interrupted_attempt(tmp_path):
     tracer = TraceStore(tmp_path / "tr", "t17")
     _trace_row(tracer, round_idx=1, step=1, tool="read_file",
                observation="hello")
+    _mark_attempt_open(tracer)
     model = _FakeModel()
     budget = BudgetTracker(round_cap=5)
     info = loop_mod._resume_prefix_from_trace(
@@ -469,9 +488,10 @@ def test_cr17_resume_helper_restores_only_interrupted_attempt(tmp_path):
     assert model.steps == 1 and model.round_no == 1
     assert budget.steps_used == 1 and budget.rounds_used == 1
 
-    # 上次尝试已自终局（__answer__）：新一次尝试不得灌回旧轨迹。
+    # 上次尝试已自终局（__answer__ + 标记已删）：新一次尝试不得灌回旧轨迹。
     _trace_row(tracer, round_idx=1, step=0, tool=ANSWER_TOOL,
                observation="done")
+    (tracer.root / loop_mod.ATTEMPT_OPEN).unlink()
     model2, budget2 = _FakeModel(), BudgetTracker(round_cap=5)
     assert loop_mod._resume_prefix_from_trace(
         model2, tracer, workdir=tmp_path, budget=budget2) is None
@@ -482,6 +502,7 @@ def test_cr17_resume_helper_tampered_trace_returns_none(tmp_path):
     tracer = TraceStore(tmp_path / "tr", "t17b")
     _trace_row(tracer, round_idx=1, step=1, tool="read_file",
                observation="hello")
+    _mark_attempt_open(tracer)
     line = next(ln for ln in tracer.load_lines()
                 if not str(ln["tool"]).startswith("__"))
     (tracer.root / line["obs_full_relpath"]).unlink()
