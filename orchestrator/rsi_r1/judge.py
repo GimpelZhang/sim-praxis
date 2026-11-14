@@ -336,10 +336,18 @@ def _check_manifest(plan: C.ResearchPlan, manifest: E.ConfirmManifest,
         p2 = _static_params(plan, manifest, c2)
         diff = sorted(k for k in set(p1) | set(p2) if p1.get(k) != p2.get(k))
         if contrast.kind == "negative":
-            if tuple(diff) != tuple(R.NEGATIVE_CONTROL_ALLOWED_DIFF):
+            # D-14（2026-11-15 实测）：A 的阴性对照必须恰差量表登记的
+            # 扭转摩擦；但 B 的设计里没有摩擦维度，任何阴性对照都不可能
+            # 满足该条件（候选的 dt_equivalence 因此被判死）。B 只要求
+            # 阴性对照与主对比一样是**单因子**对比。
+            if plan.study_id == "A":
+                if tuple(diff) != tuple(R.NEGATIVE_CONTROL_ALLOWED_DIFF):
+                    confounded.append(
+                        f"{contrast.id}:negative-diff={diff} 期望 "
+                        f"{list(R.NEGATIVE_CONTROL_ALLOWED_DIFF)}")
+            elif len(diff) != 1:
                 confounded.append(
-                    f"{contrast.id}:negative-diff={diff} 期望 "
-                    f"{list(R.NEGATIVE_CONTROL_ALLOWED_DIFF)}")
+                    f"{contrast.id}:negative-diff={diff}（阴性对照也须单因子）")
             continue
         if len(diff) != 1:
             confounded.append(f"{contrast.id}:{diff}")

@@ -333,16 +333,27 @@ SEED = 20261111          # 公开统计 seed（固定、与数据无关，见公
 RESAMPLES = 10000
 
 
-def metric_value(record, metric_id, initial_x=None):
+def metric_value(record, metric_id, initial_x=None, amplitude=None):
     qpos = record["qpos"]
     if metric_id == "normalized_tracking_rmse":
+        # 与宿主判据逐位一致（2026-11-15 实测：模板旧实现按全时段+target 峰值
+        # 归一，被判 INVALID_NUMERICS，差 8.4e-3）：
+        #   * 时间窗 0.5–4 s（按 record["time_s"] 过滤）；
+        #   * 有 instability_events 的 run 记 loss=10.0（硬失稳，不参与 RMSE）；
+        #   * RMSE = sqrt(fsum((qpos[i][0]-target_q[i][0])^2)/n) / 目标幅值 A，
+        #     A 取自计划里该 condition 的 target_amplitude_rad。
+        if record.get("instability_events"):
+            return 10.0
+        times = record["time_s"]
         target = record["target_q"]
-        sq = 0.0
-        for a, b in zip(qpos, target):
-            d = float(a[0]) - float(b[0])
-            sq += d * d
-        amp = max(abs(float(b[0])) for b in target) or 1.0
-        return math.sqrt(sq / len(qpos)) / amp
+        idx = [i for i, t in enumerate(times)
+               if 0.5 <= float(t) <= 4.0]
+        sq = math.fsum((float(qpos[i][0]) - float(target[i][0])) ** 2
+                       for i in idx)
+        amp = float(amplitude) if amplitude is not None else 1.0
+        if amp <= 0:
+            raise SystemExit("amplitude must be positive")
+        return math.sqrt(sq / len(idx)) / amp
     if metric_id in ("displacement_x_m", "displacement_x_m_negative_equivalence"):
         # 锚点 = 声明的初始位置（meta.initial_x_m，t=0）；**不要**用 qpos[0]
         # （那是第一个采样，t=0.0005 s，已前进 ~2e-4 m——2026-11-13 实测因此
@@ -405,6 +416,11 @@ def main() -> int:
     plan = json.loads(plans[0].read_text(encoding="utf-8"))
     condition = {}
     initial_x = {}
+    amplitude = {}
+    for cond in plan.get("conditions") or []:
+        p = cond.get("params") or {}
+        if "target_amplitude_rad" in p:
+            amplitude[str(cond["id"])] = float(p["target_amplitude_rad"])
     for meta in sorted(view.glob("*.meta.json")):
         doc = json.loads(meta.read_text(encoding="utf-8"))
         rid = meta.name[: -len(".meta.json")]
@@ -420,7 +436,8 @@ def main() -> int:
         by_block = {}
         for run_id, rec in records.items():
             by_block.setdefault(rec["block_id"], {})[condition[run_id]] = \
-                metric_value(rec, metric_id, initial_x.get(run_id))
+                metric_value(rec, metric_id, initial_x.get(run_id),
+                             amplitude.get(condition.get(run_id)))
         first, second = spec["condition_ids"]
         diffs = [pair[first] - pair[second] for _, pair in sorted(by_block.items())]
         level = 0.90 if spec["kind"] == "negative" else 0.95

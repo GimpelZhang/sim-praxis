@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -42,7 +43,7 @@ MAX_PACK_FILE_BYTES = 10 * 1024 * 1024
 
 #: 当前宿主 prompt 模板逐字节钉死（2026-11-13 D-1 修复后：模板与门单一源）。
 TEMPLATE_SHA256 = (
-    "afcaa68ffdd051560968f751f6d108b97927e5beb1fca76b6bb195f3242fe9a5")
+    "cb9f09213eb83b972f63c7b8d6fbd7e7f7121030335816f4a9576968f3793b39")
 #: 历史模板 sha（`r12-paid-20261113a` 那轮公开的旧示例；该轮证据按当时字节判）。
 TEMPLATE_SHA256_HISTORY = (
     "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
@@ -59,6 +60,7 @@ MISDIRECT_POINTER = "analysis_output.schema"
 CLASS_PROTOCOL_VIOLATION = "MODEL_PROTOCOL_VIOLATION"
 CLASS_CAPACITY = "INSTRUMENT_DEFECT_SANDBOX_CAPACITY"
 CLASS_ANCHOR = "INSTRUMENT_DEFECT_METRIC_ANCHOR"
+CLASS_METRIC_DEF = "INSTRUMENT_DEFECT_METRIC_DEFINITION"
 CONTRACT_VIOLATION_CODES = frozenset({
     "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
     "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
@@ -364,6 +366,78 @@ def study_a_anchor_facts(root: Path):
             "n_blocks": len(d_init)}
 
 
+def study_b_metric_facts(root: Path):
+    """B 的两种 RMSE 口径均值（纯标准库），判别候选用的是模板口径还是判据口径。"""
+    plans = []
+    for path in sorted((root / "public").glob("plan-*.json")):
+        doc = _read_json(path) or {}
+        if doc.get("phase") == "confirm" and doc.get("study_id") == "B":
+            plans.append(doc)
+    confirm = sorted((root / "observations").glob("confirm-B-*"))
+    raw_path = root / "private" / "analysis" / "B-confirm.raw.json"
+    if not plans or not confirm or not raw_path.is_file():
+        return {"available": False}
+    primary = plans[0].get("primary") or {}
+    conds = list(primary.get("condition_ids") or [])
+    amp = {}
+    for cond in plans[0].get("conditions") or []:
+        p = cond.get("params") or {}
+        if "target_amplitude_rad" in p:
+            amp[str(cond.get("id"))] = float(p["target_amplitude_rad"])
+    if len(conds) != 2:
+        return {"available": False}
+    def _first(v):
+        return float(v[0]) if isinstance(v, (list, tuple)) else float(v)
+    by_block = {}
+    for meta in sorted(confirm[0].glob("*.meta.json")):
+        rid = meta.name[: -len(".meta.json")]
+        doc = _read_json(meta) or {}
+        try:
+            rec = json.loads((confirm[0] / f"{rid}.jsonl").read_text(
+                encoding="utf-8").splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            return {"available": False}
+        q = [_first(v) for v in rec.get("qpos") or []]
+        tgt = [_first(v) for v in rec.get("target_q") or []]
+        times = [float(t) for t in rec.get("time_s") or []]
+        if not q or len(q) != len(tgt) or len(q) != len(times):
+            return {"available": False}
+        if rec.get("instability_events"):
+            host_val = 10.0
+        else:
+            idx = [i for i, t in enumerate(times) if 0.5 <= t <= 4.0]
+            if len(idx) < 2:
+                return {"available": False}
+            sq = math.fsum((q[i] - tgt[i]) ** 2 for i in idx)
+            host_val = math.sqrt(sq / len(idx)) / (amp.get(str(doc.get("condition_id"))) or 1.0)
+        sq2 = math.fsum((a - b) ** 2 for a, b in zip(q, tgt))
+        peak = max((abs(v) for v in tgt), default=0.0) or 1.0
+        legacy_val = math.sqrt(sq2 / len(q)) / peak
+        slot = by_block.setdefault(str(rec.get("block_id")), {})
+        slot[str(doc.get("condition_id"))] = (host_val, legacy_val)
+    t_cond, c_cond = conds
+    dh, dl = [], []
+    for pair in by_block.values():
+        if t_cond in pair and c_cond in pair:
+            dh.append(pair[t_cond][0] - pair[c_cond][0])
+            dl.append(pair[t_cond][1] - pair[c_cond][1])
+    if not dh:
+        return {"available": False}
+    cand = None
+    for item in (_read_json(raw_path) or {}).get("contrasts") or []:
+        if str(item.get("contrast_id")) == str(primary.get("id")):
+            cand = item.get("estimate")
+    if cand is None:
+        return {"available": False}
+    h = sum(dh) / len(dh)
+    lv = sum(dl) / len(dl)
+    return {"available": True, "candidate_estimate": float(cand),
+            "host_style_mean": h, "legacy_style_mean": lv,
+            "matches_host_style": abs(float(cand) - h) <= 1e-9,
+            "matches_legacy_style": abs(float(cand) - lv) <= 1e-9,
+            "n_blocks": len(dh)}
+
+
 def studies_started(root: Path) -> bool:
     for study in STUDIES:
         for rel in STUDY_ARTIFACTS.values():
@@ -548,6 +622,8 @@ def judge(root: Path, pack: "Path | None" = None,
                 f"readout.totals.family_total={rd_tot.get('family_total')!r} "
                 f"≠ 重算 {want_total}")
 
+    metric_def = study_b_metric_facts(root)
+    recomputed["metric_definition"] = metric_def
     anchor = study_a_anchor_facts(root)
     recomputed["metric_anchor"] = anchor
     if anchor.get("available") and anchor.get("matches_qpos0") \
@@ -591,6 +667,12 @@ def judge(root: Path, pack: "Path | None" = None,
 
     # 轴位
     axes = readout.get("axes") or {}
+    if recomputed.get("metric_definition", {}).get("available") and \
+            recomputed["metric_definition"].get("matches_legacy_style") and \
+            not recomputed["metric_definition"].get("matches_host_style"):
+        if axes.get("measurement") != "INVALID_INSTRUMENT":
+            problems.append(
+                "B 指标定义矛盾（候选=模板口径）但 measurement 不是 INVALID_INSTRUMENT")
     if set(axes) != set(AXIS_LEGAL):
         problems.append(f"axes 键集不符：{sorted(axes)}")
     for name, value in axes.items():

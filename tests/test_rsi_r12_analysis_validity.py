@@ -683,3 +683,36 @@ def test_control_censored_metric_dropped_blocks_is_evidence_invalid() -> None:
     paired = [c for c in report["checks"] if c["id"] == "J-PAIRED-primary"]
     assert paired and paired[0]["ok"] is False
     assert "n=16" in paired[0]["detail"] and "dropped=" in paired[0]["detail"]
+
+
+def test_metric_template_matches_judge_tracking_rmse():
+    """D-15：模板的 normalized_tracking_rmse 必须与 judge._metric_b 逐位一致。"""
+    from orchestrator.rsi_r1 import judge as J
+    import numpy as np
+
+    times = [i * 0.001 for i in range(4000)]           # 0..3.999 s
+    target = [[0.2 * np.sin(2 * np.pi * 0.5 * t), 0.0] for t in times]
+    qpos = [[v[0] * 0.9 + 0.001, 0.0] for v in target]
+    record = {"time_s": times, "target_q": target, "qpos": qpos,
+              "instability_events": []}
+    host = J._metric_b(record, amplitude_rad="0.2")["values"][
+        "normalized_tracking_rmse"]
+    local = _run_template_metric(record, "normalized_tracking_rmse",
+                                 amplitude=0.2)
+    assert abs(local - host) <= 1e-15
+
+    unstable = dict(record, instability_events=[{"step": 10}])
+    assert _run_template_metric(unstable, "normalized_tracking_rmse",
+                                amplitude=0.2) == float(
+        J.R.LOSS_CAP)
+
+
+def _run_template_metric(record, metric_id, *, amplitude):
+    """抽取模板里的 metric_value 并在宿主进程内执行（不经容器）。"""
+    from orchestrator.rsi_r1 import protocol as PT
+    ns = {}
+    src = PT.ANALYSIS_TEMPLATE
+    start = src.index("def metric_value(")
+    end = src.index("def interval(")
+    exec(src[start:end], {"math": __import__("math")}, ns)  # noqa: S102
+    return ns["metric_value"](record, metric_id, None, amplitude)

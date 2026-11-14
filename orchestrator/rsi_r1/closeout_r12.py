@@ -62,6 +62,9 @@ CLASS_INSTRUMENT_CAPACITY = "INSTRUMENT_DEFECT_SANDBOX_CAPACITY"
 #: judge 按 meta.initial_x_m 算；两者逐 run 差 ~2e-4，配对后均值差 1.4e-6，
 #: 恒超 3e-8 容差。候选照抄模板必被判 INVALID_NUMERICS。
 CLASS_INSTRUMENT_METRIC_ANCHOR = "INSTRUMENT_DEFECT_METRIC_ANCHOR"
+#: 指标定义矛盾（2026-11-15 轮 P 实测）：模板的 RMSE 按全时段+target 峰值归一，
+#: judge 用 0.5–4 s 时间窗 + 失稳记 10 + 计划幅值归一；候选照抄模板必错。
+CLASS_INSTRUMENT_METRIC_DEF = "INSTRUMENT_DEFECT_METRIC_DEFINITION"
 CONTRACT_VIOLATION_CODES = frozenset({
     "UNKNOWN_KEY", "MISSING_KEY", "WRONG_TYPE", "SCHEMA_MISMATCH",
     "INVALID_VALUE", "PLAN_INVALID", "ACTION_UNKNOWN"})
@@ -73,6 +76,7 @@ CLASS_NOT_APPLICABLE = "NOT_APPLICABLE"
 #: 不靠 sha 列表猜——sha 列表只回答「这是不是宿主历史上公开过的模板」。
 TEMPLATE_SHA256_HISTORY = (
     "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
+    "cb9f09213eb83b972f63c7b8d6fbd7e7f7121030335816f4a9576968f3793b39",
     "afcaa68ffdd051560968f751f6d108b97927e5beb1fca76b6bb195f3242fe9a5",
     "9d2b8f5e2866dfe020eab5b2907790148184b0841e818419e209135afb378592")
 
@@ -332,6 +336,87 @@ def _study_a_anchor_facts(root: Path, study: str = "A") -> "dict[str, Any]":
     }
 
 
+def _study_b_metric_facts(root: Path) -> "dict[str, Any]":
+    """复算 B 的两种 RMSE 口径均值，判别候选输出用的是哪一种（纯数据）。"""
+    plans = []
+    for path in sorted((root / "public").glob("plan-*.json")):
+        doc = _read_json(path) or {}
+        if doc.get("phase") == "confirm" and doc.get("study_id") == "B":
+            plans.append(doc)
+    confirm = sorted((root / "observations").glob("confirm-B-*"))
+    raw_path = root / "private" / "analysis" / "B-confirm.raw.json"
+    if not plans or not confirm or not raw_path.is_file():
+        return {"available": False}
+    primary = plans[0].get("primary") or {}
+    conds = list(primary.get("condition_ids") or [])
+    amp = {}
+    for cond in plans[0].get("conditions") or []:
+        p = cond.get("params") or {}
+        if "target_amplitude_rad" in p:
+            amp[str(cond.get("id"))] = float(p["target_amplitude_rad"])
+    if len(conds) != 2:
+        return {"available": False}
+    by_block: "dict[str, dict[str, tuple[float, float]]]" = {}
+    for meta in sorted(confirm[0].glob("*.meta.json")):
+        rid = meta.name[: -len(".meta.json")]
+        doc = _read_json(meta) or {}
+        try:
+            rec = json.loads((confirm[0] / f"{rid}.jsonl").read_text(
+                encoding="utf-8").splitlines()[0])
+        except (OSError, ValueError, IndexError):
+            return {"available": False}
+        def _first(v: Any) -> float:
+            if isinstance(v, (list, tuple)):
+                return float(v[0])
+            return float(v)
+
+        q = [_first(v) for v in rec.get("qpos") or []]
+        tgt = [_first(v) for v in rec.get("target_q") or []]
+        times = [float(t) for t in rec.get("time_s") or []]
+        if not q or len(q) != len(tgt) or len(q) != len(times):
+            return {"available": False}
+        if rec.get("instability_events"):
+            host_val = 10.0
+        else:
+            idx = [i for i, t in enumerate(times) if 0.5 <= t <= 4.0]
+            if len(idx) < 2:
+                return {"available": False}
+            import math
+            sq = math.fsum((q[i] - tgt[i]) ** 2 for i in idx)
+            host_val = math.sqrt(sq / len(idx)) / (amp.get(str(doc.get("condition_id"))) or 1.0)
+        legacy_val = 0.0
+        if q:
+            import math
+            sq2 = math.fsum((a - b) ** 2 for a, b in zip(q, tgt))
+            peak = max((abs(v) for v in tgt), default=0.0) or 1.0
+            legacy_val = math.sqrt(sq2 / len(q)) / peak
+        slot = by_block.setdefault(str(rec.get("block_id")), {})
+        slot[str(doc.get("condition_id"))] = (host_val, legacy_val)
+    t_cond, c_cond = conds
+    dh, dl = [], []
+    for pair in by_block.values():
+        if t_cond in pair and c_cond in pair:
+            dh.append(pair[t_cond][0] - pair[c_cond][0])
+            dl.append(pair[t_cond][1] - pair[c_cond][1])
+    if not dh:
+        return {"available": False}
+    cand = None
+    for item in (_read_json(raw_path) or {}).get("contrasts") or []:
+        if str(item.get("contrast_id")) == str(primary.get("id")):
+            cand = item.get("estimate")
+    if cand is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "candidate_estimate": float(cand),
+        "host_style_mean": sum(dh) / len(dh),
+        "legacy_style_mean": sum(dl) / len(dl),
+        "matches_host_style": abs(float(cand) - sum(dh) / len(dh)) <= 1e-9,
+        "matches_legacy_style": abs(float(cand) - sum(dl) / len(dl)) <= 1e-9,
+        "n_blocks": len(dh),
+    }
+
+
 def family_facts(family_root: Path, *, ledger_calls: int,
                  envelope_id: str) -> "dict[str, Any]":
     usage = FAM.usage(Path(family_root))
@@ -562,6 +647,7 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
 
     # 指标锚点矛盾判定：A 判 INVALID_NUMERICS 且候选数值与 qpos[0]-锚点逐值相符、
     # 与 initial_x-锚点不符 ⇒ 仪器缺陷（候选照抄了 prompt 模板的锚点）。
+    metric_def = _study_b_metric_facts(root)
     anchor = _study_a_anchor_facts(root)
     if (anchor.get("available") and anchor.get("matches_qpos0")
             and not anchor.get("matches_initial")):
@@ -572,6 +658,16 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
                 item["detail"] = ("指标锚点矛盾：prompt 模板用 qpos[0]，judge 用 "
                                   "meta.initial_x_m；候选数值与模板锚点逐值相符")
                 item["evidence"] = {"anchor": anchor}
+
+    if (metric_def.get("available") and metric_def.get("matches_legacy_style")
+            and not metric_def.get("matches_host_style")):
+        axes["measurement"] = "INVALID_INSTRUMENT"
+        for item in failures:
+            if item.get("task") == "T7" and item.get("study") == "B":
+                item["classification"] = CLASS_INSTRUMENT_METRIC_DEF
+                item["detail"] = ("指标定义矛盾：模板 RMSE（全时段/峰值归一）≠ judge "
+                                  "（0.5–4 s 窗/失稳记 10/计划幅值）；候选与模板口径逐值相符")
+                item["evidence"] = {"metric_definition": metric_def}
 
     if not fam["member_usage_matches_ledger"]:
         gaps.append(
