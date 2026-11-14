@@ -438,9 +438,12 @@ class VisibleStateV2:
     latest_sha: Mapping[str, Any]
     references: Mapping[str, Any]
     plan_doc: "Mapping[str, Any] | None" = None
+    #: D-13c：确认 run 余量（帽 − 已用 − 已预留）；与 resources.confirm.remaining
+    #: 同源，顶层再给一次，避免候选漏看嵌套字段而反复撞 RESOURCE_EXCEEDED。
+    confirm_runs_remaining: "int | None" = None
 
     def as_public(self) -> "dict[str, Any]":
-        return {
+        payload = {
             "study": self.study, "state": self.study_state,
             "artifacts": {k: list(v) for k, v in sorted(self.artifacts.items())},
             "last_batch": None if self.last_batch is None else dict(self.last_batch),
@@ -454,6 +457,9 @@ class VisibleStateV2:
             "latest_sha": dict(self.latest_sha),
             "references": dict(self.references),
         }
+        if self.confirm_runs_remaining is not None:
+            payload["confirm_runs_remaining"] = int(self.confirm_runs_remaining)
+        return payload
 
 
 def make_visible_state_v2(*, study: str, study_state: str,
@@ -465,7 +471,8 @@ def make_visible_state_v2(*, study: str, study_state: str,
                           resources: Mapping[str, Any],
                           latest_sha: Mapping[str, Any],
                           references: Mapping[str, Any],
-                          plan_doc: "Mapping[str, Any] | None" = None
+                          plan_doc: "Mapping[str, Any] | None" = None,
+                          confirm_runs_remaining: "int | None" = None
                           ) -> VisibleStateV2:
     if not isinstance(phase, str) or not phase:
         raise P.ProfileError("PUBLIC_CONTRACT_INVALID", "phase 不能为空")
@@ -489,7 +496,8 @@ def make_visible_state_v2(*, study: str, study_state: str,
                "latest_sha": dict(latest_sha), "references": dict(references)}
     nonce = T.stable_nonce(payload)
     return VisibleStateV2(
-        study=study, study_state=study_state, artifacts=artifacts,
+        study=study, study_state=study_state,
+        confirm_runs_remaining=confirm_runs_remaining, artifacts=artifacts,
         last_batch=last_batch,
         budget_slots_remaining=int(budget_slots_remaining),
         confirm_token=confirm_token, nonce=nonce, phase=phase,

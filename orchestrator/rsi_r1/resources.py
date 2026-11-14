@@ -47,6 +47,7 @@ RESOURCE_LEDGER_NAME = "resources.jsonl"
 
 EVENT_RESERVE = "reserve"
 EVENT_FREEZE = "freeze"
+EVENT_RELEASE = "release"  # D-13a：冻结预留回滚（失败/取消时负额冲减）
 EVENT_CONSUME = "consume"
 EVENT_SANDBOX = "sandbox"
 EVENT_WALLCLOCK = "wallclock"
@@ -247,7 +248,9 @@ class ResourceLedger:
         explore = self._rows_for(rows, study, event=EVENT_RESERVE,
                                  kind=KIND_EXPLORE, lane=lane)
         consumes = self._rows_for(rows, study, event=EVENT_CONSUME, lane=lane)
-        freezes = self._rows_for(rows, study, event=EVENT_FREEZE, lane=lane)
+        freezes = list(self._rows_for(rows, study, event=EVENT_FREEZE,
+                                      lane=lane)) + list(
+            self._rows_for(rows, study, event=EVENT_RELEASE, lane=lane))
         sandbox = self._rows_for(rows, study, event=EVENT_SANDBOX, lane=lane)
         wall = self._rows_for(rows, study, event=EVENT_WALLCLOCK)
         aux = self._rows_for(rows, study, event=EVENT_AUX)
@@ -558,6 +561,39 @@ class ResourceLedger:
             confirm_runs=confirm_runs, replay_runs=replay_runs,
             confirm_steps=confirm_steps, replay_steps=replay_steps,
             post_margin=margin, sha256=str(doc["sha256"]))
+
+    def release_freeze(self, study: str, *, lane: str,
+                       reservation: FreezeReservation,
+                       reason: str = "") -> Mapping[str, Any]:
+        """回滚一次已登记但未兑现的冻结预留（D-13a）。
+
+        失败路径（如 state 拒绝重复冻结）在 reserve 之后才暴露时，预留若不冲减
+        就会永久占掉确认/复跑预算——2026-11-14 轮 M 的 study B 正是这样把
+        192 run 的确认帽耗到 0 的。回滚行以**负额**记账，``_used`` 求和时自然
+        冲减；预留不会被压成负数（``_check_reserved_nonnegative`` 兜底）。
+        """
+        if not isinstance(reservation, FreezeReservation):
+            raise ResourceError("RESOURCE_EXCEEDED", "release 需要 FreezeReservation")
+        if int(reservation.confirm_runs) < 0 or int(reservation.replay_runs) < 0:
+            raise ResourceError("RESOURCE_EXCEEDED", "release 预留为负")
+        lane = str(lane)
+
+        def _payload(rows: "tuple[dict[str, Any], ...]") -> Mapping[str, Any]:
+            totals = self._used(rows, study, lane=lane)
+            if int(reservation.confirm_runs) > int(totals["confirm_reserved"]) \
+                    or int(reservation.replay_runs) > int(totals["replay_reserved"]):
+                raise ResourceError(
+                    "RESOURCE_EXCEEDED",
+                    "release 超过未消费预留（重复回滚或已消费）")
+            return {"study": study, "kind": "release", "lane": lane,
+                    "confirm_runs": -int(reservation.confirm_runs),
+                    "replay_runs": -int(reservation.replay_runs),
+                    "confirm_steps": -int(reservation.confirm_steps),
+                    "replay_steps": -int(reservation.replay_steps),
+                    "reason": str(reason)[:200],
+                    "reservation_seq": int(reservation.seq)}
+
+        return self._appender(EVENT_RELEASE, _payload)
 
     def consume_confirm(self, study: str, *, kind: str, runs: int, steps: int,
                         batch_id: "str | None" = None,

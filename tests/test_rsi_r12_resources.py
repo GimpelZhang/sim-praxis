@@ -514,3 +514,62 @@ def test_global_run_cap_does_not_double_count_consumed_reservation(tmp_path) -> 
     assert snap["used"] == 30
     assert snap["reserved"] == 44
     assert snap["remaining"] == led.limits.total_runs - 74
+
+
+# ---------------------------------------------------------------------------
+# D-13（2026-11-14 评审 / 轮 M 实证）：冻结一次 + 预留回滚 + 余量可见
+# ---------------------------------------------------------------------------
+
+def test_release_freeze_rolls_back_reservation(tmp_path) -> None:
+    led = _ledger(tmp_path)
+    fr = led.reserve_freeze("A", lane="study_A", blocks=32, n_conditions=1,
+                            replay_runs=32, confirm_steps=32 * 8000,
+                            replay_steps=32 * 8000,
+                            posts_remaining_after_charge=8)
+    assert led.snapshot("A")["confirm"]["remaining"] == 160
+    led.release_freeze("A", lane="study_A", reservation=fr,
+                       reason="freeze rejected by state")
+    snap = led.snapshot("A")
+    assert snap["confirm"] == {**snap["confirm"], "used": 0, "reserved": 0,
+                               "remaining": 192}
+    assert snap["replay"]["reserved"] == 0
+    # 重复回滚被拒（不把预留压成负数）
+    with pytest.raises(RS.ResourceError) as exc:
+        led.release_freeze("A", lane="study_A", reservation=fr, reason="again")
+    assert exc.value.code == "RESOURCE_EXCEEDED"
+
+
+def test_second_freeze_does_not_reserve(tmp_path) -> None:
+    """D-13b：已冻结（非 EXPLORING）时 freeze 必须在预留前被终态拒绝。"""
+    import types
+    from orchestrator.rsi_r1 import assembly as A
+
+    led = _ledger(tmp_path)
+    state = types.SimpleNamespace(
+        study_status=lambda study: {"state": "CONFIRM_LOCKED",
+                                    "artifacts": {}, "confirm_lock": None},
+        journal=types.SimpleNamespace(events=lambda: []))
+    disp = A.CampaignDispatcher(
+        ctx=types.SimpleNamespace(exists=lambda rel: False), state=state,
+        admission=types.SimpleNamespace(lane="study_A",
+                                        posts_used=lambda lane: 3),
+        budget=types.SimpleNamespace(posts_by_lane={"study_A": 48}),
+        study="A", runner=None, image=None, backend_factory=None,
+        profile=P.PROFILE_R12_DEF, resource_ledger=led)
+    action = types.SimpleNamespace(name="freeze_confirm", doc={"plan": {}})
+    out = disp._do_freeze_confirm(action)
+    assert out["ok"] is False and out["code"] == "METHOD_CHANGE"
+    assert led.snapshot("A")["confirm"]["reserved"] == 0
+    assert led.snapshot("A")["confirm"]["remaining"] == 192
+
+
+def test_visible_state_exposes_confirm_remaining(tmp_path) -> None:
+    """D-13c：可见状态顶层给出 confirm run 余量。"""
+    led = _ledger(tmp_path)
+    led.reserve_explore("A", _specs(6), batch_id="b1")
+    led.reserve_freeze("A", lane="study_A", blocks=32, n_conditions=1,
+                       replay_runs=32, confirm_steps=0, replay_steps=0,
+                       posts_remaining_after_charge=8)
+    public = _fake_dispatcher(led, tmp_path).visible_state().as_public()
+    assert public["confirm_runs_remaining"] == 160
+    assert public["resources"]["confirm"]["remaining"] == 160

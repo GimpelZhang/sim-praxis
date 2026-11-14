@@ -537,7 +537,9 @@ _BUDGET_DISCIPLINE_BLOCK = (
     "本 lane 的 POST 预算包含自修与重试。经验上：探索阶段 design/analysis 各留\n"
     "1–2 次修订即可，不要反复重写；当本轮剩余呼数降至 16 以下时，**必须停止\n"
     "探索并尽快 freeze_confirm**（宿主要求冻结后本 lane 仍余 ≥8 呼）；冻结后禁止\n"
-    "改写 design/plan/analysis。状态里每轮都给出 remaining，请自己对照预算。\n")
+    "改写 design/plan/analysis。状态里每轮都给出 remaining（含顶层 "
+    "`confirm_runs_remaining` 与 `resources.confirm.remaining`）：freeze_confirm "
+    "要求 confirm run 数 = 条件数×32 且 ≤ 该余量。\n")
 
 _SOURCE_TEMPLATES_BLOCK = (
     "### 格式示例（不是最优设计，只演示输入输出形状）\n"

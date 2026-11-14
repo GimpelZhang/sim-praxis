@@ -617,12 +617,18 @@ class CampaignDispatcher:
                                "ledger_head": snap["ledger"]["head_sha256"]}),
         }
         references = {"plan": plan_sha}
+        confirm_remaining = None
+        try:
+            confirm_remaining = int((snap.get("confirm") or {}).get("remaining"))
+        except (TypeError, ValueError):
+            confirm_remaining = None
         return L.make_visible_state_v2(
             study=self.study, study_state=str(status["state"]),
             artifacts=artifacts, last_batch=self.last_batch,
             budget_slots_remaining=slots, confirm_token=lock.get("token"),
             phase=phase, resources=snap, latest_sha=latest,
-            references=references, plan_doc=plan_doc)
+            references=references, plan_doc=plan_doc,
+            confirm_runs_remaining=confirm_remaining)
 
     # -- 动作绑定 --------------------------------------------------------
     def _binding(self, action: L.Action) -> "tuple[str, str]":
@@ -1045,6 +1051,17 @@ class CampaignDispatcher:
 
     # -- 5) freeze_confirm ----------------------------------------------
     def _do_freeze_confirm(self, action: L.Action) -> "dict[str, Any]":
+        # D-13b（2026-11-14 评审 / 轮 M 实证）：确认集只能冻结一次。
+        # 旧实现先写 freeze 预留、再由 state.freeze_confirm 拒绝重复冻结——
+        # 每次被拒的重复 freeze 都永久占掉 128 run（confirm+replay），B 因此
+        # 把 192 的确认帽打到 0。这里在任何预留写入**之前**拦截并终态。
+        cur_state = str((self.state.study_status(self.study) or {}).get("state"))
+        if cur_state != S.ST_EXPLORING:
+            return self._fail(
+                "METHOD_CHANGE",
+                f"确认集只能冻结一次（study {self.study} 当前 {cur_state}）；"
+                "冻结后不得重写 design/plan/analysis 或再次冻结",
+                side_effect_status="NONE")
         self._binding(action)
         plan_doc = dict(action.doc["plan"])
         # 锁内适配（RSI-R1.1 / L-R1-07）：``parent_sha`` 允许字面 sentinel
@@ -1097,7 +1114,7 @@ class CampaignDispatcher:
             batch_steps = sum(int(s.nsteps) for s in built.values())
             lane_cap = int(self.budget.posts_by_lane[self.admission.lane])
             remaining = lane_cap - self.admission.posts_used(self.admission.lane)
-            self.resource_ledger.reserve_freeze(
+            reservation = self.resource_ledger.reserve_freeze(
                 self.study, lane=self.admission.lane,
                 blocks=int(plan.nuisance_distribution.block_count),
                 n_conditions=len(plan.conditions), replay_runs=n,
@@ -1106,10 +1123,19 @@ class CampaignDispatcher:
                 purpose=f"freeze-{self.study}")
         else:
             self.admission.require_lane_space(confirm_runs=n, replay_runs=n)
-        lock = self.state.freeze_confirm(study=self.study, plan=plan.to_dict(),
-                                         design_sha256=design_sha,
-                                         analysis_sha256=analysis_sha,
-                                         r12=self._r12())
+        try:
+            lock = self.state.freeze_confirm(
+                study=self.study, plan=plan.to_dict(),
+                design_sha256=design_sha,
+                analysis_sha256=analysis_sha, r12=self._r12())
+        except Exception:
+            # D-13a：state 侧拒绝（重复冻结/终态/凭据不符）时回滚预留，
+            # 不让失败尝试永久吃掉确认预算；原异常照常上抛。
+            if self.resource_ledger is not None:
+                self.resource_ledger.release_freeze(
+                    self.study, lane=self.admission.lane,
+                    reservation=reservation, reason="freeze rejected by state")
+            raise
         if seed_is_new:
             _write_private(seed_path, (seed + "\n").encode("utf-8"))
         # 冻结件只留 plan sha；确认计划原文落到 confirm/ 供重入与判据复算
