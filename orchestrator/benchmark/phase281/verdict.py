@@ -240,8 +240,22 @@ def decide_h4(*, structure_worse_reps: "Sequence[int]",
             "reason_code": "STRUCTURE_MEDIAN_LOWER", "detail": detail}
 
 
-def decide_h5(agentic_tokens_median: float, legacy_tokens_median: float) -> dict:
-    """H5：``agentic`` 每 Trial token 消耗**高于** ``legacy``（成本—能力不同向）。"""
+def decide_h5(agentic_tokens_median: "float | None",
+              legacy_tokens_median: "float | None") -> dict:
+    """H5：``agentic`` 每 Trial token 消耗**高于** ``legacy``（成本—能力不同向）。
+
+    评审 CR-31：某个臂**没有账行**时不得把中位数当作 ``0.0``——那会把
+    「缺数据」读成「agentic 更便宜」并给出 ``NOT_ESTABLISHED`` 的方向性结论。
+    空样本 → ``INCONCLUSIVE`` + ``TOKEN_LEDGER_MISSING``（§13.3.2 里
+    ``INCONCLUSIVE`` 专用于数据不足以区分的情形）。
+    """
+    if agentic_tokens_median is None or legacy_tokens_median is None:
+        return {"id": "H5", "state": "INCONCLUSIVE",
+                "reason_code": "TOKEN_LEDGER_MISSING",
+                "detail": {"agentic_tokens_median": agentic_tokens_median,
+                           "legacy_tokens_median": legacy_tokens_median,
+                           "reason": "至少一个臂在账本里没有任何 call 行，"
+                                     "token 中位数不可计算"}}
     delta = float(agentic_tokens_median) - float(legacy_tokens_median)
     if delta > 0:
         state, code = "CAPABILITY_DEMONSTRATED", "AGENTIC_COSTLIER"

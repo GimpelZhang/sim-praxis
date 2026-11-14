@@ -251,7 +251,12 @@ def main(argv: "list[str] | None" = None) -> int:
     # import / init / build / 首帧哪一段，回执自己说清楚，不靠猜。
     phases: "dict[str, float]" = {}
     mark = started
-    sidecar_path: "Path | None" = None
+    # 评审 CR-57：旁侧件路径**在 try 之前**定好。早先只在 try 末尾赋值，
+    # ``finally`` 的写入条件因此恒为假——异常路径（参数不合法、资产缺失、
+    # Genesis 初始化失败）没有 `<out>.json`，与「回执在 finally 落盘」的
+    # 契约不符。现在任何退出路径都会写一份 ok=false 的旁侧回执。
+    out_path = Path(args.out)
+    sidecar_path: "Path | None" = out_path.with_suffix(".json")
     _mute_engine_output()
 
     def _phase(name: str) -> None:
@@ -303,7 +308,6 @@ def main(argv: "list[str] | None" = None) -> int:
         stats = _frame_stats(rgb)
 
         arr = _rgb_array(rgb)
-        out_path = Path(args.out)
         if out_path.is_absolute():
             raise ProbeError("--out 必须是相对 cwd 的路径")
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -323,7 +327,6 @@ def main(argv: "list[str] | None" = None) -> int:
         # 旁侧回执**在 finally 里落盘**：ok / wall_s / phase_seconds 都在
         # finally 才定稿，提前写会把「ok=true 但回执写 ok=false、无 wall_s」
         # 的假状态留在盘上（AC-T3-2 实跑抓到的真缺陷）。
-        sidecar_path = out_path.with_suffix(".json")
         receipt["ok"] = True
     except Exception as exc:  # noqa: BLE001 - 回执要的是 ok/err，不是栈
         receipt["err"] = f"{type(exc).__name__}: {exc}"

@@ -290,17 +290,21 @@ def mujoco_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
     consistent: "bool | None" = None
     diffs: "list[str]" = []
     if isinstance(reported, Mapping):
-        checked = 0
+        #: 评审 CR-32：候选契约（``task_prompt._acceptance_block``）要求
+        #: ``metrics.json`` **至少含** ``MUJOCO_METRIC_KEYS`` 全部键。早先
+        #: 「缺键不判伪造，只对已有键对账」，于是 ``metrics.json = {}``（或只写
+        #: ``{"steps": N}``）时 ``checked == 0`` ⇒ ``metrics_consistent=None``
+        #: ⇒ HG-M1-7 不适用、v2 的 CRIT_metrics_consistency 也空过，整个
+        #: 「自报 vs 重算」门从未执行。缺键本身即对账失败。
         for key in MUJOCO_METRIC_KEYS:
             if key not in reported:
+                diffs.append(f"{key}: 自报缺失（契约要求 metrics.json 至少含全部指标键）")
                 continue
-            checked += 1
             want = float(recomputed[key])
             got = reported[key]
             if not _finite(got) or abs(float(got) - want) > abs_tol:
                 diffs.append(f"{key}: 自报 {got!r} ≠ 重算 {want!r}")
-        if checked:
-            consistent = not diffs
+        consistent = not diffs
     return {
         "recomputed": recomputed,
         "metrics_abs_tol": abs_tol,
@@ -570,14 +574,15 @@ def _section(plan: Mapping, name: str) -> Any:
     return plan.get(name) if isinstance(plan, Mapping) else None
 
 
-def _split_ids(entry: Any) -> "set[str]":
+def _split_id_list(entry: Any) -> "list[str]":
+    """把一个 split 条目里声明的 id 按原序收集（**保留重复**，供 CR-60 计数）。"""
     if not isinstance(entry, Mapping):
-        return set()
-    out: "set[str]" = set()
+        return []
+    out: "list[str]" = []
     for key in ("ids", "episodes", "tasks", "scenarios"):
         values = entry.get(key)
         if isinstance(values, (list, tuple)):
-            out |= {str(item) for item in values}
+            out.extend(str(item) for item in values)
     return out
 
 
@@ -713,11 +718,26 @@ def research_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
     splits_ok = isinstance(splits, Mapping) and set(
         ("train", "validation", "holdout")) <= set(splits)
     holdout = splits.get("holdout") if isinstance(splits, Mapping) else None
-    holdout_ok = holdout not in (None, "", [], {})
     split_names = ("train", "validation", "holdout")
-    split_ids = ({name: _split_ids(splits.get(name)) for name in split_names}
-                 if isinstance(splits, Mapping) else {})
+    split_lists = ({name: _split_id_list(splits.get(name))
+                    for name in split_names}
+                   if isinstance(splits, Mapping) else {})
+    split_ids = {name: set(values) for name, values in split_lists.items()}
     ids_nonempty = all(bool(split_ids.get(name)) for name in split_names)
+    #: 评审 CR-60：早先 id 直接并进 ``set``，split 内重复（``["e1", "e1"]``）
+    #: 塌成一个，只检测跨 split 重叠。于是「声明 2 个 holdout episode、实际
+    #: 只有 1 个唯一 id」也能过 ``holdout_ok``/``leak_ok``。列表长度与集合
+    #: 长度不等即设计失败（同一 id 在同一 split 里出现两次）。
+    split_duplicates: "dict[str, list[str]]" = {}
+    for name in split_names:
+        values = split_lists.get(name) or []
+        duplicated = sorted({item for item in values if values.count(item) > 1})
+        if duplicated:
+            split_duplicates[name] = duplicated
+    #: Holdout 非空**且**其 id 列表无重复——「2 个 episode 塌成 1 个唯一 id」
+    #: 不是独立留出，HG-R1-4 与 HG-R1-3 同时判负。
+    holdout_ok = (holdout not in (None, "", [], {})
+                  and not split_duplicates.get("holdout"))
     overlap: "list[str]" = []
     pairs = ((0, 1), (0, 2), (1, 2))
     for left, right in pairs:
@@ -730,9 +750,9 @@ def research_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
     #: 评审 W3-07：判据是**实际互斥**，不是「声明了 disjoint 布尔」。
     #: 早先 ``leak_ok = disjoint_declared and not overlap``：三段都给空 id 时
     #: 交集为空即可空转通过，而真实无重叠但没写 ``disjoint: true`` 的合法计划
-    #: 反被 HG-R1-3 误杀。现在要求三段 id 全部非空且两两无交集；
+    #: 反被 HG-R1-3 误杀。现在要求三段 id 全部非空、段内无重复且两两无交集；
     #: ``disjoint`` 只作为附加声明保留在 facts 里。
-    leak_ok = ids_nonempty and not overlap
+    leak_ok = ids_nonempty and not split_duplicates and not overlap
     seeds = _section(plan, "random_seeds")
     seeds_ok = bool(seeds)
 
@@ -779,6 +799,7 @@ def research_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
         {"artifact": "dataset_splits",
          "split_ids": {name: sorted(split_ids.get(name) or [])
                        for name in split_names},
+         "split_duplicates": dict(split_duplicates),
          "overlap_ids": list(overlap), "leak_ok": leak_ok},
         {"artifact": "evaluation_metrics.json",
          "metrics_listed": len(metrics_list) if isinstance(metrics_list, list) else 0,
@@ -803,6 +824,7 @@ def research_facts(files: Mapping[str, Any], criteria: Mapping) -> dict:
         "holdout_ok": holdout_ok,
         "disjoint_declared": disjoint_declared,
         "split_ids_nonempty": ids_nonempty,
+        "split_duplicates": split_duplicates,
         "overlap_ids": overlap,
         "leak_ok": leak_ok,
         "seeds_ok": seeds_ok,
@@ -852,7 +874,9 @@ def score_research(files: Mapping[str, Any], criteria: Mapping) -> "dict[str, Di
             (facts["splits_ok"], "Train/Validation/Holdout 三段齐全"),
             (facts["holdout_ok"], "Holdout 非空（独立留出）"),
             (facts["leak_ok"],
-             f"三段 id 非空且两两无交集（重叠 {facts['overlap_ids'] or '无'}）"),
+             f"三段 id 非空且两两无交集（重叠 {facts['overlap_ids'] or '无'}）"
+             + (f"；段内重复 {facts['split_duplicates']}"
+                if facts["split_duplicates"] else "")),
             (facts["ablation_ok"],
              f"Ablation {facts['ablation_count']} 组 ≥ "
              f"{facts['ablation_min_groups']}"),

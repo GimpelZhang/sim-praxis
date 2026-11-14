@@ -97,7 +97,10 @@ def main() -> int:
             "torch_version": torch.__version__,
             "torch_cuda_available": bool(torch.cuda.is_available()),
             "sim_backend": args.sim_backend,
-            "render_backend": "gpu(Vulkan)",
+            # 评审 CR-59：本探针只测像素方差/首末帧差分，**软件渲染也能过**，
+            # 观测不到真实的渲染后端。早先无条件写 "gpu(Vulkan)" 是把未验证的
+            # 结论写进证据；GPU/EGL 结论以 verify_egl_real.py 的 rc 为准。
+            "render_backend": "unverified",
             "frame_shape": list(arr0.shape),
             "n_steps": args.n_steps,
             "pixel_var_first": round(var0, 3),

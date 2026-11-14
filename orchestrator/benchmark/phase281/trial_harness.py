@@ -680,6 +680,19 @@ def _repro(spec: Any, *, workdir: Path, logs: Path, delivered: Path,
                             ("cross_seed", int(seed) + 1)):
         target = ensure_private_dir(Path(logs) / "repro" / label)
         _copy_workdir(Path(workdir), target)
+        # 评审 CR-05：副本是从主跑工作根复制来的，里面已经有主跑的
+        # ``metrics.json``/``telemetry.jsonl``。不先删掉，重跑失败（非幂等启动、
+        # 种子分支缺失、超时）时这些残留会被当成复现件交付，逐字节相同的
+        # telemetry 让 HG-EVAL-4 白拿满分——实际上一次独立重跑都没成功。
+        for name in ("metrics.json", "telemetry.jsonl"):
+            stale = target / name
+            if stale.is_file() and not stale.is_symlink():
+                stale.unlink()
+            # 同一 Trial 重跑时，上一次尝试投递过的复现件也要先清掉，否则
+            # 本次重跑失败会留下「看起来有效」的旧件。
+            old = Path(delivered) / "repro" / label / name
+            if old.is_file() and not old.is_symlink():
+                old.unlink()
         argv = [str(item) for item in cmd]
         if container:
             # 锁内适配（P281-6）：``cmd`` 是**宿主**调用形状（argv[0] 是宿主 venv
@@ -697,8 +710,12 @@ def _repro(spec: Any, *, workdir: Path, logs: Path, delivered: Path,
             if token == "--seed" and index + 1 < len(argv):
                 argv[index + 1] = str(run_seed)
         try:
-            runner(argv, target, float(timeout_s), env_extra)
+            result = runner(argv, target, float(timeout_s), env_extra)
         except (OSError, subprocess.SubprocessError):
+            continue
+        # 评审 CR-05：非零 rc 的复现件一律不交付。只有**本次**重跑以 rc=0
+        # 成功退出、且在上一步被清空后重新写出的产物才算数。
+        if int(getattr(result, "rc", 1)) != 0:
             continue
         for name in ("metrics.json", "telemetry.jsonl"):
             src = target / name

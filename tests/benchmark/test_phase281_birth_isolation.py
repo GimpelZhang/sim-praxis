@@ -524,7 +524,11 @@ def test_ac_p281_2_15_child_source_clean():
 #: sha256 与 82a1427 时点相同」）。v2 全部落在 ``phase281/`` 下，这两个文件是
 #: 2.8.0 已结案阶段的能力入口——它们一改，2.8.0 的判决链就不再是那条被验证过的链。
 V1_BIRTH_SHA256 = "44fbc6da9312273d6f493622aba9443294fec0f77344af894ad0da8895631b6f"
-V1_EVALUATOR_SHA256 = "36332668d33d8ead3b5a07db31bf588a7f7cb2f6f9ef7a49e3c0c72fabcdc88d"
+#: 2026-11-14 代码评审 CR-06（HG-EVAL-2 畸形审计件 fail-open）按用户批次的
+#: 修复要求改了 ``evaluator.py::_hidden_access``；该门是 2.8.0 判决链的一部分，
+#: 修完必须重登记本摘要（否则本用例会把**有意修复**误报成漂移）。行为由
+#: ``test_task4_evaluator.py`` 的畸形审计件用例与 parity 用例覆盖。
+V1_EVALUATOR_SHA256 = "9f7ef41aba88394180325298139d35d4db8ab8fa55cc24711eab9dd4e3be8061"
 
 
 def test_phase281_2_v1_entrypoints_untouched():
@@ -534,3 +538,32 @@ def test_phase281_2_v1_entrypoints_untouched():
             ("orchestrator/benchmark/evaluator.py", V1_EVALUATOR_SHA256)):
         data = (REPO_ROOT / relpath).read_bytes()
         assert hashlib.sha256(data).hexdigest() == expected, relpath
+
+
+# ---------------------------------------------------------------------------
+# 评审 CR-58：总量磁盘帽必须真的执行（RLIMIT_FSIZE 只管单文件）
+# ---------------------------------------------------------------------------
+
+DISK_FLOOD = '''\
+for _i in range(3):
+    with open(f"__WORKDIR__/part{_i}.bin", "wb") as fh:
+        fh.write(b"x" * (1 << 20))
+'''
+
+
+def test_f5_cr58_disk_cap_is_enforced(tmp_path: Path):
+    """写 3×1 MiB（单个文件都低于 fsize 帽）超过 2 MiB 总量帽 ⇒ 判负。
+
+    缺陷形态：``over_disk_cap`` 只写进 ``workdir_facts`` 无人读；候选靠
+    ``RLIMIT_FSIZE``（单文件 64 MiB）绕开总量帽仍 birth PASS。
+    """
+    work = _work(tmp_path, DISK_FLOOD, "diskcap")
+    trial = _trial(tmp_path, "trial-diskcap")
+    limits = cb.LimitsV2(fsize_bytes=4 << 20, disk_cap_bytes=2 << 20)
+    _result, doc, _ = fx.run_birth(work, trial, level="B1", limits=limits)
+
+    assert doc["status"] == "NOT_BORN", doc["status"]
+    assert doc["reason"] == "memory", (doc["reason"],
+                                       doc["levels"]["B1"]["detail"])
+    assert "磁盘帽" in doc["levels"]["B1"]["detail"], doc["levels"]["B1"]["detail"]
+    assert doc["workdir_facts"]["over_disk_cap"] is True, doc["workdir_facts"]

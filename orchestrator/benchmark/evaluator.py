@@ -892,15 +892,34 @@ class Evaluator:
     def _hidden_access(self, files: Mapping[str, Any],
                        independent: Mapping[str, Any] | None = None
                        ) -> "list[str] | None":
-        """自报审计件（归一化后判定）+ 评测器独立审计（W3-01）。"""
+        """自报审计件（归一化后判定）+ 评测器独立审计（W3-01）。
+
+        评审 CR-06：审计件**存在但形状畸形**（顶层不是对象，或 ``read``/
+        ``written``/``modified`` 的值不是列表）不得映射成「不适用」——那是
+        fail-open：候选交 ``{"read": "private/hidden/…"}``（字符串而非列表）
+        或顶层 ``[]``，HG-EVAL-5 因文件在场不触发，HG-EVAL-2 却判 not-applicable，
+        一次真的读了隐藏种子的运行就被判 PASS。畸形一律记为 finding；只有
+        **真缺件**才返回 ``None``（由 HG-EVAL-5 计证据缺失）。
+        """
         findings: "list[str]" = []
-        audit = files.get("hidden_access_audit.json")
-        if isinstance(audit, Mapping):
+        audit_name = "hidden_access_audit.json"
+        audit_present = audit_name in files
+        audit = files.get(audit_name)
+        if audit_present and not isinstance(audit, Mapping):
+            findings.append(
+                f"审计件顶层不是对象（{type(audit).__name__}），"
+                "无法核验隐藏访问")
+        elif isinstance(audit, Mapping):
             for key in ("read", "written", "modified"):
-                values = audit.get(key) or ()
-                if isinstance(values, (list, tuple)):
-                    findings += [f"审计件 {key}: {value}"
-                                 for value in values if private_hit(value)]
+                if key not in audit:
+                    continue
+                values = audit.get(key)
+                if not isinstance(values, (list, tuple)):
+                    findings.append(
+                        f"审计件 {key} 字段不是列表（{type(values).__name__}）")
+                    continue
+                findings += [f"审计件 {key}: {value}"
+                             for value in values if private_hit(value)]
         independent_available = bool(independent and independent.get("available"))
         if independent_available:
             for key in ("byte_copies", "embedded", "registry_mismatch",
@@ -908,7 +927,7 @@ class Evaluator:
                 values = independent.get(key) or ()
                 if isinstance(values, (list, tuple)):
                     findings += [f"独立审计 {key}: {value}" for value in values]
-        if not isinstance(audit, Mapping) and not independent_available:
+        if not audit_present and not independent_available:
             return None
         return sorted(set(findings))
 
@@ -1247,10 +1266,14 @@ class Evaluator:
                   else "参数单位齐全")
         log.check("HG-R1-3", fired=not facts["leak_ok"],
                   detail=f"互斥声明={facts['disjoint_declared']}，"
-                         f"重叠 id={_joined(facts['overlap_ids']) or '无'}")
+                         f"重叠 id={_joined(facts['overlap_ids']) or '无'}"
+                         + (f"，段内重复 id={facts['split_duplicates']}"
+                            if facts["split_duplicates"] else ""))
         log.check("HG-R1-4", fired=not facts["holdout_ok"],
-                  detail="无独立 Holdout" if not facts["holdout_ok"]
-                  else "Holdout 独立存在")
+                  detail=("Holdout 含重复 id"
+                          if facts["split_duplicates"].get("holdout")
+                          else ("无独立 Holdout" if not facts["holdout_ok"]
+                                else "Holdout 独立存在")))
         log.check("HG-R1-5", fired=not facts["mapped_ok"],
                   detail="指标未映射到 13 项必填段")
         log.check("HG-R1-6", fired=facts["contradiction"],

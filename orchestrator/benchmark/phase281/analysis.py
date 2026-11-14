@@ -751,7 +751,17 @@ def _rounds(rows: "Sequence[Mapping[str, Any]]", task_id: str | None,
 
 
 def _token_median(rows: "Sequence[Mapping[str, Any]]", arm_id: str,
-                  ledger_tokens: Mapping[str, Mapping[str, int]]) -> float:
+                  ledger_tokens: Mapping[str, Mapping[str, int]]
+                  ) -> "float | None":
+    """每个 Trial 的 token 总量中位数；**无样本返回 ``None``**（评审 CR-31）。
+
+    早先空样本返回 ``0.0``，把「该臂没有账行」读成「0 token」，H5 因此会把
+    缺数据判成「agentic 不更贵」。悬空值不得伪装成 0——返回 ``None``，
+    由 :func:`verdict.decide_h5` 落 ``INCONCLUSIVE``。
+
+    偶数个样本取**中间两值的均值**（统计学上称中位数；与 ``median_rounds``
+    的「下中位」不同：轮次是整数、取均值会产生 3.5 轮，token 是连续量）。
+    """
     values = []
     for r in rows:
         if r["arm_id"] != arm_id:
@@ -761,10 +771,12 @@ def _token_median(rows: "Sequence[Mapping[str, Any]]", arm_id: str,
             continue
         values.append(float(cell["tokens_in"] + cell["tokens_out"]))
     if not values:
-        return 0.0
+        return None
     values.sort()
-    mid = (len(values) - 1) // 2
-    return values[mid]
+    mid = len(values) // 2
+    if len(values) % 2:
+        return values[mid]
+    return (values[mid - 1] + values[mid]) / 2.0
 
 
 def evaluate_hypotheses(rows: "Sequence[Mapping[str, Any]]",
@@ -891,9 +903,16 @@ def _limitations(rows: "Sequence[Mapping[str, Any]]", *, go_no_go: str,
         ("max_attempts 偏差（P281-7 首轮）：计划 §11.3 钉 1，实际代码使用网关缺省 5，"
          "故账本里的呼数是**逻辑调用**数，供应侧 HTTP 次数更多。该偏差已在后续批次"
          "修复（显式 max_attempts=1），本轮已发生的部分如实登记、不追补。"),
+        # 评审 CR-33：帽与预算的结论从账本调用数 / 确认性在场数推出，不写死。
+        # 旧写法恒说「硬帽未触、预算未被使用」——实际 >180 呼或有确认性 Trial
+        # 时会把报告写成与数据相反的话，而这份文件是 P281-9 的证据交付物。
         (f"账本合计 {int(ledger.get('calls') or 0)} 次实呼（含 Pilot 三轮尝试），"
-         f"硬帽 {constants.HARD_CAP} 未触；确认性阶段的 "
-         f"{constants.CONFIRMATORY_BUDGET} 呼预算未被使用。"),
+         + (f"硬帽 {constants.HARD_CAP} 未触；"
+            if int(ledger.get("calls") or 0) < constants.HARD_CAP else
+            f"硬帽 {constants.HARD_CAP} 已触；")
+         + (f"确认性阶段的 {constants.CONFIRMATORY_BUDGET} 呼预算未被使用。"
+            if not confirmatory_present else
+            f"确认性阶段预算已使用（在场 {confirmatory_present}/12 个确认性 Trial）。")),
         semantic_line,
         ("出生等级是投影而非实测：harness 的出生闸只记录 BORN / NOT_BORN 二值，"
          "本报告据 BORN ⇒ B4、NOT_BORN ⇒ 未达 B4 投影；具体停在哪一层由 "

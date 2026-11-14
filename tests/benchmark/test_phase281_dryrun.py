@@ -429,3 +429,69 @@ def test_agentic_reply_r1_writes_documents_without_running():
     body = dryrun.agentic_reply("icy_ground_dr_v1", seed="0")
     assert "write_file(path='experiment_plan.yaml'" in body
     assert "run_cmd(" not in body
+
+
+# ---------------------------------------------------------------------------
+# 评审 CR-05：复现重跑失败不得复用主跑产物
+# ---------------------------------------------------------------------------
+
+def test_f5_cr05_repro_does_not_reuse_primary_artifacts(tmp_path):
+    """复现副本先删主跑的 ``metrics.json``/``telemetry.jsonl``，且只认 rc=0。
+
+    缺陷形态：主跑写出合法产物 → ``_copy_workdir`` 把它们一起复制进
+    ``logs/repro/<label>`` → 重跑失败（这里用 rc=1 / 不写文件模拟）→ 旧实现
+    把残留当复现件交付，``_repro_facts`` 看到逐字节相同的 telemetry，HG-EVAL-4
+    白拿满分。修复后：非零 rc 不交付；即使 rc=0 但本次没重新写出文件也不交付。
+    """
+    import types
+
+    spec = types.SimpleNamespace(task_id=M1)
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    (workdir / "solution.py").write_text("print('x')\n", encoding="utf-8")
+    (workdir / "metrics.json").write_text('{"steps": 600}\n', encoding="utf-8")
+    (workdir / "telemetry.jsonl").write_text('{"step": 0}\n', encoding="utf-8")
+
+    def _sandbox(rc, writes):
+        class _Sandbox:
+            form = "host_process"
+
+            def subprocess_runner(self):
+                def _run(argv, cwd, timeout_s, env_extra):
+                    if writes:
+                        (Path(cwd) / "metrics.json").write_text(
+                            '{"steps": 7}\n', encoding="utf-8")
+                        (Path(cwd) / "telemetry.jsonl").write_text(
+                            '{"step": 7}\n', encoding="utf-8")
+                    return types.SimpleNamespace(rc=rc)
+                return _run
+        return _Sandbox()
+
+    def _run(sandbox, delivered, logs):
+        return trial_harness._repro(
+            spec, workdir=workdir, logs=logs, delivered=delivered,
+            sandbox_obj=sandbox, cmd=["python", "solution.py",
+                                      "--seed", "7"],
+            seed=7, timeout_s=10)
+
+    # ① 非零 rc：一份都不交付（哪怕工作目录里有主跑的残留件）
+    out = _run(_sandbox(rc=1, writes=True), tmp_path / "d1", tmp_path / "l1")
+    assert out == []
+    assert not (tmp_path / "d1" / "repro").exists()
+
+    # ② rc=0 但本次没写文件：副本里的残留已被删除，同样不交付
+    out = _run(_sandbox(rc=0, writes=False), tmp_path / "d2", tmp_path / "l2")
+    assert out == []
+    assert not (tmp_path / "d2" / "repro").exists()
+
+    # ③ rc=0 且本次重新写出：两件按产物路径交付
+    out = _run(_sandbox(rc=0, writes=True), tmp_path / "d3", tmp_path / "l3")
+    assert sorted(out) == sorted(
+        f"d3/repro/{label}/{name}"
+        for label in ("same_seed", "cross_seed")
+        for name in ("metrics.json", "telemetry.jsonl")), out
+    assert (tmp_path / "d3" / "repro" / "same_seed" / "metrics.json").read_text(
+        encoding="utf-8") == '{"steps": 7}\n'
+    # 主跑工作根未被破坏
+    assert (workdir / "metrics.json").read_text(encoding="utf-8") == \
+        '{"steps": 600}\n'

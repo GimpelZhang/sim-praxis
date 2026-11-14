@@ -520,6 +520,27 @@ class _EntryProblem(RuntimeError):
         self.detail = detail
 
 
+def _disk_bytes(workdir: Path) -> int:
+    """父进程自己 ``stat`` 出来的工作目录字节数（与 ``_path_facts.bytes`` 同口径）。
+
+    评审 CR-58：``RLIMIT_FSIZE`` 只是**单文件**上限，候选写 10×60 MB 文件就
+    绕开 64 MiB 的 fsize 帽；``disk_cap_bytes`` 是总量帽，必须在层判定里执行，
+    不能只写进 ``workdir_facts`` 当摆设。
+    """
+    total = 0
+    for root, _dirnames, filenames in os.walk(workdir, followlinks=False):
+        base = Path(root)
+        for name in filenames:
+            path = base / name
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if not statmod.S_ISLNK(info.st_mode):
+                total += info.st_size
+    return total
+
+
 def _path_facts(workdir: Path, limits: LimitsV2) -> dict:
     """父进程自己 ``stat`` 出来的工作目录事实（候选无法伪造这一份）。"""
     files = 0
@@ -651,6 +672,9 @@ class CandidateBirthValidator:
             run = self._spawn(spec, cfg_path, events_path, cwd)
         finally:
             shutil.rmtree(cwd, ignore_errors=True)
+        # 评审 CR-58：子进程退出后立刻量一次工作根总量（父进程 stat，候选
+        # 无法伪造）；_judge 里按 disk_cap_bytes 判负。
+        run["disk_bytes"] = _disk_bytes(spec.workdir)
         events, ev_problems = P.read_events(events_path)
         return self._judge(spec, level, run, events, ev_problems,
                            str(events_path), len(cfg["levels"]))
@@ -929,6 +953,14 @@ class CandidateBirthValidator:
             return _fail("memory",
                          f"maxrss {max_rss_kb} KiB 超过上限 "
                          f"{spec.limits.max_rss_mb} MiB")
+        #: 评审 CR-58：总量磁盘帽（``RLIMIT_FSIZE`` 只管单文件）。AC-P281-2-08
+        #: 允许的资源类 reason 是 ``memory``/``blocked_infra``，这里与
+        #: ``SIGXFSZ → memory`` 同口径，统一落 ``memory``。
+        disk_bytes = int(run.get("disk_bytes") or 0)
+        if disk_bytes > spec.limits.disk_cap_bytes:
+            return _fail("memory",
+                         f"workdir 写入 {disk_bytes} B 超过磁盘帽 "
+                         f"{spec.limits.disk_cap_bytes} B")
         if violations:
             return _fail("contract_error", "; ".join(violations))
         if ev_problems:

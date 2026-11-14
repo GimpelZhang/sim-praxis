@@ -395,3 +395,60 @@ def test_ac_p281_9_06_live_report_text():
     assert problems == [], problems
     assert detail["forbidden_hits"] == 0
     assert detail["disclaimer_sha256"] == v.disclaimer_sha256()
+
+
+# ---------------------------------------------------------------------------
+# 评审 CR-31：空 token 样本不得折成 0.0（H5 的缺失数据 → INCONCLUSIVE）
+# ---------------------------------------------------------------------------
+
+def test_f5_cr31_token_median_empty_is_none_and_h5_inconclusive():
+    """无账行 ⇒ ``_token_median=None`` ⇒ H5 ``INCONCLUSIVE``/``TOKEN_LEDGER_MISSING``。
+
+    缺陷形态：空样本返回 0.0，H5 把「该臂没有账」读成「agentic 不更贵」，
+    给出 ``NOT_ESTABLISHED`` 的方向性结论。
+    """
+    assert analysis._token_median([], "agentic_v1", {}) is None
+    rows = [{"arm_id": "agentic_v1", "trial_id": "t1"},
+            {"arm_id": "agentic_v1", "trial_id": "t2"}]
+    # 偶数样本取中间两值均值（token 是连续量；与轮次的「下中位」不同）
+    tokens = {"t1": {"tokens_in": 10, "tokens_out": 0},
+              "t2": {"tokens_in": 100, "tokens_out": 10}}
+    assert analysis._token_median(rows, "agentic_v1", tokens) == 60.0
+    for args in ((None, 5.0), (5.0, None), (None, None)):
+        doc = v.decide_h5(*args)
+        assert doc["state"] == "INCONCLUSIVE", doc
+        assert doc["reason_code"] == "TOKEN_LEDGER_MISSING", doc
+        v.assert_partition(doc["id"], doc["state"])
+    # 数值路径不变：≤ 即 NOT_ESTABLISHED，> 即 CAPABILITY_DEMONSTRATED
+    assert v.decide_h5(10.0, 9.0)["state"] == "CAPABILITY_DEMONSTRATED"
+    assert v.decide_h5(9.0, 9.0)["state"] == "NOT_ESTABLISHED"
+
+
+# ---------------------------------------------------------------------------
+# 评审 CR-33：limitations 的「触帽/预算」声明必须由数据推出
+# ---------------------------------------------------------------------------
+
+def test_f5_cr33_limitations_derive_cap_and_budget_from_ledger():
+    """账本调用数 ≥ HARD_CAP 时不得写「未触」；确认性 Trial 在场时不得写「未用」。"""
+    pilot_only = [{"present": True, "status": "FINISHED", "verdict": "PASS",
+                   "trial_id": "pilot", "phase": "pilot"}]
+    confirmatory = pilot_only + [
+        {"present": True, "status": "FINISHED", "verdict": "PASS",
+         "trial_id": f"c{i}", "phase": "confirmatory"} for i in range(2)]
+
+    def _render(rows, calls):
+        return " ".join(analysis._limitations(
+            rows, go_no_go="HOLD", go_reasons=("hash_freeze",),
+            ledger={"calls": calls}, semantic_lane="disabled"))
+
+    unused = _render(pilot_only, 63)
+    assert "硬帽 180 未触" in unused, unused
+    assert "预算未被使用" in unused, unused
+
+    hit = _render(pilot_only, constants.HARD_CAP + 20)
+    assert "硬帽 180 已触" in hit, hit
+    assert "未触" not in hit.split("账本合计", 1)[1].split("。", 1)[0], hit
+
+    used = _render(confirmatory, 63)
+    assert "确认性阶段预算已使用" in used, used
+    assert "预算未被使用" not in used, used

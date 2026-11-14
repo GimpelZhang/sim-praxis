@@ -193,6 +193,7 @@ def _mujoco_files(*, steps: "int | None" = None, endpoint_ratio: float = 0.9,
                   metrics_endpoint: "float | None" = None,
                   fingerprint_packages: "dict | None" = None,
                   hidden_reads: "list[str] | None" = None,
+                  metrics_override: "dict | None" = None,
                   split_ratio: float = 0.1) -> "dict[str, object]":
     spec = _spec("mujoco_contact_push_v1")
     d_max = _threshold(spec, "endpoint_distance_m")
@@ -263,7 +264,12 @@ def _mujoco_files(*, steps: "int | None" = None, endpoint_ratio: float = 0.9,
         "repro/cross_seed/metrics.json": cross_metrics,
         "repro/cross_seed/telemetry.jsonl": _lines(cross_rows),
     }
-    files["metrics.json"]["steps"] = int(files["metrics.json"]["steps"])
+    if metrics_override is not None:
+        # 评审 CR-32 用例：允许构造「键不全」的 metrics.json，且 manifest
+        # 的候选聚合按修改后的内容计算（不能事后改写而让 sha 失配）。
+        files["metrics.json"] = dict(metrics_override)
+    else:
+        files["metrics.json"]["steps"] = int(files["metrics.json"]["steps"])
     return files
 
 
@@ -400,6 +406,7 @@ _R1_REPORT = """\
 def _research_files(*, drop_section: "str | None" = None,
                     missing_unit: bool = False,
                     overlap_holdout: bool = False,
+                    duplicate_holdout: bool = False,
                     disjoint: bool = True,
                     claimed_success: bool = False,
                     criterion_met: bool = False,
@@ -412,6 +419,9 @@ def _research_files(*, drop_section: "str | None" = None,
     if isinstance(splits, dict):
         if overlap_holdout:
             splits["holdout"]["ids"] = ["h1", "e1"]
+        if duplicate_holdout:
+            # 评审 CR-60：声明 2 个 holdout episode，但只有 1 个唯一 id。
+            splits["holdout"]["ids"] = ["h1", "h1"]
         splits["disjoint"] = disjoint
     params = [
         {"name": "friction", "class": "friction", "unit": "1" if not missing_unit else ""},
@@ -1122,3 +1132,86 @@ def test_w3_14_binop_float_expressions_are_scanned():
     assert scoring.float_literals(
         (_REPO / "orchestrator/benchmark/scoring.py").read_text(
             encoding="utf-8")) == []
+
+
+# --------------------------------------------------------------------------
+# 评审 CR-06：审计件畸形不得 fail-open
+# --------------------------------------------------------------------------
+
+def test_f5_cr06_malformed_hidden_audit_is_a_finding(tmp_path: Path):
+    """审计件「在场但形状畸形」→ HG-EVAL-2 判负；只有真缺件才是不适用。
+
+    缺陷形态：``{"read": "private/hidden/..."}``（字符串而非列表）或顶层
+    ``[]``。文件在场所以 HG-EVAL-5 不触发，旧实现让 HG-EVAL-2 记
+    ``applicable=False``——一次真读了隐藏种子的运行被判 PASS。
+    """
+    cases = {
+        "top_level_list": [],
+        "string_read": {"read": "private/hidden/mujoco_seeds.json",
+                        "written": [], "modified": []},
+        "null_read": {"read": None, "written": [], "modified": []},
+    }
+    for label, payload in cases.items():
+        run_dir = _mujoco_bundle(tmp_path / label)
+        (run_dir / "hidden_access_audit.json").write_text(
+            json.dumps(payload), encoding="utf-8")
+        written = _evaluate("mujoco_contact_push_v1", run_dir,
+                            tmp_path / f"eval-{label}")
+        assert written["status"] == "FAIL", (label, written["status"])
+        assert "HG-EVAL-2" in written["hard_gate_ids"], (label, written)
+        detail = _gate_detail(tmp_path / f"eval-{label}", "HG-EVAL-2")
+        assert "审计件" in detail, (label, detail)
+        # 同一畸形件必须在 M1 域门同口径判负（HG-M1-6 与 HG-EVAL-2 同源）
+        assert "HG-M1-6" in written["hard_gate_ids"], (label, written)
+
+
+
+# --------------------------------------------------------------------------
+# 评审 CR-32：metrics.json 缺全部声明键不得空过一致性门
+# --------------------------------------------------------------------------
+
+def test_f5_cr32_metrics_missing_declared_keys_fire_consistency(tmp_path: Path):
+    """``metrics.json = {}`` ⇒ ``metrics_consistent=False`` 且 HG-M1-7 触发。
+
+    早先「缺键不判伪造，只对已有键对账」，于是什么键都不写时 ``checked == 0``
+    → ``consistent=None`` → HG-M1-7 not-applicable，整门从未执行。
+    """
+    spec = _spec("mujoco_contact_push_v1")
+    run_dir = _mujoco_bundle(tmp_path / "run")
+    telemetry = [json.loads(line) for line in
+                 (run_dir / "telemetry.jsonl").read_text(
+                     encoding="utf-8").splitlines() if line.strip()]
+    facts = scoring.mujoco_facts({"telemetry.jsonl": telemetry,
+                                  "metrics.json": {}}, spec.criteria)
+    assert facts["metrics_consistent"] is False
+    assert facts["metrics_mismatches"], facts
+
+    empty = _mujoco_bundle(tmp_path / "empty", metrics_override={})
+    written = _evaluate("mujoco_contact_push_v1", empty, tmp_path / "eval")
+    assert written["status"] == "FAIL", written
+    assert "HG-M1-7" in written["hard_gate_ids"], written
+
+
+
+# --------------------------------------------------------------------------
+# 评审 CR-60：split 内重复 id 判设计失败
+# --------------------------------------------------------------------------
+
+def test_f5_cr60_duplicate_ids_within_split_fail_design(tmp_path: Path):
+    """``["e1", "e1"]`` 不得塌成一个 id 后空过 HG-R1-3/HG-R1-4。
+
+    声明 2 个 holdout episode 却只有 1 个唯一 id：既不是独立留出，也不是
+    无重复的三段切分。列表长度 ≠ 集合长度即设计失败。
+    """
+    spec = _spec("icy_ground_dr_v1")
+    files = _research_files(duplicate_holdout=True)
+    facts = scoring.research_facts(files, spec.criteria)
+    assert facts["split_duplicates"] == {"holdout": ["h1"]}
+    assert facts["holdout_ok"] is False
+    assert facts["leak_ok"] is False
+
+    run_dir = _research_bundle(tmp_path / "run", duplicate_holdout=True)
+    written = _evaluate("icy_ground_dr_v1", run_dir, tmp_path / "eval")
+    assert written["status"] == "FAIL", written
+    assert "HG-R1-3" in written["hard_gate_ids"], written
+    assert "HG-R1-4" in written["hard_gate_ids"], written
