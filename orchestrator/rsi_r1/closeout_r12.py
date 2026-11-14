@@ -337,6 +337,26 @@ def _study_a_anchor_facts(root: Path, study: str = "A") -> "dict[str, Any]":
     }
 
 
+def review_facts(root: Path) -> "dict[str, Any]":
+    """读取双审合并件（``review/<study>_combined.json``）并复算轴位含义。
+
+    T8 线：两 study 的合并判决都是 ``REVIEW_PASS`` 且判据/复跑齐备时，才允许
+    ``r1=MINIMAL_RESEARCH_LOOP_ESTABLISHED``；任一无合并件、FAIL 或
+    INCONCLUSIVE 则 ``r1=NOT_ESTABLISHED``（分歧不追加第三票）。
+    """
+    out: "dict[str, Any]" = {}
+    for study in ("A", "B"):
+        path = root / "review" / f"{study}_combined.json"
+        doc = _read_json(path)
+        out[study] = {
+            "present": doc is not None,
+            "verdict": (doc or {}).get("verdict"),
+            "reviewers": (doc or {}).get("reviewers"),
+            "disagreements": (doc or {}).get("disagreements"),
+        }
+    return out
+
+
 def _study_b_metric_facts(root: Path) -> "dict[str, Any]":
     """复算 B 的两种 RMSE 口径均值，判别候选输出用的是哪一种（纯数据）。"""
     plans = []
@@ -648,6 +668,24 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
 
     # 指标锚点矛盾判定：A 判 INVALID_NUMERICS 且候选数值与 qpos[0]-锚点逐值相符、
     # 与 initial_x-锚点不符 ⇒ 仪器缺陷（候选照抄了 prompt 模板的锚点）。
+    reviews = review_facts(root)
+    judge_docs = {s: (_read_json(root / "judge" / f"report_{s}.json") or {})
+                  for s in ("A", "B")}
+    replay_docs = {s: (_read_json(root / "replay" / f"report_{s}.json") or {})
+                   for s in ("A", "B")}
+    studies_ok = all(
+        str(judge_docs[s].get("verdict")) == "JUDGE_OK"
+        and str(replay_docs[s].get("status")) == "COMPLETE" for s in ("A", "B"))
+    if studies_ok:
+        axes["study_execution"] = "COMPLETED"
+        axes["measurement"] = "VALID"
+        # claim 轴只表达「候选主张与证据一致」；研究结论是否晋升由 r1 轴承载。
+        axes["claim"] = "SUPPORTED"
+        all_reviews_pass = all(
+            reviews[s].get("present") and reviews[s].get("verdict") == "REVIEW_PASS"
+            for s in ("A", "B"))
+        axes["r1"] = ("MINIMAL_RESEARCH_LOOP_ESTABLISHED" if all_reviews_pass
+                      else "NOT_ESTABLISHED")
     metric_def = _study_b_metric_facts(root)
     anchor = _study_a_anchor_facts(root)
     if (anchor.get("available") and anchor.get("matches_qpos0")
@@ -742,6 +780,7 @@ def build(ctx: Any, *, image_pin: "str | None" = None,
         "containers": containers,
         "family": fam,
         "instrument": instrument,
+        "reviews": reviews,
         "post_freeze_drift": drift,
         "failure_chain": failures,
         "gaps": gaps,

@@ -333,3 +333,47 @@ def test_close_round_refuses_when_family_usage_not_recorded(
         C12.close_round(ctx, reason="测试结案")
     assert exc.value.code == "FAMILY_USAGE_NOT_RECORDED"
     assert ST.ResearchState(ctx).root_state() != "CLOSED"
+
+
+def test_review_facts_and_axes_gate(tmp_path: Path):
+    """双审合并件决定 r1 轴：两 study REVIEW_PASS 才晋升。"""
+    from orchestrator.rsi_r1 import closeout_r12 as C
+
+    root = tmp_path / "root"
+    (root / "review").mkdir(parents=True)
+    (root / "review" / "A_combined.json").write_text(json.dumps(
+        {"verdict": "REVIEW_PASS", "reviewers": ["r1", "r2"],
+         "disagreements": []}), encoding="utf-8")
+    (root / "review" / "B_combined.json").write_text(json.dumps(
+        {"verdict": "REVIEW_INCONCLUSIVE", "reviewers": ["r1", "r2"],
+         "disagreements": ["design_controls"]}), encoding="utf-8")
+    facts = C.review_facts(root)
+    assert facts["A"]["verdict"] == "REVIEW_PASS"
+    assert facts["B"]["verdict"] == "REVIEW_INCONCLUSIVE"
+    assert facts["B"]["disagreements"] == ["design_controls"]
+    assert not facts["B"]["present"] is False
+    (root / "review" / "B_combined.json").unlink()
+    assert C.review_facts(root)["B"]["present"] is False
+
+
+def test_t9_axes_from_studies_and_reviews(campaign: Path):
+    """判定/复跑齐备 + 双审 PASS ⇒ r1 晋升；一审 INCONCLUSIVE ⇒ NOT_ESTABLISHED。"""
+    from orchestrator.rsi_r1 import closeout_r12 as C
+
+    for s in ("A", "B"):
+        _write(campaign / "judge" / f"report_{s}.json",
+               {"verdict": "JUDGE_OK", "reason_codes": []})
+        _write(campaign / "replay" / f"report_{s}.json",
+               {"status": "COMPLETE", "summary": {"runs": 96}})
+        _write(campaign / "review" / f"{s}_combined.json",
+               {"verdict": "REVIEW_PASS", "reviewers": ["r1", "r2"],
+                "disagreements": []})
+    _, body = _build(campaign)
+    assert body["axes"]["study_execution"] == "COMPLETED"
+    assert body["axes"]["claim"] == "SUPPORTED"
+    assert body["axes"]["r1"] == "MINIMAL_RESEARCH_LOOP_ESTABLISHED"
+    _write(campaign / "review" / "B_combined.json",
+           {"verdict": "REVIEW_INCONCLUSIVE", "reviewers": ["r1", "r2"],
+            "disagreements": ["design_controls"]})
+    _, body = _build(campaign)
+    assert body["axes"]["r1"] == "NOT_ESTABLISHED"
