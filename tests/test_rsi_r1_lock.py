@@ -320,3 +320,33 @@ def test_closure_file_list_covers_all_groups(tmp_path):
     expected = sorted({rel for files in LK.CLOSURE_GROUPS.values()
                        for rel in files})
     assert sorted(listed) == expected
+
+
+def test_verify_recomputes_instrument_prereg_sha(tmp_path):
+    """CR-28：冻结后替换 instrument_prereg.json 必须报 PREREG_DRIFT。
+
+    闭包组只收 .py，prereg 不在任何 closure group 里；旧 ``verify_lock`` 从
+    不重算 LOCK 里登记的 sha，冻结后偷换预注册可零告警通过。
+    """
+    ctx, repo = _seed(tmp_path)
+    _freeze(ctx, repo)
+    _sign_both(ctx)
+    ctx.write_json("contract/instrument_prereg.json", {
+        "schema": "simpraxis.rsi_r1.instrument_prereg.v1", "schema_version": 1,
+        "document_sha256": "c" * 32})
+    with pytest.raises(LK.LockError) as exc:
+        LK.verify_lock(ctx, repo_root=repo)
+    assert exc.value.code == "PREREG_DRIFT"
+
+
+def test_verify_recomputes_refusals_sha(tmp_path):
+    """CR-28：冻结后替换 contract/refusals.json 必须报 REFUSALS_DRIFT。"""
+    ctx, repo = _seed(tmp_path)
+    _freeze(ctx, repo)
+    _sign_both(ctx)
+    ctx.write_json("contract/refusals.json", {"schema": "tampered",
+                                              "schema_version": 1,
+                                              "clauses": {}})
+    with pytest.raises(LK.LockError) as exc:
+        LK.verify_lock(ctx, repo_root=repo)
+    assert exc.value.code == "REFUSALS_DRIFT"

@@ -712,8 +712,10 @@ def close_round(ctx: Any, *, reason: str) -> "dict[str, Any]":
     """T9 收尾：按**账本 call 行**补记族用量，再把根推进 ``CLOSED``。
 
     ``record_usage`` 幂等且单调（family.py:524 docstring 指定「由 4b/T9 收尾
-    调用」）；族账缺失/不可写不阻断结案，但必须原样返回到 readout 的 gaps，
-    不能静默成「已记账」。
+    调用」）。族用量写不进去时**拒绝关根**（CR-30，2026-11-14 评审）：旧实现
+    只记 WARN 并照常 ``close_root``，之后的付费 ``family close`` 会以
+    ``posts_used=0`` 关闭成员、把整份预留退回公共池——已经花掉的 POST 就从
+    族帽里凭空消失，只有下一次 closeout 的 ``cap_respected`` 缺口才暴露。
     """
     calls = int(CO.ledger_facts(CO._rows(Path(ctx.root)))["calls"])
     note = None
@@ -729,6 +731,8 @@ def close_round(ctx: Any, *, reason: str) -> "dict[str, Any]":
         closed_member = True
     except FAM.FamilyError as exc:
         note = f"FAMILY_USAGE_NOT_RECORDED {getattr(exc, 'code', '')}: {exc}"
+        # 不关根：族用量未记账时关根会让「已花 POST」永久脱离族帽口径。
+        raise Closeout12Error("FAMILY_USAGE_NOT_RECORDED", note) from None
     ST.ResearchState(ctx).close_root(reason=reason)
     return {"ledger_calls": calls, "family_note": note,
             "family_member_closed": closed_member,

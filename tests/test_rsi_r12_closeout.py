@@ -313,3 +313,23 @@ def test_study_failures_surface_in_failure_chain(campaign: Path):
     assert rec["study"] == "A"
     assert rec["classification"] == "TRANSPORT_UNKNOWN"
     assert rec["reason_codes"] == ["INVALID_NUMERICS"]
+
+
+def test_close_round_refuses_when_family_usage_not_recorded(
+        campaign: Path, monkeypatch, tmp_path: Path):
+    """CR-30 回归：族用量写不进去时**拒绝关根**。
+
+    旧实现只记 WARN 就 `close_root`，之后付费 ``family close`` 以
+    ``posts_used=0`` 关闭成员、把整份预留退回公共池——已花的 POST 从族帽
+    里凭空消失。
+    """
+    from orchestrator.rsi_r1 import state as ST
+
+    empty = tmp_path / "empty-family"
+    empty.mkdir()
+    monkeypatch.setenv("SIMPRAXIS_RSI_R12_ROOT", str(empty))
+    ctx = _ctx(campaign)
+    with pytest.raises(C12.Closeout12Error) as exc:
+        C12.close_round(ctx, reason="测试结案")
+    assert exc.value.code == "FAMILY_USAGE_NOT_RECORDED"
+    assert ST.ResearchState(ctx).root_state() != "CLOSED"

@@ -494,3 +494,23 @@ def test_toy_freeze_steps_capped_by_aux_subenvelope(tmp_path) -> None:
                            replay_steps=steps, posts_remaining_after_charge=2)
     assert exc.value.code == "RESOURCE_EXCEEDED"
     assert "offline_probe_practice_recovery" in str(exc.value)
+
+
+def test_global_run_cap_does_not_double_count_consumed_reservation(tmp_path) -> None:
+    """CR-07 回归：冻结预留按已消费量冲减；consume 不得在全局帽里被记两遍。
+
+    活账 2026-11-13 曾把 study lane 的真实 388 run 算成 772/896（freeze 预留
+    576 + consume 196 同时计），继续预留 >124 就会被误拒。
+    """
+    led = _ledger(tmp_path)
+    led.reserve_explore("A", _specs(10), batch_id="b1")
+    led.reserve_freeze("A", lane="study_A", blocks=32, n_conditions=1,
+                       replay_runs=32, confirm_steps=0, replay_steps=0,
+                       posts_remaining_after_charge=8)
+    led.consume_confirm("A", kind="confirm", runs=20, steps=0, lane="study_A")
+    snap = led.snapshot("A")["runs_total"]
+    # 物理占用 = explore 10 + 未消费预留 (32+32-20)=44；used 只含冻结外的
+    # 10 个探索 run 与本批已消费的 20 个 confirm run。
+    assert snap["used"] == 30
+    assert snap["reserved"] == 44
+    assert snap["remaining"] == led.limits.total_runs - 74

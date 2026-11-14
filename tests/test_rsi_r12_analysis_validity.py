@@ -622,3 +622,64 @@ def test_prompt_names_output_schema_not_contract_schema():
     # 旧误导措辞（把合同自身 schema 当输出 schema 指给候选）不得复现
     assert "（= 公开合同 `analysis_output.schema`" not in block
     assert AR.OUTPUT_SCHEMA in block
+
+
+# ---------------------------------------------------------------------------
+# CR-01（2026-11-14 评审）：删失指标的缺块不得静默缩小分母
+# ---------------------------------------------------------------------------
+
+def _censored_plan() -> C.ResearchPlan:
+    """主指标换成**右删失**的 ``stop_time_s``（A 场景允许，δ=0.01 由量表固定）。"""
+    return H.doc_of(H.plan_doc(
+        "A",
+        primary={"id": "primary", "kind": "primary",
+                 "metric": "stop_time_s", "proposition": "decrease_gt",
+                 "delta": "0.01", "condition_ids": ["base", "low_mu"]}))
+
+
+def _stop_or_censored_record(spec: E.ExperimentSpec, *, stops: bool) -> dict:
+    times = [round(i * 0.1, 3) for i in range(20)]
+    # stop 判据：|vx| < 0.01 m/s 且随后 0.2 s（2 个采样）保持 ⇒ 0.2 s 处停住；
+    # 不停则全程 0.5 m/s ⇒ 右删失（_metric_a 不写 stop_time_s）。
+    vx = ([0.5, 0.4] + [0.0] * 18) if stops else [0.5] * 20
+    return {"time_s": times,
+            "qpos": [[0.0, 0.0] for _ in times],
+            "qvel": [[v, 0.0] for v in vx],
+            "run_id": spec.run_id, "spec_hash": spec.spec_hash,
+            "block_id": spec.block_id}
+
+
+def _censored_artifacts(plan: C.ResearchPlan,
+                        manifest: E.ConfirmManifest) -> "dict[str, dict]":
+    artifacts: "dict[str, dict]" = {}
+    for run_id, spec in J.build_specs(plan, manifest).items():
+        block_no = int(spec.block_id[1:])
+        # 奇数 block 的 low_mu 被右删失：每个这类 block 只能落单侧 → 丢块。
+        stops = spec.condition_id != "low_mu" or block_no % 2 == 0
+        artifacts[run_id] = {
+            "record": _stop_or_censored_record(spec, stops=stops),
+            "meta": {"run_id": run_id, "spec_hash": spec.spec_hash,
+                     "condition_id": spec.condition_id, "initial_x_m": 0.0}}
+    return artifacts
+
+
+def test_control_censored_metric_dropped_blocks_is_evidence_invalid() -> None:
+    """CR-01 回归：删失块必须判 EVIDENCE_INVALID，不得缩分母后 JUDGE_OK。
+
+    旧实现 ``judge_study_r12`` 给 ``_judge_contrast`` 传空 checks，``J-PAIRED-*``
+    永不进判决件；候选按 16/32 块报数仍能通过数值一致性，产出 JUDGE_OK。
+    """
+    plan = _censored_plan()
+    manifest = E.allocate_confirm(plan, KEEPER)
+    artifacts = _censored_artifacts(plan, manifest)
+    host = _host(plan, manifest, artifacts)
+    # 16 个奇数 block 被删失：宿主参考数值也只在存活的 16 块上算
+    assert host["primary"]["n_blocks"] == 16
+    doc = _output_doc(plan, manifest, host)
+    report = _gate(plan, manifest, artifacts, doc)
+    assert report["verdict"] == "JUDGE_REJECT"
+    assert "EVIDENCE_INVALID" in report["reason_codes"]
+    assert report["layers"]["evidence_valid"] is False
+    paired = [c for c in report["checks"] if c["id"] == "J-PAIRED-primary"]
+    assert paired and paired[0]["ok"] is False
+    assert "n=16" in paired[0]["detail"] and "dropped=" in paired[0]["detail"]

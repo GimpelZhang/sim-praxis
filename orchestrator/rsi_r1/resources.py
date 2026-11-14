@@ -322,7 +322,9 @@ class ResourceLedger:
 
     def _global_runs(self, rows: Iterable[Mapping[str, Any]]) -> "dict[str, int]":
         used = 0
-        reserved = 0
+        confirm_used = 0
+        replay_used = 0
+        frozen = 0
         for r in rows:
             # toy lane（probe/practice）是仪器演练，不是科学 run：整轮帽
             # ``total_runs`` 只约束 study lane（见 _rows_for 的锁内适配注释）。
@@ -332,8 +334,17 @@ class ResourceLedger:
                 used += int(r["runs"])
             elif r.get("event") == EVENT_CONSUME:
                 used += int(r["runs"])
+                if r.get("kind") == KIND_CONFIRM:
+                    confirm_used += int(r["runs"])
+                elif r.get("kind") == KIND_REPLAY:
+                    replay_used += int(r["runs"])
             elif r.get("event") == EVENT_FREEZE:
-                reserved += int(r["confirm_runs"]) + int(r["replay_runs"])
+                frozen += int(r["confirm_runs"]) + int(r["replay_runs"])
+        # CR-07（2026-11-14 评审）：冻结预留按**已消费量**冲减，镜像 ``_used``
+        # 的 ``confirm_reserved = frozen_confirm - confirm_used``。consume 行
+        # 已在 used 里计过；预留若不扣减，同一批 run 会被记两遍（活账
+        # 388 真实用量曾显示成 772/896）。
+        reserved = frozen - confirm_used - replay_used
         if reserved < 0:
             raise ResourceError("RESOURCE_LEDGER_CORRUPT", "全局预留为负")
         return {"used": used, "reserved": reserved}

@@ -721,3 +721,19 @@ def test_chain_cursor_stops_uncompleted_when_posts_run_out() -> None:
     assert res.completed is False
     assert res.ok_count == 8
     assert res.stopped == "POSTS_EXHAUSTED"
+
+
+def test_next_attempt_uses_max_suffix_and_refuses_overwrite(tmp_path: Path) -> None:
+    """CR-54 回归：attempt 目录有空洞时按最大数字后缀 +1，不得覆盖已有 attempt。"""
+    ctx = H.make_ctx(tmp_path / "camp")
+    base = ctx.relative(PT.PROTOCOL_SUBDIR) / PT.PROBE
+    assert PT.next_attempt(ctx, PT.PROBE) == 1
+    (base / "attempt-1").mkdir(parents=True)
+    (base / "attempt-3").mkdir()
+    # 旧实现用目录数 + 1 = 3 ⇒ 覆盖已存在的 attempt-3
+    assert PT.next_attempt(ctx, PT.PROBE) == 4
+    # 目标路径被非目录同名件占用时拒绝（不静默覆盖）
+    (base / "attempt-4").write_text("occupied", encoding="utf-8")
+    with pytest.raises(PT.ProtocolError) as exc:
+        PT.next_attempt(ctx, PT.PROBE)
+    assert exc.value.code == "ATTEMPT_CONFLICT"

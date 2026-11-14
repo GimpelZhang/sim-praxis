@@ -167,3 +167,21 @@ def test_handshake_file_quotes_terminal_report(tmp_path):
     assert hashlib.sha256(report_path.read_bytes()).hexdigest() == \
         doc["report_sha256"]
     assert doc["status"] == ATT.STATUS_COMPLETED
+
+
+def test_ledger_row_count_counts_call_rows_only(tmp_path: Path) -> None:
+    """CR-56 回归：attempt ``posts.delta`` 只数 ``event == "call"`` 行。
+
+    旧实现数全部非空行，开账/事件行也会被算成实呼（活账暂时全是 call 行，
+    但一旦有 selfcheck/事件行就高估）。
+    """
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(
+        '{"event": "call"}\n'
+        '{"event": "selfcheck", "seq": 1}\n'
+        '{"seq": 2}\n'          # 缺 event ⇒ 按默认 call
+        '\n'
+        'not-json\n',
+        encoding="utf-8")
+    assert ATT.ledger_row_count(path) == 2
+    assert ATT.ledger_row_count(tmp_path / "absent.jsonl") == 0

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -416,3 +417,25 @@ def test_snapshot_reports_both_studies(tmp_path: Path) -> None:
     assert snap["studies"]["B"]["state"] == ST.ST_EXPLORING
     assert snap["root_state"] == ST.ROOT_INIT
     json.dumps(snap, ensure_ascii=False, allow_nan=False)
+
+
+def test_append_once_deduplicates_under_concurrency(tmp_path: Path) -> None:
+    """CR-55 回归：查重与追加必须在同一 flock 临界区。
+
+    旧实现先在锁外扫 ``events()`` 再调 ``append``（在锁内重新读），两个进程
+    （此处用线程 + 独立 fd 同构）可同时看不到对方而各追加一行同键事件。
+    """
+    st = _state(tmp_path)
+    barrier = threading.Barrier(8)
+
+    def worker() -> None:
+        barrier.wait()
+        st.journal.append_once("gate2", {"card_id": "c-1"}, key="card_id")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    events = [e for e in st.journal.events() if e.event == "gate2"]
+    assert len(events) == 1

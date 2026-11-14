@@ -383,7 +383,11 @@ def test_resources_reflect_freeze_reservation_in_request(tmp_path) -> None:
     assert res["confirm"]["used"] == 16
     assert res["confirm"]["reserved"] == 16
     assert res["replay"]["reserved"] == 32
-    assert res["runs_total"]["reserved"] == 64
+    # CR-07（2026-11-14 评审）：全局预留按已消费量冲减。冻结 32+32 中已消费
+    # 16 个 confirm run ⇒ runs_total = used 16 + reserved (64-16)=48；旧断言
+    # 的 64 把冻结预留与 consume 双重计数（真实用量会被算成 2 倍）。
+    assert res["runs_total"]["used"] == 16
+    assert res["runs_total"]["reserved"] == 48
 
 
 # ---------------------------------------------------------------------------
@@ -479,3 +483,30 @@ def test_study_brief_requires_single_json_reply():
     assert "回复格式" in brief
     for token in ("必须且只能是一个 JSON 对象", "在同一回复里拼接", "作废"):
         assert token in brief, token
+
+
+def test_r12_brief_does_not_promise_references() -> None:
+    """CR-27 回归：R1.2 的 run_confirm 只回 candidate_output/analysis_receipt。
+
+    公共 brief 若继续让候选查 ``references``（legacy 回包键），r12 下会白烧
+    一呼且永远拿不到值；brief 必须按 profile 分支。
+    """
+    from orchestrator.rsi_r1 import protocol as PT
+
+    r12_brief = PT.render_study_brief("A", profile=PROFILE)
+    assert "candidate_output.contrasts[*]" in r12_brief
+    assert "references" in r12_brief          # 只出现在"不返回 references"的提示里
+    assert "不返回" in r12_brief
+    # legacy（无 profile）路径保留原来的 references 回包说明
+    legacy_brief = PT.render_study_brief("A")
+    assert "返回确认批 run_ids_head 与 references" in legacy_brief
+
+    r12_actions = PT._ACTIONS_BLOCK_R12
+    legacy_actions = PT._ACTIONS_BLOCK
+    assert "candidate_output" in r12_actions
+    assert "references 是宿主用公开估计量" in legacy_actions
+    assert "--RUN_CONFIRM_STEP--" not in legacy_actions
+    # 单元级：两个占位符必须都被替换（防模板漂移）
+    assert "__RUN_CONFIRM_STEP__" not in r12_actions
+    assert "__CLAIM_SOURCE__" not in PT._CLAIMS_BLOCK_R12
+    assert "__CLAIM_SOURCE__" not in PT._CLAIMS_BLOCK

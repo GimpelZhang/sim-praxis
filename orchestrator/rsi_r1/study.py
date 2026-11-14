@@ -130,7 +130,8 @@ def build_study_parts(
         lock_reader=LK.lock_reader(ctx), transport_factory=transport_factory,
         admission=admission, budget=slots, envelope=envelope,
         spend_contract=spend, sha_of=PT.repo_sha)
-    system = L.render_system(extra_rules=PT.render_study_brief(study))
+    system = L.render_system(
+        extra_rules=PT.render_study_brief(study, profile=profile))
 
     def messages() -> T.Request:
         return T.build_request(

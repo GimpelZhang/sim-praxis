@@ -193,7 +193,8 @@ class Journal:
 
     # ---- 写 ----
 
-    def append(self, event: str, payload: "Mapping[str, Any] | None" = None) -> Event:
+    def append(self, event: str, payload: "Mapping[str, Any] | None" = None,
+               *, once_key: "str | None" = None) -> Event:
         target = self.ctx.assert_write_allowed(self.path)
         target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         lock_path = target.with_name(target.name + ".lock")
@@ -201,6 +202,13 @@ class Journal:
         try:
             fcntl.flock(fd_lock, fcntl.LOCK_EX)
             existing = self.events()
+            if once_key is not None:
+                # CR-55（2026-11-14 评审）：幂等查重必须在**同一 flock 临界区**
+                # 内完成；旧 ``append_once`` 在取锁前扫描，两进程可重复追加。
+                for ev in existing:
+                    if ev.event == event and \
+                            ev.payload.get(once_key) == (payload or {}).get(once_key):
+                        return ev
             prev = existing[-1].sha256 if existing else None
             seq = len(existing) + 1
             ts = self.clock()
@@ -228,10 +236,7 @@ class Journal:
     def append_once(self, event: str, payload: "Mapping[str, Any]",
                     *, key: str) -> Event:
         """幂等追加：同 ``event`` 且 payload[key] 相同的事件已存在则直接返回。"""
-        for ev in self.events():
-            if ev.event == event and ev.payload.get(key) == payload.get(key):
-                return ev
-        return self.append(event, payload)
+        return self.append(event, payload, once_key=key)
 
 
 # ---------------------------------------------------------------------------

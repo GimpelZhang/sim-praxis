@@ -938,6 +938,26 @@ def verify_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
         raise LockError("BUDGET_DRIFT",
                         f"budget.sha256 {live_budget[:16]}… ≠ "
                         f"LOCK {str(doc.get('budget_sha256'))[:16]}…")
+    # CR-28（2026-11-14 评审）：冻结时登记的仪器预注册与拒答条款从不重验。
+    # 闭包组只收 .py，替换 contract/instrument_prereg.json 不会触发任何漂移
+    # 检查；这里按 LOCK 里逐字节登记的 sha 复算，冻结后改一字即拒。
+    prereg_rel = str((doc.get("instrument_prereg") or {}).get("path")
+                     or INSTRUMENT_PREREG)
+    prereg_path = ctx.relative(prereg_rel)
+    if not prereg_path.is_file():
+        raise LockError("PREREG_DRIFT", f"{prereg_rel} 缺失")
+    live_prereg = _sha256_file(prereg_path)
+    if live_prereg != (doc.get("instrument_prereg") or {}).get("sha256"):
+        raise LockError("PREREG_DRIFT",
+                        f"{prereg_rel} {live_prereg[:16]}… 已漂移")
+    refusals_rel = "contract/refusals.json"
+    refusals_path = ctx.relative(refusals_rel)
+    if not refusals_path.is_file():
+        raise LockError("REFUSALS_DRIFT", f"{refusals_rel} 缺失")
+    live_refusals = _sha256_file(refusals_path)
+    if live_refusals != doc.get("refusals_sha256"):
+        raise LockError("REFUSALS_DRIFT",
+                        f"{refusals_rel} {live_refusals[:16]}… 已漂移")
     # MINOR-7：注册件（夹具与预期）冻结后同样零漂移。
     if purpose == "validation":
         spec_rel = (doc.get("offline_suite_spec") or {}).get("path")

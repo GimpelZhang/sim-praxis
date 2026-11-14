@@ -665,7 +665,17 @@ def judge_study_r12(*, plan: C.ResearchPlan, manifest: E.ConfirmManifest,
     per_run = recompute_metrics(plan=plan, artifacts=artifacts, specs=specs)
     host: "dict[str, dict[str, Any]]" = {}
     for contrast in _contrasts(plan):
-        ref = _judge_contrast(plan, per_run, contrast, [])
+        # CR-01（2026-11-14 评审）：把真实 checks 列表交给 _judge_contrast，
+        # 让 ``J-PAIRED-*`` 进判决件。旧实现传空列表，删失（右删失指标在
+        # 某侧缺值）时块被静默丢弃、分母缩小仍可 JUDGE_OK。
+        ref = _judge_contrast(plan, per_run, contrast, checks)
+        paired = next((c for c in reversed(checks)
+                       if c["id"] == f"J-PAIRED-{contrast.id}"), None)
+        if paired is None or not bool(paired["ok"]):
+            # 删失/缺配对即证据无效：不得用更小的 n 继续算对比（legacy 的
+            # J-PAIRED 语义）。``_report_r12.evidence_valid`` 也会因该 check
+            # 转红，这里显式给出机器码。
+            problems.append("EVIDENCE_INVALID")
         # 宿主内部以 effect 命名；候选输出/比较器用 estimate——统一别名，
         # 避免 compare_values 读不到参考数值而崩（而不是安静放过）。
         host[contrast.id] = {**ref, "estimate": ref.get("effect")}

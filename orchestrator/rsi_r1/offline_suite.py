@@ -1242,7 +1242,10 @@ def validation_verdict(results: Mapping[str, Any]) -> "dict[str, Any]":
     PASS 当可签署结论，等于没跑全链也能结案。
     """
     required = list(SUITE_ORDER)
-    complete = (list(results) == required)
+    # CR-29（2026-11-14 评审）：完整性按**集合**判断。旧实现比较
+    # ``list(results) == required``，用 ``--only`` 以另一种顺序跑完六套会被判
+    # INCOMPLETE（一次完整运行变得不可签署）。显式计数防重复。
+    complete = (set(results) == set(required) and len(results) == len(required))
     if any(v.get("status") != "PASS" for v in results.values()):
         verdict = "FAIL"
     elif complete:

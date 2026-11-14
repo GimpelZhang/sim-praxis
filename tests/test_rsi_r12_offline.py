@@ -1410,3 +1410,16 @@ def test_parse_junit_rejects_conflicting_duplicate_case(tmp_path):
     with pytest.raises(OV.OfflineValidationError) as exc:
         OV._parse_junit(xml)
     assert exc.value.code == "REGRESSION_CASE_CONFLICT"
+
+
+def test_validation_verdict_key_order_insensitive():
+    """CR-29 回归：``--only`` 以另一种顺序跑完六套仍是完整运行（集合语义）。
+
+    旧实现比较 ``list(results) == SUITE_ORDER``，顺序一变就判 INCOMPLETE /
+    exit 3，一次完整运行变得不可签署。
+    """
+    shuffled = {name: {"status": "PASS"} for name in reversed(OS.SUITE_ORDER)}
+    doc = OS.validation_verdict(shuffled)
+    assert doc["complete"] is True
+    assert doc["verdict"] == "PASS"
+    assert doc["missing_suites"] == []

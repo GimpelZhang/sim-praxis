@@ -473,7 +473,27 @@ PLAN_SENTINEL_NOTE = (
     "传 64 hex 时宿主逐字比对：计划文档不符 ⇒ `PLAN_MISMATCH`；`parent_sha` 不是当前\n"
     "探索计划 ⇒ `PARENT_SHA_MISMATCH`。有探索计划时 `parent_sha` 不得为空。\n")
 
-_ACTIONS_BLOCK = (
+#: 第 7 步回包：legacy 回灌 ``references``；R1.2 只回 ``candidate_output``/
+#: ``analysis_receipt``（见 ``assembly._r12_confirm_payload``）。CR-27
+#: （2026-11-14 评审）：公共 brief 若继续让 r12 候选查 ``references``，会白烧一呼。
+_RUN_CONFIRM_STEP_LEGACY = (
+    "7. run_confirm(confirm_token)  ← 返回确认批 run_ids_head 与 references：\n"
+    "   references 是宿主用公开估计量从**你这批确认观测**算出的每条假设的\n"
+    "   estimate/lower/upper（你自己看不到确认批数值，直接逐字复制即可）\n")
+
+_RUN_CONFIRM_STEP_R12 = (
+    "7. run_confirm(confirm_token)  ← 返回确认批 run_ids_head、candidate_output\n"
+    "   与 analysis_receipt：宿主在你冻结的分析程序上对**确认批完整视图**执行，\n"
+    "   `candidate_output.contrasts[*]` 逐条给出 estimate/lower/upper/status/\n"
+    "   n_blocks（本 profile **不返回** references；查它只会白烧一呼）\n")
+
+_CLAIM_SOURCE_LEGACY = (
+    "第 7 步 `run_confirm` 返回的 `references[i]`")
+
+_CLAIM_SOURCE_R12 = (
+    "第 7 步 `run_confirm` 返回的 `candidate_output.contrasts[*]`")
+
+_ACTIONS_BLOCK_SOURCE = (
     "### 八动作顺序（每个回复只给一个动作）\n"
     "1. write_artifact(kind=design, source=<python>)\n"
     "2. propose_plan(plan=<ResearchPlan>)   ← 返回 plan_sha256；计划全文也会在每轮的\n"
@@ -484,9 +504,7 @@ _ACTIONS_BLOCK = (
     "   （单次最多 64 个 run；确认批 run 更多时按对比拆成多次 analyze）\n"
     "6. freeze_confirm(plan_sha256=\"host\", design_sha256, analysis_sha256,\n"
     "                   plan=<confirm 计划>)  ← 返回 confirm_token\n"
-    "7. run_confirm(confirm_token)  ← 返回确认批 run_ids_head 与 references：\n"
-    "   references 是宿主用公开估计量从**你这批确认观测**算出的每条假设的\n"
-    "   estimate/lower/upper（你自己看不到确认批数值，直接逐字复制即可）\n"
+    "__RUN_CONFIRM_STEP__"
     "8. submit_claim(claims=[...], report_text=<正文>)\n"
     "\n"
     "### 数值复现（2026-11-13 实测踩到：差 1.4e-6 即判 INVALID_NUMERICS）\n"
@@ -501,6 +519,11 @@ _ACTIONS_BLOCK = (
     "propose_plan 才能推进 run_batch；改写 plan 后必须重新 run_batch；改写 "
     "analysis 后必须重新 analyze。失效位置已消耗的 POST 不退还；确认冻结后"
     "禁止改写 design/plan/analysis（terminal）。\n")
+
+_ACTIONS_BLOCK = _ACTIONS_BLOCK_SOURCE.replace(
+    "__RUN_CONFIRM_STEP__", _RUN_CONFIRM_STEP_LEGACY)
+_ACTIONS_BLOCK_R12 = _ACTIONS_BLOCK_SOURCE.replace(
+    "__RUN_CONFIRM_STEP__", _RUN_CONFIRM_STEP_R12)
 
 _SINGLE_JSON_BLOCK = (
     "### 回复格式（2026-11-14 公开；实测曾有回复拼接两个 JSON 对象而作废）\n"
@@ -537,21 +560,35 @@ _SOURCE_TEMPLATES_BLOCK = (
     "seed 20261111）。\n"
     "```python\n" + ANALYSIS_TEMPLATE + "```\n")
 
-_CLAIMS_BLOCK = (
+_CLAIMS_BLOCK_SOURCE = (
     "### claims 字段（每个假设一条，逐条提交，不能汇总替代）\n"
     "`{\"hypothesis_id\", \"proposition\", \"metric_id\", \"delta\", \"estimate\",\n"
     "\"lower\", \"upper\"}`；`delta` 必须与公开合同里该指标的 δ 逐字相等（数值），\n"
     "`metric_id`/`proposition` 必须与计划里的对比一致。**estimate/lower/upper 直接\n"
-    "逐字复制第 7 步 `run_confirm` 返回的 `references[i]` 同名同值**（那是宿主用\n"
+    "逐字复制__CLAIM_SOURCE__ 同名同值**（那是宿主用\n"
     "公开估计量从你自己的确认批观测算出的测量结果）。宿主仍会用公开估计量从 raw\n"
     "独立重算，并按 1e-8 + 1e-6×|参考值| 逐字段比对；不一致即 CLAIM_INVALID。\n")
 
+_CLAIMS_BLOCK = _CLAIMS_BLOCK_SOURCE.replace(
+    "__CLAIM_SOURCE__", _CLAIM_SOURCE_LEGACY)
+_CLAIMS_BLOCK_R12 = _CLAIMS_BLOCK_SOURCE.replace(
+    "__CLAIM_SOURCE__", _CLAIM_SOURCE_R12)
 
-def render_protocol_brief(lane: str) -> str:
+
+def _is_r12_profile(profile: Any) -> bool:
+    """``profile`` 为 R1.2 画像时返回 True（None / legacy 均 False）。"""
+    flag = getattr(profile, "is_r12", False)
+    return bool(flag() if callable(flag) else flag)
+
+
+def render_protocol_brief(lane: str, *, profile: "Any | None" = None) -> str:
     """system 追加段：把公开玩具域、八动作顺序与格式示例写清（不写任何答案）。"""
     if lane not in PROTOCOL_LANES:
         raise ProtocolError("LANE_UNKNOWN", repr(lane))
     studies = (S.STUDIES[0],) if lane == PROBE else PRACTICE_STUDIES
+    r12 = _is_r12_profile(profile)
+    actions = _ACTIONS_BLOCK_R12 if r12 else _ACTIONS_BLOCK
+    claims = _CLAIMS_BLOCK_R12 if r12 else _CLAIMS_BLOCK
     parts: "list[str]" = []
     if lane == PROBE:
         parts.append(
@@ -566,7 +603,7 @@ def render_protocol_brief(lane: str) -> str:
             "先完成 study A 的八动作链，再完成 study B 的八动作链。合同内的失败可以\n"
             "自己修正（例如字段写错、设计代码报错），修正也消耗调用额度；越权、状态\n"
             "不明、LOCK 漂移、额度耗尽是终止类，不会再给你下一呼。")
-    parts.append(_ACTIONS_BLOCK)
+    parts.append(actions)
     parts.append(PLAN_SENTINEL_NOTE)
     for study in studies:
         explore = toy_plan_doc(study, phase="explore", revision=1)
@@ -580,15 +617,18 @@ def render_protocol_brief(lane: str) -> str:
             "逐字不变。")
     parts.append(ESTIMATOR_SPEC)
     parts.append(_SOURCE_TEMPLATES_BLOCK)
-    parts.append(_CLAIMS_BLOCK)
+    parts.append(claims)
     return "\n".join(parts)
 
 
-def render_study_brief(study: str) -> str:
+def render_study_brief(study: str, *, profile: "Any | None" = None) -> str:
     """正式研究 study 的 system 追加段（T7：真实研究，48 呼预算，不是演练）。"""
     if study not in S.STUDIES:
         raise ProtocolError("STUDY_UNKNOWN", repr(study))
     cap = LANES.LANE_POST_CAPS[f"study_{study}"]
+    r12 = _is_r12_profile(profile)
+    actions = _ACTIONS_BLOCK_R12 if r12 else _ACTIONS_BLOCK
+    claims = _CLAIMS_BLOCK_R12 if r12 else _CLAIMS_BLOCK
     parts: "list[str]" = [
         f"### 本轮任务：正式研究 study {study}（{cap} 呼预算）\n"
         "这是**真实研究**：针对公开合同里 study "
@@ -599,7 +639,7 @@ def render_study_brief(study: str) -> str:
         "自我评价无关。探索阶段可以提交多份修订（revision 递增）；确认集只能冻结\n"
         "一次，冻结时宿主检查本 lane 冻结后至少还剩 8 呼；确认批跑完后按每个假设\n"
         "逐条提交主张。\n",
-        _ACTIONS_BLOCK,
+        actions,
         _SINGLE_JSON_BLOCK,
         _BUDGET_DISCIPLINE_BLOCK,
         PLAN_SENTINEL_NOTE,
@@ -615,7 +655,7 @@ def render_study_brief(study: str) -> str:
         "其余字段逐字不变。")
     parts.append(ESTIMATOR_SPEC)
     parts.append(_SOURCE_TEMPLATES_BLOCK)
-    parts.append(_CLAIMS_BLOCK)
+    parts.append(claims)
     return "\n".join(parts)
 
 
@@ -643,13 +683,27 @@ class LaneParts:
 
 
 def next_attempt(ctx: Any, lane: str) -> int:
-    """下一次尝试号：已有目录数 + 1（失败尝试原样留档，不覆盖）。"""
+    """下一次尝试号：已有 ``attempt-<n>`` 的**最大数字后缀** + 1（失败尝试原样留档）。
+
+    CR-54（2026-11-14 评审）：旧实现用「目录数 + 1」，attempt 目录有空洞时
+    （``attempt-1``、``attempt-3``）返回 3，会覆盖已存在的 attempt-3 的
+    report/evidence。与 ``attempts.next_attempt_id`` 同一 max+1 口径；目标
+    目录已存在时直接拒绝（不静默覆盖）。
+    """
     base = ctx.relative(PROTOCOL_SUBDIR) / lane
-    if not base.exists():
-        return 1
-    used = [p.name for p in base.iterdir()
-            if p.is_dir() and p.name.startswith("attempt-")]
-    return len(used) + 1
+    used = 0
+    if base.exists():
+        for p in base.iterdir():
+            if not (p.is_dir() and p.name.startswith("attempt-")):
+                continue
+            tail = p.name[len("attempt-"):]
+            if tail.isdigit():
+                used = max(used, int(tail))
+    nxt = used + 1
+    if (base / f"attempt-{nxt}").exists():
+        raise ProtocolError("ATTEMPT_CONFLICT",
+                            f"{lane} attempt-{nxt} 已存在（拒绝覆盖）")
+    return nxt
 
 
 def attempt_prefix(lane: str, attempt: int) -> str:
@@ -763,7 +817,8 @@ def build_lane_parts(ctx: Any, *, lane: str, study: str, attempt: int,
         lock_reader=LK.lock_reader(ctx), transport_factory=transport_factory,
         admission=admission, budget=slots, envelope=envelope,
         spend_contract=spend, sha_of=repo_sha)
-    system = L.render_system(extra_rules=render_protocol_brief(lane))
+    system = L.render_system(
+        extra_rules=render_protocol_brief(lane, profile=profile))
 
     def messages() -> T.Request:
         return T.build_request(
@@ -1183,13 +1238,20 @@ def run_protocol(ctx: Any, *, lane: str, spend: A.SpendContract,
     posts = used_after - used_before
     if bounded:
         # R1.2：完成判据 = 游标走完 + 无终止停 + POST ≤ 帽（不要求恰好 12/16）。
-        passed = bool(ok_chains and len(chains) == len(studies) and posts <= cap)
+        # CR-08（2026-11-14 评审）：``posts`` 只是本协议增量，而 ``cap`` 是 lane
+        # 的**绝对**帽。单次 turn() 的内部重试（D-9 空回答最多 3 次 POST）可越过
+        # 回合前检查，只比增量会把已超帽的 lane 判 PASS（实花 14 对帽 12 曾判
+        # PASS）。bounded 模式下 billing == lane（上面的 REPAIR_NOT_AVAILABLE
+        # 已挡），故同时复核绝对用量。
+        within_cap = posts <= cap and used_after <= cap
+        passed = bool(ok_chains and len(chains) == len(studies) and within_cap)
         if passed:
             verdict, reason = VERDICT_PASS, (
                 f"{len(chains)}×{CHAIN_ACTIONS} 规范动作全走完，实呼 {posts} ≤ 帽 {cap}")
         else:
             verdict = VERDICT_NOT_MEASURED
-            reason = _not_measured_reason_bounded(chains, posts, cap)
+            reason = _not_measured_reason_bounded(chains, posts, cap,
+                                                  used_after=used_after)
     else:
         passed = bool(ok_chains and len(chains) == len(studies)
                       and posts == wanted_posts)
@@ -1277,7 +1339,8 @@ def _campaign_qualification(chains: "list[ChainResult]") -> "dict[str, Any]":
 
 
 def _not_measured_reason_bounded(chains: "list[ChainResult]", posts: int,
-                                 cap: int) -> str:
+                                 cap: int,
+                                 *, used_after: "int | None" = None) -> str:
     """R1.2：按里程碑游标与帽报原因（不是「实呼 != 允许」的等值判据）。"""
     parts: "list[str]" = []
     for chain in chains:
@@ -1292,6 +1355,9 @@ def _not_measured_reason_bounded(chains: "list[ChainResult]", posts: int,
             parts.append(str(note))
     if posts > cap:
         parts.append(f"实呼 {posts} > 帽 {cap}")
+    elif used_after is not None and used_after > cap:
+        # CR-08：增量未超但 lane 绝对用量已越帽（内部重试所致）。
+        parts.append(f"lane 累计实呼 {used_after} > 绝对帽 {cap}")
     return "；".join(parts) or "链未走通"
 
 

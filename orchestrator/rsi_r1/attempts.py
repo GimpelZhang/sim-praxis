@@ -92,11 +92,28 @@ def process_start_identity(pid: "int | None" = None) -> str:
 
 
 def ledger_row_count(path: "Path | str") -> int:
+    """账本 **call 行**数（attempt 的 ``posts.delta`` 只应反映真实呼）。
+
+    CR-56（2026-11-14 评审）：旧实现数全部非空行，开账/事件行（``event !=
+    "call"``）也被算进 ``posts.delta`` 而高估。与 ``closeout.ledger_facts`` /
+    独立复算器同一读法：``row.get("event", "call") == "call"``。
+    """
     p = Path(path)
     if not p.is_file():
         return 0
-    return sum(1 for line in p.read_text(encoding="utf-8").splitlines()
-               if line.strip())
+    total = 0
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            # 坏行不是 call 行；账本可读性由 closeout/复算器的 LEDGER_UNREADABLE
+            # 负责报错，这里不把损坏静默算成实呼。
+            continue
+        if isinstance(row, dict) and row.get("event", "call") == "call":
+            total += 1
+    return total
 
 
 def attempts_dir(ctx: Any, lane: "str | None" = None) -> Path:
