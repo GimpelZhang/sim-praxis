@@ -18,7 +18,9 @@ import ast
 import json
 import os
 import re
+import signal
 import subprocess
+import threading
 from ast import (AsyncFunctionDef, BoolOp, Call, ClassDef, Compare, Constant,
                  DictComp, Eq, For, FunctionDef, GeneratorExp, If, IfExp,
                  Lambda, ListComp, Load, Name, SetComp, Try, While, With)
@@ -33,6 +35,7 @@ from orchestrator.common.callcache import CallReplay, request_fingerprint
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import atomic_write_text, chmod_keep_user_exec
 from orchestrator.common.host_shim.shim_core import redact_for_model
+from orchestrator.common.secrets import contains_secret
 from orchestrator.gateway.quota_ledger import (
     billing_context,
     phase1_root,
@@ -537,14 +540,127 @@ def _default_evidence_root(thread_id: str) -> Path:
 
 SubprocessRunner = Callable[[list[str], Path, float, dict], _ExecResult]
 
+# CR-02（2026-11-14 评审，硬规则 4 边界）：模型生成的脚本不得继承宿主全量
+# 环境变量——SIMPRAXIS_LLM_TOKEN / HF_TOKEN / GITHUB_TOKEN / ARK_API_KEY 会
+# 随 print(os.environ)/库配置日志/异常 traceback 落进 timeline 与证据包。
+# 子进程环境一律白名单构建：基础系统变量 + 明确的非凭据家族，名字像凭据的
+# 一律排除，值形状命中密钥单一源口径（common.secrets）的同样排除；RunSpec
+# .env_extra（各工厂显式声明的场景变量）最后覆盖，是唯一追加通道。
+_ENV_ALLOW_EXACT = frozenset({
+    "PATH", "HOME", "LANG", "TMPDIR", "TZ",
+    "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES",
+    "NVIDIA_DRIVER_CAPABILITIES", "LD_LIBRARY_PATH",
+})
+_ENV_ALLOW_PREFIXES = ("HF_", "SIMPRAXIS_", "LC_")
+_ENV_DENY_NAME_PARTS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "APIKEY",
+                        "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL")
+
+# CR-21：输出流式落临时文件，读回只保留尾部上限（够覆盖全部 tail 切片，
+# 又不把无界输出整条缓存进内存）。
+_OUTPUT_TAIL_CAP = 1 << 20
+
+
+def _env_name_allowed(name: str) -> bool:
+    """白名单判定：exact 表或非凭据家族前缀；凭据形状名字一律不传。"""
+    if name in _ENV_ALLOW_EXACT:
+        return True
+    if not name.startswith(_ENV_ALLOW_PREFIXES):
+        return False
+    upper = name.upper()
+    return not any(part in upper for part in _ENV_DENY_NAME_PARTS)
+
+
+def _subprocess_env(env_extra: "dict[str, str] | None") -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items()
+           if _env_name_allowed(k) and not contains_secret(v)}
+    env.update({str(k): str(v) for k, v in (env_extra or {}).items()})
+    return env
+
+
+def _drain_tail(stream: "Any", cap: int, holder: "dict[str, Any]") -> None:
+    """后台线程：持续消费子进程管道，只在内存保留尾部 ``cap`` 字节。
+
+    评审 CR-21 复核（2026-11-14）：落临时文件只限住了**读**侧，写侧仍无界——
+    失控脚本（打印循环/啰嗦仿真）能把 TMPDIR 写满。改为管道 + 有界尾部缓冲，
+    写侧与读侧同时有界，且不占宿主磁盘。
+    """
+    buf = bytearray()
+    truncated = False
+    try:
+        while True:
+            chunk = stream.read1(65536)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > cap:
+                del buf[: len(buf) - cap]
+                truncated = True
+    except (OSError, ValueError):
+        # 管道被提前关闭（超时 killpg 后的正常竞态）：保留已收尾部即可。
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+    holder["data"] = bytes(buf)
+    holder["truncated"] = truncated
+
+
+def _tail_text(holder: "dict[str, Any]") -> str:
+    text = bytes(holder.get("data") or b"").decode("utf-8", errors="replace")
+    if holder.get("truncated"):
+        text = "[…输出前部已截断，仅保留尾部…]\n" + text
+    return text
+
+
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """超时整组 SIGKILL：仿真的孙进程不残留占 GPU/显示（硬规则 5）。"""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
 
 def _default_subprocess(cmd, workdir, timeout_s, env_extra) -> _ExecResult:
-    env = dict(os.environ)
-    env.update(env_extra)
-    proc = subprocess.run(
-        cmd, cwd=str(workdir), env=env, capture_output=True, text=True,
-        timeout=timeout_s)
-    return _ExecResult(proc.returncode, proc.stdout or "", proc.stderr or "")
+    env = _subprocess_env(env_extra)
+    # CR-21：start_new_session 让子进程独立成组，超时 killpg 才能连仿真孙进程
+    # 一并收掉；输出走管道 + 两个排水线程，内存与磁盘都有界（只留尾部）。
+    out_holder: "dict[str, Any]" = {}
+    err_holder: "dict[str, Any]" = {}
+    proc = subprocess.Popen(
+        cmd, cwd=str(workdir), env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    threads = [
+        threading.Thread(target=_drain_tail,
+                         args=(proc.stdout, _OUTPUT_TAIL_CAP, out_holder),
+                         daemon=True),
+        threading.Thread(target=_drain_tail,
+                         args=(proc.stderr, _OUTPUT_TAIL_CAP, err_holder),
+                         daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        _kill_process_group(proc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        for thread in threads:
+            thread.join(timeout=5)
+        raise subprocess.TimeoutExpired(
+            cmd, timeout_s, output=_tail_text(out_holder),
+            stderr=_tail_text(err_holder)) from None
+    for thread in threads:
+        thread.join(timeout=5)
+    return _ExecResult(proc.returncode, _tail_text(out_holder),
+                       _tail_text(err_holder))
 
 
 # ---------------------------------------------------------------------------
@@ -799,7 +915,16 @@ def _stage_structured(staged: dict, workdir: Path, patch: dict) -> str:
 
 
 def _commit_staged(staged: dict, workdir: Path) -> None:
-    """run7b §3.2 MINOR-3：全部锚点通过后按首触顺序落盘，每文件恰三件 rename-free 原语。"""
+    """run7b §3.2 MINOR-3：全部锚点通过后按首触顺序落盘，每文件恰三件 rename-free 原语。
+
+    CR-22（2026-11-14 评审）复审：评审建议改成原子写，但该建议与本节冻结
+    设计冲突——MINOR-3 明钉「rename-free 提交」，且既有回归
+    test_run7b_a11_success_path_byte_equivalent[symlink] 断言补丁跟随符号
+    链接、不换 inode；_validate_target 返回 resolve 后的目标，commit 层已
+    无法区分原名是否链接，故原子替换必然破坏该契约。0644 一项不成立：紧随
+    其后的 chmod_keep_user_exec 已把新文件收敛到 0o600 | 旧&0o700。
+    结论：保持原实现，缺陷登记为 NOT FIXED（需先改冻结规格再动）。
+    """
     for key, text in staged.items():
         target = Path(key)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2733,8 +2858,12 @@ class AgentRunner:
             except PatchSafetyError as exc:
                 # v1.4 收窄后仅剩 _validate_target 路径越界族（P1，唯一保留项）：
                 # 拒绝且不发起重试（L505 ② 原文只钉越界），直接结案。
+                # CR-42（2026-11-14 评审）：本分支同样作废一轮**已付费**调用，
+                # 与锚点/transport/成功分支同位落 coding_round，FAILURE.json
+                # 的 coding_round 计数不再少报一轮。
                 self._evidence(root, stem, "decision",
                                {"applied": [], "rejected": str(exc)})
+                timeline[-1]["coding_round"] = coding_calls
                 return self._fail(
                     root, spec, timeline, last_result,
                     reason=f"补丁安全拒绝（不重试）：{exc}")
@@ -2982,12 +3111,23 @@ def agent_run_seam(runner: AgentRunner, spec_factory: "Callable[[dict], RunSpec]
     覆盖 ``spec.tool_grants``（``roadmap.narrow_spec_grants``）；无 stage_frame
     时该函数原样返回同一 spec 对象，旧路径逐字节不变。**不改**
     ``RunSpec.agentic``（BR-2 冻结，本 Task 不碰）。
+
+    CR-16（2026-11-14 评审）：同一收窄函数另行按 Stage 剩余轮帽覆盖
+    ``max_coding_rounds``；剩余为 0 时本接缝直接返回失败记录，不发起任何
+    付费调用（Stage.max_rounds 是 Gate1 卡上真人批准的依据，必须真正执行）。
     """
     def seam(state: dict) -> dict:
         spec = spec_factory(state)
         # 局部 import：避免 runner 模块级依赖 graph 包（其 __init__ 拉 langgraph）。
         from orchestrator.graph.roadmap import narrow_spec_grants
         spec = narrow_spec_grants(spec, state)
+        if int(getattr(spec, "max_coding_rounds", 1)) <= 0:
+            # CR-16：Stage.max_rounds 已在图 state 里执行到 0 剩余——拒绝再发
+            # 任何付费调用，按失败结案转人工（绝不静默按默认轮数重跑，也不
+            # 以 0 轮进 runner 白付一轮）。无路线图的旧路径不会走到这里。
+            return {"status": "failed", "coding_round": 0,
+                    "failure_json": None, "timeline": [], "executions": 0,
+                    "reason": "Stage 轮帽已用尽（Stage.max_rounds 已执行满）"}
         record = runner.run(spec)
         if record["status"] == "ok":
             return {"telemetry_uri": record["telemetry_uri"],

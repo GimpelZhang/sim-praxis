@@ -240,10 +240,26 @@ def narrow_spec_grants(spec: Any, state: Mapping[str, Any]) -> Any:
 
     无 ``stage_frame``（旧路径/未给路线图）时**原样返回同一对象**，保证旧路径
     逐字节不变。
+
+    CR-16（2026-11-14 评审）：``Stage.max_rounds`` 印在 Gate1 卡上就必须真正
+    执行。这里按 ``state['stage_rounds']``（node_agent_run 每 run 累加）算出
+    当前 Stage 的剩余轮数，把 ``max_coding_rounds`` 收窄为
+    ``min(spec.max_coding_rounds, remaining)``；剩余为 0 时交给接缝拒绝付费
+    调用。路线图以外的旧路径不读这两个键，行为逐字节不变。
     """
     frame = state.get("stage_frame") or {}
     if not isinstance(frame, Mapping) or not frame.get("stage_id"):
         return spec
     grants = tuple(frame.get("tool_grants") or ())
     from dataclasses import replace
-    return replace(spec, tool_grants=grants)
+    narrowed = replace(spec, tool_grants=grants)
+    stages = coerce_stages(state.get("stages"))
+    if not stages:
+        return narrowed
+    index = int(state.get("stage_index", 0) or 0)
+    stage = current_stage(stages, index)
+    used = int((state.get("stage_rounds") or {}).get(stage.stage_id, 0))
+    remaining = max(int(stage.max_rounds) - used, 0)
+    return replace(
+        narrowed,
+        max_coding_rounds=min(int(narrowed.max_coding_rounds), remaining))

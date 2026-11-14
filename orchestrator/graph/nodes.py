@@ -205,16 +205,24 @@ def node_gate1(state: SimPraxisState, deps: GraphDeps) -> dict:
         raise GraphStateError(f"Gate1 决策值非法：{verdict!r}（决策字典：{decision}）")
     if verdict == GATE_APPROVE:
         idx = decision.get("choice")
-        proposals = state.get("proposals", [])
-        if idx is None:
+        # CR-43（2026-11-14 评审）：store 允许 choice 为 NULL（P2P 文本通道可能
+        # 不带 choice），旧实现静默取 0 后事件里只写 choice=0，事后无法区分
+        # 「真人没选、默认第一项」与「真人真的选了 0」。保留默认行为（不改变
+        # P2P 协议），但在事件里显式登记 choice_defaulted=True；正常带 choice
+        # 的事件形状逐字节不变（键缺席）。
+        choice_defaulted = idx is None
+        if choice_defaulted:
             idx = 0
+        proposals = state.get("proposals", [])
         try:
             chosen = proposals[int(idx)]
         except (IndexError, TypeError, ValueError) as exc:
             raise GraphStateError(
                 f"Gate1 choice={idx!r} 越界（proposals={len(proposals)}）") from exc
-        update = {"chosen": chosen,
-                  "events": [_ev("gate1_approved", choice=int(idx))]}
+        approved_ev = _ev("gate1_approved", choice=int(idx))
+        if choice_defaulted:
+            approved_ev["choice_defaulted"] = True
+        update = {"chosen": chosen, "events": [approved_ev]}
         # Task6 ascent：Gate1 接缝批准时带回 evolution_sources 部分块
         # （轮次/V1 summary/Gate1 意见件路径）；dict 以外类型一律不透传。
         sources = decision.get("evolution_sources")
@@ -238,6 +246,22 @@ def _stage_id_of(state: dict) -> "str | None":
     frame = state.get("stage_frame") or {}
     sid = frame.get("stage_id") if isinstance(frame, dict) else None
     return sid if isinstance(sid, str) and sid else None
+
+
+def _gate2_reject_count(state: dict) -> int:
+    """D10 判据的计数口径：有路线图时只看**当前 Stage**，否则沿用全局。
+
+    CR-20（2026-11-14 评审）：路线图运行时全局计数会把不同 Stage 的打回相加，
+    让「每个 Stage 各拒一次」被误判成「连续 2 次」并终止整轮。
+    """
+    if coerce_stages(state.get("stages")):
+        sid = _stage_id_of(state)
+        per_stage = state.get("stage_rejects")
+        if sid and isinstance(per_stage, dict):
+            return int(per_stage.get(sid, 0))
+        # 旧检查点（本修复前落盘）没有 stage_rejects：退回全局计数，
+        # 宁可多停一次也不让安全帽失效。
+    return int(state.get("gate2_rejects", 0))
 
 
 def _last_gate2_event(state: dict) -> "dict | None":
@@ -274,8 +298,9 @@ def node_stage_frame(state: SimPraxisState, deps: "GraphDeps | None" = None) -> 
     - 无 ``stages`` ⇒ 返回 ``{}``（旧路径零事件、零键，Phase 1 七事件序列不变）；
     - 最近一条 gate2 事件是**当前 Stage** 的 accept ⇒ 前进一格（拒绝重复前进：
       状态已 approved 时说明同一 accept 已被消费，fail-closed 报错而不是静默跳过）；
-    - 最近一条 gate2 事件是 reject/hard_failure ⇒ 当前 Stage 记 rejected，随后
-      重试（状态回到 running）；
+    - 最近一条 gate2 事件是 reject/hard_failure ⇒ 当前 Stage 重试（状态回到
+      running；打回事实由 node_gate2 当步写入 stage_status，stage_rejects
+      记账，见 CR-44）；
     - 产出 ``stage_index`` / ``stage_status`` / ``stage_frame``（含收窄后的授予）。
     """
     stages = coerce_stages(state.get("stages"))
@@ -312,7 +337,10 @@ def node_stage_frame(state: SimPraxisState, deps: "GraphDeps | None" = None) -> 
                 raise GraphStateError(
                     f"gate2 打回事件的 stage_id={sid!r} 与当前 Stage "
                     f"{stage.stage_id!r} 不符（事件顺序或 stage 键损坏）")
-            status[stage.stage_id] = "rejected"
+            # CR-44（2026-11-14 评审）：旧实现在此写 status=rejected，下一行又
+            # 无条件写 running，该状态对任何消费者都不可达。打回事实已由
+            # node_gate2 的 _stamped 在 decision 当步写入 stage_status
+            # （stage_rejects 另行计数），此处只负责重试时回到 running。
     status[stage.stage_id] = "running"
     grants = grants_for_stage(stages, index, _stage_ceiling(state))
     return {
@@ -330,6 +358,15 @@ def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
     runs.append(record)
     stage_id = _stage_id_of(state)
     stage_extra = {"stage_id": stage_id} if stage_id else {}
+    # CR-16（2026-11-14 评审）：Stage.max_rounds 的执行计数——本 run 实际消耗
+    # 的 coding 轮数累加到当前 Stage（打回重试的每一 run 都计入），
+    # narrow_spec_grants 据此把下一次 RunSpec.max_coding_rounds 收窄到剩余值。
+    # 无路线图的旧路径 stage_id 为 None，不写该键（旧快照逐字节不变）。
+    stage_rounds = dict(state.get("stage_rounds") or {})
+    if stage_id:
+        stage_rounds[stage_id] = (int(stage_rounds.get(stage_id, 0))
+                                  + max(int(record.get("coding_round", 0) or 0), 0))
+    rounds_update = {"stage_rounds": stage_rounds} if stage_id else {}
     # Task4：runner 5 轮用尽/补丁越界 → 失败态带轨迹进 human_failure，
     # 绝不进入 evaluate 伪造成功（计划 L502；§6.3 显式 FAILURE 原则）。
     if record.get("status") == "failed":
@@ -337,6 +374,7 @@ def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
             "agent_runs": runs,
             "coding_round": record.get("coding_round",
                                        state.get("coding_round", 0)),
+            **rounds_update,
             "events": [_ev("agent_run_failed", run_index=len(runs),
                            coding_round=record.get("coding_round", 0),
                            reason=record.get("reason", "agent_run 失败"),
@@ -349,6 +387,7 @@ def node_agent_run(state: SimPraxisState, deps: GraphDeps) -> dict:
     update = {
         "agent_runs": runs,
         "telemetry_uri": uri,
+        **rounds_update,
         "events": [_ev("agent_run", run_index=len(runs),
                        coding_round=record.get("coding_round",
                                                state.get("coding_round", 0)),
@@ -417,13 +456,23 @@ def node_gate2(state: SimPraxisState, deps: GraphDeps) -> dict:
             update["evolution_sources"] = sources
         return _stamped(update, "approved")
     rejects = int(state.get("gate2_rejects", 0)) + 1
+    # CR-20（2026-11-14 评审）：D10 的重试语义是 **per-Stage**——5 Stage 路线图
+    # 里「总计 2 次打回」不得终止整轮，尽管每个 Stage 都只被拒一次。全局
+    # gate2_rejects 继续保留（CLI 汇报/旧快照兼容），per-Stage 计数落在
+    # stage_rejects，route_after_gate2 有路线图时只读当前 Stage 的计数。
+    stage_rejects = dict(state.get("stage_rejects") or {})
+    if stage_id:
+        stage_rejects[stage_id] = int(stage_rejects.get(stage_id, 0)) + 1
+    rejects_update: dict[str, Any] = {"gate2_rejects": rejects}
+    if stage_id:
+        rejects_update["stage_rejects"] = stage_rejects
     notes = (decision.get("human_notes") or "").strip()
     if not notes:
-        return _stamped({"gate2_rejects": rejects,
+        return _stamped({**rejects_update,
                          "events": [_ev("gate2_hard_failure", rejects=rejects,
                                         reason="Gate2 打回但 human_notes 为空",
                                         **stage_extra)]}, "rejected")
-    return _stamped({"gate2_rejects": rejects,
+    return _stamped({**rejects_update,
                      "events": [_ev("gate2_rejected", rejects=rejects,
                                     human_notes=notes, **stage_extra)]},
                     "rejected")
@@ -452,7 +501,7 @@ def failure_classification(state: dict) -> tuple[str, str]:
         return "gate1", _last_event(state, "gate1_hard_failure")["reason"]
     if _last_event(state, "gate2_hard_failure"):
         return "gate2", _last_event(state, "gate2_hard_failure")["reason"]
-    stage = "gate2" if state.get("gate2_rejects", 0) >= GATE_REJECT_LIMIT \
+    stage = "gate2" if _gate2_reject_count(state) >= GATE_REJECT_LIMIT \
         else "gate1"
     return stage, f"{stage} 连续 {GATE_REJECT_LIMIT} 次打回（D10），结案转人工"
 
@@ -632,7 +681,7 @@ def route_after_gate2(state: dict) -> str:
         return TO_STAGE_FRAME if index + 1 < len(stages) else TO_PERSIST
     if kind == "gate2_hard_failure":
         return TO_HUMAN_FAILURE
-    if int(state.get("gate2_rejects", 0)) >= GATE_REJECT_LIMIT:
+    if _gate2_reject_count(state) >= GATE_REJECT_LIMIT:
         return TO_HUMAN_FAILURE
     # 打回重试：路线图运行先回 Stage 框（重算当前 Stage 的收窄授予），
     # 无路线图时**逐位保持旧边**（gate2 → agent_run）。

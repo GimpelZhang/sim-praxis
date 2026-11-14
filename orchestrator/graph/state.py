@@ -48,6 +48,14 @@ class SimPraxisState(TypedDict, total=False):
     stage_index: int             # 当前 Stage 索引（0 起）
     stage_frame: dict            # 当前 Stage 只读视图（stage_frame 节点写，agent_run 读）
     stage_status: dict           # stage_id -> pending|running|approved|rejected
+    # CR-16/CR-20（2026-11-14 评审）：per-stage 计数两键（同样必须是声明键，
+    # 否则 langgraph 在节点 update 侧静默丢弃）。
+    # - stage_rounds: stage_id -> 已消耗 coding 轮数（node_agent_run 累加，
+    #   roadmap.narrow_spec_grants 据此收窄 RunSpec.max_coding_rounds）；
+    # - stage_rejects: stage_id -> Gate2 打回次数（node_gate2 累加，
+    #   route_after_gate2 按当前 Stage 判定 D10，不再跨 Stage 串味）。
+    stage_rounds: dict
+    stage_rejects: dict
     events: Annotated[list, operator.add]
 
 

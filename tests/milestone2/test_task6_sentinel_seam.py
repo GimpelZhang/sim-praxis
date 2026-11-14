@@ -920,10 +920,13 @@ def test_run6_entry_guard_redline_structure_and_closures():
     # JSON 回退 type-is 透传 +1 bare），见上方闭包注释与交付报告偏离
     # 申报 (c)；Phase 2.5 Task4 RunSpec.__post_init__ +5 带 exc fail-closed
     # 校验 → 68=64+4，守卫三函数仍 1/0/0）。ChunkBirthError(...) 站点 M1 钉 23。
+    # 2026-11-14 代码评审 CR-21：超时路径显式 `raise subprocess.TimeoutExpired(
+    # ...) from None`（原先由 subprocess.run 内部抛，AST 里不可见）+1 带 exc
+    # → 69=65+4；守卫三函数仍 1/0/0，闭包集不变。
     raises_all = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)]
-    assert len(raises_all) == 68
+    assert len(raises_all) == 69
     assert sum(1 for n in raises_all if n.exc is None) == 4
-    assert sum(1 for n in raises_all if n.exc is not None) == 64
+    assert sum(1 for n in raises_all if n.exc is not None) == 65
     want_raises = {"_validate_entry_guard": 1,
                    "_entry_guard_body_calls_main": 0,
                    "_entry_guard_contains": 0}

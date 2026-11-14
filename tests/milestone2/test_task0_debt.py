@@ -302,8 +302,12 @@ PENDING_WRITE_ALLOWLIST: dict[str, set[int]] = {
     # 1462→1464、1510→1512、1580→1631。grep 对账（同上口径排除 tests/）
     # 恰七处（client.py 七处 + probe_c_form.py:115 + q2_human_gate.py:484），
     # 无第八处旁路；attach_message_ids 仍走 UPDATE 不进白名单。
+    # 2026-11-14 代码评审 CR-25：Gate1 家族补 claim 守卫，新增
+    # ``_gate1_claim_or_wait``（client.py:1095 一处 claim），四个 Gate1 变体
+    # 统一走它；原七处纯位移。写入点仍是「一 Gate1/Stage 一 upsert + 一
+    # claim」，无新增旁路（AST 全仓扫描证，八处全部落在闸门方法内）。
     "orchestrator/feishu_gateway/client.py": {
-        1035, 1121, 1331, 1464, 1512, 1561, 1631},
+        1095, 1155, 1241, 1451, 1587, 1638, 1690, 1760},
     # 表单探针（人工取证工具，probes/ 在契约豁免内，仍钉死行号）
     "orchestrator/feishu_gateway/probes/probe_c_form.py": {115},
     # Phase 1 封存的人工 HITL 操作脚本（既有调用点冻结，禁止漂移）
@@ -794,7 +798,10 @@ CALL_CACHE_ALLOWLIST = {
     # Phase 2.6 Task3（§T3.4-K）：RunSpec 第 6 个 agentic 字段 agentic_config
     # （+5 行含溯源注释，全在构造点之前）纯位移 2307→2312；构造表达式
     # CallReplay(phase1_root() / ".call_cache") 逐字未改，0 新增落点。
-    ("orchestrator/agent_runner/runner.py", 2312),
+    # 2026-11-14 代码评审 CR-02/CR-21（子进程环境白名单 + 进程组 kill/流式
+    # 输出，+85 行，全在构造点之前）纯位移 2312→2397；构造表达式逐字未改，
+    # 0 新增落点、0 新增网关调用。
+    ("orchestrator/agent_runner/runner.py", 2397),
     # 2026-10-24 v1.4 transport probe（设计 §2.6）：NEW 模块自带第 5 落点——
     # run_probe 默认 CallReplay(phase1_root()/.call_cache)（第 5 处，设计
     # §2.6 缓存键契约逐字；测试注入 tmp CallReplay 零触生产缓存）。
@@ -873,7 +880,9 @@ CALL_CACHE_ALLOWLIST = {
     # **教训（本行踩到）**：这两次提交都没同步改本表，冷跑套
     # `test_s10_call_cache_landing_sites_enumerated` 红（差集恰是 965 vs 984）。
     # 改 `trial_harness.py` 任何构造点之前的行都必须同步这张表。
-    ("orchestrator/benchmark/phase281/trial_harness.py", 984),
+    # 2026-11-14 代码评审 CR-05（复现件清理，+17 行在构造点之前）纯位移
+    # 984 → 1001；构造表达式逐字未改，0 新增落点。
+    ("orchestrator/benchmark/phase281/trial_harness.py", 1001),
 }
 
 

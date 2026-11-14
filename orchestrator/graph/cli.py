@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.errors import GraphRecursionError
 
 from memory_flywheel.phase1.learning_store import LearningStore
 from memory_flywheel.recall import ProductionRecall
@@ -43,21 +44,32 @@ from orchestrator.direction.planner_recall import (
     TIERS,
     PlannerRecall,
 )
-from orchestrator.direction.setter import DirectionSetter
+from orchestrator.direction.setter import (
+    DirectionError,
+    DirectionSchemaError,
+    DirectionSetter,
+)
 from orchestrator.gateway.quota_ledger import QuotaLedger, billing_context
-from orchestrator.gateway.router import ModelGateway
+from orchestrator.gateway.router import (
+    GatewayError,
+    GatewayPausedError,
+    MissingGatewayCredentialError,
+    ModelGateway,
+    PauseStateCorruptError,
+)
 from orchestrator.graph.learning import classify_failure_stage, make_learning_seam
 from orchestrator.graph.nodes import (
+    GATE_REJECT_LIMIT,
     GraphDeps,
     GraphStateError,
     build_graph,
     close_graph_failure,
     initial_state,
 )
-from orchestrator.graph.state import graph_db_path, phase1_root
+from orchestrator.graph.state import graph_db_path, phase1_root, run_dir_for
 from orchestrator.graph.topology import export_svg, export_text
 
-RECURSION_LIMIT = 25  # 契约 L487
+RECURSION_LIMIT = 25  # 契约 L487（无路线图单 Stage 路径的固定值）
 TASK6 = 6             # Task6 ascent V1→V2 升阶（ascent 模式；run 级 coding cap 3）
 TASK7 = 7             # Task7 Track1 真实容器实跑（billing task + 三 stage 批次）
 TASK8 = 8             # Task8 Track2 Genesis DR 对照 batch（三臂×3 种子）
@@ -77,9 +89,37 @@ GATE2_TRIM_SECONDS = 30.0
 
 # L-2：节点外协议异常（含 task7/8 evaluate 接缝主动抛的 GraphStateError、
 # telemetry/状态缺键的 KeyError、JSON 解码错误）一律归一 human_failure 结案。
-# GatewayPausedError（含其子类 CodingLimitError）刻意不在元组内：预算熔断
-# 必须原样上抛交回配额处置，严禁被包装成 agent 失败而落 rung=0 学习。
-_CLOSURE_EXC = (GraphStateError, KeyError, json.JSONDecodeError)
+# CR-19（2026-11-14 评审）：direction/macro 阶段逃逸的 DirectionError 族、
+# 非 pause 的 GatewayError 与 GraphRecursionError 同样收口——旧实现只抓前三类，
+# 这些异常会让 CLI 直接 traceback（exit 1），无 FAILURE.json、无 rung=0 学习行、
+# 无 human_failure 事件。GatewayPausedError（含其子类 CodingLimitError）刻意
+# 仍排除：预算熔断必须原样上抛交回配额处置，严禁被包装成 agent 失败而落
+# rung=0 学习；_invoke 用先行的显式 `except GatewayPausedError: raise` 保住
+# 该语义（GatewayError 是它的父类，顺序不可颠倒）。
+_CLOSURE_EXC = (GraphStateError, KeyError, json.JSONDecodeError,
+                DirectionError, DirectionSchemaError, GatewayError,
+                GraphRecursionError)
+
+# CR-18（2026-11-14 评审）：节点外异常收口只写 FAILURE.json/学习行、不更新
+# 图 checkpoint；一次 resume 会重放失败节点、成功，然后给已有 human_failure
+# 行的线程写 gate2_accepted + DONE.json。这里落线程级终态标记，_invoke 在
+# 两种入口（run/resume）都拒绝越过。正常 human_failure 走图内节点、不写该
+# 标记（避免改变既有线程的重挂语义）。
+CLOSURE_MARKER = "GRAPH_CLOSURE.json"
+
+
+def _recursion_limit(stage_count: int) -> int:
+    """按路线图 Stage 数逐次设定 recursion_limit（CR-15，2026-11-14 评审）。
+
+    固定 25 会被多 Stage 路线图超出：每 Stage 4 步、每次 Gate2 打回再加 4 步
+    （D10 上限 GATE_REJECT_LIMIT 次），前后缀共 5 步。超限抛
+    GraphRecursionError 时图停在半路；该异常现已并入 _CLOSURE_EXC 收口，
+    但正确做法是先给足预算。无路线图（stage_count=0）时保持契约 L487 的 25。
+    """
+    if stage_count <= 0:
+        return RECURSION_LIMIT
+    return (3 + 4 * stage_count
+            + 4 * GATE_REJECT_LIMIT * stage_count + 2)
 
 
 def _last_event(state: dict, kind: str) -> "dict | None":
@@ -309,6 +349,10 @@ def _stages_state(args: argparse.Namespace, stages_file: str) -> dict:
         "stages": [stage_to_mapping(s) for s in stages],
         "stage_index": index,
         "stage_status": stage_statuses(stages),
+        # CR-16/CR-20：per-Stage 执行计数从 0 起（轮帽与 D10 打回计数都按
+        # stage_id 分键，跨 Stage 不串味）。
+        "stage_rounds": {},
+        "stage_rejects": {},
         "stage_frame": {},
     }
 
@@ -581,12 +625,23 @@ def _production_deps(args: argparse.Namespace) -> tuple[GraphDeps, dict, Any]:
 
 
 def _invoke(args: argparse.Namespace, resume: bool) -> int:
+    # CR-18：节点外异常已收口的线程不得再被重放（否则失败节点可能重跑成功，
+    # 给同一线程补写 gate2_accepted + DONE.json，与既有 human_failure 行冲突）。
+    marker = run_dir_for(args.thread) / CLOSURE_MARKER
+    if marker.is_file():
+        print(f"线程 {args.thread} 已按节点外异常结案（{marker}），拒绝重放；"
+              "如需重启请换线程或人工裁决", file=sys.stderr)
+        return 3
     deps, payload_obj, feishu = _production_deps(args)
     # 锁内适配（计划 L487；Task7 首次容器内真跑实证）：langgraph 0.2.28 的
     # invoke/stream 均不接受 recursion_limit 关键字（TypeError），只能放进
     # config（Pregel 在 config 内读取），两分支都不得再以 kwarg 传入。
+    # CR-15：路线图 Stage 数决定步数预算（无路线图仍为契约 L487 的 25）。
+    from orchestrator.graph.roadmap import coerce_stages
+    base_state = _initial_state(args, payload_obj)
+    stage_count = len(coerce_stages(base_state.get("stages")))
     config = {"configurable": {"thread_id": args.thread},
-              "recursion_limit": RECURSION_LIMIT}
+              "recursion_limit": _recursion_limit(stage_count)}
     closure_exc: "BaseException | None" = None
     closure_state: "dict | None" = None
     closure_next: str = ""
@@ -596,6 +651,18 @@ def _invoke(args: argparse.Namespace, resume: bool) -> int:
         with billing_context(task=args.task, batch_id=args.batch_id,
                              thread_id=args.thread):
             with _compiled(deps) as graph:
+                if resume and not stage_count:
+                    # CR-15：resume 的路线图在 checkpoint 里（--stages-file 可省）；
+                    # 读一次快照只为步数预算，读不到就沿用旧值，不影响主流程。
+                    try:
+                        snap0 = graph.get_state(config)
+                        values0 = getattr(snap0, "values", None)
+                        stage_count = len(coerce_stages(
+                            (values0 or {}).get("stages")
+                            if isinstance(values0, dict) else None))
+                    except Exception:  # noqa: BLE001 - 预算取值失败不阻断主流程
+                        stage_count = 0
+                    config["recursion_limit"] = _recursion_limit(stage_count)
                 try:
                     if resume:
                         final = graph.invoke(None, config=config)
@@ -603,11 +670,20 @@ def _invoke(args: argparse.Namespace, resume: bool) -> int:
                         final = graph.invoke(
                             _initial_state(args, payload_obj),
                             config=config)
+                except GatewayPausedError:
+                    # 预算熔断（含 CodingLimitError）原样上抛：不得被下面的
+                    # 收口包成 agent 失败（GatewayError 是其父类，顺序钉死）。
+                    raise
+                except (MissingGatewayCredentialError, PauseStateCorruptError):
+                    # 评审复核（2026-11-14）：凭据缺失/暂停件损坏是运维配置
+                    # 错误，不是科学失败——收口会写 rung=0 学习行把配置事故
+                    # 变成研究记录，故与 paused 家族一样原样上抛。
+                    raise
                 except _CLOSURE_EXC as exc:
                     # L-2：不重发任何卡片——从最后一个超步检查点取状态，归一为
                     # human_failure 结案（图级 FAILURE.json + rung=0 学习）。
-                    # GatewayPausedError/CodingLimitError 不在 _CLOSURE_EXC，
-                    # 从此处原样穿透（feishu.close 仍在 finally 执行）。
+                    # GatewayPausedError/CodingLimitError 由上一子句原样穿透
+                    # （feishu.close 仍在 finally 执行）。
                     snapshot = graph.get_state(config)
                     values = snapshot.values if snapshot is not None \
                         and isinstance(snapshot.values, dict) else {}
@@ -630,6 +706,17 @@ def _invoke(args: argparse.Namespace, resume: bool) -> int:
             error_type=type(closure_exc).__name__)
         final = {**state,
                  "events": list(state.get("events", [])) + update["events"]}
+        # CR-18：收口成功后落线程级终态标记（此后的 run/resume 一律拒绝）。
+        # 顺序：先结案（FAILURE.json + rung=0 行）再落标记；两步之间被杀时
+        # resume 会重复结案一次，但不会出现「失败线程后来写成成功」。
+        atomic_write_text(marker, json.dumps({
+            "status": "closed_by_closure",
+            "thread_id": args.thread,
+            "error_type": type(closure_exc).__name__,
+            "reason": reason,
+            "ts_iso": update["events"][-1].get("ts")
+            if update.get("events") else None,
+        }, ensure_ascii=False, indent=2))
 
     kinds = [ev.get("type") for ev in final.get("events", [])]
     print(json.dumps({"thread_id": args.thread, "events": kinds,

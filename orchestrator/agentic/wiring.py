@@ -284,6 +284,18 @@ def run_agentic_for_runspec(
     # 到帽/自报失败/供应侧/引擎错：优雅 FAILURE 件（workdir 级，
     # nodes 的图级 FAILURE 交叉引用逻辑无需改动即可读取）。
     reason = f"[agentic:{outcome.kind}] {outcome.reason}".strip()
+    p = Path(spec.workdir) / FAILURE_JSON
+    # CR-45（2026-11-14 评审）：节点重放会重写 FAILURE.json；首写 ts_iso 必须
+    # 保留（与 legacy runner._fail 的 L-4 语义一致），否则时间线会被滚动成
+    # 重放时刻。旧件损坏/缺失则照常写当前时间（严格 UTC Z）。
+    prev_ts = None
+    try:
+        prev = json.loads(p.read_text(encoding="utf-8"))
+        if isinstance(prev, dict) and isinstance(prev.get("ts_iso"), str) \
+                and prev["ts_iso"].strip():
+            prev_ts = prev["ts_iso"]
+    except (OSError, ValueError):
+        prev_ts = None
     payload = {
         "status": "failed",
         "engine": "agentic",
@@ -297,9 +309,8 @@ def run_agentic_for_runspec(
         "empty_responses": outcome.empty_responses,
         "supplier_errors": outcome.supplier_errors,
         "agentic_trace": str(tracer.trace_path),
-        "ts_iso": utc_now_iso_z(),
+        "ts_iso": prev_ts or utc_now_iso_z(),
     }
-    p = Path(spec.workdir) / FAILURE_JSON
     atomic_write_text(p, json.dumps(payload, ensure_ascii=False, indent=2))
     return {"status": "failed", "failure_json": str(p),
             "reason": reason, **common}

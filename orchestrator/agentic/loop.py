@@ -338,6 +338,11 @@ TERMINAL_SIG_KINDS = frozenset({
     KIND_FINISH, KIND_FAIL, KIND_STEP_CAP, KIND_TOKEN_CAP, KIND_ROUND_CAP,
     KIND_ROUND_TAIL, KIND_BIRTH_ABSENT, KIND_ENGINE_ERROR})
 
+# CR-17 复核（2026-11-14）：断点续跑标记。本次尝试开始时写入 trace 根，
+# 任何自终局返回（成功/失败/帽耗尽）前删除；只剩 kill -9/被外部杀死时残留。
+# 续跑助手只认「标记在场」的 trace，避免把普通重入误当成中断重放。
+ATTEMPT_OPEN = "attempt.open"
+
 # AC-T4-12：上下文工程常量的集中配置点（另见 forensics.OBS_*_CHARS）。
 KEEP_FULL_ROUNDS = 2
 # smolagents 单轮代码内打印上限（与上游默认同量级，超长走 trace 全量）。
@@ -948,6 +953,19 @@ class Condenser:
         if len(steps) <= self.keep_full:
             return
         seeded = self._maybe_seed()
+        # CR-23（2026-11-14 评审）：旧实现每压缩一轮就 tracer.load_lines()
+        # 整文件重解析一次（O(轮数 × trace 大小) 热路径）。这里每次压缩回调
+        # 只读一次 trace 并按轮建索引，供下面全部旧轮共用。
+        trace_hashes: "dict[int, list[str]]" = {}
+        if self.tracer is not None:
+            for line in self.tracer.load_lines():
+                if str(line.get("tool", "")).startswith("__"):
+                    continue
+                rnd = line.get("round")
+                if not isinstance(rnd, int) or isinstance(rnd, bool):
+                    continue
+                trace_hashes.setdefault(rnd, []).append(
+                    str(line.get("obs_sha256", ""))[:12])
         for s in steps[:-self.keep_full]:
             if getattr(s, "_agentic_condensed", False):
                 continue
@@ -964,11 +982,8 @@ class Condenser:
             if getattr(s, "observations", None):
                 obs_text = str(s.observations)
                 lost += len(obs_text)
-                hashes = []
-                for line in (self.tracer.load_lines() if self.tracer else []):
-                    if line.get("round") == getattr(s, "step_number", -1) \
-                            and not str(line.get("tool", "")).startswith("__"):
-                        hashes.append(line["obs_sha256"][:12])
+                hashes = trace_hashes.get(
+                    getattr(s, "step_number", -1), [])
                 s.observations = (
                     f"[condensed] 旧轮工具 {calls}，观察哈希 {hashes}；"
                     "全文在 trace 全量存储，需要时用 read_file/grep 回查。")
@@ -1191,6 +1206,16 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
         cfg=cfg, env_spec_block=env_spec_block, skills_block=skills_block,
         extra=system_extra)
     model.configure(system_prompt=instructions, task=task)
+    # CR-17（2026-11-14 评审）：kill-9 后 LangGraph 整节点重放时，先从 trace
+    # 灌回指纹前缀——否则每一轮的指纹都对不上 callcache，先前每一轮都被重新
+    # 付费（最多 round_cap 次额外调用）。只恢复“被打断的最后一次尝试”；
+    # 恢复不了（无中断轨迹/全量观察不可读或被篡改）就把模型轨迹状态重置回
+    # 起点，诚实重出生（新 seq、照常记账，不伪装命中）。
+    if _resume_prefix_from_trace(model, tracer, workdir=workdir,
+                                 budget=budget) is None:
+        # 新 run（无中断轨迹）或恢复失败：确保轨迹状态从头开始；恢复中途
+        # fail-closed 时已喂入的前缀也由这里一并回滚。
+        model.configure(system_prompt=instructions, task=task)
 
     if max_steps is not None:
         # 显式 max_steps 优先，逐字同旧版（调用方自担外壳容量）。
@@ -1224,6 +1249,9 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
     value = ""
     reason = ""
     state = ""
+    # CR-17 复核：落中断标记（0700 根内，内容仅供人类排查）。
+    attempt_marker = Path(tracer.root) / ATTEMPT_OPEN
+    attempt_marker.write_text("in-progress\n", encoding="utf-8")
     try:
         result = agent.run(task, return_full_result=True,
                            max_steps=steps_max)
@@ -1288,6 +1316,13 @@ def run_agentic_inner_loop(*, workdir: "str | Path", task: str,
         kind = KIND_ENGINE_ERROR
         reason = f"{type(exc).__name__}: {exc}"
 
+    # CR-17 复核：自终局（含引擎错误优雅收尾）即删中断标记——下一次同 workdir
+    # 重入按新尝试处理；只有被 SIGKILL 等外部终止时标记才残留，成为续跑依据。
+    try:
+        attempt_marker.unlink()
+    except FileNotFoundError:
+        pass
+
     if kind in (KIND_FINISH,):
         tracer.record(
             seq=round_state.current_seq, round_idx=round_state.current_round,
@@ -1335,7 +1370,8 @@ def engine_for(runspec: Any) -> str:
 
 def feed_trajectory_from_trace(model: Any, tracer: TraceStore,
                                *, workdir: "str | Path",
-                               budget: "BudgetTracker | None" = None
+                               budget: "BudgetTracker | None" = None,
+                               lines: Any = None
                                ) -> dict[str, Any]:
     """从 trace 全量存储重建历史观察并重放前缀链（**不重跑任何工具**）。
 
@@ -1345,13 +1381,16 @@ def feed_trajectory_from_trace(model: Any, tracer: TraceStore,
     对不上），调用方必须诚实按重出生处理（新 seq、ledger 照常记账），
     不得伪装命中。
 
+    ``lines``（CR-17）：只重放给定行（调用方按“最后一次尝试”切片）；缺省
+    读整份 trace（既有测试/重放驱动语义不变）。
+
     返回 ``{"steps_replayed": n, "round": r, "verified": bool}``。
     """
-    lines = tracer.load_lines()
+    rows = list(lines) if lines is not None else tracer.load_lines()
     rebuilt = tracer.rebuild_observations()
     n = 0
     last_round = 0
-    for line in iter_trajectory(lines):
+    for line in iter_trajectory(rows):
         step = int(line["step"])
         if step not in rebuilt:
             raise ValueError(
@@ -1374,10 +1413,10 @@ def feed_trajectory_from_trace(model: Any, tracer: TraceStore,
     model.restore_round(last_round)
     if budget is not None:
         # 预算计数从 trace 重放恢复（控制行 step=0 不计工具步）。
-        tool_steps = sum(1 for ln in iter_trajectory(lines))
+        tool_steps = sum(1 for _ in iter_trajectory(rows))
         tokens = 0
         model_rounds = 0
-        for ln in lines:
+        for ln in rows:
             if ln["tool"] == MODEL_ROUND_TOOL:
                 model_rounds += 1
                 usage = ln.get("usage")
@@ -1387,3 +1426,39 @@ def feed_trajectory_from_trace(model: Any, tracer: TraceStore,
         budget.steps_used = tool_steps
         budget.tokens_used = tokens
     return {"steps_replayed": n, "round": last_round, "verified": True}
+
+
+def _resume_prefix_from_trace(model: Any, tracer: TraceStore, *,
+                              workdir: "str | Path",
+                              budget: "BudgetTracker | None" = None
+                              ) -> "dict[str, Any] | None":
+    """CR-17 接线：仅在**最后一次尝试被打断**时恢复轨迹前缀。
+
+    判据：trace 里最后一条 ``__answer__`` 终局行之后的工具行才是被打断那一次
+    尝试的轨迹，且 trace 根下必须留有 ``attempt.open`` 标记（本次尝试开始时
+    写入、任何自终局返回前删除）。仅凭「最后一段没有 answer」不够：一次正常
+    结束但没有 answer 的失败（round_cap/供应侧错）会让同 workdir 的重入被误判
+    成 kill -9 重放。全量观察不可读/被篡改/行截断时 fail-closed 返回 None
+    （调用方重置模型状态，按诚实重出生记账）。
+    """
+    marker = Path(tracer.root) / ATTEMPT_OPEN
+    if not marker.is_file():
+        # 无中断标记 = 上一次尝试已自终局（正常/失败返回都会删标记），
+        # 本次是重入而非断点续跑：不灌旧轨迹，从头开始。
+        return None
+    try:
+        lines = tracer.load_lines()
+        start = 0
+        for idx, line in enumerate(lines):
+            if str(line.get("tool", "")) == ANSWER_TOOL:
+                start = idx + 1
+        segment = lines[start:]
+        if not any(not str(ln.get("tool", "")).startswith("__")
+                   for ln in segment):
+            return None
+        return feed_trajectory_from_trace(
+            model, tracer, workdir=workdir, budget=budget, lines=segment)
+    except (ValueError, KeyError, OSError):
+        # 截断/损坏/缺键的行（kill -9 残骸的典型形态）一律按恢复失败处理：
+        # 不重跑工具、不伪装命中，调用方诚实重出生。
+        return None
