@@ -195,7 +195,12 @@ class Rung4Judge:
 
 
 def combine_vector(rules: dict, rung4: "Rung4Result | dict | None") -> dict:
-    """汇总分级向量：放行只看 Rung1–3；Rung4 给意见/升级标志。"""
+    """汇总分级向量：Rung1–3 是放行前提，active Rung4 升级态一律禁止自动放行。
+
+    Rung4 仍不改规则结论（规则可否决、VLM 永不放行）；record_only/uncalibrated
+    零影响；active 下分歧/低置信/VLM 故障时 escalate_human=True 且
+    auto_release=False（CR-26：与 bineval_gate_verdict 同形，两标志互斥）。
+    """
     r4 = rung4.as_dict() if isinstance(rung4, Rung4Result) else rung4
     vector = {
         "rung1": rules["rung1"]["pass"],
@@ -204,13 +209,18 @@ def combine_vector(rules: dict, rung4: "Rung4Result | dict | None") -> dict:
     }
     rules_pass = all(vector.values())
     r4_active = (r4 or {}).get("mode") == MODE_ACTIVE
+    escalate_human = bool(
+        not rules_pass
+        or (r4_active and (r4 or {}).get("disagreement"))
+        or (r4_active and (r4 or {}).get("low_confidence"))
+        or (r4_active and (r4 or {}).get("status") == "vlm_error"))
+    # CR-26：auto_release 与 escalate_human 必须互斥——旧实现无条件
+    # auto_release=rules_pass，active Rung4 报缺陷时会同时产出
+    # auto_release=True 与 escalate_human=True，任何信任该字段名的消费者都会
+    # 绕过 D8 升级。此处与 bineval_gate_verdict 同形：rules_pass 且不升级。
     out = {"vector": vector, "rules_pass": rules_pass, "rung4": r4,
-           "auto_release": rules_pass,
-           "escalate_human": bool(
-               not rules_pass
-               or (r4_active and (r4 or {}).get("disagreement"))
-               or (r4_active and (r4 or {}).get("low_confidence"))
-               or (r4_active and (r4 or {}).get("status") == "vlm_error"))}
+           "auto_release": rules_pass and not escalate_human,
+           "escalate_human": escalate_human}
     if (r4 or {}).get("disagreement"):
         out["banner"] = "规则/VLM 分歧：以 Rung1–3 规则为准，由人裁决（D8）"
     return out

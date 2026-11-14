@@ -14,6 +14,7 @@ QA 修复轮追加 4b-4g 六个默认测试（数据链三态/strict 基线/对�
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -199,6 +200,45 @@ def test_resolver_stages_fixture_solution(tmp_path):
         yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
     with pytest.raises(SolutionError, match="逃逸|空段|relpath"):
         load_manifest(bad)
+
+
+def test_cr51_stage_hardens_intermediate_dirs_and_existing_files(tmp_path):
+    """CR-51（2026-11-14 评审）：中间目录也要 0700，既有件重入也要收敛权限。
+
+    旧实现只 chmod 叶子父目录：mkdir(parents=True) 建出的中间层保持 umask
+    （0755），已存在的 dst 则完全跳过 chmod——外层目录/旧件世界可读。
+    """
+    src = tmp_path / "solutions" / "track1_tools" / "09_nested"
+    (src / "lib").mkdir(parents=True)
+    body = b"print('nested')\n"
+    (src / "lib" / "util.py").write_bytes(body)
+    manifest_doc = {
+        "schema": "simpraxis.solution_manifest.v1",
+        "solution_id": "track1_tools/09_nested",
+        "title": "CR-51 合成嵌套方案",
+        "entrypoint": "lib/util.py",
+        "sim_engine": {"slug": "sapien", "min_version": "3.0.3"},
+        "dependencies": {"pip": []},
+        "rung_thresholds": {"ref": "orchestrator/judge/thresholds.py"},
+        "frozen_inputs": [{"track": "track1", "index": 9}],
+        "files": [{"relpath": "lib/util.py",
+                   "sha256": hashlib.sha256(body).hexdigest()}],
+    }
+    (src / "manifest.yaml").write_text(
+        yaml.safe_dump(manifest_doc, allow_unicode=True), encoding="utf-8")
+    manifest = load_manifest(src)
+
+    work = tmp_path / "work"
+    (work / "lib").mkdir(parents=True)          # 外部/上一轮留下的目录
+    os.chmod(work / "lib", 0o755)
+    staged = manifest.stage(work)
+    assert stat.S_IMODE((work / "lib").stat().st_mode) == 0o700
+    assert stat.S_IMODE(staged.entrypoint.stat().st_mode) == 0o700
+
+    # 既有件被放宽后重入 stage：同样收敛回契约权限（入口 0700）
+    os.chmod(staged.entrypoint, 0o644)
+    staged2 = manifest.stage(work)
+    assert stat.S_IMODE(staged2.entrypoint.stat().st_mode) == 0o700
 
 
 # ---------------------------------------------------------------------------

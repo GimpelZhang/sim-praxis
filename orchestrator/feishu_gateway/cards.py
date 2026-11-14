@@ -1599,15 +1599,24 @@ def parse_card_event(event: Any) -> "tuple[dict, str, Optional[str], Optional[st
     # feedback_<choice>（见 _gate1_form_2）；其余形态回退取唯一字符串值。
     feedback = form_value.get("feedback")
     if not isinstance(feedback, str):
+        # CR-46：choice 可能被客户端序列化成 "1"/"2"（字符串），先归一成 int
+        # 再选 feedback_<choice>；否则回退会把第一个字符串控件当成该方案的
+        # textarea，真人点「批准方案 2」却存下方案 1 的文本。
         choice = value.get("choice")
-        if isinstance(choice, int):
+        if isinstance(choice, str):
+            try:
+                choice = int(choice.strip())
+            except ValueError:
+                choice = None
+        if isinstance(choice, int) and not isinstance(choice, bool):
             cand = form_value.get(f"feedback_{choice}")
             if isinstance(cand, str):
                 feedback = cand
     if not isinstance(feedback, str):
-        # 兼容形态：取其中唯一的字符串控件值（按钮 value 不进 form_value）
+        # 兼容形态：取其中唯一的字符串控件值（按钮 value 不进 form_value）。
+        # CR-46：多字符串值无法归属，宁空勿猜（其 docstring 早已声明「唯一」）。
         str_values = [v for v in form_value.values() if isinstance(v, str)]
-        feedback = str_values[0] if str_values else ""
+        feedback = str_values[0] if len(str_values) == 1 else ""
     operator = getattr(data, "operator", None)
     context = getattr(data, "context", None)
     return (

@@ -23,6 +23,8 @@ from typing import Any, Callable
 
 import requests
 
+from orchestrator.common.fsutil import ensure_private_dir
+
 from .cards import (
     APPROVAL_EMPTY_TOAST,
     GATE_MISMATCH_TOAST,
@@ -129,7 +131,9 @@ class FeishuGateway:
                                            "/mnt/artifacts/simpraxis/phase1"),
                             "task1_feishu")
         )
-        self.evidence_dir.mkdir(parents=True, exist_ok=True)
+        # CR-50：证据目录含 ws_run.log（线程 id/任务标题），必须 0700——
+        # 裸 mkdir 走 umask 0755 时世界可读。
+        ensure_private_dir(self.evidence_dir, mode=0o700)
         self.run_dir = run_dir or os.environ.get("SIMPRAXIS_RUN_DIR",
                                                  "/mnt/artifacts/simpraxis/runs")
         self._on_p2p_text = on_p2p_text
@@ -219,9 +223,19 @@ class FeishuGateway:
 
     # ---------- 发消息 / 上传 ----------
 
-    def send_text(self, receive_id: str, text: str) -> str:
+    def send_text(self, receive_id: str, text: str, *,
+                  receive_id_type: str = "open_id") -> str:
+        """发纯文本消息。receive_id_type 必须与 id 形态匹配（CR-03）。
+
+        P2P 通道拿到的是 ev["chat_id"]（``oc_…`` 会话 id），发回执时必须用
+        ``chat_id``；发给 owner 本人的提醒/标签行用的是 open_id。旧实现恒发
+        ``open_id``，三个 P2P 调用点每次都被服务端拒绝，异常被吞成一行日志，
+        真人却以为意见已记录。
+        """
+        if receive_id_type not in ("open_id", "chat_id"):
+            raise ValueError(f"非法 receive_id_type: {receive_id_type!r}")
         body = self._post_json(
-            f"{self.BASE}/im/v1/messages?receive_id_type=open_id",
+            f"{self.BASE}/im/v1/messages?receive_id_type={receive_id_type}",
             {"receive_id": receive_id, "msg_type": "text",
              "content": json.dumps({"text": text}, ensure_ascii=False)},
             api="im.messages.text",
@@ -255,7 +269,16 @@ class FeishuGateway:
                   "content": json.dumps(primary, ensure_ascii=False)},
             timeout=self.HTTP_TIMEOUT,
         )
-        body = resp.json()
+        # CR-48：主响应也必须走与 _check 同形的非 JSON 兜底——裸 resp.json()
+        # 抛 ValueError 会跳过下面的 1.0/2.0 回退，并逃逸只捕获 FeishuAPIError
+        # 的调用方（发卡失败从「降级重试」变成不可控异常）。
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            self._log.error("interactive 卡片 %s 非 JSON 响应 http=%s",
+                            primary_name, resp.status_code)
+            raise FeishuAPIError(resp.status_code, "non-json response",
+                                 api="im.messages.interactive") from exc
         used = primary_name
         if body.get("code") != 0:
             self._log.warning(
@@ -706,6 +729,14 @@ class FeishuGateway:
             lines.append(f"- Gate{r['gate']}｜{title}｜线程 `{r['thread_id']}`")
         return "\n".join(lines)
 
+    @staticmethod
+    def _outside_window_text(row: dict) -> str:
+        """CR-04：窗外回执（明确「未记录」，并指出是哪张卡的窗口已过）。"""
+        title = row.get("task_title") or "（无任务名）"
+        return ("**未记录**：这条意见距该审批卡送达已超过 10 分钟会话窗。"
+                f"请直接点击审批卡片上的按钮，或在当前待审批卡/视频下回复。"
+                f"当前审批：Gate{row['gate']}｜{title}｜线程 `{row['thread_id']}`")
+
     def _handle_message(self, data: Any) -> None:
         try:
             ev = parse_message_event(data)
@@ -732,7 +763,8 @@ class FeishuGateway:
                         "chat=%s refs=%d", ev["chat_id"], len(refs))
                     try:
                         self.send_text(ev["chat_id"],
-                                       self._ambiguity_text([]))
+                                       self._ambiguity_text([]),
+                                       receive_id_type="chat_id")
                     except FeishuAPIError:
                         self._log.warning("p2p 歧义回执发送失败", exc_info=True)
                     self._on_card_safe({**info, "accepted": False,
@@ -751,19 +783,35 @@ class FeishuGateway:
                 self._log.info("p2p 文本无法唯一定位审批卡（候选 %d），不落库",
                                len(pending))
                 try:
-                    self.send_text(ev["chat_id"], self._ambiguity_text(pending))
+                    self.send_text(ev["chat_id"], self._ambiguity_text(pending),
+                                   receive_id_type="chat_id")
                 except FeishuAPIError:
                     self._log.warning("p2p 歧义回执发送失败", exc_info=True)
                 self._on_card_safe({**info, "accepted": False,
                                     "reason": "ambiguous",
                                     "candidates": len(pending)})
                 return
-            age_ms = now_ms() - int(row["created_at"])
+            # CR-04：窗口锚点是**卡片送达**时刻（card_sent_at，首次回填
+            # card_message_id 时写入），不是 claim/created_at——Gate2 的
+            # created_at 落在视频压缩上传阶梯（最多 4×1800s）之前，崩溃后
+            # resume 也不刷新，按 created_at 计窗会把卡片刚出现时的评论判成
+            # 过期。老行（v4 前）无该列值 → 回退 created_at。
+            anchor_ms = int(row.get("card_sent_at") or row["created_at"])
+            age_ms = now_ms() - anchor_ms
             if age_ms > self.SESSION_WINDOW_MS:
                 self._log.info(
-                    "p2p 文本超出 10 分钟会话窗（%dms），忽略 thread=%s gate=%s",
-                    age_ms, row["thread_id"], row["gate"])
+                    "p2p 文本超出 10 分钟会话窗（%dms，锚点 card_sent_at=%s），"
+                    "忽略 thread=%s gate=%s", age_ms,
+                    row.get("card_sent_at"), row["thread_id"], row["gate"])
                 info.update({"accepted": False, "reason": "outside_window"})
+                # CR-04：窗外也必须回执——旧实现只落一行日志，真人以为意见
+                # 已进入裁决。
+                try:
+                    self.send_text(ev["chat_id"],
+                                   self._outside_window_text(row),
+                                   receive_id_type="chat_id")
+                except FeishuAPIError:
+                    self._log.warning("p2p 窗外回执发送失败", exc_info=True)
                 if self._on_p2p_text:
                     self._on_card_safe(info)
                 return
@@ -786,7 +834,8 @@ class FeishuGateway:
             self._log.info("p2p 意见已记录 %d 字 thread=%s gate=%s",
                            len(text), row["thread_id"], row["gate"])
             try:
-                self.send_text(ev["chat_id"], receipt)
+                self.send_text(ev["chat_id"], receipt,
+                               receive_id_type="chat_id")
             except FeishuAPIError:
                 # 回执失败不影响意见已落库；静默不报错（通道②主流程不依赖回执）
                 self._log.warning("p2p 回执发送失败（意见已落库）", exc_info=True)
@@ -816,7 +865,12 @@ class FeishuGateway:
         """
         archived = self.store.archive_decided(thread_id, gate)
         if archived:
-            self._event_for(thread_id, gate).clear()
+            # CR-52：旧轮 Event 只服务上一轮等待者（已随归档早退），clear 后
+            # 直接回收 map 条目——旧实现恒 _event_for() 取用，条目永不释放。
+            with self._events_lock:
+                old = self._events.pop((thread_id, gate), None)
+            if old is not None:
+                old.clear()
             self._log.info("Gate%s 新一轮请求：上一轮决策已归档重发卡片 thread=%s",
                            gate, thread_id)
         return archived
@@ -913,30 +967,47 @@ class FeishuGateway:
     ) -> dict:
         ev = self._event_for(thread_id, gate)
         start = time.monotonic()
-        while True:
-            ev.wait(self.WAIT_TICK_S)
-            row = self.store.get_pending(thread_id, gate)
-            if row is not None and row["status"] == "DECIDED":
-                return {"decision": row["decision"],
-                        "choice": row["choice"],
-                        "human_notes": row["human_notes"],
-                        "source": row["source"]}
-            # H-6：提醒节奏落库（reminder_count/last_reminder_at），调度锚点用
-            # 行 created_at 的墙钟时间——进程重启后 8h/16h 节奏不重置、不重复发。
-            count, _last = self.store.get_reminder_state(thread_id, gate)
-            if (row is not None and row["status"] == "PENDING"
-                    and count < len(self.REMIND_AFTER_S)):
-                due_at_ms = int(row["created_at"]) + self.REMIND_AFTER_S[count] * 1000
-                if now_ms() >= due_at_ms:
-                    task_title = row.get("task_title")
-                    if self._send_reminder(gate, count + 1, thread_id, task_title):
-                        # 仅发送成功才计数；失败下一节拍重试，不跳过该档。
-                        self.store.bump_reminder(thread_id, gate)
-            elapsed = time.monotonic() - start
-            if max_wait is not None and elapsed >= max_wait:
-                # 绝不代决：超时仅抛出，由上层决定是否继续等待
-                raise TimeoutError(
-                    f"Gate{gate} 等待 {elapsed:.0f}s 未决策（禁止自动批准）")
+        try:
+            while True:
+                ev.wait(self.WAIT_TICK_S)
+                row = self.store.get_pending(thread_id, gate)
+                if row is not None and row["status"] == "DECIDED":
+                    return {"decision": row["decision"],
+                            "choice": row["choice"],
+                            "human_notes": row["human_notes"],
+                            "source": row["source"]}
+                # CR-53：EXPIRED/其他非 PENDING 终态不是「继续等」——旧实现
+                # 每 60s 空转且不提醒、不返回。绝不代决：fail-loud 交上层
+                # （resume 读终态或人工介入）。行不存在（被归档/清库）仍按
+                # 原语义继续等：新一轮请求可能在途。
+                if row is not None and row["status"] != "PENDING":
+                    raise RuntimeError(
+                        f"Gate{gate} 等待中行状态变为 {row['status']}"
+                        f"（非 PENDING/DECIDED），停止等待；"
+                        f"请走 resume 读终态 thread={thread_id}")
+                # H-6：提醒节奏落库（reminder_count/last_reminder_at），调度锚点用
+                # 行 created_at 的墙钟时间——进程重启后 8h/16h 节奏不重置、不重复发。
+                count, _last = self.store.get_reminder_state(thread_id, gate)
+                if (row is not None and row["status"] == "PENDING"
+                        and count < len(self.REMIND_AFTER_S)):
+                    due_at_ms = int(row["created_at"]) + self.REMIND_AFTER_S[count] * 1000
+                    if now_ms() >= due_at_ms:
+                        task_title = row.get("task_title")
+                        if self._send_reminder(gate, count + 1, thread_id, task_title):
+                            # 仅发送成功才计数；失败下一节拍重试，不跳过该档。
+                            self.store.bump_reminder(thread_id, gate)
+                elapsed = time.monotonic() - start
+                if max_wait is not None and elapsed >= max_wait:
+                    # 绝不代决：超时仅抛出，由上层决定是否继续等待
+                    raise TimeoutError(
+                        f"Gate{gate} 等待 {elapsed:.0f}s 未决策（禁止自动批准）")
+        finally:
+            # CR-52：等待者退出即回收 Event map 条目（仅当仍指向本对象）。
+            # 并发等待者各持自身引用，裁决仍由库行判定；被回收只影响唤醒
+            # 时延（≤ WAIT_TICK_S 一拍），不改变正确性。
+            with self._events_lock:
+                if self._events.get((thread_id, gate)) is ev:
+                    self._events.pop((thread_id, gate), None)
 
     def _send_reminder(
         self,
@@ -1006,6 +1077,52 @@ class FeishuGateway:
             f"Gate{gate} 占位行在{phase}前已终结（status={status}），未发件不发；"
             f"{orphan_hint}，请走 resume 读终态 thread={thread_id}")
 
+    def _gate1_claim_or_wait(
+        self, thread_id: str, gate: int, task_title: str, *, kind: str
+    ) -> bool:
+        """Gate1 家族发卡前的 claim 守卫（CR-25，与 Gate2 同形）。
+
+        返回 True = 本次**不发卡**（他方卡片已送达，或观察窗内他方存活上传中），
+        直接落进 _await_decision 纯等待同一裁决；返回 False = 可以发卡（本方法
+        已占位成功，或接管陈旧崩溃现场——发送前已做 fresh 复查）。占位行消失
+        或已终结时 fail-loud 抛 RuntimeError，拒绝补发孤儿卡。
+
+        旧实现是 check-then-send：kill -9 后 resume 与另一个存活调用者并发服务
+        同一线程时，聊天里会出现两张 Gate1 卡；真人点较新那张被
+        _find_pending_by_card 判「该审批已结束或不存在」，点击被丢弃而流水线
+        继续等——安全门上白浪费一次人类动作（Gate2 早已用 claim_pending 解决）。
+        """
+        claimed = self.store.claim_pending(thread_id, gate,
+                                           task_title=task_title)
+        if claimed:
+            self._fresh_pending_or_abort(
+                thread_id, gate, phase="卡片发送",
+                orphan_hint="本次无媒体在途，卡片未发")
+            return False
+        existing = self.store.get_pending(thread_id, gate)
+        if existing is not None and existing["status"] == "PENDING" \
+                and existing["card_message_id"]:
+            self._log.warning(
+                "Gate%s 占位已被他方持有且卡片已发（%s），本次零发送纯等待 "
+                "thread=%s card=%s", gate, kind, thread_id,
+                existing["card_message_id"])
+            return True
+        claim_action = self._claim_loss_action(thread_id, gate)
+        if claim_action == "gone":
+            raise RuntimeError(
+                f"Gate{gate} 占位行在 claim 后消失，疑似他方已裁决归档；"
+                "拒绝发送孤儿卡，请走 resume 读终态 "
+                f"thread={thread_id}")
+        if claim_action == "wait":
+            self._log.warning(
+                "Gate%s 全空占位行观察窗内他方有列增长（存活上传中），"
+                "本次零发送纯等待（%s）thread=%s", gate, kind, thread_id)
+            return True
+        self._fresh_pending_or_abort(
+            thread_id, gate, phase="卡片发送",
+            orphan_hint="本次无媒体在途，卡片未发")
+        return False
+
     # ---------- 对外主入口 ----------
 
     def request_gate1_approval(
@@ -1026,25 +1143,28 @@ class FeishuGateway:
         else:
             # Task7 D10：上一轮已决策（打回）时先归档终态行，保证是新卡片新点击
             self._reopen_round(thread_id, gate)
-            sent = self._send_interactive(
-                self.owner_open_id,
-                build_gate1_card(task_title, proposals),
-                build_gate1_card_v2(task_title, proposals),
-                form_required=True,
-            )
-            self.store.upsert_pending(
-                thread_id, gate,
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"],
-                task_title=task_title)
-            # 极端竞态：upsert 前行已存在但无 message_id，attach 再保底回填一次
-            # （R-LOW-3：0 行=卡片刚发出行即终结，走孤儿告警留痕）
-            self._attach_ids_or_warn(
-                thread_id, gate, sent_kind="Gate1 卡片",
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"])
-            self._log.info("Gate1 卡片已发出 thread=%s schema=%s",
-                           thread_id, sent["schema"])
+            # CR-25：与 Gate2 同形的 claim 守卫（并发 resume 不得发第二张卡）
+            if not self._gate1_claim_or_wait(
+                    thread_id, gate, task_title, kind="Gate1 卡片"):
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate1_card(task_title, proposals),
+                    build_gate1_card_v2(task_title, proposals),
+                    form_required=True,
+                )
+                self.store.upsert_pending(
+                    thread_id, gate,
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"],
+                    task_title=task_title)
+                # 极端竞态：upsert 前行已存在但无 message_id，attach 再保底回填一次
+                # （R-LOW-3：0 行=卡片刚发出行即终结，走孤儿告警留痕）
+                self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate1 卡片",
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"])
+                self._log.info("Gate1 卡片已发出 thread=%s schema=%s",
+                               thread_id, sent["schema"])
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 
@@ -1455,24 +1575,27 @@ class FeishuGateway:
         else:
             # Task7 D10：上一轮打回先归档，保证新卡片新点击。
             self._reopen_round(thread_id, gate)
-            sent = self._send_interactive(
-                self.owner_open_id,
-                build_gate1_card_ascent_v1(task_title, proposals, v1_summary),
-                build_gate1_card_ascent(task_title, proposals, v1_summary),
-                form_required=True,
-            )
-            self.store.upsert_pending(
-                thread_id, gate,
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"],
-                task_title=task_title)
-            # 极端竞态保底回填（R-LOW-3：0 行=卡片刚发出行即终结，孤儿告警）。
-            self._attach_ids_or_warn(
-                thread_id, gate, sent_kind="Gate1(ascent) 卡片",
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"])
-            self._log.info("Gate1(ascent) 卡片已发出 thread=%s schema=%s",
-                           thread_id, sent["schema"])
+            # CR-25：与 Gate2 同形的 claim 守卫（并发 resume 不得发第二张卡）
+            if not self._gate1_claim_or_wait(
+                    thread_id, gate, task_title, kind="Gate1(ascent) 卡片"):
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate1_card_ascent_v1(task_title, proposals, v1_summary),
+                    build_gate1_card_ascent(task_title, proposals, v1_summary),
+                    form_required=True,
+                )
+                self.store.upsert_pending(
+                    thread_id, gate,
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"],
+                    task_title=task_title)
+                # 极端竞态保底回填（R-LOW-3：0 行=卡片刚发出行即终结，孤儿告警）。
+                self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate1(ascent) 卡片",
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"])
+                self._log.info("Gate1(ascent) 卡片已发出 thread=%s schema=%s",
+                               thread_id, sent["schema"])
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 
@@ -1501,26 +1624,29 @@ class FeishuGateway:
                 thread_id, row["card_message_id"])
         else:
             self._reopen_round(thread_id, gate)
-            sent = self._send_interactive(
-                self.owner_open_id,
-                build_gate1_card_libero_v1(
-                    task_title, proposals, stage0_facts),
-                build_gate1_card_libero(
-                    task_title, proposals, stage0_facts),
-                form_required=True,
-            )
-            self.store.upsert_pending(
-                thread_id, gate,
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"],
-                task_title=task_title)
-            # 极端竞态保底回填（R-LOW-3 家法：0 行=卡片刚发出行即终结）。
-            self._attach_ids_or_warn(
-                thread_id, gate, sent_kind="Gate1(libero) 卡片",
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"])
-            self._log.info("Gate1(libero) 卡片已发出 thread=%s schema=%s",
-                           thread_id, sent["schema"])
+            # CR-25：与 Gate2 同形的 claim 守卫（并发 resume 不得发第二张卡）
+            if not self._gate1_claim_or_wait(
+                    thread_id, gate, task_title, kind="Gate1(libero) 卡片"):
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate1_card_libero_v1(
+                        task_title, proposals, stage0_facts),
+                    build_gate1_card_libero(
+                        task_title, proposals, stage0_facts),
+                    form_required=True,
+                )
+                self.store.upsert_pending(
+                    thread_id, gate,
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"],
+                    task_title=task_title)
+                # 极端竞态保底回填（R-LOW-3 家法：0 行=卡片刚发出行即终结）。
+                self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate1(libero) 卡片",
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"])
+                self._log.info("Gate1(libero) 卡片已发出 thread=%s schema=%s",
+                               thread_id, sent["schema"])
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 
@@ -1550,26 +1676,29 @@ class FeishuGateway:
                 thread_id, row["card_message_id"])
         else:
             self._reopen_round(thread_id, gate)
-            sent = self._send_interactive(
-                self.owner_open_id,
-                build_gate1_card_fluid_v1(
-                    task_title, proposals, stage0_facts),
-                build_gate1_card_fluid(
-                    task_title, proposals, stage0_facts),
-                form_required=True,
-            )
-            self.store.upsert_pending(
-                thread_id, gate,
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"],
-                task_title=task_title)
-            # 极端竞态保底回填（R-LOW-3 家法：0 行=卡片刚发出行即终结）。
-            self._attach_ids_or_warn(
-                thread_id, gate, sent_kind="Gate1(fluid) 卡片",
-                card_message_id=sent["message_id"],
-                open_chat_id=sent["chat_id"])
-            self._log.info("Gate1(fluid) 卡片已发出 thread=%s schema=%s",
-                           thread_id, sent["schema"])
+            # CR-25：与 Gate2 同形的 claim 守卫（并发 resume 不得发第二张卡）
+            if not self._gate1_claim_or_wait(
+                    thread_id, gate, task_title, kind="Gate1(fluid) 卡片"):
+                sent = self._send_interactive(
+                    self.owner_open_id,
+                    build_gate1_card_fluid_v1(
+                        task_title, proposals, stage0_facts),
+                    build_gate1_card_fluid(
+                        task_title, proposals, stage0_facts),
+                    form_required=True,
+                )
+                self.store.upsert_pending(
+                    thread_id, gate,
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"],
+                    task_title=task_title)
+                # 极端竞态保底回填（R-LOW-3 家法：0 行=卡片刚发出行即终结）。
+                self._attach_ids_or_warn(
+                    thread_id, gate, sent_kind="Gate1(fluid) 卡片",
+                    card_message_id=sent["message_id"],
+                    open_chat_id=sent["chat_id"])
+                self._log.info("Gate1(fluid) 卡片已发出 thread=%s schema=%s",
+                               thread_id, sent["schema"])
         self._event_for(thread_id, gate)
         return self._await_decision(thread_id, gate, max_wait=max_wait)
 

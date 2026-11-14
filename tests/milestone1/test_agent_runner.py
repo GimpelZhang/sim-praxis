@@ -3358,7 +3358,9 @@ for arm in const["arms"]:
                     "dur_s": const["dur_s"]},
             "series": {k: [0.0] * const["frames"]
                        for k in const["series_keys"]},
-            "params": {"arm": arm},
+            "params": {"arm": arm, "mu": const["mu"],
+                       "push": {"t": const["push_t"], "dur": const["push_dur_s"],
+                                "n": const["push_force_n"]}},
             "outcomes": {"fell": False, "fall_frame": None,
                          "torso_z_min": 1.0, "tilt_max_deg": 0.0,
                          "slip_dist_m": feet, "slip_v_max_mps": feet,
@@ -3393,12 +3395,16 @@ _SG_FIXED_FAIL_SCRIPT = (
 
 def _sg_const_doc():
     # 单一口径：测试侧与子进程脚本共用，值全部 import 自 gait_rungs。
+    # params.push/mu（CR-24 起进结构闸）取真实扰动口径，push_t=0 落在
+    # t=[0.0]*frames 的时间轴上（推后窗非空，recompute_run 不会 max([])）。
     return {"seeds": _gr.MIN_SEEDS, "arms": list(_gr.ARMS),
             "series_keys": list(_gr.SERIES_KEYS),
             "csv_fields": list(_gr.CSV_REQUIRED_FIELDS),
             "telem_hz": _gr.TELEM_HZ, "dur_s": _gr.DUR_S,
             "frames": _gr.EXPECTED_FRAMES, "schema": _gr.TELEMETRY_SCHEMA,
-            "engine": _gr.ENGINE, "engine_version": _gr.ENGINE_VERSION}
+            "engine": _gr.ENGINE, "engine_version": _gr.ENGINE_VERSION,
+            "push_force_n": _gr.PUSH_FORCE_N, "push_dur_s": _gr.PUSH_DUR_S,
+            "push_t": 0.0, "mu": 0.2}
 
 
 def _sg_telemetry_dict(arm, s, *, flat, mut=None):
@@ -3411,7 +3417,9 @@ def _sg_telemetry_dict(arm, s, *, flat, mut=None):
                 "gs_enable_zerocopy": False,
                 "telem_hz": _gr.TELEM_HZ, "dur_s": _gr.DUR_S},
         "series": {k: [0.0] * _gr.EXPECTED_FRAMES for k in _gr.SERIES_KEYS},
-        "params": {"arm": arm},
+        "params": {"arm": arm, "mu": 0.2,
+                   "push": {"t": 0.0, "dur": _gr.PUSH_DUR_S,
+                            "n": _gr.PUSH_FORCE_N}},
         "outcomes": {"fell": False, "fall_frame": None,
                      "torso_z_min": 1.0, "tilt_max_deg": 0.0,
                      "slip_dist_m": feet, "slip_v_max_mps": feet,

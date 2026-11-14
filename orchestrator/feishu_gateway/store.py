@@ -22,6 +22,12 @@ schema 演进（H-1/H-6，2026-10-16）：对**已存在的生产库**纯增量�
     media_message_id_v1a / v1b / v2a / v2b 四列（ascent 四媒体 Diff 卡：
     V1 split1 → V1 split2 → V2 split1 → V2 split2 严格顺序各最多推一次，
     崩溃重挂只补缺失件）；Task3 两列与标准单列均不写不碰。
+  - user_version 3→4（CR-04，2026-11-14 评审）：两表各追加 card_sent_at
+    （epoch ms，卡片**送达**时刻）。created_at 在 Gate2 是 claim 时刻，落在
+    视频压缩/上传阶梯（最多 4×1800s）之前，恢复时也不刷新；P2P 文本意见的
+    10 分钟会话窗若锚在 created_at，卡片刚出现就已过期。窗口锚点改为
+    card_sent_at（仅在 card_message_id 首次回填时写入，重挂不刷新），
+    老行回填 NULL → 消费侧回退 created_at。
 """
 from __future__ import annotations
 
@@ -29,7 +35,7 @@ import os
 import sqlite3
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 # 详细计划 §1.2 逐字 DDL（列序、CHECK、PRIMARY KEY(thread_id, gate) 不得改动）
 _DDL = """
@@ -88,14 +94,14 @@ CREATE TABLE IF NOT EXISTS inbound_messages(
 """
 
 # 当前 schema 版本（PRAGMA user_version）。每个版本只做纯增量 ALTER/CREATE。
-_USER_VERSION = 3
+_USER_VERSION = 4
 
 _HISTORY_COLS = (
     "thread_id, gate, status, choice, decision, human_notes, source, "
     "card_message_id, media_message_id, open_chat_id, operator_open_id, "
     "created_at, decided_at, media_message_id_v1, media_message_id_v2, "
     "media_message_id_v1a, media_message_id_v1b, "
-    "media_message_id_v2a, media_message_id_v2b"
+    "media_message_id_v2a, media_message_id_v2b, card_sent_at"
 )
 
 # PENDING 行允许被回填的消息列（只允许 NULL -> 非 NULL，禁止覆盖，重启重挂用）
@@ -208,6 +214,15 @@ class PendingStore:
                 self._conn.execute(
                     f"ALTER TABLE pending_gates_history ADD COLUMN {col} TEXT"
                 )
+        if version < 4:
+            # CR-04：comment 窗锚点列（卡片送达 epoch ms）。可空，老行回填
+            # NULL；主表与 history 同步加列，归档列单保持一致。
+            self._conn.execute(
+                "ALTER TABLE pending_gates ADD COLUMN card_sent_at INTEGER"
+            )
+            self._conn.execute(
+                "ALTER TABLE pending_gates_history ADD COLUMN card_sent_at INTEGER"
+            )
         self._conn.execute(f"PRAGMA user_version = {_USER_VERSION};")
 
     def close(self) -> None:
@@ -236,16 +251,20 @@ class PendingStore:
         历史决策。Gate 打回后的新一轮卡片必须先调 archive_decided 归档，再走本
         插入（Task7 D10 多轮语义，见 _DDL_HISTORY 注释）。
         task_title 同样仅在缺省时回填（H-6 提醒卡片需要任务名）。
+        card_sent_at（CR-04）：随 card_message_id 一并只在缺省时回填——同一轮
+        的窗口锚点，重挂不刷新。
         """
         created_at = created_at_ms if created_at_ms is not None else now_ms()
+        card_sent_at = created_at if card_message_id is not None else None
         # source NOT NULL 但决策前无来源：插入空串占位，mark_decided 写真实来源。
         self._conn.execute(
             """
             INSERT INTO pending_gates(
                 thread_id, gate, status, choice, decision, human_notes, source,
                 card_message_id, media_message_id, open_chat_id,
-                operator_open_id, created_at, decided_at, task_title)
-            VALUES (?, ?, 'PENDING', NULL, NULL, '', '', ?, ?, ?, NULL, ?, NULL, ?)
+                operator_open_id, created_at, decided_at, task_title,
+                card_sent_at)
+            VALUES (?, ?, 'PENDING', NULL, NULL, '', '', ?, ?, ?, NULL, ?, NULL, ?, ?)
             ON CONFLICT(thread_id, gate) DO UPDATE SET
                 card_message_id = COALESCE(pending_gates.card_message_id,
                                            excluded.card_message_id),
@@ -254,11 +273,13 @@ class PendingStore:
                 open_chat_id = COALESCE(pending_gates.open_chat_id,
                                         excluded.open_chat_id),
                 task_title = COALESCE(pending_gates.task_title,
-                                      excluded.task_title)
+                                      excluded.task_title),
+                card_sent_at = COALESCE(pending_gates.card_sent_at,
+                                        excluded.card_sent_at)
             WHERE pending_gates.status = 'PENDING'
             """,
             (thread_id, gate, card_message_id, media_message_id,
-             open_chat_id, created_at, task_title),
+             open_chat_id, created_at, task_title, card_sent_at),
         )
 
     def attach_message_ids(
@@ -289,10 +310,14 @@ class PendingStore:
           （COALESCE 全 no-op 也算 1——行仍存活）；0 = 行不存在或已非
           PENDING（已被他方裁定/归档）——传入的消息 id 对应一条**刚发出的
           孤儿**媒体/卡片，调用方必须 warning 留痕以便运维召回。
+
+        CR-04：card_message_id 首次回填时同事务写入 card_sent_at（P2P 会话窗
+        锚点）；COALESCE 保证重挂不刷新。
         """
         sets, vals = [], []
-        params: dict[str, Optional[str]] = {
+        params: dict[str, Any] = {
             "card_message_id": card_message_id,
+            "card_sent_at": (now_ms() if card_message_id is not None else None),
             "media_message_id": media_message_id,
             "open_chat_id": open_chat_id,
             "media_message_id_v1": media_message_id_v1,
@@ -305,6 +330,8 @@ class PendingStore:
         for col in _FILLABLE:
             if params[col] is not None:
                 sets.append(f"{col} = COALESCE({col}, :{col})")
+        if params["card_sent_at"] is not None:
+            sets.append("card_sent_at = COALESCE(card_sent_at, :card_sent_at)")
         if not sets:
             return None
         sql = (
@@ -354,7 +381,9 @@ class PendingStore:
         """落决策。仅当前状态为 PENDING 时生效（幂等：重复点击/竞态不覆盖）。
 
         返回是否实际落库。human_notes 为 None 时保留既有文本（通道②已追加的意见），
-        非 None 时做一次合并：既有文本在前、卡片反馈在后，去重重叠前缀。
+        非 None 时做一次合并：既有文本在前、卡片反馈在后，按**行等值**去重
+        （CR-47：子串去重会把「ok」吞掉「ok，已确认」「确认」吞掉「确认，同意」
+        这类独立人工备注——真人写了却不落库，卡片却记为 approved）。
         """
         if decision not in ("approve", "reject_with_comments"):
             raise ValueError(f"非法 decision: {decision!r}")
@@ -366,7 +395,7 @@ class PendingStore:
         notes = existing["human_notes"] or ""
         if human_notes is not None and human_notes.strip():
             piece = human_notes.strip()
-            if piece not in notes:
+            if piece not in notes.splitlines():
                 notes = (notes + "\n" + piece).strip()
         cur = self._conn.execute(
             """

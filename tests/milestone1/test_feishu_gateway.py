@@ -26,6 +26,7 @@ import json
 import logging
 import shlex
 import sqlite3
+import stat
 import threading
 import time
 from pathlib import Path
@@ -343,7 +344,9 @@ def test_03_p2p_reply_localization_window_decided_ambiguity_redelivery(gw):
                                   parent_id="om_media_3e"))
     assert "回复视频的意见" in gw.store.get_pending("t3e", 2)["human_notes"]
 
-    # 窗外：created_at 早于 10 分钟会话窗 -> 忽略，不追加、不回执
+    # 窗外：卡片送达（card_sent_at）早于 10 分钟会话窗 -> 忽略、不追加，但
+    # CR-04（2026-11-14 评审）要求必须回执「未记录」——原断言 == before 把
+    # 「静默丢弃」钉成了预期行为，真人会以为意见已进入裁决。
     chat_b = "oc_fixture_outside_window_00000000000000000000"
     gw.store.upsert_pending(
         "t3b", 1, card_message_id="om_card_3b", open_chat_id=chat_b,
@@ -353,7 +356,9 @@ def test_03_p2p_reply_localization_window_decided_ambiguity_redelivery(gw):
                                   message_id="om_t3", parent_id="om_card_3b"))
     row_b = gw.store.get_pending("t3b", 1)
     assert row_b["human_notes"] == "" and row_b["status"] == "PENDING"
-    assert len(_text_calls(gw, chat_b)) == before
+    after = _text_calls(gw, chat_b)
+    assert len(after) == before + 1
+    assert "未记录" in after[-1] and "t3b" in after[-1]
 
     # 已 DECIDED：H-1 收紧——终态行绝不追加（旧实现「仅留痕」是误归属来源），
     # 该行也不在 PENDING 候选中：回执提示无进行中审批，决策/choice/source 不变。
@@ -1451,8 +1456,8 @@ def test_28_schema_migration_from_user_version_0(tmp_path):
 
     s = PendingStore(db)
     # Task3：v0 老库一次性增量（v1 提醒三列 + 双媒体两列）；Task6 再增量到
-    # user_version=3（四媒体 v1a/v1b/v2a/v2b 四列），同提交对账原 ==2 断言。
-    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 3
+    # v3（四媒体 v1a/v1b/v2a/v2b 四列）；CR-04 增量到 v4（card_sent_at）。
+    assert s._conn.execute("PRAGMA user_version;").fetchone()[0] == 4
     cols = {r[1] for r in s._conn.execute("PRAGMA table_info(pending_gates);")}
     hcols = {r[1] for r in s._conn.execute(
         "PRAGMA table_info(pending_gates_history);")}
@@ -1464,6 +1469,8 @@ def test_28_schema_migration_from_user_version_0(tmp_path):
             "media_message_id_v2a", "media_message_id_v2b"} <= cols
     assert {"media_message_id_v1a", "media_message_id_v1b",
             "media_message_id_v2a", "media_message_id_v2b"} <= hcols
+    # CR-04：评论窗锚点列在活表与历史表同生
+    assert "card_sent_at" in cols and "card_sent_at" in hcols
     # 原 13 列顺序/名字未动
     assert list(cols)  # sanity
     row = s.get_pending("oldrow", 1)
@@ -1484,3 +1491,104 @@ def test_28_schema_migration_from_user_version_0(tmp_path):
     assert s2.get_pending("oldrow", 1)["reminder_count"] == 0
     assert s2.bump_reminder("oldrow", 1) == 1
     s2.close()
+
+
+# ---------- CR-03/25/46/47/50/52/53（2026-11-14 评审修复） ----------
+
+def test_cr03_p2p_receipts_use_chat_id_receive_type(gw, monkeypatch):
+    """P2P 回执必须以 receive_id_type=chat_id 发出（oc_ id 配 open_id 必被拒）。"""
+    urls: list[str] = []
+    inner = client_mod.requests.post
+
+    def spy(url, **kw):
+        urls.append(url)
+        return inner(url, **kw)
+
+    monkeypatch.setattr(client_mod.requests, "post", spy)
+    gw.store.upsert_pending("cr3", 1, card_message_id="om_card_cr3",
+                            open_chat_id=CHAT, task_title="CR3 任务")
+    gw._handle_message(text_event("口头补充", chat_id=CHAT,
+                                  message_id="om_cr3",
+                                  parent_id="om_card_cr3"))
+    msg_urls = [u for u in urls if "/im/v1/messages" in u]
+    assert msg_urls, "未记录回执应发出"
+    assert all("receive_id_type=chat_id" in u for u in msg_urls), msg_urls
+
+
+def test_cr46_string_choice_selects_matching_feedback():
+    """choice 被序列化成 "2" 时仍取 feedback_2，且多字符串值不再瞎猜。"""
+    ev = card_event({"gate": 1, "decision": "approve", "choice": "2"},
+                    form_value={"feedback_1": "方案一意见",
+                                "feedback_2": "方案二意见"})
+    value, feedback, *_ = parse_card_event(ev)
+    assert value["choice"] == "2"
+    assert feedback == "方案二意见"
+    # 无 choice 归属且多字符串值：无法确定，宁空不猜
+    ev2 = card_event({"gate": 2, "decision": "approve"},
+                     form_value={"a": "甲", "b": "乙"})
+    assert parse_card_event(ev2)[1] == ""
+
+
+def test_cr47_card_note_not_dropped_as_substring(tmp_path):
+    """P2P 已记「ok，已确认」后卡片再写「ok」：按行等值必须落库。"""
+    s = PendingStore(tmp_path / "dedupe.db")
+    s.upsert_pending("cr47", 1, card_message_id="om_cr47")
+    assert s.append_human_note("cr47", 1, "ok，已确认", message_id="om_a")
+    assert s.mark_decided("cr47", 1, decision="approve", source="card_form",
+                          human_notes="ok")
+    assert s.get_pending("cr47", 1)["human_notes"].splitlines() == \
+        ["ok，已确认", "ok"]
+    s.close()
+    # 完全相同的一行仍然去重（不重复落库）
+    s2 = PendingStore(tmp_path / "dedupe2.db")
+    s2.upsert_pending("cr47b", 1, card_message_id="om_cr47b")
+    assert s2.append_human_note("cr47b", 1, "确认，同意", message_id="om_b")
+    s2.mark_decided("cr47b", 1, decision="approve", source="card_form",
+                    human_notes="确认，同意")
+    assert s2.get_pending("cr47b", 1)["human_notes"] == "确认，同意"
+    s2.close()
+
+
+def test_cr50_evidence_dir_is_private(tmp_path, monkeypatch):
+    """证据目录（ws_run.log 所在）必须 0700，不能用裸 mkdir。"""
+    monkeypatch.setattr(client_mod.requests, "post", make_fake_post([]))
+    ev = tmp_path / "evidence"
+    g = FeishuGateway(APP_ID, APP_SECRET, OWNER,
+                      db_path=tmp_path / "state" / "p.db",
+                      evidence_dir=ev, start_ws=False)
+    try:
+        assert stat.S_IMODE(ev.stat().st_mode) == 0o700
+    finally:
+        g.close()
+
+
+def test_cr52_waiter_reclaims_event_entry(gw, monkeypatch):
+    """_await_decision 退出即回收 map 条目（不再随线程数无界增长）。"""
+    monkeypatch.setattr(gw, "WAIT_TICK_S", 0.01)
+    gw.store.upsert_pending("cr52", 1, card_message_id="om_cr52")
+    assert gw.store.mark_decided("cr52", 1, decision="approve", source="cli")
+    out = gw._await_decision("cr52", 1, max_wait=5)
+    assert out["decision"] == "approve"
+    assert ("cr52", 1) not in gw._events
+
+
+def test_cr53_await_decision_fails_loud_on_expired(gw, monkeypatch):
+    """EXPIRED 行不是「继续等」：必须 fail-loud 而非每 60s 空转。"""
+    monkeypatch.setattr(gw, "WAIT_TICK_S", 0.01)
+    gw.store.upsert_pending("cr53", 2, card_message_id="om_cr53")
+    assert gw.store.mark_expired("cr53", 2)
+    with pytest.raises(RuntimeError, match="EXPIRED"):
+        gw._await_decision("cr53", 2, max_wait=5)
+
+
+def test_cr25_gate1_claim_guard_semantics(gw):
+    """Gate1 发卡前的 claim 守卫：他方已发卡=零发送等待；无行=占位后发卡。"""
+    gw.store.upsert_pending("cr25", 1, card_message_id="om_cr25",
+                            open_chat_id=CHAT, task_title="CR25 任务")
+    n = len(_interactive_calls(gw))
+    assert gw._gate1_claim_or_wait("cr25", 1, "CR25 任务",
+                                   kind="Gate1 卡片") is True
+    assert len(_interactive_calls(gw)) == n          # 绝不发第二张卡
+    assert gw._gate1_claim_or_wait("cr25-new", 1, "CR25 任务",
+                                   kind="Gate1 卡片") is False
+    assert gw.store.get_pending("cr25-new", 1)["status"] == "PENDING"

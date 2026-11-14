@@ -67,6 +67,7 @@ from orchestrator.judge.gait_rungs import (
     contrast_block,
     evaluate_batch,
     recompute_run,
+    resolve_threshold_profile,
 )
 from orchestrator.judge.pareto import METRIC_DIRECTIONS
 from orchestrator.phase2 import chronicle
@@ -1149,3 +1150,44 @@ def test_factory_chunked_birth_spec(tmp_path, monkeypatch):
     # 以 {} 静默装配 ChunkSpec（工厂内另以 state["chosen"] 裸取双保险）。
     with pytest.raises(GraphStateError, match="sim_engine"):
         factory({k: v for k, v in state.items() if k != "chosen"})
+
+
+# ---------------------------------------------------------------------------
+# CR-24 / CR-49（2026-11-14 评审修复）：结构闸与加严 profile 收口
+# ---------------------------------------------------------------------------
+
+def test_cr24_params_push_and_mu_are_schema_errors(tmp_path):
+    """缺 params.push/mu 必须是 schema_errors，而不是 rung2 裸 KeyError。"""
+    wd = tmp_path / "batch"
+    build_synthetic_batch(wd)
+    p = wd / "telemetry" / "normal_s0.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["params"] = {"arm": "normal"}          # 缺 push 块与 mu
+    p.write_text(json.dumps(data), encoding="utf-8")
+    out = evaluate_batch(wd)
+    assert out["ok"] is False and out["rules_pass"] is False
+    errs = " | ".join(out["schema_errors"])
+    assert "normal_s0: params.push" in errs
+    assert "normal_s0: params.mu" in errs
+
+
+def test_cr24_corrupt_calibration_routes_to_schema_errors(tmp_path):
+    """截断的标定件必须短路成 schema_errors，而不是 JSONDecodeError 逃逸。"""
+    wd = tmp_path / "batch"
+    build_synthetic_batch(wd)
+    (wd / "push_window_calibration.json").write_text("{", encoding="utf-8")
+    out = evaluate_batch(wd)
+    assert out["ok"] is False and out["rung4"] is None
+    assert any("push_window_calibration.json 无法解析" in e
+               for e in out["schema_errors"])
+
+
+def test_cr49_profile_may_tighten_but_never_loosen():
+    """profile 只允许 ≤ 默认常量（七个键方向一致：越小越严）。"""
+    base = tight_profile()
+    got = resolve_threshold_profile(base)
+    assert got["contact_force_n"] == base["contact_force_n"]
+    with pytest.raises(ValueError, match="更松"):
+        resolve_threshold_profile({**base, "contact_force_n": 1000.0})
+    with pytest.raises(ValueError, match="更松"):
+        resolve_threshold_profile({**base, "slip_v_max_mps": 500.0})

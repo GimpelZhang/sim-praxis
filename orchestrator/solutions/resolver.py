@@ -103,10 +103,16 @@ class SolutionManifest:
         for sf in self.files:
             src = self.solution_dir / sf.relpath
             dst = work / sf.relpath
+            mode = 0o700 if sf.relpath == self.entrypoint else 0o600
             if not dst.exists():
-                ensure_private_dir(dst.parent, mode=0o700)
-                mode = 0o700 if sf.relpath == self.entrypoint else 0o600
+                # CR-51：mkdir(parents=True) 建出的中间目录保持 umask（0755），
+                # 逐级收敛到 0700——直到 workdir 根（根已在上方设过）。
+                _harden_dir_chain(work, dst.parent)
                 atomic_write_bytes(dst, src.read_bytes(), mode=mode)
+            elif (dst.stat().st_mode & 0o777) != mode:
+                # CR-51：既有件（同 workdir 重入 stage）也收敛到契约权限，
+                # 不让上一轮 umask 留下的 0644 继续世界可读。
+                os.chmod(dst, mode)
             if not dst.is_file():
                 raise SolutionError(
                     f"stage 落件不是常规文件：{dst}（方案 {self.solution_id}）")
@@ -124,6 +130,18 @@ class SolutionManifest:
                 f"（方案 {self.solution_id}）")
         return StagedSolution(workdir=work, entrypoint=entry,
                               files=staged, manifest=self)
+
+
+def _harden_dir_chain(root: Path, leaf: Path) -> None:
+    """把 leaf 到 root 之间的目录逐级收敛到 0700（CR-51）。
+
+    只 chmod 叶子父目录会留下中间层 umask 模式（0755）——方案目录里任何一层
+    世界可读都会泄露解题脚本内容层。root 必为 leaf 的祖先（relpath 已被
+    _validate_relpath 钉在方案目录内）。
+    """
+    cur = ensure_private_dir(leaf, mode=0o700)
+    while cur != root and root in cur.parents:
+        cur = ensure_private_dir(cur.parent, mode=0o700)
 
 
 def solutions_root(kb_root: "str | Path | None" = None) -> Path:

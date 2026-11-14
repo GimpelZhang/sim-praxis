@@ -229,8 +229,13 @@ def test_07_rung4_active_disagreement_d8_both_directions(tmp_path):
     r2 = Rung4Judge(gw2, calibration_file=cal).judge("Zm9v", rules_pass=True)
     assert r2.disagreement == "rules_pass_vlm_defects"
     out2 = combine_vector(rules_ok, r2)
-    assert out2["auto_release"] is True                # 规则为准仍自动放行…
-    assert out2["escalate_human"] is True              # …但升级人裁决（D8）
+    # CR-26（2026-11-14 评审）：本行原先断言 auto_release is True——旧实现把
+    # auto_release 无条件设成 rules_pass，与同时给出的 escalate_human=True
+    # 自相矛盾（任何信任字段名的消费者都会绕过 D8 升级）。现与
+    # bineval_gate_verdict 同形：active 升级态一律禁止自动放行。
+    assert out2["auto_release"] is False               # 升级人裁决即不自动放行
+    assert out2["escalate_human"] is True              # D8 升级
+    assert out2["rules_pass"] is True                  # 规则结论本身不变
 
 
 def test_08_rung4_record_only_displays_without_power(tmp_path):

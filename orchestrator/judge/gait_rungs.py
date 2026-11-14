@@ -76,23 +76,34 @@ PROFILE_KEYS = (
 )
 
 
+def _default_profile() -> dict[str, float]:
+    """gait_thresholds 默认常量（profile=None 口径，也是加严下限的唯一真值）。"""
+    return {
+        "slip_dist_rel_tol": SLIP_DIST_REL_TOL,
+        "vmax_abs_tol": VMAX_ABS_TOL,
+        "tilt_max_abs_tol_deg": TILT_MAX_ABS_TOL_DEG,
+        "contact_force_n": CONTACT_FORCE_N,
+        "slip_v_max_mps": SLIP_V_MAX_MPS,
+        "contact_force_max_n": CONTACT_FORCE_MAX_N,
+        "contact_force_max_n_dr": CONTACT_FORCE_MAX_N_DR,
+    }
+
+
 def resolve_threshold_profile(
         profile: "Mapping[str, float] | None") -> dict[str, float]:
     """归一化加严 profile：None→gait_thresholds 默认常量（Task8 口径）。
 
     映射必须恰含 PROFILE_KEYS 七键、值为正有限实数（bool 不认），否则
     ValueError——加严口径是科学判定的一部分，禁止半张表静默走默认。
+
+    CR-49：每个键都必须 **≤ 默认常量**（七个键的方向一致：公差/接触力门/
+    滑移界/冲击界越小越严）。旧实现只看键集与正数性，`contact_force_n=1000`
+    这类远松于默认（2.0N）的值会把滑移积分归零——任何不传
+    ascent_thresholds.tight_profile() 的调用方都会静默放松 Rung2/3 判定。
     """
+    default = _default_profile()
     if profile is None:
-        return {
-            "slip_dist_rel_tol": SLIP_DIST_REL_TOL,
-            "vmax_abs_tol": VMAX_ABS_TOL,
-            "tilt_max_abs_tol_deg": TILT_MAX_ABS_TOL_DEG,
-            "contact_force_n": CONTACT_FORCE_N,
-            "slip_v_max_mps": SLIP_V_MAX_MPS,
-            "contact_force_max_n": CONTACT_FORCE_MAX_N,
-            "contact_force_max_n_dr": CONTACT_FORCE_MAX_N_DR,
-        }
+        return dict(default)
     if not isinstance(profile, Mapping):
         raise ValueError(
             f"threshold profile 必须是映射或 None，收到 {type(profile).__name__}")
@@ -109,6 +120,11 @@ def resolve_threshold_profile(
                 or not math.isfinite(float(v)) or float(v) <= 0:
             raise ValueError(
                 f"threshold profile[{key!r}] 必须是正有限实数，收到 {v!r}")
+        if float(v) > default[key]:
+            raise ValueError(
+                f"threshold profile[{key!r}]={float(v)!r} 比默认 "
+                f"{default[key]!r} 更松；加严 profile 只允许收紧"
+                "（唯一来源 orchestrator.judge.ascent_thresholds.tight_profile()）")
         out[key] = float(v)
     return out
 
@@ -220,6 +236,22 @@ def validate_telemetry_structure(data: Any, run_id: str) -> list[str]:
     params = data.get("params")
     if not isinstance(params, dict) or params.get("arm") not in ARMS:
         errs.append(f"{run_id}: params.arm 必须属于 {ARMS}")
+        return errs
+    # CR-24：recompute_run/_group_stats 直接取 params["push"]["t"/"dur"/"n"] 与
+    # params["mu"]，形状不合必须在结构闸转 schema 错误（evaluate_batch 短路、
+    # 不出裸 KeyError/TypeError），且 push 三值与 mu 必须是有限数（NaN 会让
+    # 推后窗为空、max([]) 直接抛 ValueError）。
+    mu = params.get("mu")
+    if not _is_num(mu) or not math.isfinite(float(mu)):
+        errs.append(f"{run_id}: params.mu 必须是有限数值")
+    push = params.get("push")
+    if not isinstance(push, dict):
+        errs.append(f"{run_id}: params.push 必须是含 t/dur/n 的对象")
+    else:
+        for key in ("t", "dur", "n"):
+            v = push.get(key)
+            if not _is_num(v) or not math.isfinite(float(v)):
+                errs.append(f"{run_id}: params.push.{key} 必须是有限数值")
     return errs
 
 
@@ -289,13 +321,40 @@ def recompute_run(data: dict, *,
 # Rung1：结构 + finite + 产物齐套 + 标定件
 # ---------------------------------------------------------------------------
 
+def _read_calibration(workdir: Path) -> tuple["dict | None", "str | None"]:
+    """读 push_window_calibration.json（CR-24）。
+
+    返回 (doc, err)：缺件 → (None, None)（缺件由 Rung1 报「必须随批」）；
+    解析失败/顶层非对象 → (None, 受控错误行)——标定件畸形必须走 schema-error
+    路径短路（evaluate_batch 在发任何视觉调用前返回、scan_batch_schema_gate
+    同口径），而不是让 JSONDecodeError/AttributeError 逃出判定。
+    """
+    p = workdir / "push_window_calibration.json"
+    if not p.is_file():
+        return None, None
+    try:
+        cal = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return None, (f"push_window_calibration.json 无法解析："
+                      f"{type(exc).__name__}")
+    if not isinstance(cal, dict):
+        return None, (f"push_window_calibration.json 顶层必须是对象，"
+                      f"实际 {type(cal).__name__}")
+    return cal, None
+
+
 def _check_calibration(workdir: Path) -> tuple[dict, list[str]]:
     p = workdir / "push_window_calibration.json"
     info: dict[str, Any] = {"present": p.is_file()}
     errs: list[str] = []
     if not p.is_file():
         return info, ["缺 push_window_calibration.json（推力窗口标定件必须随批）"]
-    cal = json.loads(p.read_text(encoding="utf-8"))
+    cal, parse_err = _read_calibration(Path(workdir))
+    if parse_err is not None:
+        # 正常路径下 load_batch 已把该错转成 schema 错误并短路；这里是直接
+        # 调用 rung1_check 时的第二道防线（不抛裸异常）。
+        info["parse_error"] = True
+        return info, [parse_err]
     info["schema"] = cal.get("schema")
     sel = cal.get("selected_window", {})
     info["selected_window"] = sel
@@ -640,6 +699,11 @@ def load_batch(workdir: str | Path) -> tuple[dict[str, dict], list[dict],
     missing_cols = [c for c in CSV_REQUIRED_FIELDS if c not in header]
     if missing_cols:
         errs.append(f"dr_controls_vs_experimental.csv 缺列：{missing_cols}")
+    # CR-24：标定件解析错误与批次结构错误同路（schema_errors 短路），而不是
+    # 留到 Rung1 里抛裸 JSONDecodeError 让判定整体崩掉。
+    _cal_doc, cal_err = _read_calibration(wd)
+    if cal_err is not None:
+        errs.append(cal_err)
     return telemetries, rows, summary, errs
 
 
