@@ -41,6 +41,7 @@ from typing import Callable
 
 from orchestrator.common import fsutil
 from orchestrator.common.clock import utc_now_iso_z
+from orchestrator.common.secrets import redact_text
 
 # ---------------------------------------------------------------------------
 # 常量区（AC-T2-5：静默时限改动只许在此常量 + silence_limits.json，并随票）
@@ -350,7 +351,14 @@ def atomic_append_jsonl(path: Path, obj: dict, *, mode: int = 0o600,
         os.fchmod(fd, mode)
         line = json.dumps(obj, ensure_ascii=False, sort_keys=True) + \
             ("\n" if newline else "")
-        os.write(fd, line.encode("utf-8"))
+        data = memoryview(line.encode("utf-8"))
+        # CR-41：os.write 可能短写（ENOSPC/EINTR 边界）或返回 0；丢弃返回值
+        # 会留下截断行，卡死后续所有 JSONL 读取者。循环写满，0 字节即抛。
+        while data:
+            written = os.write(fd, data)
+            if written <= 0:
+                raise OSError(f"jsonl 追加短写：写入 {written} 字节（{path}）")
+            data = data[written:]
     finally:
         os.close(fd)
 
@@ -489,51 +497,74 @@ def run_watched(name: str, cmd: "list[str]", *, cwd: "str | None" = None,
                             stdout=out_f, stderr=err_f)
     fsutil.atomic_write_text(run_dir / "pid", f"{proc.pid}\n", 0o600)
 
-    # toucher 独立进程：preexec 上 PDEATHSIG 内核钩（父死即被 SIGKILL）。
-    toucher_err = (run_dir / "toucher.err").open("wb")
+    # CR-14：toucher 启动与 signal.signal 也必须落在 try/finally 内——设置阶段
+    # 任一异常（如非主线程调 signal.signal）都要回收被监管子进程与已开文件，
+    # 不能留下孤儿 + fd 泄漏。
+    toucher: "subprocess.Popen | None" = None
+    toucher_err = None
+    old_handlers: "dict[int, object]" = {}
+    rc: "int | None" = None
+    exit_code: "int | None" = None
     try:
-        os.fchmod(toucher_err.fileno(), 0o600)
-    except OSError:
-        pass
-    toucher = subprocess.Popen(
-        [sys.executable, "-c", _TOUCHER_SRC, str(heartbeat), str(interval),
-         str(os.getpid())],
-        stdout=subprocess.DEVNULL, stderr=toucher_err,
-        preexec_fn=_prctl_pdeathsig_preexec(os.getpid()))
-
-    def _forward(signum, _frame):
+        # toucher 独立进程：preexec 上 PDEATHSIG 内核钩（父死即被 SIGKILL）。
+        toucher_err = (run_dir / "toucher.err").open("wb")
         try:
-            proc.send_signal(signum)
-        except ProcessLookupError:
+            os.fchmod(toucher_err.fileno(), 0o600)
+        except OSError:
             pass
+        toucher = subprocess.Popen(
+            [sys.executable, "-c", _TOUCHER_SRC, str(heartbeat), str(interval),
+             str(os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=toucher_err,
+            preexec_fn=_prctl_pdeathsig_preexec(os.getpid()))
 
-    old_handlers = {sig: signal.signal(sig, _forward)
-                    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
-    try:
+        def _forward(signum, _frame):
+            try:
+                proc.send_signal(signum)
+            except ProcessLookupError:
+                pass
+
+        old_handlers = {}
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            # 逐个登记（而非推导式一次赋值）：中途失败时已装上的处理器也能
+            # 在 finally 里按表还原，不留半装状态。
+            old_handlers[sig] = signal.signal(sig, _forward)
         rc = proc.wait()
     finally:
         for sig, old in old_handlers.items():
             signal.signal(sig, old)
-        exit_code = rc if rc >= 0 else 128 - rc
-        try:
-            fsutil.atomic_write_text(run_dir / "exit_code",
-                                     f"{exit_code}\n", 0o600)
-        except OSError:
-            # 只读目录故障注入下可能写不进（AC-T2-4③）：不掩盖退出路径
-            pass
+        if rc is None:
+            # 设置阶段失败：原异常即将穿出，先终止仍存活的被监管子进程。
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
+        else:
+            exit_code = rc if rc >= 0 else 128 - rc
+            try:
+                fsutil.atomic_write_text(run_dir / "exit_code",
+                                         f"{exit_code}\n", 0o600)
+            except OSError:
+                # 只读目录故障注入下可能写不进（AC-T2-4③）：不掩盖退出路径
+                pass
         for f in (out_f, err_f):
             try:
                 f.flush()
             except OSError:
                 pass
             f.close()
-        toucher.terminate()
-        try:
-            toucher.wait(timeout=3)
-        except subprocess.TimeoutExpired:
-            toucher.kill()
-            toucher.wait(timeout=3)
-        toucher_err.close()
+        if toucher is not None:
+            toucher.terminate()
+            try:
+                toucher.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                toucher.kill()
+                toucher.wait(timeout=3)
+        if toucher_err is not None:
+            toucher_err.close()
 
     return exit_code
 
@@ -922,16 +953,28 @@ def _alert_text(kind: str, reason: str, snapshot: Snapshot,
 
 def fire_alert(cfg: WatchConfig, snapshot: Snapshot, verdict: Verdict, *,
                kind: str, meta: bool = False) -> dict:
-    """固定动作序：①P2P（含预定 bundle 路径）→ ②快照包 → ③alerts 原子行。"""
+    """固定动作序：①P2P（含预定 bundle 路径）→ ②快照包 → ③alerts 原子行。
+
+    CR-09：P2P 通道失败（网络/HTTP/令牌过期）绝不能吞掉证据。send 异常记入
+    ``p2p_error``（脱敏）后**无条件**继续落快照包与 alerts.jsonl 行；否则一次
+    真实运行死亡会零告警证据，且异常穿出 watch-loop 把两个看门狗一起打死。
+    """
     notifier = cfg.notifier or NullNotifier()
     cfg.triage_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     bundle_dir = _new_bundle_dir(cfg)
     # ① 先通知（bundle 路径确定性生成，60s 内分诊包必可达）
-    message_id = notifier.send(
-        _alert_text(kind, verdict.reason, snapshot, bundle_dir, meta))
+    message_id = None
+    p2p_error = None
+    try:
+        message_id = notifier.send(
+            _alert_text(kind, verdict.reason, snapshot, bundle_dir, meta))
+    except Exception as exc:  # noqa: BLE001 —— 告警通道失败不阻断证据落盘
+        p2p_error = redact_text(f"{type(exc).__name__}: {exc}")[:300]
     # ② 快照包
     gather_triage_bundle(cfg, snapshot, bundle_dir, kind=kind,
-                         reason=verdict.reason, extra={"message_id": message_id})
+                         reason=verdict.reason,
+                         extra={"message_id": message_id,
+                                "p2p_error": p2p_error})
     # ③ alerts.jsonl（0600 O_APPEND 原子追加）
     record = {
         "schema": "simpraxis.watchdog_alert.v1",
@@ -950,6 +993,7 @@ def fire_alert(cfg: WatchConfig, snapshot: Snapshot, verdict: Verdict, *,
                          for h in snapshot.failure_hits[:10]],
         "bundle_dir": str(bundle_dir),
         "p2p_message_id": message_id,
+        "p2p_error": p2p_error,
     }
     atomic_append_jsonl(cfg.alerts_path, record, mode=0o600)
     return record
@@ -994,6 +1038,9 @@ def run_watch_loop(cfg: WatchConfig) -> int:
 
         # process_vanished 两阶段确认：首见宽限复查（排除 wait()→exit_code
         # 落盘竞争窗），下一拍仍消失才判死（见 VANISH_GRACE_S 注释）。
+        # CR-10：置位后必须睡一拍再复查——旧实现置位后直接落入下方通用 DEATH
+        # 分支，vanish_armed 永远观察不到 True（宽限窗实际只剩 2s）。
+        vanish_deferred = False
         if verdict.status == "DEATH" and verdict.reason == "process_vanished":
             if vanish_armed:
                 fire_alert(cfg, snap, verdict, kind="death")
@@ -1002,10 +1049,11 @@ def run_watch_loop(cfg: WatchConfig) -> int:
             if verdict.status == "DEATH" and \
                     verdict.reason == "process_vanished":
                 vanish_armed = True
+                vanish_deferred = True
 
         if verdict.status == "SUCCESS":
             return EXIT_OK
-        if verdict.status in ("DEATH", "SILENCE"):
+        if verdict.status in ("DEATH", "SILENCE") and not vanish_deferred:
             kind = "death" if verdict.status == "DEATH" else "silence"
             fire_alert(cfg, snap, verdict, kind=kind)
             return EXIT_DEATH if kind == "death" else EXIT_SILENCE

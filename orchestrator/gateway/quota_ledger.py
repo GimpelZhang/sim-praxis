@@ -132,6 +132,7 @@ from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
     GatewayPausedError,
     PauseStateCorruptError,
+    _QUOTA_FIELD_RE,  # CR-39：配额正则单一源（router 分类器）
     is_paused,
     redact,
 )
@@ -1009,9 +1010,12 @@ def call_lines(rows: "list[dict[str, Any]] | None" = None) -> list[dict[str, Any
 
 
 def load_approval(batch_id: str,
-                  approvals_path: "Path | None" = None) -> dict[str, Any]:
+                  approvals_path: "Path | None" = None, *,
+                  expected_phase: "int | None" = None) -> dict[str, Any]:
     # G-9：batch_id 是路径段，读法先过字符集白名单（拒绝 ../、斜杠等遍历形态）。
     # approvals_path 缺省=Phase 2 凭据目录（旧行为）；phase25 传本命名空间目录。
+    # CR-37：expected_phase 传入当前账期时，凭据里写过的 ledger_phase 必须一致，
+    # 防止批准件被复制/误放到另一命名空间仍被接受（字段缺失的旧件不回溯）。
     try:
         validate_batch_id(batch_id)
     except (TypeError, ValueError) as exc:
@@ -1037,6 +1041,13 @@ def load_approval(batch_id: str,
     approved = data["approved"]
     if not isinstance(approved, int) or isinstance(approved, bool) or approved <= 0:
         raise QuotaError(f"批次凭据 {batch_id} approved 必须为正整数（不接受 bool）")
+    # CR-37：跨命名空间复制件拒绝——凭据自带 ledger_phase 时必须与当前账期相等。
+    doc_phase = data.get("ledger_phase")
+    if expected_phase is not None and doc_phase is not None \
+            and doc_phase != expected_phase:
+        raise QuotaError(
+            f"批次凭据 {batch_id} 的 ledger_phase={doc_phase!r} 与当前账期 "
+            f"{expected_phase} 不一致（跨命名空间凭据不接受）")
     return data
 
 
@@ -1146,11 +1157,11 @@ def _write_counters(c: dict[str, Any], path: "Path | None" = None) -> None:
 
 
 def _is_quota_err(err: "str | None") -> bool:
+    # CR-39：复用 router 的已编译配额正则（单一源），不再维护第二份字面量表；
+    # 原字面量 "resource exhausted" 漏掉下划线/连字符形态（resource_exhausted）。
     if not err:
         return False
-    text = err.lower()
-    return any(k in text for k in ("quota", "balance", "billing", "欠费", "余额",
-                                  "insufficient", "resource exhausted"))
+    return bool(_QUOTA_FIELD_RE.search(err))
 
 
 class QuotaLedger:
@@ -1192,7 +1203,8 @@ class QuotaLedger:
 
     @classmethod
     def rsi_r0(cls) -> "QuotaLedger":
-        """RSI-R0 账（2026-11-09 R0 结案后已封存；写打开由封存守卫拒绝）。
+        """RSI-R0 账（2026-11-09 R0 结案后已封存；结案 campaign 的写打开由封存守卫拒绝，
+        判据是该根 ``closeout/`` 下的结案产物件）。
 
         campaign 由 ``SIMPRAXIS_RSI_R0_CAMPAIGN`` 选定，未设置即 fail-closed
         （``RsiR0CampaignUnsetError``），绝不回退到别人的 campaign 账。
@@ -1201,7 +1213,7 @@ class QuotaLedger:
 
     @classmethod
     def rsi_r01(cls) -> "QuotaLedger":
-        """RSI-R0.1 账（当前唯一可写账；含 R0 在内的七本旧账已封存只读）。
+        """RSI-R0.1 账（家族账；已结案 campaign 由 closeout 标记封存只读，新战役须新建 campaign）。
 
         campaign 由 ``SIMPRAXIS_RSI_R01_CAMPAIGN`` 选定，未设置即 fail-closed
         （``RsiR01CampaignUnsetError``），绝不回退到任何缺省 campaign。
@@ -1210,7 +1222,7 @@ class QuotaLedger:
 
     @classmethod
     def rsi_r02(cls) -> "QuotaLedger":
-        """RSI-R0.2 账（当前唯一可写账；含 R0/R0.1 在内的八本旧账已封存只读）。
+        """RSI-R0.2 账（家族账；已结案 campaign 由 closeout 标记封存只读，新战役须新建 campaign）。
 
         campaign 由 ``SIMPRAXIS_RSI_R02_CAMPAIGN`` 选定，未设置即 fail-closed
         （``RsiR02CampaignUnsetError``），绝不回退到任何缺省 campaign。
@@ -1219,7 +1231,7 @@ class QuotaLedger:
 
     @classmethod
     def rsi_r1(cls) -> "QuotaLedger":
-        """RSI-R1 账（当前唯一可写账；含 R0/R0.1/R0.2 在内的九本旧账已封存只读）。
+        """RSI-R1 账（家族账；已结案 campaign 由 closeout 标记封存只读，新战役须新建 campaign）。
 
         campaign 由 ``SIMPRAXIS_RSI_R1_CAMPAIGN`` 选定，未设置即 fail-closed
         （``RsiR1CampaignUnsetError``），绝不回退到任何缺省 campaign。
@@ -1228,8 +1240,7 @@ class QuotaLedger:
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":
-        """RSI-R1.2 账（当前唯一可写账；R0/R0.1/R0.2 已路径封存，R1 旧账按
-        R1.1 结案纪律只读，R1.2 写路径不触任何旧根）。
+        """RSI-R1.2 账（家族账；已结案 campaign 由 closeout 标记封存只读，新战役须新建 campaign）。
 
         campaign 由 ``SIMPRAXIS_RSI_R12_CAMPAIGN`` 选定，未设置即 fail-closed
         （``RsiR12CampaignUnsetError``），绝不回退到任何缺省 campaign。
@@ -1292,7 +1303,8 @@ class QuotaLedger:
             # 只做当次不发网拦截 + 审计行（内存态、不落 quota_pause.json）；
             # 凭据补齐后下一次 preflight 自然放行，无需 resume ticket。
             try:
-                approval = load_approval(batch_id, self.ns.approvals_dir_fn())
+                approval = load_approval(batch_id, self.ns.approvals_dir_fn(),
+                                         expected_phase=self.ns.phase)
             except QuotaError as exc:
                 self._record_blocked(stage, task, batch_id,
                                      f"preflight_blocked: {redact(str(exc))[:200]}")
@@ -1379,11 +1391,28 @@ class QuotaLedger:
                tokens_cache_create: "int | None" = None,
                err: "str | None" = None, evidence: "str | None" = None) -> dict[str, Any]:
         with _FileLock(self.ns.quota_dir_fn()):
-            rows = self._call_rows()
+            # CR-34：账本里一条截断/不可解析行会在这里抛 QuotaError，且原实现
+            # 发生在 _append 的 try 之外——既无 .degraded 告警，又会在调用方
+            # 的失败出口顶掉真正的 provider 异常。先落告警再抛专用 degraded 错。
+            try:
+                rows = self._call_rows()
+            except Exception as exc:  # noqa: BLE001 —— 读账失败同样禁止静默
+                alert = _write_degraded_alert(exc, {
+                    "time": _now_iso(), "phase": "read_before_append",
+                    "stage": stage, "task": task, "batch_id": batch_id,
+                    "model": model, "ok": bool(ok), "thread_id": thread_id,
+                    "err": redact(err)[:300] if err else None,
+                }, self.ns.quota_dir_fn())
+                where = (f"，告警件 {alert}" if alert is not None
+                         else "（告警件同样写入失败）")
+                raise LedgerDegradedError(
+                    f"ledger 读账失败（{type(exc).__name__}），本次调用未入账"
+                    f"{where}：{redact(str(exc))[:200]}") from exc
             seq = max((int(r["seq"]) for r in rows), default=0) + 1
             global_after = max((r["global_used_after"] for r in rows), default=0) + 1
             try:
-                approval = load_approval(batch_id, self.ns.approvals_dir_fn())
+                approval = load_approval(batch_id, self.ns.approvals_dir_fn(),
+                                         expected_phase=self.ns.phase)
                 batch_approved = approval["approved"]
                 approval_ref = f"quota/approvals/{batch_id}.json"
             except QuotaError:
@@ -1823,7 +1852,8 @@ def resume(*, ticket: str, batch_id: "str | None" = None,
     if reason in ("batch_budget_reached", "global_hard_cap") or used >= ns.normal_budget:
         if not batch_id:
             raise QuotaError("预算类恢复必须同时给 --batch-id 指向新批次批准凭据")
-        approval = load_approval(batch_id, ns.approvals_dir_fn())
+        approval = load_approval(batch_id, ns.approvals_dir_fn(),
+                                 expected_phase=ns.phase)
         if (ns.normal_budget < ns.hard_cap
                 and used >= ns.normal_budget
                 and not approval.get("beyond_normal")):
@@ -1933,10 +1963,13 @@ def main(argv: "list[str] | None" = None) -> int:
     # 放宽其既有判据（不动历史口径）。
     summary = ledger_summary(
         rows, validate=ns.in_sealed_set_for_read(),
+        # CR-36：RSI-R1/R1.2 与其他新账同口径——开账 selfcheck 行（占 seq、
+        # 不计实呼）必须能在严格机判下通过，否则 status 报 LedgerSequenceError。
         allow_events=(("selfcheck",)
                       if ns.phase in (LEDGER_PHASE26, LEDGER_PHASE27,
                                       LEDGER_PHASE281, LEDGER_RSI_R0,
-                                      LEDGER_RSI_R01, LEDGER_RSI_R02) else ()))
+                                      LEDGER_RSI_R01, LEDGER_RSI_R02,
+                                      LEDGER_RSI_R1, LEDGER_RSI_R12) else ()))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:

@@ -902,9 +902,16 @@ class ModelGateway:
                 thinking=thinking, capture=capture)
         except Exception as exc:  # noqa: BLE001 —— 越过 preflight 的任何出口恰好一行 ok=false
             if self._billing is not None:
-                self._billing.record(
-                    stage, ok=False, model=model_id,
-                    err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+                try:
+                    self._billing.record(
+                        stage, ok=False, model=model_id,
+                        err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+                except Exception as ledger_exc:  # noqa: BLE001
+                    # CR-34：记账失败（如账本截断行）不得顶掉真正的 provider
+                    # 异常；降级告警件由 quota_ledger 落盘，原异常照常上抛。
+                    logger.error("ok=false 记账失败（原异常优先）：%s: %s",
+                                 type(ledger_exc).__name__,
+                                 _error_text(ledger_exc)[:300])
             raise
         if self._billing is not None:
             self._billing.record(stage, ok=True, model=model_id,
@@ -1133,9 +1140,15 @@ class ModelGateway:
             raise
         except Exception as exc:  # noqa: BLE001 —— 与 call() 同契约：恰好一行 ok=false
             if self._billing is not None:
-                self._billing.record(
-                    stage, ok=False, model=model_id,
-                    err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+                try:
+                    self._billing.record(
+                        stage, ok=False, model=model_id,
+                        err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+                except Exception as ledger_exc:  # noqa: BLE001
+                    # CR-34：记账失败不得顶掉真正的 provider 异常（同 call()）。
+                    logger.error("ok=false 记账失败（原异常优先）：%s: %s",
+                                 type(ledger_exc).__name__,
+                                 _error_text(ledger_exc)[:300])
             raise
         if self._billing is not None:
             self._billing.record(stage, ok=True, model=model_id,
@@ -1170,8 +1183,12 @@ class ModelGateway:
         wait_total = 0.0
         while True:
             try:
-                resp = send_one()
-            except (requests.ConnectionError, requests.Timeout) as exc:
+                # CR-13：requests 的 timeout= 只管单次读，滴流响应可无限重置；
+                # 与 _chat_loop 同款硬墙钟（seq313 slowloris 的直 POST 同源路径）。
+                with self._hard_deadline(timeout, stage):
+                    resp = send_one()
+            except (requests.ConnectionError, requests.Timeout,
+                    HardDeadlineTimeout) as exc:
                 if attempt + 1 >= self.max_attempts:
                     raise GatewayError(f"连接错误重试 {self.max_attempts} 次仍失败：{exc}") from exc
                 wait = self._retry_wait(attempt, exc=exc)
@@ -1292,7 +1309,9 @@ class ModelGateway:
             "content-type": "application/json",
         }
         post = self._raw_transport or requests.post
-        resp = post(url, headers=headers, json=payload, timeout=timeout)
+        # CR-13：一次性直 POST 同样加硬墙钟，避免滴流 bytes 把诊断探针挂死。
+        with self._hard_deadline(timeout, stage):
+            resp = post(url, headers=headers, json=payload, timeout=timeout)
         try:
             body = resp.json()
         except Exception:  # noqa: BLE001 —— 非 JSON 响应也是证据（status 仍可读）
@@ -1348,9 +1367,15 @@ class ModelGateway:
             raise
         except Exception as exc:  # noqa: BLE001 —— 连接类：无 HTTP 证据，记账后抛出
             if self._billing is not None:
-                self._billing.record(
-                    stage, ok=False, model=model_id,
-                    err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+                try:
+                    self._billing.record(
+                        stage, ok=False, model=model_id,
+                        err=f"{type(exc).__name__}: {_error_text(exc)[:300]}")
+                except Exception as ledger_exc:  # noqa: BLE001
+                    # CR-34：记账失败不得顶掉真正的连接异常（同 call()）。
+                    logger.error("ok=false 记账失败（原异常优先）：%s: %s",
+                                 type(ledger_exc).__name__,
+                                 _error_text(ledger_exc)[:300])
             raise
         latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1364,7 +1389,9 @@ class ModelGateway:
         texts = ([str(b.get("text", "")) for b in content
                   if isinstance(b, dict) and b.get("type") == "text"]
                  if isinstance(content, list) else [])
-        answer_head = (texts[0] if texts else "")[:80]
+        # CR-35：模型回答是自由文本，可能原样复述 token；与 safe_body 同口径
+        # 先脱敏再截断，避免密钥材料随证据 JSON 落盘。
+        answer_head = redact(texts[0])[:80] if texts else ""
         usage_body = body.get("usage") if isinstance(body, dict) else None
         if not isinstance(usage_body, dict):
             usage_body = {}
@@ -1436,7 +1463,9 @@ class ModelGateway:
                 f"stage={stage} 响应 type={body.get('type')!r}，非 message（200 但语义不对）")
         return {"stage": stage, "requested_id": model_id, "echo_model": body.get("model"),
                 "http_status": resp.status_code, "type": body["type"],
-                "latency_ms": latency_ms, "answer": _message_text(body)[:80]}
+                "latency_ms": latency_ms,
+                # CR-35：回答先脱敏再入证据（模型可能复述 token）。
+                "answer": redact(_message_text(body))[:80]}
 
     def vision_check(self, *, size: int = 32, max_tokens: int = 16) -> dict:
         """对 visual_rollout 发 32x32 纯红 PNG，断言回答含 red/红（Ark 视觉实证的可复验版）。"""
@@ -1458,7 +1487,9 @@ class ModelGateway:
         record = {"stage": stage, "requested_id": model_id, "echo_model": body.get("model"),
                   "http_status": resp.status_code, "latency_ms": latency_ms,
                   "image": f"{size}x{size} solid red PNG (stdlib-generated, no external asset)",
-                  "min_edge_px": MIN_IMAGE_EDGE, "answer": answer[:80], "red_assert": bool(ok)}
+                  "min_edge_px": MIN_IMAGE_EDGE,
+                  # CR-35：回答先脱敏再入证据（模型可能复述 token）。
+                  "answer": redact(answer)[:80], "red_assert": bool(ok)}
         if not ok:
             raise GatewayError(f"视觉校验失败：32x32 纯红图回答 {answer!r} 不含 red/红")
         return record
@@ -1471,7 +1502,8 @@ class ModelGateway:
         skipped: list[str] = []
 
         def _base_doc(status: str) -> dict:
-            return {"generated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime()),
+            # CR-38：全仓严格 UTC Z 约定（旧 %z 写本地偏移 +0800）。
+            return {"generated_at_iso": utc_now_iso_z(),
                     "endpoint": "anthropic-messages", "status": status,
                     "results": results, "skipped_null": skipped}
 
@@ -1515,14 +1547,23 @@ def _write_validate_doc(doc: dict) -> Path:
     root = _validate_root()
     ts = time.strftime("%Y%m%d-%H%M%S")
     out_dir = root / ts
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # CR-38：证据目录 0700（与全仓私有目录口径一致）。
+    ensure_private_dir(out_dir)
     raw = out_dir / "result.json"
     # S-6：原子写 0600 收口 fsutil。
     atomic_write_text(raw, json.dumps(doc, ensure_ascii=False, indent=2))
     latest = root / "latest"
-    if latest.is_symlink() or latest.exists():
-        latest.unlink()
-    latest.symlink_to(ts)  # 相对软链（basename 规则）
+    # CR-38：临时软链 + os.replace 原子换指，消除 unlink/symlink_to 之间的
+    # latest 悬空窗（读者可能看到不存在或旧目标）。
+    tmp_link = root / f".latest.tmp-{os.getpid()}-{time.time_ns()}"
+    try:
+        tmp_link.symlink_to(ts)  # 相对软链（basename 规则）
+        os.replace(tmp_link, latest)
+    finally:
+        try:
+            tmp_link.unlink()
+        except FileNotFoundError:
+            pass
     return raw
 
 
@@ -1535,7 +1576,8 @@ def _write_failure_doc(doc: dict) -> Path:
     root = _validate_root()
     ts = time.strftime("%Y%m%d-%H%M%S")
     out_dir = root / ts
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # CR-38：证据目录 0700（与全仓私有目录口径一致）。
+    ensure_private_dir(out_dir)
     raw = out_dir / "FAILURE.json"
     # S-6：原子写 0600 收口 fsutil。
     atomic_write_text(raw, json.dumps(doc, ensure_ascii=False, indent=2))

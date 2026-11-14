@@ -442,13 +442,49 @@ def sealed_ledger_paths() -> frozenset[Path]:
     })
 
 
+# 已结案 campaign 的封存标记：closeout 产物件存在即视为该 campaign 已关闭。
+# RSI 家族以 campaign 为单位（同族可有几十个根，无法枚举进 sealed_ledger_paths），
+# 因此用「结案件在盘」做标记，而不是维护一份会漏项的路径清单。
+_CLOSE_MARKER_RELPATHS: tuple[str, ...] = (
+    "closeout/r12_readout.json",
+    "closeout/r1_readout.json",
+    "closeout/closeout_zero_paid.json",
+    "closeout/closeout_report.json",
+)
+
+
+def closed_campaign_root(path: "str | Path") -> "Path | None":
+    """若 ``path`` 是某已结案 campaign 的 ``quota/ledger.jsonl``，返回该 campaign 根。
+
+    判据是 closeout 产物件（各 RSI 家族统一写在 ``closeout/``）存在；只认
+    ``<campaign>/quota/ledger.jsonl`` 这一形状，避免把同名文件误判为账本。
+    """
+    p = Path(path)
+    if p.name != "ledger.jsonl" or p.parent.name != "quota":
+        return None
+    root = p.parent.parent
+    for rel in _CLOSE_MARKER_RELPATHS:
+        if (root / rel).is_file():
+            return root
+    return None
+
+
 def assert_not_sealed_ledger(path: "str | Path") -> Path:
-    """写打开前置守卫：目标解析到任一封存账（Phase 1/2/2.5/2.6/2.7/2.8.1）即抛。"""
+    """写打开前置守卫：目标解析到任一封存账（Phase 1/2/2.5/2.6/2.7/2.8.1）即抛。
+
+    RSI 家族（R0/R0.1/R0.2/R1/R1.2）另按「campaign 已结案」判定：账本同根存在
+    closeout 产物件时同样拒绝写入（campaign 数不可枚举，不能并入路径集）。
+    """
     p = Path(path)
     if p.resolve(strict=False) in sealed_ledger_paths():
         raise SealedLedgerError(
             f"封存台账禁止以写方式打开：{p}（Phase 1/2/2.5/2.6/2.7/2.8.1 封存账只读；"
             "RSI-R0 新写账必须走 rsi_r0_ledger_path()）")
+    closed_root = closed_campaign_root(p)
+    if closed_root is not None:
+        raise SealedLedgerError(
+            f"已结案 campaign 台账禁止以写方式打开：{p}"
+            f"（{closed_root} 含 closeout 产物，族账只读；新战役请新建 campaign 根）")
     return p
 
 

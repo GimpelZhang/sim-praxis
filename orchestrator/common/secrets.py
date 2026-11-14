@@ -45,8 +45,11 @@ SECRET_PATTERNS: tuple[SecretPattern, ...] = (
                   prefix_groups=(1,)),
     SecretPattern("aws_access_key", r"AKIA[0-9A-F]{16}"),
     SecretPattern("slack_token", r"xox[baprs]-[A-Za-z0-9-]{10,}"),
+    # CR-12：原式只覆盖 5 种未加密头，漏 BEGIN ENCRYPTED PRIVATE KEY 与
+    # PGP PRIVATE KEY BLOCK（口令私钥同样是密钥材料）。放宽为「任意全大写
+    # 算法词 + PRIVATE KEY [BLOCK]」，仍是形状足够具体的严格口径。
     SecretPattern("pem_private_key",
-                  r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----"),
+                  r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----"),
     SecretPattern(
         "assigned_secret_kv",
         # S-2：name 后允许一个可选收尾引号（组 2），覆盖 JSON/env dump 形态

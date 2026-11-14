@@ -202,8 +202,13 @@ class _SampleSink:
 
 
 def _sample_loop(proc: subprocess.Popen, nvml: Any, handle: Any,
-                 interval: float, sink: _SampleSink) -> None:
-    """先采一次再查存活：保证 samples>=1；子进程在则每 interval 采一次。"""
+                 interval: float, sink: _SampleSink,
+                 stop: "threading.Event | None" = None) -> None:
+    """先采一次再查存活：保证 samples>=1；子进程在则每 interval 采一次。
+
+    CR-40：``stop`` 置位（或短睡返回）即退出——主线程 join 超时后据此在
+    nvmlShutdown() 之前让采样线程有机会收敛，避免关库时仍在 NVML 调用内。
+    """
     while sink.error is None:
         try:
             used = nvml.nvmlDeviceGetMemoryInfo(handle).used
@@ -213,7 +218,11 @@ def _sample_loop(proc: subprocess.Popen, nvml: Any, handle: Any,
         sink.add(used)
         if proc.poll() is not None:
             return
-        time.sleep(interval)
+        if stop is not None:
+            if stop.wait(interval):
+                return
+        else:
+            time.sleep(interval)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -276,6 +285,8 @@ def main(argv: "list[str] | None" = None) -> int:
         device_name = device_name.decode("utf-8", "replace")
 
     started = False
+    sampler: "threading.Thread | None" = None
+    stop_event: "threading.Event | None" = None
     try:
         # 不指定 cwd/env：继承父进程（runner 已设 cwd=workdir、env_extra）；
         # stdout/stderr 继承父 fd，runner 的 capture_output 管道自然捕获。
@@ -297,10 +308,11 @@ def main(argv: "list[str] | None" = None) -> int:
         signal.signal(signal.SIGINT, _handler)
 
         sink = _SampleSink()
+        stop_event = threading.Event()
         t0 = time.monotonic()
         sampler = threading.Thread(
             target=_sample_loop,
-            args=(proc, pynvml, handle, args.interval, sink),
+            args=(proc, pynvml, handle, args.interval, sink, stop_event),
             daemon=True)
         sampler.start()
 
@@ -334,7 +346,14 @@ def main(argv: "list[str] | None" = None) -> int:
                                 sort_keys=True).encode("utf-8"))
         return child_rc
     finally:
-        if started:
+        if stop_event is not None:
+            stop_event.set()
+        if sampler is not None:
+            # CR-40：join 超时后采样线程可能仍在 nvmlDeviceGetMemoryInfo 内；
+            # 先置停止标志再短暂 join，仍存活就绝不调用 nvmlShutdown（否则
+            # 退出期会与关库竞态，可能异常/段错误）。
+            sampler.join(timeout=1.0)
+        if started and (sampler is None or not sampler.is_alive()):
             try:
                 pynvml.nvmlShutdown()
             except Exception:
