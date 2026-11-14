@@ -710,9 +710,26 @@ def test_metric_template_matches_judge_tracking_rmse():
 def _run_template_metric(record, metric_id, *, amplitude):
     """抽取模板里的 metric_value 并在宿主进程内执行（不经容器）。"""
     from orchestrator.rsi_r1 import protocol as PT
-    ns = {}
+    ns = {"math": __import__("math")}
     src = PT.ANALYSIS_TEMPLATE
-    start = src.index("def metric_value(")
+    start = src.index("def _first(")
     end = src.index("def interval(")
-    exec(src[start:end], {"math": __import__("math")}, ns)  # noqa: S102
+    exec(src[start:end], ns)  # noqa: S102
     return ns["metric_value"](record, metric_id, None, amplitude)
+
+
+def test_metric_template_handles_scalar_target_and_qpos():
+    """D-16：B 的 target_q/qpos 是标量；模板必须与 judge 同样兼容。"""
+    from orchestrator.rsi_r1 import judge as J
+
+    times = [i * 0.001 for i in range(4000)]
+    target = [0.2 * __import__("math").sin(2 * __import__("math").pi * 0.5 * t)
+              for t in times]
+    qpos = [v * 0.9 + 0.001 for v in target]
+    record = {"time_s": times, "target_q": target, "qpos": qpos,
+              "instability_events": []}
+    host = J._metric_b(record, amplitude_rad="0.2")["values"][
+        "normalized_tracking_rmse"]
+    local = _run_template_metric(record, "normalized_tracking_rmse",
+                                 amplitude=0.2)
+    assert abs(local - host) <= 1e-15

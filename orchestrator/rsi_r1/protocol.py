@@ -333,6 +333,13 @@ SEED = 20261111          # 公开统计 seed（固定、与数据无关，见公
 RESAMPLES = 10000
 
 
+def _first(v):
+    """qpos/target_q 的分量：B 的记录是标量，A 的常是 [x, ...] 列表。"""
+    if isinstance(v, (list, tuple)):
+        return float(v[0])
+    return float(v)
+
+
 def metric_value(record, metric_id, initial_x=None, amplitude=None):
     qpos = record["qpos"]
     if metric_id == "normalized_tracking_rmse":
@@ -348,7 +355,7 @@ def metric_value(record, metric_id, initial_x=None, amplitude=None):
         target = record["target_q"]
         idx = [i for i, t in enumerate(times)
                if 0.5 <= float(t) <= 4.0]
-        sq = math.fsum((float(qpos[i][0]) - float(target[i][0])) ** 2
+        sq = math.fsum((_first(qpos[i]) - _first(target[i])) ** 2
                        for i in idx)
         amp = float(amplitude) if amplitude is not None else 1.0
         if amp <= 0:
@@ -358,8 +365,8 @@ def metric_value(record, metric_id, initial_x=None, amplitude=None):
         # 锚点 = 声明的初始位置（meta.initial_x_m，t=0）；**不要**用 qpos[0]
         # （那是第一个采样，t=0.0005 s，已前进 ~2e-4 m——2026-11-13 实测因此
         # 判 INVALID_NUMERICS）。缺 meta 时才回退到 qpos[0]。
-        anchor = float(initial_x) if initial_x is not None else float(qpos[0][0])
-        return float(qpos[-1][0]) - anchor
+        anchor = float(initial_x) if initial_x is not None else _first(qpos[0])
+        return _first(qpos[-1]) - anchor
     raise SystemExit("unknown metric: %s" % metric_id)
 
 
