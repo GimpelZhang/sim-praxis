@@ -96,7 +96,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert ev["lane_caps"] == {lane: PROFILE.lane_post_caps[lane]
                                for lane in PROFILE.lane_order}
     assert ev["posts_total"] == PROFILE.hard_cap == 124
-    assert ev["family_cap"] == PROFILE.family_cap == 475
+    assert ev["family_cap"] == PROFILE.family_cap == 491
     assert ev["family_history"] == PROFILE.family_history_posts == 31
     assert ev["aux_subenvelopes"] == dict(P.AUX_SUBENVELOPES)
     assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
@@ -468,4 +468,14 @@ def test_study_brief_discloses_budget_discipline():
     brief = PT.render_study_brief("B")
     assert "预算纪律" in brief
     for token in ("freeze_confirm", "剩余", "≥8", "冻结后禁止"):
+        assert token in brief, token
+
+
+def test_study_brief_requires_single_json_reply():
+    """2026-11-14 轮 N：回复曾拼接两个 JSON 对象 ⇒ prompt 必须明示单一 JSON。"""
+    from orchestrator.rsi_r1 import protocol as PT
+
+    brief = PT.render_study_brief("A")
+    assert "回复格式" in brief
+    for token in ("必须且只能是一个 JSON 对象", "在同一回复里拼接", "作废"):
         assert token in brief, token

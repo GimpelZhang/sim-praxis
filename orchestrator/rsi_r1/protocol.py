@@ -502,6 +502,13 @@ _ACTIONS_BLOCK = (
     "analysis 后必须重新 analyze。失效位置已消耗的 POST 不退还；确认冻结后"
     "禁止改写 design/plan/analysis（terminal）。\n")
 
+_SINGLE_JSON_BLOCK = (
+    "### 回复格式（2026-11-14 公开；实测曾有回复拼接两个 JSON 对象而作废）\n"
+    "每个回复**必须且只能是一个 JSON 对象**：不要加 markdown 代码围栏、不要写任何\n"
+    "解释文字、**不要**在同一回复里拼接第二个动作或第二份计划。宿主只接受恰好一个\n"
+    "JSON 对象；出现多余内容（包括第二个 JSON）整条回复作废、动作不可归因，按未知\n"
+    "副作用终止。\n")
+
 _BUDGET_DISCIPLINE_BLOCK = (
     "### 预算纪律（2026-11-14 公开；实测 study B 曾耗尽 48 呼仍未冻结）\n"
     "本 lane 的 POST 预算包含自修与重试。经验上：探索阶段 design/analysis 各留\n"
@@ -593,6 +600,7 @@ def render_study_brief(study: str) -> str:
         "一次，冻结时宿主检查本 lane 冻结后至少还剩 8 呼；确认批跑完后按每个假设\n"
         "逐条提交主张。\n",
         _ACTIONS_BLOCK,
+        _SINGLE_JSON_BLOCK,
         _BUDGET_DISCIPLINE_BLOCK,
         PLAN_SENTINEL_NOTE,
     ]
