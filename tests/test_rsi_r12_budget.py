@@ -164,7 +164,7 @@ def test_family_imports_history_once(fam_root, tmp_path, copied_sources):
     usage = FAM.usage(fam_root)
     assert usage["reserved_total"] == 155
     # 族帽 160 = 历史 31 + 已关闭轮 5 + 本轮 124（2026-11-13 用户裁决）
-    assert usage["remaining"] == 218
+    assert usage["remaining"] == 248
     # 幂等：再次登记不加第二次 carryover
     again = FAM.register(fam_root, r12, "env1", history_sources=sources)
     assert again["posts_reserved"] == 124
@@ -259,7 +259,7 @@ def test_cli_init_check_zero_post(tmp_path, monkeypatch, capsys):
     C.validate_envelope_v2(envelope, envelope_id="env_cli")
     assert envelope["ledger_namespace"] == 2904
     assert envelope["hard_cap"] == 124
-    assert envelope["family_cap"] == 373
+    assert envelope["family_cap"] == 403
     assert envelope["mode"] == "offline_validation"
     assert envelope["cost_gate"]["decision"] == "BLOCKED"
     assert envelope["cost_gate"]["paid_authorized"] is False

@@ -6,7 +6,7 @@
 * ``resolve_profile``：无声明 → legacy；声明 R1.2 → 新 profile；未声明 R1.2 根、
   id 未知、声明与请求冲突 → 拒（绝不静默回退）；
 * 公开合同 v2 由 profile 派生，缺段/改数值即拒；
-* R1.2 资源数值自洽（124 = 12+16+48+48；族 373；aux 五信封 2,000,000）。
+* R1.2 资源数值自洽（124 = 12+16+48+48；族 403；aux 五信封 2,000,000）。
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def test_r12_profile_numbers():
     assert r12.namespace == 2904
     assert r12.consent_scope == "R1.2"
     assert r12.judge_version == "r1.2"
-    assert r12.family_cap == 373
+    assert r12.family_cap == 403
     assert r12.family_history_posts == 31
     assert "repair_reserve" not in r12.lane_post_caps
     assert r12.budget_schema == P.BUDGET_SCHEMA_V2
@@ -103,7 +103,7 @@ def test_public_contract_derives_from_profile():
     assert doc["posts"]["per_lane"] == {
         "probe": 12, "practice": 16, "study_A": 48, "study_B": 48}
     assert doc["posts"]["total"] == 124
-    assert doc["family"]["cap_posts"] == 373
+    assert doc["family"]["cap_posts"] == 403
     assert doc["family"]["history_posts"] == 31
     assert doc["compute"]["explore"]["max_runs_per_study"] == 64
     assert doc["compute"]["explore"]["max_batches_per_study"] == 8
