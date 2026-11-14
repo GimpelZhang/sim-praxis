@@ -793,10 +793,11 @@ class ResearchLoop:
                                      detail=accounting.verdict)
             return StepOutcome(ok=False, code="INPUT_LIMIT", terminal=True)
 
-        # D-9（2026-11-13 轮 E/F/H 实测）：网关 **空回答**（零内容、零副作用）
-        # 允许在同一回合原样重发**一次**，重发另计一次 POST（新 call_id → 新预留），
-        # 第二次仍空回答才按传输未知终止。超时/截断/其它网关错误语义不变。
-        # 这是对 AC23「不重发」的窄化偏差：只有「证明无副作用」的空回答适用。
+        # D-9（2026-11-13 轮 E/F/H/K 实测）：网关 **空回答**（零内容、零副作用）
+        # 允许在同一回合原样重发**至多两次**（每回合 ≤3 发），每发另计 POST
+        # （新 call_id :a1/:a2 → 新预留）；三次仍空才按传输未知终止。
+        # 超时/截断/其它网关错误语义不变。这是对 AC23「不重发」的窄化偏差：
+        # 只有「证明无副作用」的空回答适用（2026-11-13 用户裁决放宽到 2 次）。
         from orchestrator.gateway.router import EmptyResponseError
 
         attempt = 0
@@ -820,7 +821,7 @@ class ResearchLoop:
                 # 空回答零内容、零副作用：该次预留已占槽（账本已有 ok=false 行），
                 # **不能**调 resolve_or_pause（非可动作回复会写暂停件，把重发挡在
                 # 准入外——2026-11-13 轮 I 实测 PAUSED）。直接原样重发一次。
-                if attempt >= 1:
+                if attempt >= 2:
                     self.budget.resolve_or_pause(
                         Reply(text="", response_id="", is_actionable=False,
                               reason="EmptyResponseError"))

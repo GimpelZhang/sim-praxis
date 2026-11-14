@@ -646,4 +646,4 @@ def test_empty_response_twice_is_terminal() -> None:
     out = loop.turn()
     assert out.terminal is True
     assert out.code == "EmptyResponseError"
-    assert len(seen) == 2
+    assert len(seen) == 3  # 首发 + 两次重发
