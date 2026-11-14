@@ -85,23 +85,23 @@ RSI_R12_TASK_CAPS: "Mapping[int, int]" = types.MappingProxyType({
 })
 
 #: 跨轮研究族硬帽：历史 31（R1 9 + R1.1 22，两独立 envelope 的最终根实呼）
-#: + 已关闭轮实花 248（`r12-paid-20261113a`…`l`，花掉的不归还）
-#: + 已关闭轮实花 248 + 本轮 124 = **403**（D-10 输出预算 32768 修复后续跑）。历史 31 的
+#: + 已关闭轮实花 320（`r12-paid-20261113a`…`m`，花掉的不归还）
+#: + 已关闭轮实花 320 + 本轮 124 = **475**（收敛指引修复后续跑）。历史 31 的
 #: 逐字节导入在 ``family.py``。
 #:
 #: 锁内适配（2026-11-13，用户逐字裁决）：原帽 155 = 31 + 124，上一轮以
 #: INVALID_INSTRUMENT 结案时已真实花掉 5 呼；若仍按 155 开新轮，31+124=155
 #: 会把已花的 5 呼算成「不存在」。用户裁决把帽抬到 160 使
 #: 「历史 + 已关闭轮实花 + 新轮」恰好闭合（Plan 明写「改变 155 需新用户裁决」）。
-FAMILY_CAP = 403
+FAMILY_CAP = 475
 FAMILY_HISTORY_POSTS = 31
 #: 已关闭轮的实花（只能由族文档的 closed 成员逐行复算，不得手填）：
 #: 轮 A `r12-paid-20261113a` 5 + 轮 B `r12-paid-20261113b` 5 +
-#: 轮 C 6 + D 7 + E 12 + F 54 + G 24 + H 25 + I 28 + J 2 + K 50 + L 30 = 248；
+#: 轮 C 6 + D 7 + E 12 + F 54 + G 24 + H 25 + I 28 + J 2 + K 50 + L 30 + M 72 = 320；
 #: 加历史 31 后总实花 120。
-FAMILY_CLOSED_ROUND_POSTS = 248
+FAMILY_CLOSED_ROUND_POSTS = 320
 #: 历史族帽取值（旧 envelope/consent 仍须可读；新轮一律用当前 ``FAMILY_CAP``）。
-FAMILY_CAP_HISTORY: "tuple[int, ...]" = (155, 160, 165, 171, 178, 190, 244, 268, 293, 321, 323, 373, FAMILY_CAP)
+FAMILY_CAP_HISTORY: "tuple[int, ...]" = (155, 160, 165, 171, 178, 190, 244, 268, 293, 321, 323, 373, 403, FAMILY_CAP)
 FAMILY_NEW_ROUND_POSTS = RSI_R12_HARD_CAP
 
 #: 历史来源的**两本最终根账**（Plan §0 基线；行数/哈希在 family.py 复核）。
@@ -679,7 +679,7 @@ def public_contract_document(profile: CampaignProfile, *, envelope_id: str,
                 profile.family_cap - family_used_before,
             "this_round_cap_posts": profile.hard_cap,
             "note": ("历史 31 呼 = R1 9 + R1.1 22（两独立 envelope 的最终根实呼，"
-                     "carryover 不重复计）；已关闭轮实花 248 呼（"
+                     "carryover 不重复计）；已关闭轮实花 320 呼（"
                      "`r12-paid-20261113a`…`f`，花掉的不归还）；族帽 244 由 "
                      "2026-11-13 用户第四次授权设立；本轮不重置家族余额"),
         },

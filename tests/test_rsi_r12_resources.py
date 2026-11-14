@@ -374,7 +374,7 @@ def test_limits_document_is_single_source_projection() -> None:
     assert doc["limits"]["confirm_runs_per_study"] == 192
     assert doc["limits"]["replay_runs_per_study"] == 192
     assert doc["total_posts"] == P.PROFILE_R12_DEF.hard_cap == 124
-    assert doc["family_cap"] == P.FAMILY_CAP == 403
+    assert doc["family_cap"] == P.FAMILY_CAP == 475
     assert doc["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
     assert doc["confirm_post_margin"] == 8
     assert doc["protocol_post_margin"] == 2

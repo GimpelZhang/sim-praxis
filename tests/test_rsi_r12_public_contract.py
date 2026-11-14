@@ -96,7 +96,7 @@ def test_expected_values_match_typed_limits_single_source() -> None:
     assert ev["lane_caps"] == {lane: PROFILE.lane_post_caps[lane]
                                for lane in PROFILE.lane_order}
     assert ev["posts_total"] == PROFILE.hard_cap == 124
-    assert ev["family_cap"] == PROFILE.family_cap == 403
+    assert ev["family_cap"] == PROFILE.family_cap == 475
     assert ev["family_history"] == PROFILE.family_history_posts == 31
     assert ev["aux_subenvelopes"] == dict(P.AUX_SUBENVELOPES)
     assert ev["aux_total"] == P.AUX_SUBENVELOPE_TOTAL
@@ -459,3 +459,13 @@ def test_prompt_requires_bitwise_estimator_reuse():
     for token in ("metric_value()", "interval()", "float64", "20261111",
                   "linear", "不要 round"):
         assert token in block, token
+
+
+def test_study_brief_discloses_budget_discipline():
+    """2026-11-14：B 曾在 48 呼内未收敛 ⇒ prompt 必须给预算纪律。"""
+    from orchestrator.rsi_r1 import protocol as PT
+
+    brief = PT.render_study_brief("B")
+    assert "预算纪律" in brief
+    for token in ("freeze_confirm", "剩余", "≥8", "冻结后禁止"):
+        assert token in brief, token

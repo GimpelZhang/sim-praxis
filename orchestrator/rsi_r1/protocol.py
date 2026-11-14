@@ -502,6 +502,13 @@ _ACTIONS_BLOCK = (
     "analysis 后必须重新 analyze。失效位置已消耗的 POST 不退还；确认冻结后"
     "禁止改写 design/plan/analysis（terminal）。\n")
 
+_BUDGET_DISCIPLINE_BLOCK = (
+    "### 预算纪律（2026-11-14 公开；实测 study B 曾耗尽 48 呼仍未冻结）\n"
+    "本 lane 的 POST 预算包含自修与重试。经验上：探索阶段 design/analysis 各留\n"
+    "1–2 次修订即可，不要反复重写；当本轮剩余呼数降至 16 以下时，**必须停止\n"
+    "探索并尽快 freeze_confirm**（宿主要求冻结后本 lane 仍余 ≥8 呼）；冻结后禁止\n"
+    "改写 design/plan/analysis。状态里每轮都给出 remaining，请自己对照预算。\n")
+
 _SOURCE_TEMPLATES_BLOCK = (
     "### 格式示例（不是最优设计，只演示输入输出形状）\n"
     "design 程序：argv[1]=只读视图（含 `plan-<sha12>.json` 与 `public_contract.json`），\n"
@@ -586,6 +593,7 @@ def render_study_brief(study: str) -> str:
         "一次，冻结时宿主检查本 lane 冻结后至少还剩 8 呼；确认批跑完后按每个假设\n"
         "逐条提交主张。\n",
         _ACTIONS_BLOCK,
+        _BUDGET_DISCIPLINE_BLOCK,
         PLAN_SENTINEL_NOTE,
     ]
     explore = toy_plan_doc(study, phase="explore", revision=1)
