@@ -43,7 +43,7 @@ MAX_PACK_FILE_BYTES = 10 * 1024 * 1024
 
 #: 当前宿主 prompt 模板逐字节钉死（2026-11-13 D-1 修复后：模板与门单一源）。
 TEMPLATE_SHA256 = (
-    "cb9f09213eb83b972f63c7b8d6fbd7e7f7121030335816f4a9576968f3793b39")
+    "5811c323fb0365d919c126ff979b5a99a66c820d510a6acd0768ccde6490db9e")
 #: 历史模板 sha（`r12-paid-20261113a` 那轮公开的旧示例；该轮证据按当时字节判）。
 TEMPLATE_SHA256_HISTORY = (
     "daf30754f8eb9b0e6b468d6d714c9579b73a2b6afbf668b9b7edafcc3e7d4f63",
