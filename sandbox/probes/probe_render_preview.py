@@ -256,7 +256,10 @@ def main(argv: "list[str] | None" = None) -> int:
     # Genesis 初始化失败）没有 `<out>.json`，与「回执在 finally 落盘」的
     # 契约不符。现在任何退出路径都会写一份 ok=false 的旁侧回执。
     out_path = Path(args.out)
-    sidecar_path: "Path | None" = out_path.with_suffix(".json")
+    # 复核 2026-11-14：绝对路径是**契约不合法**输入，必须在派生旁侧件之前
+    # 拒绝；否则 finally 会往 /abs 写一个 .json（越界写）。校验通过后才设
+    # sidecar，失败路径因此不会产生任何旁侧件。
+    sidecar_path: "Path | None" = None
     _mute_engine_output()
 
     def _phase(name: str) -> None:
@@ -266,6 +269,10 @@ def main(argv: "list[str] | None" = None) -> int:
         mark = now
 
     try:
+        if out_path.is_absolute():
+            raise ProbeError("--out 必须是相对 cwd 的路径")
+        # 校验通过：此后任何退出路径都写旁侧回执（复核 2026-11-14 的顺序）。
+        sidecar_path = out_path.with_suffix(".json")
         if args.size != PREVIEW_MAX_PX:
             raise ProbeError(f"预览尺寸固定 {PREVIEW_MAX_PX}，收到 {args.size}")
         spec = _load_spec(Path(args.spec))
@@ -308,8 +315,6 @@ def main(argv: "list[str] | None" = None) -> int:
         stats = _frame_stats(rgb)
 
         arr = _rgb_array(rgb)
-        if out_path.is_absolute():
-            raise ProbeError("--out 必须是相对 cwd 的路径")
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # 无 PIL 依赖：PNG 由 numpy → 简易编码（Pillow 在镜像里未必有）。
         _write_png(out_path, arr.astype("uint8"))
@@ -336,6 +341,7 @@ def main(argv: "list[str] | None" = None) -> int:
         receipt["wall_s"] = round(time.monotonic() - started, 2)
         if sidecar_path is not None:
             try:
+                sidecar_path.parent.mkdir(parents=True, exist_ok=True)
                 sidecar_path.write_text(
                     json.dumps(receipt, ensure_ascii=False), encoding="utf-8")
             except OSError:   # noqa: BLE001 - 写不了旁侧件不影响 stdout 回执

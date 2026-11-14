@@ -538,6 +538,15 @@ def _disk_bytes(workdir: Path) -> int:
                 continue
             if not statmod.S_ISLNK(info.st_mode):
                 total += info.st_size
+            else:
+                # 复核 2026-11-14：符号链接本身 0 字节，若直接跳过，指向
+                # workdir 外大文件（/mnt 上预置件）的链接会完全绕开总量帽。
+                # 按解析后的目标尺寸计入（悬空链接计 0），保证「工作目录
+                # 可触达字节」口径真实。
+                try:
+                    total += path.stat().st_size
+                except OSError:
+                    continue
     return total
 
 
