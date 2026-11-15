@@ -109,7 +109,8 @@ _KEYS: "Mapping[str, frozenset[str]]" = {
     "submit_claim": frozenset({"action", "claims", "report_text"}),
 }
 _OPTIONAL_KEYS: "Mapping[str, frozenset[str]]" = {
-    "propose_plan": frozenset({"design_source", "analysis_source"}),
+    "propose_plan": frozenset({"design_source", "analysis_source",
+                                  "design_intent"}),
     # R1.3：设计声明与研究报告随既有动作提交，不新增第九动作（Plan §4/§7）。
     # 旧 profile 的这些键不被读取；R1.3 分派器强制要求。
     "freeze_confirm": frozenset({"design_intent"}),
@@ -253,6 +254,9 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
         for opt in ("design_source", "analysis_source"):
             if opt in doc:
                 _require_str(doc, opt, max_bytes=SOURCE_MAX_BYTES)
+        if "design_intent" in doc and not isinstance(doc["design_intent"],
+                                                     Mapping):
+            raise LoopError("WRONG_TYPE", "design_intent 必须是对象")
     elif name == "run_batch":
         _require_hex(doc, "plan_sha256")
         _require_hex(doc, "design_sha256")

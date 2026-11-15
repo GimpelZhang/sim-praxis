@@ -739,6 +739,10 @@ class CampaignDispatcher:
         plan_doc = dict(action.doc["plan"])
         if self.r13_bound:
             raw_intent = action.doc.get("design_intent")
+            # 兼容：模型常把 design_intent 塞进 plan 文档内（R1.3 轮 G 实证）。
+            # 顶层字段优先；plan 内的键在合同校验前取出，语义不变。
+            if raw_intent is None and "design_intent" in plan_doc:
+                raw_intent = plan_doc.pop("design_intent")
             if raw_intent is None:
                 return self._fail(
                     "DESIGN_INTENT_MISSING",

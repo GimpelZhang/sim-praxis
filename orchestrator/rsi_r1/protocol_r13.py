@@ -325,7 +325,8 @@ def render_study_brief_r13(study: str, task: TS.TaskSpecV13) -> str:
         "",
         "### 动作与必填字段（每个回复只给一个 JSON 对象）",
         "1. write_artifact(kind=design, source=<python>)  → 返回 source_sha256",
-        "2. propose_plan(plan=<ResearchPlan>, design_intent=<DesignIntentV13>)",
+        "2. propose_plan(plan=<ResearchPlan>, design_intent=<DesignIntentV13>)\n"
+        "   **design_intent 必须与 plan 同级（动作顶层字段）**，不要放进 plan 文档内。",
         "   design_intent 的 phase_role=fixed_pilot|distributional_exploration；"
         "若声明 distributional_exploration，run_batch 的矩阵必须真的让 nuisance 变化"
         "（全用占位值会被 DESIGN_DECLARATION_INVALID 拒绝）。",
