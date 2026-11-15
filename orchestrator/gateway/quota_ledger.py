@@ -996,6 +996,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_r1_roots_isolated()
     elif ns.phase == LEDGER_RSI_R12:
         assert_rsi_r12_roots_isolated()
+    elif ns.phase == LEDGER_RSI_R13:
+        assert_rsi_r13_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
