@@ -190,9 +190,9 @@ R13_FAMILY_CLOSED_ROUND_POSTS = 514
 #: 轮 A 首槽 1 呼（R13-D3）+ 轮 B review 校准 4 呼（R13-D4 案例夹具）已真实花掉，
 #: 已花不归还；新轮仍需完整 132 ⇒ 族帽 = 历史 554 + 已花 5 + 新轮 132 = 691。
 #: 旧 637 的余量 92 不结转（Plan §6 明写「不是把旧637余量92再加132」）。
-R13_PRIOR_SPENT_POSTS = 6          # 轮 A 1 + 轮 B 4 + 轮 C 1（不可归还）
+R13_PRIOR_SPENT_POSTS = 10         # 轮 A1 + B4 + C1 + D4（不可归还）
 R13_FAMILY_CAP = (R13_FAMILY_HISTORY_POSTS + R13_PRIOR_SPENT_POSTS
-                  + RSI_R13_HARD_CAP)   # 692
+                  + RSI_R13_HARD_CAP)   # 696
 R13_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (R13_FAMILY_CAP,)
 #: 账外诊断的取证材料（2026-11-14，`/tmp` 脚本只从 env 读凭据，不落密）。
 R13_OFFLEDGER_EVIDENCE: "tuple[Mapping[str, Any], ...]" = (

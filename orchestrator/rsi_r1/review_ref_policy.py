@@ -94,31 +94,27 @@ class RefResolver:
         return bool(good), good
 
     def resolve(self, locator: Any) -> "dict[str, Any]":
-        # 纯字符串：case_id（校准）或 pointer（正式）
         if isinstance(locator, str):
-            if self.mode == "calibration":
+            if self.mode == "calibration" and not locator.startswith("/"):
                 return self._case(locator)
-            ok, prefix = self._longest_prefix(locator)
-            if not ok:
-                raise RefPolicyError("REF_UNRESOLVED", locator)
-            return {"pointer_prefix": "/" + "/".join(prefix)}
-        if not isinstance(locator, Mapping):
+            pointer: "str | None" = locator
+        elif isinstance(locator, Mapping):
+            if self.mode == "calibration":
+                if "case_id" in locator:
+                    return self._case(str(locator["case_id"]))
+                if str(locator.get("type")) in ("case", "case_id"):
+                    return self._case(str(locator.get("case_id") or
+                                          locator.get("value") or ""))
+            pointer = next((locator.get(k) for k in ALIASES
+                            if isinstance(locator.get(k), str)), None)
+        else:
             raise RefPolicyError("REF_INVALID", str(locator))
-        if self.mode == "calibration":
-            if "case_id" in locator:
-                return self._case(str(locator["case_id"]))
-            if str(locator.get("type")) in ("case", "case_id"):
-                return self._case(str(locator.get("case_id") or
-                                      locator.get("value") or ""))
-        pointer = next((locator.get(k) for k in ALIASES
-                        if isinstance(locator.get(k), str)), None)
         if pointer is None:
             raise RefPolicyError("REF_INVALID", "缺 pointer/path/value/case_id")
         ok, prefix = self._longest_prefix(pointer)
         if not ok:
             raise RefPolicyError("REF_UNRESOLVED", pointer)
         if self.mode == "calibration":
-            # 校准包：最长前缀必须落在 /cases/<i>
             if len(prefix) < 2 or prefix[0] != "cases":
                 raise RefPolicyError("REF_NOT_CASE", pointer)
             try:

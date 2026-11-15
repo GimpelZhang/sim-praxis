@@ -295,6 +295,9 @@ def _calibration_case(case_id: str) -> dict:
              "values": blocks[1]["values"], "effect": 0.17}]
         case["assignment_note"] = ("exploration cells all used the same "
                                    "placeholder nuisance value 1.0")
+        case["diagnostics"] = dict(diagnostics, coverage={
+            "blocks": ["b01", "b02"], "unique_design_count": 1,
+            "independent_unit_count": 2})
         case["report"] = dict(report, methods_and_assignment_responsibility=(
             "探索覆盖了 nuisance 分布（48 run）"))
     elif case_id == "overclaim_universal":
@@ -316,22 +319,51 @@ def _calibration_case(case_id: str) -> dict:
         case["diagnostics"] = dict(diagnostics, contrasts=[
             {"contrast_id": task.primary.id, "effect": 0.002,
              "lower": -0.004, "upper": 0.009, "n_blocks": 2}],
-            threshold_counts=[{"above_delta": 0, "below_minus_delta": 0,
-                               "within": 2}])
+            threshold_counts=[{"contrast_id": task.primary.id,
+                               "above_delta": 1, "below_minus_delta": 0,
+                               "within": 1}])
         case["report"] = dict(report, question_and_hypotheses=(
             "效应可能接近零；当前证据不足以支持或反驳"))
     elif case_id == "fixed_pilot_scoped":
+        pair = {"schema": task.primary.to_dict()["schema"], "schema_version": 1,
+                "id": "fixed_point_pair", "kind": "pairwise_difference",
+                "metric": task.primary.metric,
+                "proposition": task.primary.proposition,
+                "delta": str(task.primary.delta),
+                "terms": [{"condition_id": "hi_low_mu", "weight": "1"},
+                          {"condition_id": "hi_base", "weight": "-1"}]}
+        case["primary"] = pair
+        case["conditions"] = [c for c in conditions
+                              if c["id"] in ("hi_base", "hi_low_mu")]
         case["design_intent"] = dict(
             intent, phase_role="fixed_pilot",
             estimand={**intent["estimand"],
+                      "contrast_ids": ["fixed_point_pair"],
                       "target_population": "single point: v0=0.6, mu=0.4"},
             phase_comparability={"relation": "different_target",
                                  "rationale": "结论只适用该点"})
+        case["diagnostics"] = dict(diagnostics, contrasts=[
+            {"contrast_id": "fixed_point_pair", "effect": 0.235,
+             "lower": 0.22, "upper": 0.25, "n_blocks": 2}])
         case["report"] = dict(report, heterogeneity_and_scope=[
             {"claim": "固定点结论只适用 v0=0.6, μ=0.4",
              "applicability": "单点 pilot"}],
             limitations=[{"statement": "固定点 pilot 不外推到其他初速/摩擦",
                           "consequence": "仅是可行性，不是总体效应"}])
+    # 夹具归一（R13-D4）：诊断效应=primary terms 的 block 均值，δ 两侧计数
+    # 由同一 block 效应重算——案例必须自洽，否则 T5 自检直接拦截。
+    weights = {t["condition_id"]: float(t["weight"])
+               for t in case["primary"]["terms"]}
+    eff = [sum(w * b["values"][cond] for cond, w in weights.items())
+           for b in case["block_table"]]
+    mean = sum(eff) / len(eff)
+    delta = float(case["primary"]["delta"])
+    case["diagnostics"]["contrasts"][0]["effect"] = mean
+    case["diagnostics"]["threshold_counts"] = [{
+        "contrast_id": case["primary"]["id"],
+        "above_delta": sum(1 for v in eff if v > delta),
+        "below_minus_delta": sum(1 for v in eff if v < -delta),
+        "within": sum(1 for v in eff if -delta <= v <= delta)}]
     return case
 
 
@@ -439,21 +471,40 @@ def review_adapter_selftest() -> "dict[str, Any]":
     groups = (["valid_positive", "pseudo_replication", "overclaim_universal"],
               ["valid_uncertain", "fixed_pilot_scoped", "empty_limitations"])
     problems: "list[str]" = []
-    # 案例自洽性（R13-D4）：诊断效应必须等于 block_table 的交互均值。
+    # 案例自洽性（R13-D4）：诊断效应=按 primary.terms 的 block 均值；
+    # δ 两侧计数与实际效应一致；fixed-pilot 用单点 pairwise；pseudo 占位。
     for cid in RN.CALIBRATION_CASES:
         case = _calibration_case(cid)
-        vals = [b["values"] for b in case["block_table"]]
-        eff = [v["hi_low_mu"] - v["hi_base"] - v["lo_low_mu"] + v["lo_base"]
-               for v in vals]
+        weights = {t["condition_id"]: float(t["weight"])
+                   for t in case["primary"]["terms"]}
+        blocks = case["block_table"]
+        eff = [sum(w * b["values"][cond] for cond, w in weights.items())
+               for b in blocks]
         mean = sum(eff) / len(eff)
         diag = case["diagnostics"]["contrasts"][0]["effect"]
         if abs(mean - diag) > 1e-9:
-            problems.append(f"{cid}: block_table 均值 {mean} != 诊断 {diag}")
-        if cid == "fixed_pilot_scoped" and "single point" not in str(
-                case["design_intent"]["estimand"].get("target_population")):
-            problems.append("fixed_pilot_scoped: 未明示单点总体")
-        if cid == "pseudo_replication" and not case.get("assignment_note"):
-            problems.append("pseudo_replication: 缺占位值证据")
+            problems.append(f"{cid}: block 均值 {mean} != 诊断 {diag}")
+        delta = float(case["primary"]["delta"])
+        counts = case["diagnostics"]["threshold_counts"][0]
+        want = {"above_delta": sum(1 for v in eff if v > delta),
+                "below_minus_delta": sum(1 for v in eff if v < -delta),
+                "within": sum(1 for v in eff if -delta <= v <= delta)}
+        for key, value in want.items():
+            if int(counts.get(key, -1)) != value:
+                problems.append(f"{cid}: {key} {counts.get(key)} != {value}")
+        if cid == "fixed_pilot_scoped":
+            if case["primary"]["kind"] != "pairwise_difference":
+                problems.append("fixed_pilot_scoped: primary 必须是单点 pairwise")
+            if "single point" not in str(
+                    case["design_intent"]["estimand"].get("target_population")):
+                problems.append("fixed_pilot_scoped: 未明示单点总体")
+            if len(case["conditions"]) != 2:
+                problems.append("fixed_pilot_scoped: 条件必须只有该点两臂")
+        if cid == "pseudo_replication":
+            nuisance = {json.dumps(b["nuisance"], sort_keys=True)
+                        for b in blocks}
+            if len(nuisance) != 1 or not case.get("assignment_note"):
+                problems.append("pseudo_replication: 占位值证据不自洽")
     all_results: "dict[str, dict[str, str]]" = {}
     for pi, ids in enumerate(groups):
         packet = build_calibration_packet(ids)
