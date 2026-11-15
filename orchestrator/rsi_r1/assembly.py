@@ -218,10 +218,12 @@ class Envelope:
     def from_ctx(cls, ctx: Any) -> "Envelope":
         doc = ctx.read_json("contract/envelope.json")
         schema = doc.get("schema")
-        if schema not in (ENVELOPE_SCHEMA, P.ENVELOPE_SCHEMA_V2):
+        if schema not in (ENVELOPE_SCHEMA, P.ENVELOPE_SCHEMA_V2,
+                          P.ENVELOPE_SCHEMA_V13):
             raise AssemblyError(
                 "ENVELOPE_SCHEMA",
-                f"{schema!r} 不在（{ENVELOPE_SCHEMA!r}, {P.ENVELOPE_SCHEMA_V2!r}）")
+                f"{schema!r} 不在（{ENVELOPE_SCHEMA!r}, {P.ENVELOPE_SCHEMA_V2!r}, "
+                f"{P.ENVELOPE_SCHEMA_V13!r}）")
         return cls(envelope_id=C.require_safe_id(doc.get("envelope_id"),
                                                  where="envelope"),
                    budget_sha256=_require_sha256(
