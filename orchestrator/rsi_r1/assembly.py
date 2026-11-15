@@ -1179,6 +1179,12 @@ class CampaignDispatcher:
             code, detail = self._r13_confirm_precheck(plan, action)
             if code:
                 return self._fail(code, detail, side_effect_status="NONE")
+        # 量表固定 32 block：在任何预留/种子写入之前拒绝（预执行，零副作用）。
+        if int(plan.nuisance_distribution.block_count) != 32:
+            return self._fail(
+                "CONFIRM_BLOCK_COUNT",
+                f"confirm block_count={plan.nuisance_distribution.block_count} "
+                "!= 量表固定 32", side_effect_status="NONE")
         if plan.parent_sha != expect_parent:
             return self._fail(
                 "PARENT_SHA_MISMATCH",
