@@ -235,7 +235,9 @@ def main():
             rec, metric_id, initial_x.get(run_id), amplitude.get(cond))
     effects = {b: sum(w * vals[c] for c, w in weights.items())
                for b, vals in by_block.items()}
-    values = sorted(effects.values())
+    # 与宿主同一顺序：按 block_id 排序后再做 bootstrap（同一 seed 下数组顺序
+    # 改变会改变重抽样结果——2026-11-15 T5 实测 CI 差 1e-2）。
+    values = [effects[b] for b in sorted(effects)]
     effect = float(np.mean(values))
     lower, upper = interval(values, 0.95)
     delta = float(task["primary"]["delta"])
@@ -252,7 +254,11 @@ def main():
                        "block_effects": [{"block_id": b, "effect": effects[b]}
                                          for b in sorted(effects)]}],
         "coverage": {"blocks": sorted(by_block), "run_count": len(records),
-                     "unique_design_count": len(records),
+                     "unique_design_count": len({
+                         (condition[rid],
+                          json.dumps(records[rid].get("params_applied") or {},
+                                     sort_keys=True))
+                         for rid in records}),
                      "independent_unit_count": len(by_block)},
         "summaries": [],
         "threshold_counts": [{"contrast_id": task["primary"]["id"],
