@@ -164,7 +164,12 @@ def test_parse_rejects_bad_claims() -> None:
 
 
 def test_claims_reject_non_finite_numbers() -> None:
-    """NaN/inf 能过 json.loads（非严格 JSON），但绝不许进主张/区间的数值面。"""
+    """NaN/inf 能过 json.loads（非严格 JSON），但绝不许进主张/区间的数值面。
+
+    轮 M（R13-D7）：动作入口先做递归非有限数检查（T0 注册的可恢复码
+    ``NAN_OR_INF``），所以在 ``parse_action`` 这一层就拒绝了；主张字段级
+    的类型校验仍是绕过入口时的第二道闸。
+    """
     base = _all_actions()["submit_claim"]
     good = dict(base["claims"][0])
     for bad in (float("nan"), float("inf"), float("-inf")):
@@ -172,7 +177,13 @@ def test_claims_reject_non_finite_numbers() -> None:
             with pytest.raises(L.LoopError) as exc:
                 L.parse_action(json.dumps({**base,
                                            "claims": [{**good, key: bad}]}))
-            assert exc.value.code == "WRONG_TYPE"
+            assert exc.value.code == "NAN_OR_INF"
+    # 第二道闸：直接构造 Action 绕过入口时，字段校验仍以 WRONG_TYPE 拒绝。
+    with pytest.raises(L.LoopError) as exc:
+        L._validate_action_fields("submit_claim",
+                                  {**base, "claims": [{**good,
+                                                       "estimate": float("nan")}]})
+    assert exc.value.code in ("WRONG_TYPE", "NAN_OR_INF")
 
 
 def test_claims_accept_n_blocks_and_reject_other_extras() -> None:
