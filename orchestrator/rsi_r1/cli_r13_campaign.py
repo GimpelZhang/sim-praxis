@@ -170,6 +170,16 @@ def cmd_init(args: Any) -> int:
     }
     _write_json(ctx.relative("public/public_contract.json"), contract)
     _write_json(ctx.relative("contract/public_contract.json"), contract)
+    md = ("# RSI-R1.3 公开合同\n\n"
+          f"- profile: {contract['profile_id']}\n"
+          f"- envelope: {contract['envelope_id']}\n"
+          f"- 预算: {json.dumps(contract['posts'], ensure_ascii=False)}\n"
+          f"- 分析输出 schema: {contract['analysis_output']['output_schema']}\n"
+          f"- 诊断 schema: {contract['analysis_output']['diagnostics_schema']}\n"
+          f"- 科学: {json.dumps(contract['science'], ensure_ascii=False)}\n"
+          f"- 家族: {json.dumps(contract['family'], ensure_ascii=False)}\n")
+    atomic_write_text(ctx.relative("public/public_contract.md"), md, mode=0o600)
+    atomic_write_text(ctx.relative("contract/public_contract.md"), md, mode=0o600)
     plan = _plan_path(args)
     if not plan.is_file():
         raise Cli13Error("PLAN_ABSENT", str(plan))
