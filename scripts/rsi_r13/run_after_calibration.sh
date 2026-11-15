@@ -28,6 +28,21 @@ run studyB "$PY" -m orchestrator.rsi_r1.cli_r13 study --envelope "$ENVELOPE" --s
   --batch-id "R13-T7-B-${STAMP}" --tokenizer "$TOK" --tokenizer-sha256 "$TOKSHA" || exit 1
 run replayA "$PY" -m orchestrator.rsi_r1.cli_r13 replay --envelope "$ENVELOPE" --study A || exit 1
 run replayB "$PY" -m orchestrator.rsi_r1.cli_r13 replay --envelope "$ENVELOPE" --study B || exit 1
-run reviewA "$PY" -m orchestrator.rsi_r1.cli_r13 review --envelope "$ENVELOPE" --study A || exit 1
-run reviewB "$PY" -m orchestrator.rsi_r1.cli_r13 review --envelope "$ENVELOPE" --study B || exit 1
+# 轮 O：REVIEW_FAIL 是**合法科学结论**（审查判 FAIL），CLI 以 rc=2 表达它；
+# 只有合并件缺失（仪器/宿主失败）才算停。旧写法 `|| exit 1` 会让 review A 的
+# 非 PASS 结论把 review B 一起掐掉。
+review_step() {
+  local study="$1"
+  echo "[chain] review$study $(date -u +%FT%TZ)"
+  if ! "$PY" -m orchestrator.rsi_r1.cli_r13 review --envelope "$ENVELOPE" \
+      --study "$study" > "/tmp/r13chain-review$study.log" 2>&1; then
+    if [ ! -f "/mnt/artifacts/simpraxis/rsi_r13/${ENVELOPE}/reviews/${study}_combined.json" ]; then
+      echo "[chain] STOP at review$study（无合并件，见 /tmp/r13chain-review$study.log）"
+      return 1
+    fi
+    echo "[chain] review$study 结论非 REVIEW_PASS（照常继续）"
+  fi
+}
+review_step A || exit 1
+review_step B || exit 1
 echo "[chain] COMPLETE $(date -u +%FT%TZ)"
