@@ -555,3 +555,30 @@ def test_r13_formal_packet_uses_task_primary_metric(tmp_path):
     assert abs(float(effect) - float(claim["estimate"])) < 1e-12
     assert len(values) == 32
     assert packet["primary_contrast"]["metric"] == task.primary.metric
+
+
+def test_r13_formal_packet_block_table_carries_actual_nuisance(tmp_path):
+    """轮 P（R13-D12）：块表必须带**实际抽到的** nuisance 值。
+
+    轮 O 两名审查者判「block_table 未给出各 block 的质量赋值 / target_freq」；
+    实际 manifest 里逐 run 的 params 有这些值，是宿主旧实现只写了
+    `{"sampled_policy": "host_per_block"}`。此测试要求每 block 的 nuisance
+    与 manifest 逐字一致。
+    """
+    from orchestrator.rsi_r1 import r13_review_run as RR, experiments as E
+
+    task = TS.build_new_a()
+    ctx, state, dispatcher = _setup(tmp_path, task=task, values=_values_a())
+    out, state, ctx = _run_chain(ctx, state, dispatcher, task)
+    assert out["ok"], out
+    packet, _, _ = RR.build_formal_packet(ctx, "A", task)
+    manifest = E.manifest_from_doc(ctx.read_json("confirm/manifest_A.json"))
+    want: "dict[str, str]" = {}
+    for a in manifest.assignments:
+        if "mass_kg" in a.params:
+            want.setdefault(a.block_id, str(a.params["mass_kg"]))
+    rows = {row["block_id"]: row["nuisance"] for row in packet["block_table"]}
+    assert set(rows) == set(want) and len(rows) == 32
+    for block, mass in want.items():
+        assert rows[block].get("mass_kg") == mass, block
+        assert "sampled_policy" not in rows[block]

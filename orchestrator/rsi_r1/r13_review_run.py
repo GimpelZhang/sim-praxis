@@ -642,14 +642,26 @@ def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
     if not ctx.exists(intent_rel):
         raise ReviewRunError("INTENT_MISSING", f"{study}:{intent_rel}")
     intent = json.loads(ctx.relative(intent_rel).read_text(encoding="utf-8"))
-    assignments = []
-    seen_blocks = set()
+    # 轮 P（R13-D12）：块表的 nuisance 必须是**实际抽到的值**。
+    # 轮 O 实证：旧实现每 block 只写 ``{"sampled_policy": "host_per_block"}``，
+    # 把 manifest 里逐 run 的 params（A: mass_kg=0.86888…，B: target_freq_hz）
+    # 整段丢掉；两名审查者据此判「block_table 未给出各 block 的质量赋值 /
+    # target_freq」——又是宿主喂错材料（D12）。现在按 nuisance_schema 的键
+    # 从该 block 的分配里取值；某 block 缺键即 fail-closed。
+    nuisance_names = tuple((task.nuisance_schema or {}).keys())
+    by_block: "dict[str, dict[str, str]]" = {}
     for a in manifest.assignments:
-        if a.block_id in seen_blocks:
-            continue
-        seen_blocks.add(a.block_id)
-        assignments.append({"block_id": a.block_id,
-                            "nuisance": {"sampled_policy": "host_per_block"}})
+        row = by_block.setdefault(a.block_id, {})
+        for name in nuisance_names:
+            if name in a.params:
+                row[name] = str(a.params[name])
+    assignments = []
+    for block in sorted(by_block):
+        if len(by_block[block]) != len(nuisance_names):
+            raise ReviewRunError("NUISANCE_MISSING",
+                                 f"{study}:{block} 缺 {nuisance_names}")
+        assignments.append({"block_id": block,
+                            "nuisance": dict(by_block[block])})
     packet = RN.build_packet(
         study=study, task=task, intent=intent,
         design_audit={"run_count": len(artifacts),
