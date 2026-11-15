@@ -16,10 +16,13 @@ import pytest
 from orchestrator.rsi_r1 import profiles as P
 
 
-def test_profile_ids_are_frozen_pair():
-    assert P.PROFILES == ("rsi-r1-legacy", "rsi-r1.2")
+def test_profile_ids_are_frozen_triple():
+    # R1.3（2026-11-15）把已登记 profile 从两条扩到三条：旧两条的 id/定义
+    # 逐字节不变（下方各测试仍逐项断言），新增 rsi-r1.3 显式登记。
+    assert P.PROFILES == ("rsi-r1-legacy", "rsi-r1.2", "rsi-r1.3")
     assert P.profile_by_id("rsi-r1-legacy") is P.PROFILE_LEGACY_DEF
     assert P.profile_by_id("rsi-r1.2") is P.PROFILE_R12_DEF
+    assert P.profile_by_id("rsi-r1.3") is P.PROFILE_R13_DEF
 
 
 def test_legacy_profile_matches_lanes_single_source():
@@ -74,11 +77,12 @@ def test_resolve_profile_declared_r12():
 
 
 def test_resolve_profile_rejects_unknown():
+    # 未登记 id 仍一律拒绝（rsi-r1.3 已于 2026-11-15 登记，不再是未知值）。
     with pytest.raises(P.ProfileError) as exc:
-        P.resolve_profile({"profile_id": "rsi-r1.3"})
+        P.resolve_profile({"profile_id": "rsi-r1.9"})
     assert exc.value.code == "PROFILE_UNKNOWN"
     with pytest.raises(P.ProfileError) as exc:
-        P.resolve_profile({"profile_id": "rsi-r1.3"}, requested_campaign="rsi-r1.3")
+        P.resolve_profile({"profile_id": "rsi-r1.9"}, requested_campaign="rsi-r1.9")
     assert exc.value.code == "PROFILE_UNKNOWN"
     with pytest.raises(P.ProfileError):
         P.resolve_profile({"profile_id": 42})

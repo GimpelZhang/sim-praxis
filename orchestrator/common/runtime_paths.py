@@ -1334,3 +1334,268 @@ def assert_rsi_r12_roots_isolated() -> None:
         message=("R1.2 campaign 根必须与 Phase 1/2/2.5/2.6/2.7/2.8.1 封存根及 "
                  f"RSI-R0/R0.1/R0.2/R1 家族根互异且互不嵌套（解析后）：campaign={campaign} "
                  f"protected={[str(p.resolve(strict=False)) for p in seals]}"))
+
+
+# ---- RSI-R1.3：独立新根（2026-11-15；照 RSI-R1.2 复制，不泛化旧根）----
+# 期号取 **2905**（R1.3 T0 全仓扫描确认 2/25/26/27/281/2900/2901/2902/2903/2904
+# 已占用、2905 无冲突后锁定）。R1.2 家族根（``rsi_r12_root()``，含其全部
+# campaign）与 R1/R0 各族根一并进入 R1.3 的不可写根集：R1.3 的任何写路径不得
+# 落进已结案实验根（AC02/AC03）。旧账继续只读，不改写任何历史行。
+#
+# R1.3 与 R1.2 的差异（Plan §2/§3/§4/§5）：同构目录族**新增**
+# tasks/（公开任务与封存清单）、resources/（resource_plan.json 与其复核件）、
+# design_audits/（声明↔实际对账）、reports/（ResearchReportV13 与渲染件）、
+# reviews/（ReviewPacketV13/ReviewRunReceipt/合并判决）、calibration/
+# （审查校准 4 呼的封存件）、permits/（ReviewCalibrationPermit）、
+# baseline/（T0 只读基线快照），其余逐名保留以便旧工具只读复用。
+
+_RSI_R13_ROOT_ENV = "SIMPRAXIS_RSI_R13_ROOT"          # R1.3 家族根（campaign 父目录）
+_RSI_R13_CAMPAIGN_ENV = "SIMPRAXIS_RSI_R13_CAMPAIGN"  # R1.3 campaign id（写路径必填）
+
+
+class RsiR13CampaignUnsetError(RuntimeError):
+    """未指定 R1.3 campaign 就解析写路径——fail-closed，不回退到任何缺省 campaign。"""
+
+
+#: R1.3 campaign 子目录（Plan §2–§5 的产物面；quota/approvals 嵌套在 quota 下）。
+RSI_R13_CAMPAIGN_SUBDIRS: "tuple[str, ...]" = (
+    "contract",          # 单源 schema / 公开合同 / 冻结公开科学范围
+    "tasks",             # TaskSpecV13 公开面与封存清单（私有实例不在此）
+    "resources",         # resource_plan.json（由实际 spec 推导）
+    "private",           # 维护侧私有件（候选不可挂载）
+    "public",            # 候选可见的公开任务与边界
+    "observations",      # 可信 raw 观测与 manifest
+    "analysis",          # 候选分析程序的输出视图
+    "design_audits",     # audit_design 前后两次对账
+    "trials",            # 逐 trial 证据（explore/confirm/replay 分 root）
+    "designs",           # 候选 design/analysis 源码版本（按 hash 存储）
+    "confirm",           # 确认集私有 block 与一次原子批次证据
+    "judge",             # 独立判据报告
+    "replay",            # 独立复跑 root
+    "reports",           # ResearchReportV13 原始对象与渲染件
+    "reviews",           # ReviewPacketV13 / ReviewRunReceipt / 合并判决
+    "calibration",       # 审查校准包与 4 呼结果（封存）
+    "permits",           # ReviewCalibrationPermit 与费用 scope 件
+    "deliverable",       # 结案交付件
+    "claim",             # 候选主张提交件
+    "research_packets",  # 两 study 的研究包
+    "state",             # 事件日志/回复原文（journal.jsonl 与其 sha 链）
+    "human_events",      # HumanEvent 计时
+    "quota",             # 本 R1.3 独立账（2905）
+    "quota/approvals",   # 批次批准件
+    "protocol",          # probe/practice 单链演练
+    "attempts",          # 逐 attempt 报告
+    "studies",           # 两正式研究 study 的驱动报告
+    "validation",        # 离线生产准入
+    "aux",               # aux 子信封占额与逐项用量
+    "baseline",          # T0 只读基线快照
+    "closeout",          # 结案件
+    "evidence_pack",     # 证据包
+)
+
+#: 家族根下保留名：envelope_id 不得与之同名（防止族账/基线被当作 campaign 根）。
+RSI_R13_RESERVED_ROOT_NAMES: "tuple[str, ...]" = ("family", "baseline")
+
+
+def rsi_r13_root() -> Path:
+    """R1.3 家族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_r13``。"""
+    root = os.environ.get(_RSI_R13_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_r13"
+
+
+def rsi_r13_campaign_id() -> str:
+    cid = os.environ.get(_RSI_R13_CAMPAIGN_ENV, "")
+    if not cid:
+        raise RsiR13CampaignUnsetError(
+            f"{_RSI_R13_CAMPAIGN_ENV} 未设置：R1.3 写路径必须显式指定 campaign")
+    return _validate_campaign_id(cid, error_cls=RsiR13CampaignUnsetError,
+                                 label="R1.3")
+
+
+def rsi_r13_campaign_root() -> Path:
+    return rsi_r13_root() / rsi_r13_campaign_id()
+
+
+def rsi_r13_subdir(name: str) -> Path:
+    """campaign 子目录解析（白名单；越界名直接拒绝，杜绝路径穿越）。"""
+    if name not in RSI_R13_CAMPAIGN_SUBDIRS:
+        raise RsiR13CampaignUnsetError(f"未知 R1.3 campaign 子目录：{name!r}")
+    return rsi_r13_campaign_root() / name
+
+
+def rsi_r13_family_dir() -> Path:
+    """族账目录（家族根下 ``family/``；不隶属任何 campaign）。"""
+    return ensure_private_dir(rsi_r13_root() / "family")
+
+
+def rsi_r13_family_doc_path() -> Path:
+    return rsi_r13_family_dir() / "family.json"
+
+
+def rsi_r13_baseline_dir() -> Path:
+    """T0 基线快照目录（家族根下 ``baseline/``；不隶属任何 campaign）。"""
+    return ensure_private_dir(rsi_r13_root() / "baseline")
+
+
+def _r13_dir(name: str) -> Path:
+    return ensure_private_dir(rsi_r13_subdir(name))
+
+
+def rsi_r13_contract_dir() -> Path:
+    return _r13_dir("contract")
+
+
+def rsi_r13_tasks_dir() -> Path:
+    return _r13_dir("tasks")
+
+
+def rsi_r13_resources_dir() -> Path:
+    return _r13_dir("resources")
+
+
+def rsi_r13_private_dir() -> Path:
+    return _r13_dir("private")
+
+
+def rsi_r13_public_dir() -> Path:
+    return _r13_dir("public")
+
+
+def rsi_r13_observations_dir() -> Path:
+    return _r13_dir("observations")
+
+
+def rsi_r13_analysis_dir() -> Path:
+    return _r13_dir("analysis")
+
+
+def rsi_r13_design_audits_dir() -> Path:
+    return _r13_dir("design_audits")
+
+
+def rsi_r13_trials_dir() -> Path:
+    return _r13_dir("trials")
+
+
+def rsi_r13_designs_dir() -> Path:
+    return _r13_dir("designs")
+
+
+def rsi_r13_confirm_dir() -> Path:
+    return _r13_dir("confirm")
+
+
+def rsi_r13_replay_dir() -> Path:
+    return _r13_dir("replay")
+
+
+def rsi_r13_reports_dir() -> Path:
+    return _r13_dir("reports")
+
+
+def rsi_r13_reviews_dir() -> Path:
+    return _r13_dir("reviews")
+
+
+def rsi_r13_calibration_dir() -> Path:
+    return _r13_dir("calibration")
+
+
+def rsi_r13_permits_dir() -> Path:
+    return _r13_dir("permits")
+
+
+def rsi_r13_research_packets_dir() -> Path:
+    return _r13_dir("research_packets")
+
+
+def rsi_r13_human_events_dir() -> Path:
+    return _r13_dir("human_events")
+
+
+def rsi_r13_quota_dir() -> Path:
+    return _r13_dir("quota")
+
+
+def rsi_r13_ledger_path() -> Path:
+    return rsi_r13_quota_dir() / "ledger.jsonl"
+
+
+def rsi_r13_counters_path() -> Path:
+    return rsi_r13_quota_dir() / "counters.json"
+
+
+def rsi_r13_approvals_dir() -> Path:
+    return ensure_private_dir(rsi_r13_quota_dir() / "approvals")
+
+
+def rsi_r13_reservations_dir() -> Path:
+    return ensure_private_dir(rsi_r13_quota_dir() / "resource_reservations")
+
+
+def rsi_r13_attempts_path() -> Path:
+    return rsi_r13_quota_dir() / "attempts.jsonl"
+
+
+def rsi_r13_gateway_state_dir() -> Path:
+    # 熔断/暂停态随本 campaign 隔离，绝不读写全局 SIMPRAXIS_GATEWAY_STATE。
+    return ensure_private_dir(rsi_r13_campaign_root() / "gateway_state")
+
+
+def rsi_r13_gateway_state_path() -> Path:
+    return rsi_r13_gateway_state_dir() / "quota_pause.json"
+
+
+def rsi_r13_protocol_dir() -> Path:
+    return _r13_dir("protocol")
+
+
+def rsi_r13_validation_dir() -> Path:
+    return _r13_dir("validation")
+
+
+def rsi_r13_aux_dir() -> Path:
+    return _r13_dir("aux")
+
+
+def rsi_r13_closeout_dir() -> Path:
+    return _r13_dir("closeout")
+
+
+def rsi_r13_evidence_pack_dir() -> Path:
+    return _r13_dir("evidence_pack")
+
+
+def rsi_r13_protected_write_roots() -> "dict[str, Path]":
+    """R1.3 写路径的不可写根集：六份封存期根 + R0/R0.1/R0.2/R1/R1.2 五族家族根。
+
+    旧家族根整棵进入（不只某个 campaign）：R1.3 写路径若嵌进任一旧 campaign，
+    会直接污染已结案实验的台账与证据包（AC02/AC03）。
+    """
+    roots = sealed_phase_roots()
+    roots["rsi_r0"] = rsi_r0_root()
+    roots["rsi_r01"] = rsi_r01_root()
+    roots["rsi_r02"] = rsi_r02_root()
+    roots["rsi_r1"] = rsi_r1_root()
+    roots["rsi_r12"] = rsi_r12_root()
+    return roots
+
+
+def assert_rsi_r13_roots_isolated() -> None:
+    """R1.3 campaign 根与六份封存期根 + R0/R0.1/R0.2/R1/R1.2 家族根两两互异且互不嵌套。
+
+    在任何 mkdir/写系统调用之前 fail-fast（AC02/AC03）：approvals/、
+    gateway_state/、attempts.jsonl、validation/ 若与旧根嵌套，会直接污染
+    已结案实验的台账与证据包。
+    """
+    campaign = rsi_r13_campaign_root().resolve(strict=False)
+    protected = rsi_r13_protected_write_roots()
+    seals = tuple(protected.values())
+    _assert_roots_isolated(
+        rsi_r13_campaign_root(), seals,
+        label=_RSI_R13_CAMPAIGN_ENV,
+        message=("R1.3 campaign 根必须与 Phase 1/2/2.5/2.6/2.7/2.8.1 封存根及 "
+                 f"RSI-R0/R0.1/R0.2/R1/R1.2 家族根互异且互不嵌套（解析后）：campaign={campaign} "
+                 f"protected={[str(p.resolve(strict=False)) for p in seals]}"))

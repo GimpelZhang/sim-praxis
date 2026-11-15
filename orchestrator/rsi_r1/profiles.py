@@ -43,7 +43,10 @@ from orchestrator.rsi_r1.lanes import (
 
 PROFILE_LEGACY = "rsi-r1-legacy"
 PROFILE_R12 = "rsi-r1.2"
-PROFILES: "tuple[str, ...]" = (PROFILE_LEGACY, PROFILE_R12)
+#: R1.3（2026-11-15）：显式选择的新不可变 profile。旧两条 id 与全部序列化/
+#: 判决逐字节不变；未知 id 一律 `PROFILE_UNKNOWN`，不得 startswith 匹配。
+PROFILE_R13 = "rsi-r1.3"
+PROFILES: "tuple[str, ...]" = (PROFILE_LEGACY, PROFILE_R12, PROFILE_R13)
 
 SCHEMA_PREFIX = "simpraxis.rsi_r1"
 SCHEMA_VERSION = 1
@@ -56,6 +59,29 @@ ENVELOPE_SCHEMA_V1 = f"{SCHEMA_PREFIX}.envelope.v1"
 ENVELOPE_SCHEMA_V2 = "simpraxis.rsi_r12.envelope.v1"
 PUBLIC_CONTRACT_SCHEMA_V2 = "simpraxis.rsi_r12.public_contract.v2"
 PROFILE_SCHEMA = "simpraxis.rsi_r12.profile.v1"
+
+# ---- R1.3 独立 schema 家族（Plan §2–§5；旧 v1/v2 文档一律不重解释）----
+SCHEMA_PREFIX_V13 = "simpraxis.rsi_r13"
+BUDGET_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.budget.v1"
+CONSENT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.consent.v1"
+ENVELOPE_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.envelope.v1"
+PUBLIC_CONTRACT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.public_contract.v1"
+PROFILE_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.profile.v1"
+FAMILY_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.family.v1"
+FAMILY_PERMIT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.family_permit.v1"
+TASK_SPEC_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.task_spec.v1"
+TASKSET_MANIFEST_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.taskset_manifest.v1"
+RESOURCE_PLAN_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.resource_plan.v1"
+DESIGN_INTENT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.design_intent.v1"
+DESIGN_AUDIT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.design_audit.v1"
+ANALYSIS_OUTPUT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.analysis_output.v1"
+DIAGNOSTICS_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.diagnostics.v1"
+RESEARCH_REPORT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.research_report.v1"
+REVIEW_PACKET_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.review_packet.v1"
+REVIEW_RECEIPT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.review_receipt.v1"
+REVIEW_VERDICT_SCHEMA_V13 = f"{SCHEMA_PREFIX_V13}.review_verdict.v1"
+REVIEW_CALIBRATION_PERMIT_SCHEMA_V13 = (
+    f"{SCHEMA_PREFIX_V13}.review_calibration_permit.v1")
 
 # ---------------------------------------------------------------------------
 # R1.2 lane 表（Plan §1.1；**独立字面量**，不复用 legacy 表）
@@ -103,6 +129,80 @@ FAMILY_CLOSED_ROUND_POSTS = 482
 #: 历史族帽取值（旧 envelope/consent 仍须可读；新轮一律用当前 ``FAMILY_CAP``）。
 FAMILY_CAP_HISTORY: "tuple[int, ...]" = (155, 160, 165, 171, 178, 190, 244, 268, 293, 321, 323, 373, 403, 475, 491, 496, 563, FAMILY_CAP)
 FAMILY_NEW_ROUND_POSTS = RSI_R12_HARD_CAP
+
+# ---------------------------------------------------------------------------
+# R1.3 lane 表与预算（Plan §6；**独立字面量**，不复用 R1.2 表）
+# ---------------------------------------------------------------------------
+#: 候选四 lane 的帽与 R1.2 相同（Plan §6「候选lane保12/16/48/48=124 POST上限」）。
+#: 新增两条 review lane：校准 4（=2 包 × 2 通道）+ 正式 4（=2 study × 2 审）。
+#: review lane 的 POST 同样经项目网关 `coding_debug` 阶段逐次记账；两者一起
+#: 在族账登记时预留（Plan §7/§8.2）。
+LANE_ORDER_R13: "tuple[str, ...]" = (
+    "probe", "practice", "study_A", "study_B",
+    "review_calibration", "review_final",
+)
+LANE_TASK_ID_R13: "Mapping[str, int]" = types.MappingProxyType({
+    "probe": 0,
+    "practice": 1,
+    "study_A": 2,
+    "study_B": 3,
+    "review_calibration": 4,
+    "review_final": 5,
+})
+LANE_POST_CAPS_R13: "Mapping[str, int]" = types.MappingProxyType({
+    "probe": 12,
+    "practice": 16,
+    "study_A": 48,
+    "study_B": 48,
+    "review_calibration": 4,
+    "review_final": 4,
+})
+RSI_R13_CANDIDATE_POSTS = 124
+RSI_R13_REVIEW_POSTS = 8
+RSI_R13_HARD_CAP = RSI_R13_CANDIDATE_POSTS + RSI_R13_REVIEW_POSTS   # 132
+RSI_R13_NORMAL_BUDGET = RSI_R13_HARD_CAP
+RSI_R13_TASK_CAPS: "Mapping[int, int]" = types.MappingProxyType({
+    LANE_TASK_ID_R13[lane]: LANE_POST_CAPS_R13[lane] for lane in LANE_ORDER_R13
+})
+#: 输出预算承 R1.2 D-10（该端点默认思考且 reasoning 计入 completion）。
+RSI_R13_OUTPUT_TOKENS = 32768
+#: review 请求的输入/输出/字节帽（Plan §5「分别注册review专用输入/输出/字节帽，
+#: 引用当前stage已验证能力」）。输入帽取 R1/R1.2 已实测通过的 20000 token
+#: 请求门；输出帽与候选相同 32768（含思考）；包体 UTF-8 字节帽 120 KB。
+#: 超过任一即 `REVIEW_PACKET_TOO_LARGE`，付费前停止，不静默截断。
+REVIEW_INPUT_TOKENS_R13 = 20000
+REVIEW_OUTPUT_TOKENS_R13 = RSI_R13_OUTPUT_TOKENS
+REVIEW_PACKET_BYTES_R13 = 122_880
+
+#: 族历史（T0 对账，见 ``docs``/`family_reconciliation.json`）：
+#: 545 = 历史 31（R1 9 + R1.1 22，两本最终根账逐行冻结）
+#:      + R1.2 已关闭轮实花 514（17 个 paid 轮根账逐 call 行复算，与族成员
+#:        `posts_used` 逐轮相符；carryover 不重复计）
+#: 另有账外仪器诊断 9（2026-11-14 空回答调查，同一端点/同一模型，脚本读 env
+#: 不留密；逐条清单见 R1.3 family 对账件）。按「已花不隐藏」规则单列并计入：
+#: 9 呼不在任何项目账本内，与 545 无重叠，不得双计 ⇒ 审计后 H=554。
+R13_LEDGER_HISTORY_POSTS = 545
+R13_OFFLEDGER_DIAGNOSTIC_POSTS = 9
+R13_FAMILY_HISTORY_POSTS = R13_LEDGER_HISTORY_POSTS + R13_OFFLEDGER_DIAGNOSTIC_POSTS
+R13_FAMILY_CLOSED_ROUND_POSTS = 514
+#: 677 = 545 + 132（Plan §6 拟值）；计入账外诊断 9 后为 686。旧 637 的余量 92
+#: 不结转（Plan §6 明写「不是把旧637余量92再加132」）。
+R13_FAMILY_CAP = R13_FAMILY_HISTORY_POSTS + RSI_R13_HARD_CAP     # 686
+R13_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (R13_FAMILY_CAP,)
+#: 账外诊断的取证材料（2026-11-14，`/tmp` 脚本只从 env 读凭据，不落密）。
+R13_OFFLEDGER_EVIDENCE: "tuple[Mapping[str, Any], ...]" = (
+    types.MappingProxyType({
+        "case": "empty_response_investigation_2026-11-14",
+        "posts": 9,
+        "scripts": (
+            "sha256:17812163b8cc8638aa7444232c1f7e919fb7e57e2e56420b76db9619c2b3fbaa",
+            "sha256:6972c7634314e58ee5774e6fd85acb16129644a42aa216d3c1cd791565786977",
+        ),
+        "source": "~/文档/RSI_R1.2_Plan_Complete.md §13.2（9 次受控探测）",
+        "rule": ("同一端点/同一模型的仪器诊断 POST，不在任何项目账本内；"
+                 "单列为 off_ledger_diagnostic 并计入族已用，不与账本行双计"),
+    }),
+)
 
 #: 历史来源的**两本最终根账**（Plan §0 基线；行数/哈希在 family.py 复核）。
 HISTORY_SOURCES: "tuple[Mapping[str, Any], ...]" = (
@@ -457,6 +557,11 @@ class CampaignProfile:
     def is_r12(self) -> bool:
         return self.profile_id == PROFILE_R12
 
+    @property
+    def is_r13(self) -> bool:
+        # 精确匹配：绝不 startswith（防止 rsi-r1.3x 误收旧分支，Plan §8.2）。
+        return self.profile_id == PROFILE_R13
+
     def task_caps(self) -> "Mapping[int, int]":
         return types.MappingProxyType({
             self.lane_task_id[lane]: self.lane_post_caps[lane]
@@ -560,9 +665,62 @@ PROFILE_R12_DEF = CampaignProfile(
     }),
 )
 
+PROFILE_R13_DEF = CampaignProfile(
+    profile_id=PROFILE_R13,
+    budget_schema=BUDGET_SCHEMA_V13,
+    protocol_policy=R12_POLICY,
+    resource_limits=ResourceLimits(),
+    consent_scope="R1.3",
+    judge_version="r1.3",
+    namespace=2905,
+    lane_order=LANE_ORDER_R13,
+    lane_task_id=LANE_TASK_ID_R13,
+    lane_post_caps=LANE_POST_CAPS_R13,
+    hard_cap=RSI_R13_HARD_CAP,
+    normal_budget=RSI_R13_NORMAL_BUDGET,
+    family_cap=R13_FAMILY_CAP,
+    family_history_posts=R13_FAMILY_HISTORY_POSTS,
+    data_root_name="rsi_r13",
+    envelope_schema=ENVELOPE_SCHEMA_V13,
+    consent_schema=CONSENT_SCHEMA_V13,
+    public_contract_schema=PUBLIC_CONTRACT_SCHEMA_V13,
+    closure_groups_key="r13",
+    output_tokens=RSI_R13_OUTPUT_TOKENS,
+    extra=types.MappingProxyType({
+        "candidate_lanes": ("probe", "practice", "study_A", "study_B"),
+        "review_lanes": ("review_calibration", "review_final"),
+        "candidate_posts": RSI_R13_CANDIDATE_POSTS,
+        "review_posts": RSI_R13_REVIEW_POSTS,
+        "review_input_tokens": REVIEW_INPUT_TOKENS_R13,
+        "review_output_tokens": REVIEW_OUTPUT_TOKENS_R13,
+        "review_packet_bytes": REVIEW_PACKET_BYTES_R13,
+        "offline_validation_states": (
+            "registered", "offline_authorized", "calibrated",
+            "validation_locked", "validated",
+        ),
+        "paid_states": (
+            "registered", "authorized", "calibrated", "frozen",
+            "qualified", "study", "closed",
+        ),
+        "history_sources": [dict(s) for s in HISTORY_SOURCES],
+        "ledger_history_posts": R13_LEDGER_HISTORY_POSTS,
+        "offledger_diagnostic_posts": R13_OFFLEDGER_DIAGNOSTIC_POSTS,
+        "closed_rounds_posts": R13_FAMILY_CLOSED_ROUND_POSTS,
+        "offledger_evidence": [dict(e) for e in R13_OFFLEDGER_EVIDENCE],
+        "no_repair_entry": True,
+        "confirm_analysis_in_run_confirm": True,
+        "analysis_receipt_required": True,
+        "design_intent_required": True,
+        "research_report_required": True,
+        "review_receipt_required": True,
+        "review_calibration_permit_required": True,
+    }),
+)
+
 _BY_ID: "Mapping[str, CampaignProfile]" = types.MappingProxyType({
     PROFILE_LEGACY: PROFILE_LEGACY_DEF,
     PROFILE_R12: PROFILE_R12_DEF,
+    PROFILE_R13: PROFILE_R13_DEF,
 })
 
 
@@ -620,7 +778,44 @@ def resolve_profile(envelope_doc: Mapping[str, Any] | None = None, *,
         raise ProfileError(
             "PROFILE_MISMATCH",
             "R1.2 根必须在 contract/envelope.json 显式声明 profile_id=rsi-r1.2")
+    if requested == PROFILE_R13 and envelope_doc is not None and declared is None:
+        raise ProfileError(
+            "PROFILE_MISMATCH",
+            "R1.3 根必须在 contract/envelope.json 显式声明 profile_id=rsi-r1.3")
     return _BY_ID[requested]
+
+
+def assert_r13_table_consistent() -> None:
+    """R1.3 数值自洽（T0 自检 + AC04/AC44 机判共用；不成立即 fail-fast）。"""
+    if tuple(LANE_POST_CAPS_R13) != LANE_ORDER_R13:
+        raise AssertionError(
+            f"R1.3 lane 表顺序与 LANE_ORDER_R13 不一致：{tuple(LANE_POST_CAPS_R13)}")
+    if sorted(LANE_TASK_ID_R13.values()) != list(range(len(LANE_ORDER_R13))):
+        raise AssertionError(
+            f"R1.3 task id 必须是 0..{len(LANE_ORDER_R13) - 1}：{dict(LANE_TASK_ID_R13)}")
+    candidate = sum(LANE_POST_CAPS_R13[lane] for lane in
+                    ("probe", "practice", "study_A", "study_B"))
+    review = sum(LANE_POST_CAPS_R13[lane] for lane in
+                 ("review_calibration", "review_final"))
+    if candidate != RSI_R13_CANDIDATE_POSTS:
+        raise AssertionError(f"候选 lane 帽 {candidate} != {RSI_R13_CANDIDATE_POSTS}")
+    if review != RSI_R13_REVIEW_POSTS:
+        raise AssertionError(f"审查 lane 帽 {review} != {RSI_R13_REVIEW_POSTS}")
+    if sum(LANE_POST_CAPS_R13.values()) != RSI_R13_HARD_CAP:
+        raise AssertionError("R1.3 lane 帽之和 != 硬帽 132")
+    if RSI_R13_HARD_CAP != RSI_R13_NORMAL_BUDGET:
+        raise AssertionError("R1.3 无 repair_reserve，正常预算必须等于硬帽 132")
+    if R13_FAMILY_HISTORY_POSTS != (R13_LEDGER_HISTORY_POSTS
+                                    + R13_OFFLEDGER_DIAGNOSTIC_POSTS):
+        raise AssertionError("R1.3 族历史 != 账本 545 + 账外诊断 9")
+    if R13_FAMILY_CAP != R13_FAMILY_HISTORY_POSTS + RSI_R13_HARD_CAP:
+        raise AssertionError(
+            f"R1.3 族帽 {R13_FAMILY_CAP} != 历史 {R13_FAMILY_HISTORY_POSTS} + 本轮 132")
+    if sum(int(e["posts"]) for e in R13_OFFLEDGER_EVIDENCE) != \
+            R13_OFFLEDGER_DIAGNOSTIC_POSTS:
+        raise AssertionError("R1.3 账外诊断清单合计 != 9")
+    if sum(int(s["call_rows"]) for s in HISTORY_SOURCES) != 31:
+        raise AssertionError("R1.3 历史来源行数和 != 31")
 
 
 # ---------------------------------------------------------------------------

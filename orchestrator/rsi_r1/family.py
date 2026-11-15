@@ -37,6 +37,7 @@ import json
 import os
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -47,12 +48,28 @@ from orchestrator.rsi_r1.profiles import (
     FAMILY_HISTORY_POSTS,
     HISTORY_SOURCES,
     PROFILE_R12,
+    PROFILE_R13,
+    R13_FAMILY_CAP,
+    R13_FAMILY_CLOSED_ROUND_POSTS,
+    R13_FAMILY_HISTORY_POSTS,
+    R13_LEDGER_HISTORY_POSTS,
+    R13_OFFLEDGER_DIAGNOSTIC_POSTS,
+    R13_OFFLEDGER_EVIDENCE,
+    FAMILY_SCHEMA_V13,
+    FAMILY_PERMIT_SCHEMA_V13,
     CampaignProfile,
 )
 
 FAMILY_SCHEMA = "simpraxis.rsi_r12.family.v1"
 FAMILY_PERMIT_SCHEMA = "simpraxis.rsi_r12.family_permit.v1"
 FAMILY_SCHEMA_VERSION = 1
+
+#: R1.3 历史账的只读来源：R1.2 族文档（逐字节钉死）+ 其下 17 个已关闭
+#: paid 轮根账。`posts_used` 逐轮由账本 call 行重算，carryover 不重复计。
+R12_FAMILY_DOC_PATH = Path("/mnt/artifacts/simpraxis/rsi_r12/family/family.json")
+R12_FAMILY_DOC_SHA256 = (
+    "9ff8b63dfcdb03e8b56babbf9d7dd56a204828229f13a8c3e41994a2e47710a5")
+R12_FAMILY_ROOT = Path("/mnt/artifacts/simpraxis/rsi_r12")
 
 FAMILY_DIRNAME = "family"
 FAMILY_DOC_NAME = "family.json"
@@ -65,6 +82,47 @@ _ENVELOPE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MEMBER_REGISTERED = "registered"
 MEMBER_EXHAUSTED = "exhausted"
 MEMBER_CLOSED = "closed"
+
+
+@dataclass(frozen=True)
+class FamilySpec:
+    """一个 profile 的族账口径（schema/许可 schema/帽/历史导入器）。
+
+    R1.2 与 R1.3 共用同一套登记/许可算法，但族文档 schema、族帽与历史块
+    来源不同（R1.3 把 R1.2 的 17 个关闭轮与 9 次账外诊断并入历史）。
+    """
+
+    schema: str
+    permit_schema: str
+    profile_id: str
+    family_cap: int
+    history_posts: int
+
+
+FAMILY_SPEC_R12 = FamilySpec(
+    schema=FAMILY_SCHEMA,
+    permit_schema=FAMILY_PERMIT_SCHEMA,
+    profile_id=PROFILE_R12,
+    family_cap=FAMILY_CAP,
+    history_posts=FAMILY_HISTORY_POSTS,
+)
+FAMILY_SPEC_R13 = FamilySpec(
+    schema=FAMILY_SCHEMA_V13,
+    permit_schema=FAMILY_PERMIT_SCHEMA_V13,
+    profile_id=PROFILE_R13,
+    family_cap=R13_FAMILY_CAP,
+    history_posts=R13_FAMILY_HISTORY_POSTS,
+)
+
+
+def family_spec_for(profile: CampaignProfile) -> FamilySpec:
+    if profile.profile_id == PROFILE_R12:
+        return FAMILY_SPEC_R12
+    if profile.profile_id == PROFILE_R13:
+        return FAMILY_SPEC_R13
+    raise FamilyError("PROFILE_NOT_ELIGIBLE",
+                      f"族账只服务 {PROFILE_R12}/{PROFILE_R13}，实为 "
+                      f"{profile.profile_id}")
 
 
 class FamilyError(RuntimeError):
@@ -249,7 +307,7 @@ def family_doc_path(family_root: Path) -> Path:
     return family_root / FAMILY_DIRNAME / FAMILY_DOC_NAME
 
 
-def _read_doc(path: Path) -> "dict[str, Any]":
+def _read_doc(path: Path, *, expected_schema: "str | None" = FAMILY_SCHEMA) -> "dict[str, Any]":
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -260,9 +318,14 @@ def _read_doc(path: Path) -> "dict[str, Any]":
         raise FamilyError("FAMILY_CORRUPT", f"族账不可解析：{path}") from None
     if not isinstance(doc, dict):
         raise FamilyError("FAMILY_CORRUPT", f"族账不是对象：{path}")
-    if doc.get("schema") != FAMILY_SCHEMA:
+    known = (FAMILY_SCHEMA, FAMILY_SCHEMA_V13)
+    if expected_schema is None:
+        if doc.get("schema") not in known:
+            raise FamilyError("FAMILY_CORRUPT",
+                              f"族账 schema={doc.get('schema')!r} 未登记")
+    elif doc.get("schema") != expected_schema:
         raise FamilyError("FAMILY_CORRUPT",
-                          f"族账 schema={doc.get('schema')!r} != {FAMILY_SCHEMA}")
+                          f"族账 schema={doc.get('schema')!r} != {expected_schema}")
     return doc
 
 
@@ -278,24 +341,30 @@ def _write_doc(family_root: Path, doc: Mapping[str, Any]) -> None:
     atomic_write_text(path, text, mode=0o600)
 
 
-def load_family_doc(family_root: Path) -> "dict[str, Any] | None":
+def load_family_doc(family_root: Path, *,
+                    expected_schema: "str | None" = FAMILY_SCHEMA
+                    ) -> "dict[str, Any] | None":
     path = family_doc_path(family_root)
     if not path.is_file():
         return None
-    return _read_doc(path)
+    return _read_doc(path, expected_schema=expected_schema)
 
 
 # ---------------------------------------------------------------------------
 # 登记 / 许可
 # ---------------------------------------------------------------------------
 
-def _assert_profile(profile: CampaignProfile) -> None:
-    if profile.profile_id != PROFILE_R12:
+def _assert_profile(profile: CampaignProfile,
+                    spec: "FamilySpec | None" = None) -> FamilySpec:
+    resolved = spec or family_spec_for(profile)
+    if profile.profile_id != resolved.profile_id:
         raise FamilyError("PROFILE_NOT_ELIGIBLE",
-                          f"族账只服务 {PROFILE_R12}，实为 {profile.profile_id}")
-    if profile.family_cap != FAMILY_CAP:
+                          f"族账口径 {resolved.profile_id} 不接受 "
+                          f"{profile.profile_id}")
+    if profile.family_cap != resolved.family_cap:
         raise FamilyError("FAMILY_CAP_MISMATCH",
-                          f"profile 族帽 {profile.family_cap} != {FAMILY_CAP}")
+                          f"profile 族帽 {profile.family_cap} != {resolved.family_cap}")
+    return resolved
 
 
 def _assert_envelope_id(envelope_id: str) -> str:
@@ -323,10 +392,11 @@ def _reserved_total(doc: Mapping[str, Any]) -> int:
 
 
 def _build_permit(doc: Mapping[str, Any], member: Mapping[str, Any],
-                  *, now: "datetime | None") -> "dict[str, Any]":
+                  *, now: "datetime | None",
+                  permit_schema: str = FAMILY_PERMIT_SCHEMA) -> "dict[str, Any]":
     doc_sha = _doc_sha256(doc)
     permit = {
-        "schema": FAMILY_PERMIT_SCHEMA,
+        "schema": permit_schema,
         "schema_version": FAMILY_SCHEMA_VERSION,
         "envelope_id": member["envelope_id"],
         "profile_id": member["profile_id"],
@@ -346,15 +416,20 @@ def _build_permit(doc: Mapping[str, Any], member: Mapping[str, Any],
 def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
              *, posts_reserved: "int | None" = None,
              history_sources: "Iterable[Mapping[str, Any]]" = HISTORY_SOURCES,
+             spec: "FamilySpec | None" = None,
+             fresh_history: "Mapping[str, Any] | None" = None,
              now: "datetime | None" = None) -> "dict[str, Any]":
     """登记（或幂等取回）本 envelope 的族许可。
 
-    首次登记：导入并冻结历史 31，写入成员行（posts_reserved 默认 124）。
-    幂等：同 envelope_id 且同 profile/预留数 → 返回同一许可内容（族文档不变，
-    除 permit 的 issued_at/permit_sha 外；族文档本身不重写）。
+    首次登记：导入并冻结历史（R1.2=31；R1.3=554），写入成员行
+    （``posts_reserved`` 默认 profile.hard_cap）。幂等：同 envelope_id 且同
+    profile/预留数 → 返回同一许可内容（族文档不变）。
     拒绝：族帽不足、同 profile 已有其他成员、历史漂移、profile 不符。
+
+    ``fresh_history`` 仅供单测注入预计算历史块（生产调用必须留默认 None，
+    由 ``_fresh_history`` 从真实账本重算）。
     """
-    _assert_profile(profile)
+    resolved = _assert_profile(profile, spec)
     envelope_id = _assert_envelope_id(envelope_id)
     reserved = int(profile.hard_cap if posts_reserved is None else posts_reserved)
     if reserved <= 0:
@@ -364,23 +439,29 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
                           f"posts_reserved={reserved} > 本轮帽 {profile.hard_cap}")
 
     with _family_lock(family_root):
-        doc = load_family_doc(family_root)
-        fresh_history = import_history(history_sources, now=now)
+        doc = load_family_doc(family_root,
+                              expected_schema=resolved.schema)
+        if fresh_history is not None:
+            fresh = dict(fresh_history)
+        elif resolved.profile_id == PROFILE_R12:
+            fresh = import_history(history_sources, now=now)
+        else:
+            fresh = _fresh_history(resolved, now=now)
         if doc is None:
             doc = {
-                "schema": FAMILY_SCHEMA,
+                "schema": resolved.schema,
                 "schema_version": FAMILY_SCHEMA_VERSION,
-                "family_cap": FAMILY_CAP,
+                "family_cap": resolved.family_cap,
                 "profile_id": profile.profile_id,
-                "history": fresh_history,
+                "history": fresh,
                 "members": [],
                 "created_at_utc": _utc_now(now),
             }
         else:
-            _assert_history_unchanged(doc, fresh_history)
-            if int(doc["family_cap"]) != FAMILY_CAP:
+            _assert_history_unchanged(doc, fresh)
+            if int(doc["family_cap"]) != resolved.family_cap:
                 raise FamilyError("FAMILY_CAP_MISMATCH",
-                                  f"族账族帽 {doc['family_cap']} != {FAMILY_CAP}")
+                                  f"族账族帽 {doc['family_cap']} != {resolved.family_cap}")
             if doc.get("profile_id") != profile.profile_id:
                 raise FamilyError("FAMILY_PROFILE_MISMATCH",
                                   f"族账 profile={doc.get('profile_id')!r}")
@@ -396,7 +477,8 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
                 raise FamilyError(
                     "FAMILY_RESERVATION_MISMATCH",
                     f"{envelope_id} 已预留 {member['posts_reserved']} != {reserved}")
-            return _build_permit(doc, member, now=now)
+            return _build_permit(doc, member, now=now,
+                                 permit_schema=resolved.permit_schema)
 
         others = [m for m in members
                   if m["profile_id"] == profile.profile_id
@@ -407,10 +489,11 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
                 (f"profile {profile.profile_id} 已有活动成员 "
                  f"{[m['envelope_id'] for m in others]}；本轮关闭前不得开第二轮"))
         reserved_now = _reserved_total(doc)
-        if reserved_now + reserved > FAMILY_CAP:
+        if reserved_now + reserved > resolved.family_cap:
             raise FamilyError(
                 "FAMILY_CAP_EXCEEDED",
-                f"已预留 {reserved_now} + 本轮 {reserved} > 族帽 {FAMILY_CAP}")
+                f"已预留 {reserved_now} + 本轮 {reserved} > 族帽 "
+                f"{resolved.family_cap}")
 
         member = {
             "envelope_id": envelope_id,
@@ -426,7 +509,8 @@ def register(family_root: Path, profile: CampaignProfile, envelope_id: str,
         doc["members"] = members + [member]
         doc["updated_at_utc"] = _utc_now(now)
         _write_doc(family_root, doc)
-        return _build_permit(doc, member, now=now)
+        return _build_permit(doc, member, now=now,
+                             permit_schema=resolved.permit_schema)
 
 
 def close_member(family_root: Path, envelope_id: str, *, reason: str,
@@ -443,7 +527,7 @@ def close_member(family_root: Path, envelope_id: str, *, reason: str,
     if not isinstance(reason, str) or not reason.strip():
         raise FamilyError("FAMILY_CLOSE_REASON_REQUIRED", "关闭必须有 reason")
     with _family_lock(family_root):
-        doc = load_family_doc(family_root)
+        doc = load_family_doc(family_root, expected_schema=None)
         if doc is None:
             raise FamilyError("FAMILY_ABSENT", "族账不存在")
         members = list(doc["members"])
@@ -468,6 +552,7 @@ def close_member(family_root: Path, envelope_id: str, *, reason: str,
 
 def migrate_cap(family_root: Path, *, reason: str,
                 evidence: Mapping[str, Any] | None = None,
+                spec: "FamilySpec | None" = None,
                 now: "datetime | None" = None) -> "dict[str, Any]":
     """把族文档的族帽抬到当前常量 ``FAMILY_CAP``（只增不减、幂等、留痕）。
 
@@ -483,9 +568,10 @@ def migrate_cap(family_root: Path, *, reason: str,
     """
     if not isinstance(reason, str) or not reason.strip():
         raise FamilyError("FAMILY_CAP_REASON_REQUIRED", "族帽迁移必须有 reason")
-    target = int(FAMILY_CAP)
+    resolved = spec or FAMILY_SPEC_R12
+    target = int(resolved.family_cap)
     with _family_lock(family_root):
-        doc = load_family_doc(family_root)
+        doc = load_family_doc(family_root, expected_schema=resolved.schema)
         if doc is None:
             raise FamilyError("FAMILY_ABSENT", "族账不存在")
         current = int(doc["family_cap"])
@@ -545,17 +631,19 @@ def _assert_history_unchanged(doc: Mapping[str, Any],
 
 def verify_permit(family_root: Path, permit: Mapping[str, Any],
                   profile: CampaignProfile, envelope_id: str, *,
-                  history_sources: "Iterable[Mapping[str, Any]]" = HISTORY_SOURCES
+                  history_sources: "Iterable[Mapping[str, Any]]" = HISTORY_SOURCES,
+                  spec: "FamilySpec | None" = None,
+                  fresh_history: "Mapping[str, Any] | None" = None
                   ) -> "dict[str, Any]":
     """付费前核许可：族文档字节未漂移、成员预留未变、余额仍成立。
 
     任何不符 → ``FAMILY_PERMIT_INVALID``；历史源漂移 → ``HISTORY_DRIFT``。
     """
-    _assert_profile(profile)
+    resolved = _assert_profile(profile, spec)
     envelope_id = _assert_envelope_id(envelope_id)
     if not isinstance(permit, Mapping):
         raise FamilyError("FAMILY_PERMIT_INVALID", "permit 不是对象")
-    if permit.get("schema") != FAMILY_PERMIT_SCHEMA:
+    if permit.get("schema") != resolved.permit_schema:
         raise FamilyError("FAMILY_PERMIT_INVALID",
                           f"permit.schema={permit.get('schema')!r}")
     claimed = dict(permit)
@@ -571,10 +659,16 @@ def verify_permit(family_root: Path, permit: Mapping[str, Any],
     if int(permit.get("posts_reserved", -1)) != profile.hard_cap:
         raise FamilyError("FAMILY_PERMIT_INVALID",
                           "permit.posts_reserved 不等于本轮帽")
-    doc = load_family_doc(family_root)
+    doc = load_family_doc(family_root, expected_schema=resolved.schema)
     if doc is None:
         raise FamilyError("FAMILY_PERMIT_INVALID", "族账不存在")
-    _assert_history_unchanged(doc, import_history(history_sources))
+    if fresh_history is not None:
+        fresh = dict(fresh_history)
+    elif resolved.profile_id == PROFILE_R12:
+        fresh = import_history(history_sources)
+    else:
+        fresh = _fresh_history(resolved)
+    _assert_history_unchanged(doc, fresh)
     if _doc_sha256(doc) != permit.get("family_doc_sha256"):
         raise FamilyError("FAMILY_PERMIT_INVALID",
                           "族文档自 permit 签发后已变化")
@@ -586,7 +680,7 @@ def verify_permit(family_root: Path, permit: Mapping[str, Any],
         raise FamilyError("FAMILY_PERMIT_INVALID", "成员预留数与 permit 不符")
     if int(member["posts_used"]) != int(permit["posts_used"]):
         raise FamilyError("FAMILY_PERMIT_INVALID", "成员已用量与 permit 不符")
-    if _reserved_total(doc) > FAMILY_CAP:
+    if _reserved_total(doc) > resolved.family_cap:
         raise FamilyError("FAMILY_CAP_EXCEEDED", "族账预留总量已越过族帽")
     return doc
 
@@ -602,7 +696,7 @@ def record_usage(family_root: Path, envelope_id: str, posts_used: int, *,
     if used < 0:
         raise FamilyError("FAMILY_USAGE_INVALID", f"posts_used={used} 非法")
     with _family_lock(family_root):
-        doc = load_family_doc(family_root)
+        doc = load_family_doc(family_root, expected_schema=None)
         if doc is None:
             raise FamilyError("FAMILY_ABSENT", "族账不存在")
         members = [m for m in doc["members"] if m["envelope_id"] == envelope_id]
@@ -631,12 +725,14 @@ def record_usage(family_root: Path, envelope_id: str, posts_used: int, *,
         return new_doc
 
 
-def usage(family_root: Path) -> "dict[str, Any]":
+def usage(family_root: Path, *,
+          spec: "FamilySpec | None" = None) -> "dict[str, Any]":
     """只读汇总：历史、各成员预留/已用、族余额。"""
-    doc = load_family_doc(family_root)
+    resolved = spec or FAMILY_SPEC_R12
+    doc = load_family_doc(family_root, expected_schema=None)
     if doc is None:
         return {
-            "family_cap": FAMILY_CAP,
+            "family_cap": resolved.family_cap,
             "history_posts": None,
             "members": [],
             "reserved_total": None,
@@ -663,3 +759,153 @@ def usage(family_root: Path) -> "dict[str, Any]":
         "remaining": int(doc["family_cap"]) - reserved,
         "family_doc_sha256": _doc_sha256(doc),
     }
+
+
+# ---------------------------------------------------------------------------
+# R1.3 历史导入：R1.2 族文档 + 17 个关闭轮根账 + 9 次账外诊断（T0 对账）
+# ---------------------------------------------------------------------------
+
+def import_history_v13(*, r12_family_doc: Path = R12_FAMILY_DOC_PATH,
+                       r12_root: Path = R12_FAMILY_ROOT,
+                       require_pin: bool = True,
+                       now: "datetime | None" = None) -> "dict[str, Any]":
+    """构造 R1.3 族历史块：**逐独立账本事件去重核对**，不复用成员自报。
+
+    核对链：
+    1. R1 / R1.1 两本最终根账 → ``import_history``（31 行，逐字节冻结）；
+    2. R1.2 族文档字节 sha 必须等于 T0 钉死值（``R12_FAMILY_DOC_SHA256``）；
+    3. 族文档必须无未关闭成员（未决 reservation 不得释放或忽略）；
+    4. 每个已关闭轮：根账 ``quota/ledger.jsonl`` 的 call 行数必须等于该成员
+       ``posts_used``，行集哈希/seq 连续/权限逐项复核；
+    5. 合计必须等于冻结常量（514），否则 ``HISTORY_DRIFT``；
+    6. 账外仪器诊断 9（同一端点/模型的空回答调查）单列 ``offledger`` 块：
+       不在任何项目账本内，与账本行无重叠，按「已花不隐藏」计入历史。
+    """
+    base = import_history(HISTORY_SOURCES, now=now)
+    path = Path(r12_family_doc)
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        raise FamilyError("HISTORY_UNAVAILABLE",
+                          f"R1.2 族文档不存在：{path}") from None
+    got = hashlib.sha256(raw).hexdigest()
+    if require_pin and got != R12_FAMILY_DOC_SHA256:
+        raise FamilyError(
+            "HISTORY_DRIFT",
+            f"R1.2 族文档字节 sha256={got} 与冻结值 {R12_FAMILY_DOC_SHA256} 不符")
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise FamilyError("HISTORY_DRIFT", "R1.2 族文档不可解析") from None
+    if doc.get("schema") != FAMILY_SCHEMA:
+        raise FamilyError("HISTORY_DRIFT",
+                          f"R1.2 族文档 schema={doc.get('schema')!r}")
+    if int(doc.get("family_cap", -1)) != FAMILY_CAP:
+        raise FamilyError("HISTORY_DRIFT", "R1.2 族文档族帽不是 637")
+    if int((doc.get("history") or {}).get("total_call_rows", -1)) != FAMILY_HISTORY_POSTS:
+        raise FamilyError("HISTORY_DRIFT", "R1.2 族文档历史块不是 31")
+    members = list(doc.get("members") or [])
+    still_open = [m.get("envelope_id") for m in members
+                  if m.get("state") != MEMBER_CLOSED]
+    if still_open:
+        raise FamilyError(
+            "HISTORY_DRIFT",
+            f"R1.2 族账仍有未关闭成员（未决 reservation 不得释放）：{still_open}")
+
+    sources: "list[dict[str, Any]]" = [dict(s) for s in base["sources"]]
+    seen: "set[str]" = set()
+    closed_calls = 0
+    closed_ok = 0
+    closed_fail = 0
+    for member in members:
+        envelope_id = str(member["envelope_id"])
+        if envelope_id in seen:
+            raise FamilyError("HISTORY_DRIFT",
+                              f"R1.2 族文档成员重复：{envelope_id}")
+        seen.add(envelope_id)
+        root = Path(r12_root) / envelope_id
+        ledger = root / "quota" / "ledger.jsonl"
+        if not ledger.is_file():
+            raise FamilyError("HISTORY_UNAVAILABLE", f"轮根账不存在：{ledger}")
+        # 离线验证轮按设计是**零 POST 空账**（文件存在、0 字节）；`_read_rows`
+        # 把空账当漂移，故这里对「0 字节且成员 used=0」显式接受为空行集。
+        ledger_bytes = ledger.read_bytes()
+        if not ledger_bytes:
+            if int(member["posts_used"]) != 0:
+                raise FamilyError(
+                    "HISTORY_DRIFT",
+                    f"{envelope_id} 账本为空但成员 posts_used="
+                    f"{member['posts_used']}（不得用自报值替代逐行核对）")
+            rows = []
+        else:
+            rows = _read_rows(ledger)
+        calls = [r for r in rows if r.get("event") == "call"]
+        if len(calls) != len(rows):
+            raise FamilyError("HISTORY_DRIFT",
+                              f"{ledger} 含非 call 行 {len(rows) - len(calls)} 条")
+        if len(calls) != int(member["posts_used"]):
+            raise FamilyError(
+                "HISTORY_DRIFT",
+                f"{envelope_id} 账本 call 行 {len(calls)} != 成员 posts_used "
+                f"{member['posts_used']}（不得用自报值替代逐行核对）")
+        seqs = [int(r["seq"]) for r in calls]
+        if seqs and seqs != list(range(seqs[0], seqs[0] + len(seqs))):
+            raise FamilyError("HISTORY_DRIFT", f"{ledger} seq 不连续：{seqs}")
+        mode = os.stat(ledger).st_mode & 0o777
+        if mode & 0o077:
+            raise FamilyError("HISTORY_PERMISSIONS",
+                              f"{ledger} 权限 {oct(mode)} 过宽（应为 0600）")
+        ok_rows = sum(1 for r in calls if r.get("ok") is True)
+        fail_rows = len(calls) - ok_rows
+        sources.append({
+            "envelope_id": envelope_id,
+            "root": str(root),
+            "ledger_relpath": "quota/ledger.jsonl",
+            "ledger_sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "rows_sha256": canonical_rows_sha256(rows),
+            "call_rows": len(calls),
+            "ok_rows": ok_rows,
+            "fail_rows": fail_rows,
+            "seq_range": [seqs[0], seqs[-1]] if seqs else [0, 0],
+        })
+        closed_calls += len(calls)
+        closed_ok += ok_rows
+        closed_fail += fail_rows
+    if closed_calls != R13_FAMILY_CLOSED_ROUND_POSTS:
+        raise FamilyError(
+            "HISTORY_DRIFT",
+            f"R1.2 关闭轮 call 合计 {closed_calls} != 冻结 "
+            f"{R13_FAMILY_CLOSED_ROUND_POSTS}")
+    total = base["total_call_rows"] + closed_calls + R13_OFFLEDGER_DIAGNOSTIC_POSTS
+    if total != R13_FAMILY_HISTORY_POSTS:
+        raise FamilyError(
+            "HISTORY_DRIFT",
+            f"R1.3 历史合计 {total} != 冻结 {R13_FAMILY_HISTORY_POSTS}")
+    return {
+        "imported_at_utc": _utc_now(now),
+        # total_call_rows 是族帽占用口径（含账外诊断），逐行账本口径单列。
+        "total_call_rows": total,
+        "total_ok_rows": int(base["total_ok_rows"]) + closed_ok,
+        "total_fail_rows": int(base["total_fail_rows"]) + closed_fail,
+        "ledger_call_rows": R13_LEDGER_HISTORY_POSTS,
+        "r12_family_doc": {
+            "path": str(path),
+            "sha256": got,
+            "members": len(members),
+        },
+        "offledger": {
+            "posts": R13_OFFLEDGER_DIAGNOSTIC_POSTS,
+            "evidence": [dict(e) for e in R13_OFFLEDGER_EVIDENCE],
+        },
+        "sources": sources,
+        "note": ("R1.3 历史 = R1/R1.1 31 + R1.2 关闭轮 514（逐轮重算账本 call 行，"
+                 "carryover 不重复计）+ 账外仪器诊断 9（单列，不与账本行双计）"
+                 "= 554。"),
+    }
+
+
+def _fresh_history(spec: FamilySpec, *,
+                   now: "datetime | None" = None) -> "dict[str, Any]":
+    if spec.profile_id == PROFILE_R13:
+        return import_history_v13(now=now)
+    return import_history(HISTORY_SOURCES, now=now)

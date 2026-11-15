@@ -1078,6 +1078,13 @@ def _run_r12(argv: "list[str]") -> int:
     return cli_r12.main(list(argv))
 
 
+def _run_r13(argv: "list[str]") -> int:
+    """``r13`` 子命令转发（R1.3 profile；账 2905；零 POST 起步）。"""
+    from orchestrator.rsi_r1 import cli_r13
+
+    return cli_r13.main(list(argv))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python -m orchestrator.rsi_r1.cli",
@@ -1089,6 +1096,12 @@ def build_parser() -> argparse.ArgumentParser:
     p12.add_argument("r12_args", nargs=argparse.REMAINDER,
                      help="原样转发给 orchestrator.rsi_r1.cli_r12")
     p12.set_defaults(func=lambda a: _run_r12(a.r12_args))
+
+    # RSI-R1.3（profile rsi-r1.3；账 2905）：转发到独立 CLI，旧行为逐字节不变。
+    p13 = sub.add_parser("r13", help="RSI-R1.3 子命令（t0-baseline/family-reconcile/...）")
+    p13.add_argument("r13_args", nargs=argparse.REMAINDER,
+                     help="原样转发给 orchestrator.rsi_r1.cli_r13")
+    p13.set_defaults(func=lambda a: _run_r13(a.r13_args))
 
     pi = sub.add_parser("init", help="初始化 R1 campaign：预算/授权/依赖索引落件")
     pi.add_argument("--envelope", required=True, help="envelope id（同时作 campaign id）")
