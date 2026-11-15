@@ -602,9 +602,15 @@ _CLAIMS_BLOCK_R12 = _CLAIMS_BLOCK_SOURCE.replace(
 
 
 def _is_r12_profile(profile: Any) -> bool:
-    """``profile`` 为 R1.2 画像时返回 True（None / legacy 均 False）。"""
+    """``profile`` 为 R1.2/R1.3 画像时返回 True（None / legacy 均 False）。
+
+    R1.2 与 R1.3 的 probe/practice 用同一套八动作与不回灌 references 的回包；
+    正式 study 的 R1.3 brief 由 ``protocol_r13`` 单独渲染。
+    """
     flag = getattr(profile, "is_r12", False)
-    return bool(flag() if callable(flag) else flag)
+    ok = bool(flag() if callable(flag) else flag)
+    flag = getattr(profile, "is_r13", False)
+    return ok or bool(flag() if callable(flag) else flag)
 
 
 def render_protocol_brief(lane: str, *, profile: "Any | None" = None) -> str:
@@ -647,10 +653,15 @@ def render_protocol_brief(lane: str, *, profile: "Any | None" = None) -> str:
     return "\n".join(parts)
 
 
-def render_study_brief(study: str, *, profile: "Any | None" = None) -> str:
+def render_study_brief(study: str, *, profile: "Any | None" = None,
+                       task: "Any | None" = None) -> str:
     """正式研究 study 的 system 追加段（T7：真实研究，48 呼预算，不是演练）。"""
     if study not in S.STUDIES:
         raise ProtocolError("STUDY_UNKNOWN", repr(study))
+    flag = getattr(profile, "is_r13", False)
+    if (flag() if callable(flag) else flag) and task is not None:
+        from orchestrator.rsi_r1 import protocol_r13
+        return protocol_r13.render_study_brief_r13(study, task)
     cap = LANES.LANE_POST_CAPS[f"study_{study}"]
     r12 = _is_r12_profile(profile)
     actions = _ACTIONS_BLOCK_R12 if r12 else _ACTIONS_BLOCK

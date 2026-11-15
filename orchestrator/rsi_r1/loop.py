@@ -110,6 +110,10 @@ _KEYS: "Mapping[str, frozenset[str]]" = {
 }
 _OPTIONAL_KEYS: "Mapping[str, frozenset[str]]" = {
     "propose_plan": frozenset({"design_source", "analysis_source"}),
+    # R1.3：设计声明与研究报告随既有动作提交，不新增第九动作（Plan §4/§7）。
+    # 旧 profile 的这些键不被读取；R1.3 分派器强制要求。
+    "freeze_confirm": frozenset({"design_intent"}),
+    "submit_claim": frozenset({"research_report"}),
 }
 
 
@@ -279,6 +283,9 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
         _require_hex(doc, "analysis_sha256")
         # parent_sha 同为不可计算项：允许 sentinel，宿主替换后做**值**校验。
         _require_confirm_plan(doc)
+        if "design_intent" in doc and not isinstance(doc["design_intent"],
+                                                     Mapping):
+            raise LoopError("WRONG_TYPE", "design_intent 必须是对象")
     elif name == "run_confirm":
         _require_str(doc, "confirm_token", max_bytes=200)
     elif name == "submit_claim":
@@ -288,6 +295,9 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
                               allow_empty=True)
         if not report.strip():
             raise LoopError("REPORT_MISSING", "report_text 不得为空白")
+        if "research_report" in doc and not isinstance(
+                doc["research_report"], Mapping):
+            raise LoopError("WRONG_TYPE", "research_report 必须是对象")
 
 
 # ---------------------------------------------------------------------------

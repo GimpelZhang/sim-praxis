@@ -38,8 +38,10 @@ from orchestrator.common.fsutil import ensure_private_dir
 from orchestrator.rsi_r1 import analysis_receipt as AR
 from orchestrator.rsi_r1 import closure as CL
 from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import design_intent as DI
 from orchestrator.rsi_r1 import experiments as E
 from orchestrator.rsi_r1 import judge as J
+from orchestrator.rsi_r1 import judge_v13 as JV
 from orchestrator.rsi_r1 import lanes as LANES
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import loop as L
@@ -50,6 +52,7 @@ from orchestrator.rsi_r1 import replay as RP
 from orchestrator.rsi_r1 import resources as RS
 from orchestrator.rsi_r1 import sandbox as SB
 from orchestrator.rsi_r1 import state as S
+from orchestrator.rsi_r1 import task_specs as TS
 from orchestrator.rsi_r1 import watchdog as W
 
 ENVELOPE_SCHEMA = "simpraxis.rsi_r1.envelope.v1"
@@ -536,12 +539,18 @@ class CampaignDispatcher:
                  backend_factory: Callable[[str], Any],
                  clock: Callable[[], str] = utc_now_iso_z,
                  profile: "P.CampaignProfile | None" = None,
-                 resource_ledger: "RS.ResourceLedger | None" = None) -> None:
+                 resource_ledger: "RS.ResourceLedger | None" = None,
+                 task: "TS.TaskSpecV13 | None" = None) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
         # 旧 profile/不传则维持 R1 行为，逐字节不变。
-        if profile is not None and profile.is_r12:
+        if profile is not None and profile.is_r13:
+            # R1.3：任务规格是候选设计合法性/判据的唯一锚点；缺它不得装配。
+            if task is None:
+                raise AssemblyError("TASK_SPEC_MISSING",
+                                    "rsi-r1.3 分派器必须绑定 TaskSpecV13")
+        elif profile is not None and profile.is_r12:
             if resource_ledger is None:
                 raise AssemblyError(
                     "RESOURCE_LEDGER_MISSING",
@@ -563,6 +572,10 @@ class CampaignDispatcher:
         self.clock = clock
         self.profile = profile
         self.resource_ledger = resource_ledger
+        self.task = task
+        self.r13_explore_intent: "DI.DesignIntentV13 | None" = None
+        self.r13_confirm_intent: "DI.DesignIntentV13 | None" = None
+        self.r13_design_counts: "dict[str, int] | None" = None
         self.runs_used: "dict[str, int]" = {"explore": 0, "confirm": 0,
                                             "replay": 0}
         self.last_batch: "dict[str, Any] | None" = None
@@ -715,9 +728,35 @@ class CampaignDispatcher:
                 registered.append({"kind": kind,
                                    "source_sha256": rec.source_sha256})
         plan_doc = dict(action.doc["plan"])
+        if self.profile is not None and self.profile.is_r13:
+            raw_intent = action.doc.get("design_intent")
+            if raw_intent is None:
+                return self._fail(
+                    "DESIGN_INTENT_MISSING",
+                    "R1.3 的 propose_plan 必须声明 design_intent"
+                    "（固定点 pilot 也要显式声明范围）",
+                    side_effect_status="NONE")
+            try:
+                intent = DI.parse_design_intent(raw_intent,
+                                                profile=self.profile,
+                                                task_spec=self.task)
+            except DI.DesignError as exc:
+                return self._fail(exc.code, exc.detail,
+                                  side_effect_status="NONE")
+            if intent.phase_role == "confirmation":
+                return self._fail(
+                    "INTENT_PHASE", "propose_plan 只接受 fixed_pilot/"
+                    "distributional_exploration 意图；确认意图在 freeze_confirm 提交",
+                    side_effect_status="NONE")
+            self.r13_explore_intent = intent
         out = self.state.append_plan(self.study, plan_doc)
+        if self.profile is not None and self.profile.is_r13:
+            rel = f"design_audits/intent_explore_{out['plan_sha256'][:12]}.json"
+            self.ctx.write_json(rel, self.r13_explore_intent.to_dict())
         return self._ok(plan_sha256=out["plan_sha256"], revision=out["revision"],
-                        registered=registered, plan=plan_doc)
+                        registered=registered, plan=plan_doc,
+                        intent_sha256=(self.r13_explore_intent.sha256
+                                       if self.r13_explore_intent else None))
 
     # -- 3) run_batch ----------------------------------------------------
     def _do_run_batch(self, action: L.Action) -> "dict[str, Any]":
@@ -755,6 +794,22 @@ class CampaignDispatcher:
             matrix = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             return self._fail("MATRIX_INVALID", str(exc), side_effect_status="NONE")
+        if self.profile is not None and self.profile.is_r13:
+            # 前执行审计：声明 varying 却全用占位值必须拒绝（R1.2 §16 的教训）。
+            if self.r13_explore_intent is None:
+                return self._fail("DESIGN_INTENT_MISSING",
+                                  "run_batch 前必须声明探索意图",
+                                  side_effect_status="NONE")
+            try:
+                audit = DI.audit_design(
+                    self.r13_explore_intent, task=self.task,
+                    proposed_cells=matrix.get("cells") or [])
+            except DI.DesignError as exc:
+                return self._fail(exc.code, exc.detail,
+                                  side_effect_status="NONE")
+            self.ctx.write_json(
+                f"design_audits/explore_pre_{_sha_doc(action.to_doc())[:12]}.json",
+                audit.to_dict())
         if self.resource_ledger is not None:
             # 逐 cell 形状仍由 experiments.validate_matrix 单一实现裁决；
             # 累计 run/batch/步数/沙盒由资源账在 run_batch 前原子预留。
@@ -804,7 +859,7 @@ class CampaignDispatcher:
 
     # -- 4) analyze ------------------------------------------------------
     def _do_analyze(self, action: L.Action) -> "dict[str, Any]":
-        if self._r12():
+        if self._r12() or (self.profile is not None and self.profile.is_r13):
             return self._r12_analyze(action)
         self._binding(action)
         source_sha = _require_sha256(action.doc["source_sha256"],
@@ -930,7 +985,9 @@ class CampaignDispatcher:
 
     def _r12_analysis(self, *, phase: str, source_sha: str,
                       run_ids: Sequence[str], plan: C.ResearchPlan,
-                      manifest_sha: "str | None") -> "tuple[dict[str, Any], dict[str, Any], bytes]":
+                      manifest_sha: "str | None",
+                      expected_contrasts: "Sequence[str] | None" = None
+                      ) -> "tuple[dict[str, Any], dict[str, Any], bytes]":
         """执行冻结分析并落凭据；返回 ``(output_doc, receipt_summary, bytes)``。
 
         预执行拒绝（视图/作用域）抛 ``SandboxError``；执行后失败由调用方按
@@ -946,6 +1003,21 @@ class CampaignDispatcher:
         # meta 只有 condition_id，没有主张/δ），视图缺计划则合规脚本只能瞎猜。
         # 这两件由**宿主**按 `_design_inputs` 的同一份字节写入（候选不可覆盖）。
         extra_files = analysis_host_inputs(self.ctx, plan)
+        if (self.profile is not None and self.profile.is_r13
+                and self.task is not None):
+            # R1.3：分析视图额外放任务公开件（条件/主对比/nuisance/阴性控制）。
+            task_view = {
+                "task_id": self.task.task_id,
+                "study_id": self.task.mechanism_id.split("_")[0],
+                "conditions": [c.to_dict() for c in self.task.conditions],
+                "primary": self.task.primary.to_dict(),
+                "nuisance_schema": dict(self.task.nuisance_schema),
+                "negative_control_spec": self.task.negative_control_spec,
+            }
+            extra_files = extra_files + ((
+                "task.json",
+                (json.dumps(task_view, sort_keys=True, ensure_ascii=False)
+                 + "\n").encode("utf-8")),)
         if self.resource_ledger is not None:
             self.resource_ledger.reserve_sandbox(
                 self.study, purpose=f"analysis-{phase}",
@@ -970,14 +1042,16 @@ class CampaignDispatcher:
             except (ValueError, UnicodeDecodeError):
                 reasons.append("ANALYSIS_OUTPUT_BAD_JSON")
             else:
+                wanted = (list(expected_contrasts)
+                          if expected_contrasts is not None
+                          else self._r12_plan_contrast_ids(plan))
                 try:
                     parsed = AR.parse_output(
                         raw_doc, expected_run_ids=run_ids,
-                        expected_contrasts=self._r12_plan_contrast_ids(plan))
+                        expected_contrasts=wanted)
                     output_doc = dict(raw_doc)
                     output_doc["contrasts"] = [
-                        parsed["contrasts"][cid]
-                        for cid in self._r12_plan_contrast_ids(plan)]
+                        parsed["contrasts"][cid] for cid in wanted]
                 except AR.ReceiptError as exc:
                     reasons.append(exc.code)
         output_bytes = payload or b""
@@ -1033,9 +1107,12 @@ class CampaignDispatcher:
             return self._fail("ANALYSIS_RUNS_MISMATCH", "run_ids 为空",
                               side_effect_status="NONE")
         try:
+            expected = ([self.task.primary.id]
+                        if self.profile is not None and self.profile.is_r13
+                        else None)
             output, summary, _ = self._r12_analysis(
                 phase="explore", source_sha=source_sha, run_ids=wanted,
-                plan=plan, manifest_sha=None)
+                plan=plan, manifest_sha=None, expected_contrasts=expected)
         except SB.SandboxError as exc:
             # 视图/作用域等**执行前**拒绝：零副作用，可自修。
             return self._fail(exc.code, exc.detail, side_effect_status="NONE")
@@ -1087,6 +1164,10 @@ class CampaignDispatcher:
         if plan.study_id != self.study:
             return self._fail("STUDY_MISMATCH", plan.study_id,
                                   side_effect_status="NONE")
+        if self.profile is not None and self.profile.is_r13:
+            code, detail = self._r13_confirm_precheck(plan, action)
+            if code:
+                return self._fail(code, detail, side_effect_status="NONE")
         if plan.parent_sha != expect_parent:
             return self._fail(
                 "PARENT_SHA_MISMATCH",
@@ -1127,7 +1208,10 @@ class CampaignDispatcher:
             lock = self.state.freeze_confirm(
                 study=self.study, plan=plan.to_dict(),
                 design_sha256=design_sha,
-                analysis_sha256=analysis_sha, r12=self._r12())
+                analysis_sha256=analysis_sha,
+                r12=bool(self._r12() or (self.profile is not None
+                                          and self.profile.is_r13)),
+                profile=self.profile)
         except Exception:
             # D-13a：state 侧拒绝（重复冻结/终态/凭据不符）时回滚预留，
             # 不让失败尝试永久吃掉确认预算；原异常照常上抛。
@@ -1138,6 +1222,11 @@ class CampaignDispatcher:
             raise
         if seed_is_new:
             _write_private(seed_path, (seed + "\n").encode("utf-8"))
+        if (self.profile is not None and self.profile.is_r13
+                and self.r13_confirm_intent is not None):
+            self.ctx.write_json(
+                f"design_audits/intent_confirm_{plan.sha256[:12]}.json",
+                self.r13_confirm_intent.to_dict())
         # 冻结件只留 plan sha；确认计划原文落到 confirm/ 供重入与判据复算
         # （锁内适配：append_plan 只收 explore 修订，confirm 计划由冻结动作携带）。
         self.ctx.write_json(f"confirm/plan_{self.study}.json", plan.to_dict())
@@ -1213,6 +1302,11 @@ class CampaignDispatcher:
             # R1.2：自动在**确认批完整视图**上执行冻结分析并落凭据；
             # 不再回灌任何维护侧参考值（§5.1）。
             return self._r12_confirm_payload(run_ids, result_sha, plan, manifest)
+        if self.profile is not None and self.profile.is_r13:
+            # R1.3：同样自动跑冻结分析（候选脚本），但**只**校验任务级主对比；
+            # 不回传任何宿主参考值。
+            self._r13_post_audit(plan, manifest)
+            return self._r13_confirm_payload(run_ids, result_sha, plan, manifest)
         # 第 8 步 claims 要逐字段复现宿主从**确认批**重算的值，但候选从未见过
         # 确认批的数值（观测只在容器里、run_confirm 只回 id）：不把宿主用公开
         # 估计量算出的参考值回灌，submit 分支在物理上不可能通过。这里给的是
@@ -1250,6 +1344,8 @@ class CampaignDispatcher:
 
     # -- 7) submit_claim -------------------------------------------------
     def _do_submit_claim(self, action: L.Action) -> "dict[str, Any]":
+        if self.profile is not None and self.profile.is_r13:
+            return self._r13_submit(action)
         if self._r12():
             return self._r12_submit(action)
         response_id, _ = self._binding(action)
@@ -1282,6 +1378,276 @@ class CampaignDispatcher:
         return self._ok(judge_verdict=report["verdict"], verdict=verdict,
                         claim_status=report["layers"].get("claim_status"),
                         evidence_valid=report["layers"].get("evidence_valid"))
+
+    # -- R1.3：确认前校验 / 后审计 / 自动分析 / 提交 --------------------
+    def _r13_confirm_precheck(self, plan: C.ResearchPlan,
+                              action: L.Action) -> "tuple[str, str]":
+        """确认计划的 R1.3 合同：任务条件固定、意图/分布/对比/阴性控制一致。"""
+        task = self.task
+        want = {c.id: dict(c.params) for c in task.conditions}
+        got = {c.id: dict(c.params) for c in plan.conditions}
+        if got != want:
+            return ("TASK_CONDITIONS_MISMATCH",
+                    "确认条件必须逐字等于任务登记的干预条件（含 sham/角点）；"
+                    f"实得 id={sorted(got)}")
+        dist = plan.nuisance_distribution
+        want_var = {k: (str(v["support"][0]), str(v["support"][1]))
+                    for k, v in task.nuisance_schema.items()
+                    if v["mode"] == "varying"}
+        got_var = {k: (str(v[0]), str(v[1])) for k, v in dist.varying.items()}
+        if int(dist.block_count) != 32 or got_var != want_var:
+            return ("NUISANCE_DISTRIBUTION_MISMATCH",
+                    f"block_count={dist.block_count} varying={got_var}；"
+                    f"任务要求 32 与 {want_var}")
+        if (plan.primary.metric != task.primary.metric
+                or plan.primary.proposition != task.primary.proposition
+                or plan.primary.delta != task.primary.delta):
+            return ("PRIMARY_CONTRAST_MISMATCH",
+                    "plan.primary 的 metric/proposition/delta 必须与任务登记一致")
+        ids = set(plan.primary.condition_ids)
+        if not ids <= set(want):
+            return ("PRIMARY_CONTRAST_MISMATCH", f"条件 {sorted(ids)} 不在任务内")
+        a, b = (next(c for c in plan.conditions if c.id == cid) for cid in ids)
+        diff = sorted(k for k in a.params if a.params.get(k) != b.params.get(k))
+        if len(diff) != 1:
+            return ("PRIMARY_CONTRAST_MISMATCH",
+                    f"plan.primary 必须是单因子组件对比，实为 {diff}")
+        if task.negative_control_spec is not None:
+            nc = task.negative_control_spec["contrast"]
+            if plan.negative_control is None:
+                return ("NEGATIVE_CONTROL_MISSING", "任务登记了阴性控制")
+            if (plan.negative_control.id != nc["id"]
+                    or plan.negative_control.metric != nc["metric"]
+                    or tuple(sorted(plan.negative_control.condition_ids))
+                    != tuple(sorted(t["condition_id"] for t in nc["terms"]))):
+                return ("NEGATIVE_CONTROL_MISMATCH",
+                        "阴性控制必须逐字复用任务登记件")
+        elif plan.negative_control is not None:
+            return ("NEGATIVE_CONTROL_MISMATCH",
+                    "开放研究任务不登记阴性控制，不得自加有利对比")
+        raw_intent = action.doc.get("design_intent")
+        if raw_intent is None:
+            return ("DESIGN_INTENT_MISSING",
+                    "freeze_confirm 必须提交 confirmation 意图")
+        try:
+            intent = DI.parse_design_intent(raw_intent, profile=self.profile,
+                                            task_spec=task)
+        except DI.DesignError as exc:
+            return (exc.code, exc.detail)
+        if intent.phase_role != "confirmation":
+            return ("INTENT_PHASE", "freeze 需要 phase_role=confirmation")
+        self.r13_confirm_intent = intent
+        return ("", "")
+
+    def _r13_post_audit(self, plan: C.ResearchPlan,
+                        manifest: "E.ConfirmManifest") -> None:
+        """后执行审计：以宿主 manifest 为唯一事实源，逐 run 核 actual。"""
+        rows: "list[dict[str, Any]]" = []
+        for a in manifest.assignments:
+            rows.append({"condition_id": a.condition_id, "block_id": a.block_id,
+                         "params": dict(a.params)})
+        actual = [dict(r, verified_by_host=True) for r in rows]
+        try:
+            audit = DI.audit_design(self.r13_confirm_intent, task=self.task,
+                                    proposed_cells=rows,
+                                    actual_manifest=actual)
+        except DI.DesignError as exc:
+            raise L.LoopError(exc.code, exc.detail, terminal=True) from None
+        try:
+            counts = DI.counts_document(
+                run_count=audit.run_count,
+                unique_design_count=audit.unique_design_count,
+                independent_unit_count=audit.independent_unit_count)
+        except DI.DesignError as exc:
+            raise L.LoopError(exc.code, exc.detail, terminal=True) from None
+        self.r13_design_counts = counts
+        self.ctx.write_json(
+            f"design_audits/confirm_post_{plan.sha256[:12]}.json",
+            {**audit.to_dict(), "counts": counts})
+
+    def _r13_confirm_payload(self, run_ids: "list[str]", result_sha: str,
+                             plan: C.ResearchPlan,
+                             manifest: "E.ConfirmManifest") -> "dict[str, Any]":
+        lock = self.state.confirm_lock(self.study)
+        source_sha = str(lock.analysis_source_sha256)
+        try:
+            output, summary, output_bytes = self._r12_analysis(
+                phase="confirm", source_sha=source_sha, run_ids=run_ids,
+                plan=plan, manifest_sha=manifest.sha256,
+                expected_contrasts=[self.task.primary.id])
+        except SB.SandboxError as exc:
+            return self._fail(exc.code, exc.detail,
+                              side_effect_status="KNOWN_COMPLETE")
+        if not summary["validity"]:
+            return self._fail(
+                "ANALYSIS_FAILED",
+                "确认批冻结分析未通过执行有效门（检查输出 schema/run 集/"
+                f"主对比 {self.task.primary.id}）",
+                side_effect_status="KNOWN_COMPLETE")
+        receipt_bytes = b""
+        rel = self._receipt_rel(self.study, "confirm")
+        if self.ctx.exists(rel):
+            receipt_bytes = self.ctx.relative(rel).read_bytes()
+        evidence = self._r13_evidence(plan, manifest, output_bytes,
+                                      receipt_bytes)
+        index = {name: hashlib.sha256(data).hexdigest()
+                 for name, data in sorted(evidence.items())}
+        return self._ok(run_ids_head=run_ids[:8], n_runs=len(run_ids),
+                        result_sha256=result_sha,
+                        candidate_output=output, analysis_receipt=summary,
+                        primary_contrast_id=self.task.primary.id,
+                        evidence_index=index)
+
+    def _r13_evidence(self, plan: C.ResearchPlan,
+                      manifest: "E.ConfirmManifest",
+                      output_bytes: bytes, receipt_bytes: bytes
+                      ) -> "dict[str, bytes]":
+        specs = J.build_specs(plan, manifest)
+        per_run = J.recompute_metrics(plan=plan, artifacts=self._confirm_artifacts(),
+                                      specs=specs)
+        metric = self.task.primary.metric
+        table: "dict[str, Any]" = {"task_id": self.task.task_id,
+                                   "metric": metric, "blocks": []}
+        blocks: "dict[str, dict[str, Any]]" = {}
+        for run_id, spec in specs.items():
+            got = ((per_run.get(run_id) or {}).get("values") or {}).get(metric)
+            blocks.setdefault(spec.block_id, {})[spec.condition_id] = got
+        for block in sorted(blocks):
+            table["blocks"].append({"block_id": block,
+                                    "values": blocks[block]})
+        return {
+            "analysis/output.json": output_bytes,
+            "analysis/receipt.json": receipt_bytes,
+            "confirm/blocks.json": (json.dumps(table, sort_keys=True,
+                                               ensure_ascii=False) + "\n").encode(),
+        }
+
+    def _r13_submit(self, action: L.Action) -> "dict[str, Any]":
+        """R1.3 提交：凭据/数值/诊断/报告/claim 全过才 JUDGE_OK。"""
+        response_id, action_sha = self._binding(action)
+        claims = [dict(c) for c in action.doc["claims"]]
+        report_text = str(action.doc["report_text"])
+        report_doc = action.doc.get("research_report")
+        if report_doc is None:
+            return self._fail("REPORT_MISSING",
+                              "R1.3 提交必须携带 research_report",
+                              side_effect_status="NONE")
+        plan = self._current_plan(phase="confirm")
+        manifest = self.confirm_manifest or self._frozen_manifest_raw()
+        if manifest is None:
+            return self._fail("CONFIRM_NOT_LOCKED", "缺确认 manifest",
+                              side_effect_status="NONE")
+        lock = self.state.confirm_lock(self.study)
+        source_sha = str(lock.analysis_source_sha256)
+        receipt_rel = self._receipt_rel(self.study, "confirm")
+        receipt_bytes = (self.ctx.relative(receipt_rel).read_bytes()
+                         if self.ctx.exists(receipt_rel) else b"")
+        receipt = (json.loads(receipt_bytes.decode("utf-8"))
+                   if receipt_bytes else None)
+        receipt_sha = (hashlib.sha256(receipt_bytes).hexdigest()
+                       if receipt_bytes else "")
+        output_bytes, output_error = read_confirm_output(self.ctx, self.study)
+        output_norm = None
+        if not output_error:
+            try:
+                raw = json.loads(output_bytes.decode("utf-8"))
+                parsed = AR.parse_output(
+                    raw, expected_run_ids=sorted(self._confirm_artifacts()),
+                    expected_contrasts=[self.task.primary.id])
+                output_norm = {"run_ids": parsed["run_ids"],
+                               "contrasts": dict(parsed["contrasts"]),
+                               "diagnostics": raw.get("diagnostics")}
+            except (ValueError, UnicodeDecodeError):
+                output_error = "ANALYSIS_OUTPUT_BAD_JSON"
+            except AR.ReceiptError as exc:
+                output_error = exc.code
+        if receipt is None:
+            receipt_ok, receipt_reasons = False, ["NO_CONFIRM_RECEIPT"]
+        else:
+            run_ids = sorted(self._confirm_artifacts())
+            entries: "list[SB.ViewEntry]" = []
+            for run_id in run_ids:
+                entries.extend(self._run_view_entries(run_id))
+            source_file_sha = ""
+            try:
+                source_file_sha = hashlib.sha256(
+                    self.ctx.relative(f"designs/{source_sha}.py").read_bytes()
+                ).hexdigest()
+            except OSError:
+                pass
+            art = self._artifact_event(source_sha)
+            expect = AR.ReceiptExpectation(
+                study_id=self.study, phase="confirm", plan_sha256=plan.sha256,
+                profile_id=str(self.profile.profile_id),
+                source_sha256=source_sha, source_file_sha256=source_file_sha,
+                producer=receipt_producer(art),
+                registered_reply_id=art.get("response_id"),
+                registered_action_id=art.get("action_sha256"),
+                confirm_manifest_sha256=manifest.sha256,
+                allowed_run_ids=tuple(run_ids),
+                expected_inputs=tuple(self._entry_inputs(entries)),
+                output_bytes=output_bytes,
+                execution_id=str(receipt.get("execution_id") or ""),
+                exit_code=int(receipt.get("exit_code", -1)),
+                timed_out=bool(receipt.get("timed_out", False)))
+            receipt_ok, receipt_reasons = AR.validate_receipt(receipt, expect)
+        submission = {
+            "schema": J.SUBMISSION_SCHEMA, "study_id": self.study,
+            "plan_sha256": plan.sha256,
+            "confirm_manifest_sha256": manifest.sha256,
+            "primary_contrast_id": self.task.primary.id,
+            "analysis_source_sha": source_sha,
+            "analysis_receipt_sha": receipt_sha,
+            "claims": claims}
+        evidence = self._r13_evidence(plan, manifest, output_bytes,
+                                      receipt_bytes)
+        origin = {"producer": "candidate",
+                  "reply_sha256": _sha_doc(action.to_doc()),
+                  "assisted": False}
+        report = JV.judge_study_v13(
+            task=self.task, plan=plan, manifest=manifest,
+            artifacts=self._confirm_artifacts(),
+            specs=J.build_specs(plan, manifest),
+            submission=submission, report_doc=report_doc,
+            receipt_ok=receipt_ok, receipt_reasons=receipt_reasons,
+            output=output_norm, output_error=output_error,
+            candidate_origin=origin,
+            expected_reply_sha256=str(origin["reply_sha256"]),
+            evidence_files=evidence,
+            design_counts=self.r13_design_counts)
+        self.state.submit_claim(study=self.study, claims=claims,
+                                report_text=report_text,
+                                response_id=response_id)
+        CL.write_claim_submission(self.ctx, self.study, submission)
+        CL.write_judge_report(self.ctx, self.study, report)
+        self.ctx.write_json(
+            f"reports/{self.study}-{plan.sha256[:12]}.json",
+            {"report": dict(report_doc), "rendered": None,
+             "reply_sha256": origin["reply_sha256"]})
+        verdict = self._verdict_v13(report)
+        self.state.conclude(self.study, verdict,
+                            reason=f"judge {report['verdict']}")
+        layers = report.get("layers") or {}
+        return self._ok(
+            judge_verdict=report["verdict"], verdict=verdict,
+            claim_status=layers.get("claim_status"),
+            receipt_valid=layers.get("receipt_valid"),
+            numerics_valid=layers.get("numerics_valid"),
+            diagnostics_valid=layers.get("diagnostics_valid"),
+            report_valid=layers.get("report_valid"),
+            reason_codes=list(report.get("reason_codes") or [])[:8])
+
+    def _verdict_v13(self, report: Mapping[str, Any]) -> str:
+        layers = report.get("layers") or {}
+        if not (layers.get("schema_accepted") and layers.get("receipt_valid")
+                and layers.get("numerics_valid") and layers.get("evidence_valid")):
+            return S.ST_INVALID
+        if (report.get("verdict") == "JUDGE_OK"
+                and layers.get("claim_status") == "MATCH"
+                and layers.get("diagnostics_valid")
+                and layers.get("report_valid")):
+            return S.ST_VERIFIED
+        return S.ST_VALID_FAIL
 
     def _r12_submit(self, action: L.Action) -> "dict[str, Any]":
         """R1.2 提交：凭据 → 数值 → claim 三门 AND；回包不含宿主数值。"""
@@ -1455,8 +1821,24 @@ class CampaignDispatcher:
         if not contract.is_file():
             raise L.LoopError("PUBLIC_CONTRACT_MISSING", PUBLIC_CONTRACT_RELPATH,
                               terminal=True)
-        return [SB.ViewEntry(plan_path.name, _sha_file(plan_path)),
-                SB.ViewEntry(contract.name, _sha_file(contract))]
+        entries = [SB.ViewEntry(plan_path.name, _sha_file(plan_path)),
+                   SB.ViewEntry(contract.name, _sha_file(contract))]
+        if (self.profile is not None and self.profile.is_r13
+                and self.task is not None):
+            task_rel = "public/task.json"
+            task_path = self.ctx.relative(task_rel)
+            if not task_path.is_file():
+                task_view = {
+                    "task_id": self.task.task_id,
+                    "study_id": self.task.mechanism_id.split("_")[0],
+                    "conditions": [c.to_dict() for c in self.task.conditions],
+                    "primary": self.task.primary.to_dict(),
+                    "nuisance_schema": dict(self.task.nuisance_schema),
+                    "negative_control_spec": self.task.negative_control_spec,
+                }
+                self.ctx.write_json(task_rel, task_view)
+            entries.append(SB.ViewEntry(task_path.name, _sha_file(task_path)))
+        return entries
 
     def _run_view_entries(self, run_id: str) -> "list[SB.ViewEntry]":
         base = self.ctx.subdir("observations")
@@ -1582,7 +1964,8 @@ def build_campaign_parts(
         runner: Any, image: str, backend_factory: Callable[[str], Any],
         lock_sha256: str,
         profile: "P.CampaignProfile | None" = None,
-        resource_ledger: "RS.ResourceLedger | None" = None
+        resource_ledger: "RS.ResourceLedger | None" = None,
+        task: "TS.TaskSpecV13 | None" = None,
 ) -> "tuple[CampaignAdmission, SlotBook, CampaignDispatcher, S.ResearchState]":
     """标准装配：状态 + 预算 + 准入 + 槽 + 分派（同 root 共享）。"""
     budget = C.budget_from_dict(ctx.read_json("contract/budget.json"))
@@ -1595,5 +1978,6 @@ def build_campaign_parts(
                                     budget=budget, study=study, runner=runner,
                                     image=image, backend_factory=backend_factory,
                                     profile=profile,
-                                    resource_ledger=resource_ledger)
+                                    resource_ledger=resource_ledger,
+                                    task=task)
     return admission, slots, dispatcher, state

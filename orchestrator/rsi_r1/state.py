@@ -613,7 +613,7 @@ class ResearchState:
 
     def freeze_confirm(self, *, study: str, plan: Mapping[str, Any],
                        design_sha256: str, analysis_sha256: str,
-                       r12: bool = False,
+                       r12: bool = False, profile: Any = None,
                        ) -> ConfirmLock:
         _require_study(study)
         state = self.study_state(study)
@@ -626,7 +626,7 @@ class ResearchState:
         doc = C.ResearchPlan.from_dict(plan)
         if doc.study_id != study:
             raise StateError("STUDY_MISMATCH", f"plan.study_id={doc.study_id} != {study}")
-        check = C.validate_plan(doc, state=ST_EXPLORING)
+        check = C.validate_plan(doc, state=ST_EXPLORING, profile=profile)
         for sha, label in ((design_sha256, "design"), (analysis_sha256, "analysis")):
             C._require_sha256_hex(sha, where=f"freeze.{label}")
             if self._artifact_producer(sha) is None:

@@ -1492,7 +1492,8 @@ def _check_tc_dt_separable(conditions: "tuple[Condition, ...]") -> "tuple[str, s
 
 def validate_plan(plan: ResearchPlan, *,
                   contract: "Mapping[str, Any] | None" = None,
-                  state: "str | None" = None) -> PlanCheck:
+                  state: "str | None" = None,
+                  profile: Any = None) -> PlanCheck:
     """机械设计检查；不合法即抛 ``ContractError``（带公开条款 id）。
 
     ``contract``/``state`` 保留给调用方传公开合同与当前状态机状态；本函数的
@@ -1594,7 +1595,12 @@ def validate_plan(plan: ResearchPlan, *,
                        f"{a.id} vs {b.id} 仅差 torsional friction（condim 恒 3）"))
 
     # --- 6. Study B 的 Tc/dt 可分离设计门 ---
-    if plan.study_id == "B":
+    # R1.3（profile rsi-r1.3）：留出任务 B 是 Tc×惯量**交互**设计，条件里没有
+    # dt 因子，旧门会让合法交互设计永远无法提交。R1.3 用 contrasts.ContrastV13
+    # 与 audit_design 替代该门（单因素可归因性由 2×2 全因子结构与权重模式
+    # 机判保证）；旧 profile 逐字节不变。
+    if plan.study_id == "B" and not (profile is not None
+                                     and getattr(profile, "is_r13", False)):
         found = _check_tc_dt_separable(plan.conditions)
         if found is None:
             raise ContractError(

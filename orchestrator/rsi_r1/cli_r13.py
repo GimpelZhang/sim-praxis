@@ -28,6 +28,7 @@ from orchestrator.rsi_r1 import family as FAM
 from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import resource_plan as RPL
 from orchestrator.rsi_r1 import review_capacity as RC
+from orchestrator.rsi_r1 import closeout_r13 as CO13
 from orchestrator.rsi_r1 import task_specs as TS
 
 PLAN_PATH_R13 = Path("/home/vipuser/文档/RSI_R1.3_Plan_detailed.md")
@@ -462,6 +463,27 @@ def cmd_t1_preregister(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_t9_closeout(args: argparse.Namespace) -> int:
+    """T9：五轴结案（零 POST；只读既有产物，不重判）。"""
+    doc = CO13.build_closeout(
+        campaign=args.campaign_id or "rsi-r1.3",
+        taskset_dir=args.taskset,
+        t5_summary=args.t5_summary,
+        family_doc=args.family_doc,
+        calibration_report=args.calibration,
+        study_reports=args.study or (),
+        review_reports=args.review or (),
+        human_events=args.human_events,
+        notes=args.note or ())
+    out = Path(args.out) if args.out else (
+        RP.rsi_r13_root() / "closeout" / "closeout.json")
+    sha = CO13.write_closeout(out, doc)
+    print(json.dumps({"closeout": str(out), "sha256": sha,
+                      "axes": doc["axes"]}, ensure_ascii=False,
+                      sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="rsi-r1.3",
@@ -487,6 +509,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_t1.add_argument("--seal-new", action="store_true",
                       help="首次封存私有 seed（已存在则复用并核对）")
     p_t1.set_defaults(func=cmd_t1_preregister)
+
+    p_t9 = sub.add_parser("t9-closeout", help="T9 五轴结案（零 POST）")
+    p_t9.add_argument("--campaign-id", default=None)
+    p_t9.add_argument("--taskset", required=True)
+    p_t9.add_argument("--t5-summary", default=None)
+    p_t9.add_argument("--family-doc", default=None)
+    p_t9.add_argument("--calibration", default=None)
+    p_t9.add_argument("--study", action="append", default=None,
+                      help="study 驱动报告（可多次）")
+    p_t9.add_argument("--review", action="append", default=None,
+                      help="审查合并件（可多次）")
+    p_t9.add_argument("--human-events", default=None)
+    p_t9.add_argument("--note", action="append", default=None)
+    p_t9.add_argument("--out", default=None)
+    p_t9.set_defaults(func=cmd_t9_closeout)
     return parser
 
 

@@ -113,7 +113,8 @@ def build_study_parts(
         transport_factory: Callable[[], Callable[[T.Request], L.Reply]],
         runner: Any, image: str, counter: Callable[[str], int],
         backend_factory: "Callable[[str], Any] | None" = None,
-        profile: Any = None, resource_ledger: Any = None) -> StudyParts:
+        profile: Any = None, resource_ledger: Any = None,
+        task: Any = None) -> StudyParts:
     """按生产面装配一条研究链；root 门由 ``CampaignAdmission`` 二次把守。"""
     if study not in S.STUDIES:
         raise StudyError("STUDY_UNKNOWN", repr(study))
@@ -123,7 +124,7 @@ def build_study_parts(
     admission, slots, dispatcher, state = A.build_campaign_parts(
         ctx, spend=spend, lane=lane, study=study, runner=runner, image=image,
         backend_factory=factory, lock_sha256=lock.sha256,
-        profile=profile, resource_ledger=resource_ledger)
+        profile=profile, resource_ledger=resource_ledger, task=task)
     store = L.EventStore(state, study=study)
     envelope = A.Envelope.from_ctx(ctx)
     sender = L.build_production_sender(
@@ -131,7 +132,7 @@ def build_study_parts(
         admission=admission, budget=slots, envelope=envelope,
         spend_contract=spend, sha_of=PT.repo_sha)
     system = L.render_system(
-        extra_rules=PT.render_study_brief(study, profile=profile))
+        extra_rules=PT.render_study_brief(study, profile=profile, task=task))
 
     def messages() -> T.Request:
         return T.build_request(
@@ -226,6 +227,7 @@ def run_study(
         clock: Callable[[], str] = utc_now_iso_z,
         backend_factory: "Callable[[str], Any] | None" = None,
         profile: Any = None, resource_ledger: Any = None,
+        task: Any = None,
 ) -> "dict[str, Any]":
     """跑一个正式研究 study 并落 ``studies/report_<study>.json``。
 
@@ -254,7 +256,7 @@ def run_study(
             ctx, study=study, spend=spend, lock=lock,
             transport_factory=transport_factory, runner=runner, image=image,
             counter=counter, backend_factory=backend_factory,
-            profile=profile, resource_ledger=resource_ledger)
+            profile=profile, resource_ledger=resource_ledger, task=task)
         result = drive_study(parts, cap=cap)
     finally:
         pump.stop()

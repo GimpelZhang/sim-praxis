@@ -137,9 +137,33 @@ CLOSURE_GROUPS_R12: "dict[str, tuple[str, ...]]" = {
                 "orchestrator/rsi_r1/offline_validation.py"),
 }
 
+CLOSURE_GROUPS_R13: "dict[str, tuple[str, ...]]" = {
+    **CLOSURE_GROUPS_R12,
+    "instrument": tuple(sorted(set(CLOSURE_GROUPS_R12["instrument"]) | {
+        "orchestrator/rsi_r1/contrasts.py",
+        "orchestrator/rsi_r1/design_intent.py",
+        "orchestrator/rsi_r1/diagnostics.py",
+        "orchestrator/rsi_r1/judge_v13.py",
+        "orchestrator/rsi_r1/research_report.py",
+        "orchestrator/rsi_r1/resource_plan.py",
+        "orchestrator/rsi_r1/task_specs.py",
+    })),
+    "entry": tuple(sorted(set(CLOSURE_GROUPS_R12["entry"]) | {
+        "orchestrator/rsi_r1/cli_r13.py",
+        "orchestrator/rsi_r1/protocol_r13.py",
+    })),
+    "review": (
+        "orchestrator/rsi_r1/review_capacity.py",
+        "orchestrator/rsi_r1/review_receipt.py",
+        "orchestrator/rsi_r1/review_rubric_v13.py",
+        "orchestrator/rsi_r1/review_runner.py",
+    ),
+}
+
 CLOSURE_GROUPS_BY_KEY: "dict[str, dict[str, tuple[str, ...]]]" = {
     "legacy": CLOSURE_GROUPS,
     "r12": CLOSURE_GROUPS_R12,
+    "r13": CLOSURE_GROUPS_R13,
 }
 
 
