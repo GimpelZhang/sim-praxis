@@ -636,6 +636,14 @@ def render_protocol_brief(lane: str, *, profile: "Any | None" = None) -> str:
             "自己修正（例如字段写错、设计代码报错），修正也消耗调用额度；越权、状态\n"
             "不明、LOCK 漂移、额度耗尽是终止类，不会再给你下一呼。")
     parts.append(actions)
+    if lane == PROBE:
+        parts.append(
+            "### probe 演练硬约束（公开）\n"
+            "- 探索矩阵 cells 总数必须 ≤ 64（本轮建议 2 个 block × 条件数；\n"
+            "  不要用 32 个 block，否则 run_batch 会被 RESOURCE_EXCEEDED 拒绝）；\n"
+            "- 动作只带字段表中的键：`propose_plan` 的计划来源写在 plan 文档里，\n"
+            "  不要在动作顶层加 `design_source_sha`/`analysis_source_sha` 之外的键；\n"
+            "- 命中一个拒绝时按反馈修正同一动作，不要跳到下一步。")
     parts.append(PLAN_SENTINEL_NOTE)
     for study in studies:
         explore = toy_plan_doc(study, phase="explore", revision=1)
@@ -1003,11 +1011,16 @@ def _failure_evidence(parts: LaneParts, outcome: L.StepOutcome,
     if not phase:
         phase = "confirm" if outcome.action in ("run_confirm", "submit_claim") \
             else "explore"
-    effect = str(result.get("side_effect_status") or RCV.EFFECT_UNKNOWN)
+    # 解析层失败（action=None）在执行任何动作**之前**：没有副作用、也没有
+    # 未闭 intent。旧实现读 state.open_intent，把一次多余字段误判成
+    # TOOL_OUTCOME_UNKNOWN 终止（R1.3 轮 H probe 实证）。
+    parse_failure = outcome.action is None
+    effect = (RCV.EFFECT_NONE if parse_failure
+              else str(result.get("side_effect_status") or RCV.EFFECT_UNKNOWN))
     return RCV.FailureEvidence(
         phase=phase,
         frozen=bool(status.get("confirm_lock")),
-        open_intent=bool(status.get("open_intent")),
+        open_intent=False if parse_failure else bool(status.get("open_intent")),
         effect_status=effect,
         code=code,
         error_class=str(result.get("exception_type") or ""),

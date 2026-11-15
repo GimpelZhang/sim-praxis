@@ -110,7 +110,8 @@ _KEYS: "Mapping[str, frozenset[str]]" = {
 }
 _OPTIONAL_KEYS: "Mapping[str, frozenset[str]]" = {
     "propose_plan": frozenset({"design_source", "analysis_source",
-                                  "design_intent"}),
+                                  "design_intent", "design_source_sha",
+                                  "analysis_source_sha"}),
     # R1.3：设计声明与研究报告随既有动作提交，不新增第九动作（Plan §4/§7）。
     # 旧 profile 的这些键不被读取；R1.3 分派器强制要求。
     "freeze_confirm": frozenset({"design_intent"}),
