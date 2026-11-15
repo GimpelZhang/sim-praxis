@@ -350,6 +350,8 @@ def cmd_calibrate(args: Any) -> int:
                                      image=CAL.CAL_IMAGE, design=design,
                                      ledger_path=ledger)
     if report.get("verdict") != "CALIBRATION_PASS" and design["version"] == 1:
+        if not ctx.exists(CAL.PERMIT_RELPATH):
+            CAL.issue_zero_post_permit(ctx, ledger_path=ledger)
         # v1 的已知缺口（A 首步速度门与 B 0.01 绝对容差）由 v2 的设计修订
         # 处理；v2 必须携带 v1 历史件与 gap 分析（plan §T1b/R1.2 先例）。
         gap = _write_gap_analysis(ctx, report)
