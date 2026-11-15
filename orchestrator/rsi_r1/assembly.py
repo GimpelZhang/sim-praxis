@@ -706,6 +706,21 @@ class CampaignDispatcher:
         handler = getattr(self, f"_do_{action.name}", None)
         if handler is None:
             raise L.LoopError("UNKNOWN_ACTION", action.name, terminal=True)
+        # 轮 N（R13-D8）：8 位置协议在 R13 study 上不是「建议顺序」而是状态机。
+        # 2026-11-15 轮 M study A 实证：run_confirm 后 study 已进 RESULTS_RELEASED
+        # （只允许 submit_claim），但宿主仍放行 write_artifact/analyze，模型在
+        # 「再修一次分析」里烧掉 39 呼直至 POSTS_EXHAUSTED、零主张提交。
+        # 这里把状态机的唯一出口显式挡在入口：拒绝**非终止**（可自修），
+        # 副作用 NONE（未写任何事件），但那一呼照常计账。
+        if (self.profile is not None and self.profile.is_r13
+                and self.study in S.STUDIES):
+            if (self.state.study_state(self.study) == S.ST_RESULTS_RELEASED
+                    and action.name != "submit_claim"):
+                return self._fail(
+                    "CLAIM_REQUIRED",
+                    "study 已在 RESULTS_RELEASED：第 8 位 submit_claim 是唯一"
+                    f"合法动作；{action.name} 被拒（本呼照计预算）",
+                    side_effect_status="NONE")
         try:
             return handler(action)
         except L.LoopError as exc:

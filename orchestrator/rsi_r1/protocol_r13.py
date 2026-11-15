@@ -399,5 +399,12 @@ def render_study_brief_r13(study: str, task: TS.TaskSpecV13) -> str:
         "\"lower\",\"upper\"}`；数值逐字复制第 7 步 `candidate_output.contrasts` 里 "
         f"`{task.primary.id}` 的同名字段；delta 必须等于公开量表值 "
         f"{task.primary.delta}。",
+        "",
+        "### 硬状态规则（轮 N）",
+        "第 7 步 run_confirm 成功后 study 立即进入 RESULTS_RELEASED：**唯一**"
+        "合法动作是第 8 步 submit_claim。此后任何 write_artifact / analyze / "
+        "propose_plan / run_batch / run_confirm 都会被 CLAIM_REQUIRED 拒绝且"
+        "照计 1 呼——不要在发布后再改分析或再登记源码；直接按第 7 步返回的"
+        "candidate_output / analysis_receipt / evidence_index 写主张与报告。",
     ]
     return "\n".join(parts)

@@ -148,8 +148,8 @@ def _dispatch(dispatcher, state, action: L.Action, store=None):
     return dispatcher.execute_once(action, None)
 
 
-def _run_chain(ctx, state, dispatcher, task: TS.TaskSpecV13, *,
-               report_kwargs: "dict[str, Any] | None" = None):
+def _run_to_confirm(ctx, state, dispatcher, task: TS.TaskSpecV13):
+    """跑到第 7 位 run_confirm 成功（RESULTS_RELEASED），返回确认面输出。"""
     design = PR.DESIGN_TEMPLATE_R13
     analysis = PR.ANALYSIS_TEMPLATE_R13
     explore = PR._plan_template(task, phase="explore")
@@ -196,15 +196,38 @@ def _run_chain(ctx, state, dispatcher, task: TS.TaskSpecV13, *,
                                   None)
     assert out["ok"], out
     assert "references" not in out
-    cand = out["candidate_output"]["contrasts"][0]
-    index = out["evidence_index"]
-    receipt_sha = out["analysis_receipt"]["sha256"]
+    return out
 
+
+def _run_chain(ctx, state, dispatcher, task: TS.TaskSpecV13, *,
+               report_kwargs: "dict[str, Any] | None" = None):
+    out = _run_to_confirm(ctx, state, dispatcher, task)
+    cand = out["candidate_output"]["contrasts"][0]
+    report = _report_doc(task, cand, out["analysis_receipt"]["sha256"],
+                         out["evidence_index"])
+    if report_kwargs:
+        report.update(report_kwargs)
+    claims = [{"hypothesis_id": "h_interaction",
+               "proposition": task.primary.proposition,
+               "metric_id": task.primary.metric,
+               "delta": float(task.primary.delta),
+               "estimate": cand["estimate"], "lower": cand["lower"],
+               "upper": cand["upper"], "n_blocks": cand["n_blocks"]}]
+    out = _dispatch(dispatcher, state, _act("submit_claim", {
+        "claims": claims, "report_text": PR.render_study_brief_r13(
+            task.mechanism_id.split("_")[0], task)[:200],
+        "research_report": report}), None)
+    return out, state, ctx
+
+
+def _report_doc(task, cand, receipt_sha, index):
+    """研究报告最小合法文档（locator 一律用 run_confirm 的 evidence_index）。"""
+    del cand
     def loc(file, pointer):
         return {"kind": "json_pointer", "file": file,
                 "sha256": index[file], "pointer": pointer}
 
-    report = {
+    return {
         "schema": "simpraxis.rsi_r13.research_report.v1", "schema_version": 1,
         "task_id": task.task_id,
         "question_and_hypotheses": "交互效应是否不为零",
@@ -230,19 +253,6 @@ def _run_chain(ctx, state, dispatcher, task: TS.TaskSpecV13, *,
                         "discriminating_experiment": "增加端点条件",
                         "possible_outcomes": ["继续增大", "饱和"]}],
     }
-    if report_kwargs:
-        report.update(report_kwargs)
-    claims = [{"hypothesis_id": "h_interaction",
-               "proposition": task.primary.proposition,
-               "metric_id": task.primary.metric,
-               "delta": float(task.primary.delta),
-               "estimate": cand["estimate"], "lower": cand["lower"],
-               "upper": cand["upper"], "n_blocks": cand["n_blocks"]}]
-    out = _dispatch(dispatcher, state, _act("submit_claim", {
-        "claims": claims, "report_text": PR.render_study_brief_r13(
-            task.mechanism_id.split("_")[0], task)[:200],
-        "research_report": report}), None)
-    return out, state, ctx
 
 
 def _values_a():
@@ -392,3 +402,46 @@ def test_r13_parse_action_rejects_nonfinite():
                        ' "run_ids": [], "sneaky": NaN}' % ("a" * 64))
     assert info.value.code == "NAN_OR_INF"
     assert info.value.terminal is False
+
+
+def test_r13_results_released_only_allows_submit_claim(tmp_path):
+    """轮 N（R13-D8）：RESULTS_RELEASED 之后只在入口放行 submit_claim。
+
+    轮 M study A 实证：发布后 write_artifact/analyze 被放行，模型在「再修一次
+    分析」里烧掉 39 呼、零主张。此处的拒绝必须是非终止、副作用 NONE，
+    且不写任何事件（下一呼仍可正常提交主张）。
+    """
+    task = TS.build_new_a()
+    ctx, state, dispatcher = _setup(tmp_path, task=task, values=_values_a())
+    out = _run_to_confirm(ctx, state, dispatcher, task)
+    assert out["ok"], out
+    assert state.study_state("A") == S.ST_RESULTS_RELEASED
+
+    results_before = sum(1 for e in state.journal.events()
+                         if e.event == "action_result")
+    blocked = _dispatch(dispatcher, state, _act("write_artifact", {
+        "kind": "analysis", "source": PR.ANALYSIS_TEMPLATE_R13}), None)
+    assert blocked["ok"] is False, blocked
+    assert blocked["code"] == "CLAIM_REQUIRED"
+    assert blocked["side_effect_status"] == "NONE"
+    blocked = _dispatch(dispatcher, state, _act("freeze_confirm", {
+        "plan_sha256": "host"}), None)
+    assert blocked["ok"] is False and blocked["code"] == "CLAIM_REQUIRED"
+    # 只允许测试驱动的 reply/action 登记；被拒动作不得留下结果/转移事件。
+    assert sum(1 for e in state.journal.events()
+               if e.event == "action_result") == results_before
+    # 合法出口不受影响：主张照样能提交，study 进入成功终态。
+    cand = out["candidate_output"]["contrasts"][0]
+    receipt_sha = out["analysis_receipt"]["sha256"]
+    claims = [{"hypothesis_id": "h_interaction",
+               "proposition": task.primary.proposition,
+               "metric_id": task.primary.metric,
+               "delta": float(task.primary.delta),
+               "estimate": cand["estimate"], "lower": cand["lower"],
+               "upper": cand["upper"], "n_blocks": cand["n_blocks"]}]
+    done = _dispatch(dispatcher, state, _act("submit_claim", {
+        "claims": claims, "report_text": "结论见报告",
+        "research_report": _report_doc(task, cand, receipt_sha,
+                                       out["evidence_index"])}), None)
+    assert done["ok"], done
+    assert done.get("judge_verdict") == "JUDGE_OK", done
