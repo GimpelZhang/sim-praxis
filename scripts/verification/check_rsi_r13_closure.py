@@ -78,7 +78,9 @@ def main(argv=None) -> int:
     studies = facts.get("studies") or []
     any_study = any(s.get("status") == "COMPLETED" for s in studies)
     if not any_study:
-        if axes.get("study_execution") != "NOT_STARTED":
+        calib = facts.get("calibration") or {}
+        want_exec = "BLOCKED" if (calib and not calib.get("ok")) else "NOT_STARTED"
+        if axes.get("study_execution") != want_exec:
             problems.append("AXIS_STUDY_EXECUTION")
         if axes.get("claim") != "NONE":
             problems.append("AXIS_CLAIM")

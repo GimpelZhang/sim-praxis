@@ -107,6 +107,10 @@ def build_closeout(*, campaign: str, taskset_dir: "str | Path",
 
     measurement = (MEASUREMENT_VALID if t5_ok else
                    MEASUREMENT_INCOMPLETE)
+    if calibration is not None and not calibration.get("ok"):
+        # 审查仪器校准失败属于测量仪器缺陷（Plan §5：REVIEW_INSTRUMENT_NOT_READY
+        # 即停付费候选试验），优先级高于 T5 物理参考链的 VALID。
+        measurement = MEASUREMENT_INVALID
     if any_study:
         # 候选 study 的判据层决定 measurement 是否被污染/无效
         layers = [s.get("judge") or {} for s in facts["studies"]]
