@@ -104,7 +104,7 @@ def _setup(task: TS.TaskSpecV13, root: Path, envelope: str) -> Ctx:
         ctx=ctx, state=state, admission=admission, budget=budget,
         study=task.mechanism_id.split("_")[0], runner=SB.DockerRunner(),
         image=BASE_IMAGE, backend_factory=factory,
-        profile=P.PROFILE_R13_DEF, task=task)
+        profile=P.PROFILE_R13_DEF, task=task, batch_workers=8)
     return Ctx(root=root, ctx=ctx, state=state, dispatcher=dispatcher,
                study=task.mechanism_id.split("_")[0], task=task)
 
@@ -227,7 +227,7 @@ def run_chain(task: TS.TaskSpecV13, root: Path, out: Path,
         batch_id=f"replay-{c.study}")
     book = E.ResourceBook(max_runs=len(ordered),
                           max_steps=sum(s.nsteps for s in ordered))
-    ev = E.execute_batch(ordered, backend, book)
+    ev = E.execute_batch(ordered, backend, book, workers=8)
     check("replay-executed", not ev.blocked, ev.reason)
     comparison = {"study_id": c.study, "task_id": task.task_id,
                   "plan_sha256": plan.sha256,

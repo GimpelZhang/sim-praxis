@@ -657,12 +657,19 @@ def _verify_spec(spec: ExperimentSpec) -> None:
 
 @_public
 def execute_batch(specs: Iterable[ExperimentSpec], backend: Any,
-                  resource_book: Any) -> BatchEvidence:
+                  resource_book: Any, *, workers: int = 1) -> BatchEvidence:
     """逐 spec 预留资源后调用 ``backend.run(spec)``；不采信候选自报成本。
 
     ``backend`` 只需实现 ``run(spec) -> Mapping``；infra 失败抛
     :class:`BackendInfraError`，科学失稳抛 :class:`BackendScientificStop`。
     基础设施失败后**不再执行剩余 spec**（整批 blocked，不补样本）。
+
+    锁内适配（R1.3 T5，2026-11-15）：维护参考链的 A 批 32×5=160 run 在单线程
+    下约 1 run/分钟（宿主侧 8000 步记录校验是瓶颈），9 小时不可接受。这里加
+    **可选** ``workers>1`` 的线程池；默认 1 保持逐 spec 顺序语义不变。并行只
+    改变调度，不改变 spec/预留/记录/判据；backend 必须把每次 run 写到互不冲突
+    的路径（T5 用同一 batch_id + 不同 work_root）。任一 infra 失败仍整批
+    blocked，未跑的 spec 记 ``CANCELLED_AFTER_BLOCK``（不补样本）。
     """
     items = tuple(specs)
     if not items:
@@ -678,6 +685,10 @@ def execute_batch(specs: Iterable[ExperimentSpec], backend: Any,
         if spec.run_id in seen:
             raise _err("DUPLICATE_ID", f"run_id={spec.run_id} 在批内重复")
         seen.add(spec.run_id)
+
+    if int(workers) > 1 and len(items) > 1:
+        return _execute_batch_parallel(items, backend, resource_book,
+                                       workers=int(workers))
 
     outcomes: "list[RunOutcome]" = []
     blocked = False
@@ -722,6 +733,70 @@ def execute_batch(specs: Iterable[ExperimentSpec], backend: Any,
                                    condition_id=spec.condition_id,
                                    block_id=spec.block_id, ok=True,
                                    record=dict(record)))
+    resources = (resource_book.to_dict()
+                 if hasattr(resource_book, "to_dict") else {})
+    return BatchEvidence(study_id=items[0].study_id,
+                         plan_sha256=items[0].plan_sha256,
+                         outcomes=tuple(outcomes), blocked=blocked,
+                         reason=reason, resources=resources)
+
+
+def _execute_batch_parallel(items: "tuple[ExperimentSpec, ...]", backend: Any,
+                            resource_book: Any, *, workers: int) -> BatchEvidence:
+    """``workers>1`` 的维护专用并行路径（语义见 ``execute_batch`` docstring）。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    for spec in items:
+        resource_book.reserve(spec)
+
+    def one(spec: ExperimentSpec) -> RunOutcome:
+        try:
+            record = backend.run(spec)
+        except BackendScientificStop as exc:
+            return RunOutcome(run_id=spec.run_id,
+                              condition_id=spec.condition_id,
+                              block_id=spec.block_id, ok=True,
+                              record=exc.record,
+                              stop_reason=str(exc) or "scientific_stop")
+        except BackendInfraError as exc:
+            return RunOutcome(run_id=spec.run_id,
+                              condition_id=spec.condition_id,
+                              block_id=spec.block_id, ok=False,
+                              record=None, error_code=exc.code)
+        except Exception as exc:  # noqa: BLE001
+            return RunOutcome(run_id=spec.run_id,
+                              condition_id=spec.condition_id,
+                              block_id=spec.block_id, ok=False,
+                              record=None, error_code="BACKEND_ERROR")
+        if not isinstance(record, Mapping):
+            return RunOutcome(run_id=spec.run_id,
+                              condition_id=spec.condition_id,
+                              block_id=spec.block_id, ok=False,
+                              record=None, error_code="BACKEND_ERROR")
+        return RunOutcome(run_id=spec.run_id,
+                          condition_id=spec.condition_id,
+                          block_id=spec.block_id, ok=True,
+                          record=dict(record))
+
+    outcomes: "list[RunOutcome]" = []
+    blocked = False
+    reason: "str | None" = None
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(one, spec) for spec in items]
+        for spec, future in zip(items, futures):
+            outcome = future.result()
+            outcomes.append(outcome)
+            if not outcome.ok and not blocked:
+                blocked = True
+                reason = f"{outcome.error_code}"
+                for other in futures[len(outcomes):]:
+                    other.cancel()
+        if blocked:
+            for spec in items[len(outcomes):]:
+                outcomes.append(RunOutcome(
+                    run_id=spec.run_id, condition_id=spec.condition_id,
+                    block_id=spec.block_id, ok=False, record=None,
+                    error_code="CANCELLED_AFTER_BLOCK"))
     resources = (resource_book.to_dict()
                  if hasattr(resource_book, "to_dict") else {})
     return BatchEvidence(study_id=items[0].study_id,

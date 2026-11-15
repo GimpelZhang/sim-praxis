@@ -540,7 +540,8 @@ class CampaignDispatcher:
                  clock: Callable[[], str] = utc_now_iso_z,
                  profile: "P.CampaignProfile | None" = None,
                  resource_ledger: "RS.ResourceLedger | None" = None,
-                 task: "TS.TaskSpecV13 | None" = None) -> None:
+                 task: "TS.TaskSpecV13 | None" = None,
+                 batch_workers: int = 1) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
@@ -573,6 +574,8 @@ class CampaignDispatcher:
         self.profile = profile
         self.resource_ledger = resource_ledger
         self.task = task
+        # 维护参考链可选并行（T5）；默认 1 保持生产逐 spec 语义
+        self.batch_workers = max(1, int(batch_workers))
         self.r13_explore_intent: "DI.DesignIntentV13 | None" = None
         self.r13_confirm_intent: "DI.DesignIntentV13 | None" = None
         self.r13_design_counts: "dict[str, int] | None" = None
@@ -843,7 +846,8 @@ class CampaignDispatcher:
             f"explore-{self.study}-{self.runs_used['explore']}")
         book = E.ResourceBook(max_runs=explore_cap,
                               max_steps=int(self.budget.max_steps))
-        evidence = E.execute_batch(specs, backend, book)
+        evidence = E.execute_batch(specs, backend, book,
+                                   workers=self.batch_workers)
         self.runs_used["explore"] += book.used_runs
         run_ids = [o.run_id for o in evidence.outcomes if o.ok]
         manifest = backend.write_manifest()
@@ -1271,7 +1275,8 @@ class CampaignDispatcher:
         backend = self.backend_factory(confirm_batch_id(self.study, token))
         book = E.ResourceBook(max_runs=len(ordered),
                               max_steps=int(self.budget.max_steps))
-        evidence = E.execute_batch(ordered, backend, book)
+        evidence = E.execute_batch(ordered, backend, book,
+                                   workers=self.batch_workers)
         self.runs_used["confirm"] += book.used_runs
         outcome = (S.OUTCOME_INFRA_FAIL if evidence.blocked else S.OUTCOME_OK)
         result_doc = {"study": self.study, "intent_id": intent.intent_id,
