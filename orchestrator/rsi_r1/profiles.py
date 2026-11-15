@@ -185,9 +185,11 @@ R13_LEDGER_HISTORY_POSTS = 545
 R13_OFFLEDGER_DIAGNOSTIC_POSTS = 9
 R13_FAMILY_HISTORY_POSTS = R13_LEDGER_HISTORY_POSTS + R13_OFFLEDGER_DIAGNOSTIC_POSTS
 R13_FAMILY_CLOSED_ROUND_POSTS = 514
-#: 677 = 545 + 132（Plan §6 拟值）；计入账外诊断 9 后为 686。旧 637 的余量 92
-#: 不结转（Plan §6 明写「不是把旧637余量92再加132」）。
-R13_FAMILY_CAP = R13_FAMILY_HISTORY_POSTS + RSI_R13_HARD_CAP     # 686
+#: 677 = 545 + 132（Plan §6 拟值）；计入账外诊断 9 后为 686。
+#: 2026-11-15 第二轮授权：轮 A 的 review 校准首槽已真实花掉 1 呼（R13-D3），
+#: 已花不归还；新一轮仍需完整 132 ⇒ 族帽 686→687 = 历史 554 + 已花 1 + 新轮 132。
+#: 旧 637 的余量 92 不结转（Plan §6 明写「不是把旧637余量92再加132」）。
+R13_FAMILY_CAP = R13_FAMILY_HISTORY_POSTS + 1 + RSI_R13_HARD_CAP   # 687
 R13_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (R13_FAMILY_CAP,)
 #: 账外诊断的取证材料（2026-11-14，`/tmp` 脚本只从 env 读凭据，不落密）。
 R13_OFFLEDGER_EVIDENCE: "tuple[Mapping[str, Any], ...]" = (
@@ -808,9 +810,10 @@ def assert_r13_table_consistent() -> None:
     if R13_FAMILY_HISTORY_POSTS != (R13_LEDGER_HISTORY_POSTS
                                     + R13_OFFLEDGER_DIAGNOSTIC_POSTS):
         raise AssertionError("R1.3 族历史 != 账本 545 + 账外诊断 9")
-    if R13_FAMILY_CAP != R13_FAMILY_HISTORY_POSTS + RSI_R13_HARD_CAP:
+    if R13_FAMILY_CAP != (R13_FAMILY_HISTORY_POSTS + 1 + RSI_R13_HARD_CAP):
         raise AssertionError(
-            f"R1.3 族帽 {R13_FAMILY_CAP} != 历史 {R13_FAMILY_HISTORY_POSTS} + 本轮 132")
+            f"R1.3 族帽 {R13_FAMILY_CAP} != 历史 {R13_FAMILY_HISTORY_POSTS} + "
+            f"已花 1 + 本轮 132")
     if sum(int(e["posts"]) for e in R13_OFFLEDGER_EVIDENCE) != \
             R13_OFFLEDGER_DIAGNOSTIC_POSTS:
         raise AssertionError("R1.3 账外诊断清单合计 != 9")

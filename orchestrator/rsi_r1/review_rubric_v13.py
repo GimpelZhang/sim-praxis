@@ -103,7 +103,12 @@ def validate_review_v13(doc: Any, *, evidence: Mapping[str, bytes],
             raise ReviewError("REFS_EMPTY", name)
         for i, locator in enumerate(refs):
             try:
-                RR.resolve_locator(locator, evidence=evidence)
+                # 审查者的引用只需解析到包内位置；包字节由收据绑定。模型常把
+                # packet_sha256 字段当文件 sha 抄进来，这里不让它误伤解析。
+                clean = {k: v for k, v in locator.items() if k != "sha256"}
+                RR.resolve_locator(clean, evidence=evidence,
+                                   default_file="packet.json"
+                                   if "packet.json" in evidence else None)
             except RR.ReportError as exc:
                 raise ReviewError(exc.code, f"{name}.refs[{i}]: {exc.detail}") from None
         out[name] = {"verdict": row["verdict"],

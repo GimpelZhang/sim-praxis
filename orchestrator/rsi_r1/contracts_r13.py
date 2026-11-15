@@ -200,7 +200,7 @@ class ConsentV13:
         if int(doc["max_posts"]) != P.RSI_R13_HARD_CAP:
             raise Contract13Error("MAX_POSTS", "consent.max_posts 必须为 132")
         if int(doc["family_cap"]) != P.R13_FAMILY_CAP:
-            raise Contract13Error("FAMILY_CAP", "consent.family_cap 必须为 686")
+            raise Contract13Error("FAMILY_CAP", f"consent.family_cap 必须为 {P.R13_FAMILY_CAP}")
         return cls(
             decision=str(doc["decision"]),
             paid_authorized=bool(doc["paid_authorized"]),

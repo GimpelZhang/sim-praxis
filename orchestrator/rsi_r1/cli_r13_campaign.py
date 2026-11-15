@@ -465,7 +465,8 @@ def cmd_freeze(args: Any) -> int:
     out = LK.freeze_lock(ctx, image_pin=image, purpose="paid",
                          validation_binding=binding)
     state = S.ResearchState(ctx)
-    state.advance_root(S.ROOT_FROZEN, reason="paid LOCK frozen")
+    if state.root_state() != S.ROOT_FROZEN:
+        state.advance_root(S.ROOT_FROZEN, reason="paid LOCK frozen")
     print(json.dumps({"lock_sha256": out["sha256"],
                       "root": state.root_state(),
                       "validation_lock_sha256": binding["validation_lock_sha256"]}))

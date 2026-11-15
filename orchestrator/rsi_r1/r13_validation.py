@@ -310,13 +310,17 @@ def run_production_validation(ctx: Any, *, taskset_dir: Path,
         (taskset / "task_a.json").read_text(encoding="utf-8")))
     task_b = TS.TaskSpecV13.from_dict(json.loads(
         (taskset / "task_b.json").read_text(encoding="utf-8")))
+    from orchestrator.rsi_r1 import r13_review_run as RRUN
+    adapter = RRUN.review_adapter_selftest()
     results = [run_study_chain(ctx, state, task=task, out=out)
                for task in (task_a, task_b)]
     summary = {
         "schema": "simpraxis.rsi_r13.t5_summary.v1", "schema_version": 1,
         "captured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "studies": results,
-        "all_ok": all(r.get("all_ok") for r in results),
+        "review_adapter": adapter,
+        "all_ok": (all(r.get("all_ok") for r in results)
+                   and bool(adapter.get("ok"))),
         "paid_posts": 0,
         "identity": "offline_validation_root",
     }

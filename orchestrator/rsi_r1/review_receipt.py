@@ -97,7 +97,8 @@ def build_receipt(*, review_id: str, reviewer_id: str, session_id: str,
                   response: bytes, access_log: bytes,
                   input_allowlist: Sequence[str], started_at_utc: str,
                   ended_at_utc: str, isolation: IsolationEvidence,
-                  actor_kind: str = "model_reviewer") -> "dict[str, Any]":
+                  actor_kind: str = "model_reviewer",
+                  packet_sha256: "str | None" = None) -> "dict[str, Any]":
     return {
         "schema": RECEIPT_SCHEMA,
         "schema_version": 1,
@@ -109,7 +110,8 @@ def build_receipt(*, review_id: str, reviewer_id: str, session_id: str,
         "prompt_sha256": sha256_bytes(prompt),
         "schema_sha256": sha256_bytes(schema),
         "source_sha256": sha256_bytes(source),
-        "packet_sha256": sha256_bytes(packet),
+        "packet_sha256": (sha256_bytes(packet) if packet_sha256 is None
+                          else str(packet_sha256)),
         "input_allowlist": list(input_allowlist),
         "manifest_sha256": sha256_bytes("\n".join(input_allowlist).encode()),
         "started_at_utc": str(started_at_utc),

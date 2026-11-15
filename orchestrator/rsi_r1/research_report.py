@@ -91,12 +91,20 @@ def _resolve_pointer(body: Any, pointer: str) -> bool:
     return True
 
 
-def resolve_locator(locator: Any, *, evidence: Mapping[str, bytes]) -> str:
-    """解析一个 typed locator；返回规范化文件路径（失败抛 ReportError）。"""
+def resolve_locator(locator: Any, *, evidence: Mapping[str, bytes],
+                    default_file: "str | None" = None) -> str:
+    """解析一个 typed locator；返回规范化文件路径（失败抛 ReportError）。
+
+    ``default_file`` 只用于审查包（review 者常写 ``type`` 与相对 pointer，
+    省略文件名）；候选报告仍必须显式给 ``kind``/``file``。
+    """
     if not isinstance(locator, Mapping):
         raise ReportError("LOCATOR_INVALID", "locator 必须是对象")
-    kind = locator.get("kind")
-    path = _safe_relpath(locator.get("file"))
+    kind = locator.get("kind") or locator.get("type")
+    file = locator.get("file") or default_file
+    if not file:
+        raise ReportError("LOCATOR_INVALID", "locator 缺 file")
+    path = _safe_relpath(file)
     if path not in evidence:
         raise ReportError("LOCATOR_UNRESOLVED", f"证据根无文件 {path}")
     data = evidence[path]

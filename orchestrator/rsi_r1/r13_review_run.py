@@ -106,17 +106,30 @@ def _approval(ctx: Any, *, batch_id: str, lane: str, task: int,
                       namespace=QL.RSI_R13_NAMESPACE)
 
 
+def seal_packet(packet: Mapping[str, Any], slot: RN.ReviewSlot
+                ) -> "tuple[dict[str, Any], bytes, str]":
+    """给包写入自包含摘要（R13-D3）。
+
+    ``packet_sha256`` = sha256(canonical(包内容 **不含** review_id/reviewer_id/
+    packet_sha256))；两个审查通道因此共享同一逻辑包摘要，审查者只需回显。
+    """
+    content = {k: v for k, v in packet.items()
+               if k not in ("review_id", "reviewer_id", "packet_sha256")}
+    sha = _sha(json.dumps(content, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False).encode("utf-8"))
+    doc = dict(content, review_id=slot.review_id,
+               reviewer_id=slot.reviewer_id, packet_sha256=sha)
+    return doc, json.dumps(doc, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False).encode("utf-8"), sha
+
+
 def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
            batch_id: str, task: int, out_dir: Path) -> "dict[str, Any]":
     _approval(ctx, batch_id=batch_id, lane=lane, task=task, approved=4)
     work = out_dir / f"review-{slot.review_id}-{uuid.uuid4().hex[:8]}"
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
-    packet_doc = dict(packet, review_id=slot.review_id,
-                      reviewer_id=slot.reviewer_id)
+    packet_doc, packet_bytes, packet_sha = seal_packet(packet, slot)
     packet_path = work / "packet.json"
-    packet_bytes = json.dumps(packet_doc, sort_keys=True,
-                              separators=(",", ":"),
-                              ensure_ascii=False).encode("utf-8")
     packet_path.write_bytes(packet_bytes)
     packet_path.chmod(0o600)
     nonce = work / "nonce"
@@ -167,12 +180,13 @@ def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
         response=response, access_log=access,
         input_allowlist=["packet.json"],
         started_at_utc=str(call["started_at_utc"]),
-        ended_at_utc=str(call["ended_at_utc"]), isolation=isolation)
+        ended_at_utc=str(call["ended_at_utc"]), isolation=isolation,
+        packet_sha256=packet_sha)
     RRc.verify_receipt(receipt, review_id=slot.review_id,
                        reviewer_id=slot.reviewer_id,
-                       packet_sha256=_sha(packet_bytes))
+                       packet_sha256=packet_sha)
     return {"call": call, "packet_bytes": packet_bytes,
-            "packet_sha256": _sha(packet_bytes), "receipt": receipt}
+            "packet_sha256": packet_sha, "receipt": receipt}
 
 
 # ---------------------------------------------------------------------------
@@ -307,8 +321,11 @@ def _parse_calibration_reply(call_text: str, packet_sha: str,
             from orchestrator.rsi_r1 import research_report as _RR
             for locator in refs:
                 try:
-                    _RR.resolve_locator(locator,
-                                        evidence=_packet_evidence(packet_bytes))
+                    clean = {k: v for k, v in locator.items()
+                             if k != "sha256"}
+                    _RR.resolve_locator(clean,
+                                        evidence=_packet_evidence(packet_bytes),
+                                        default_file="packet.json")
                 except Exception:
                     raise ReviewRunError("CALIBRATION_REFS", f"{cid}.{item}")
             row[item] = verdict
@@ -347,6 +364,64 @@ def run_calibration(ctx: Any, out_dir: Path, *, envelope: str) -> "dict[str, Any
                     else "REVIEW_INSTRUMENT_NOT_READY")}
     ctx.write_json(CALIBRATION_REPORT_REL, doc)
     return doc
+
+
+def review_adapter_selftest() -> "dict[str, Any]":
+    """零 POST 审查适配自检（T5 必跑；避免 T6 才发现包字段不可回显）。
+
+    用脚本化"审查者"：对两个校准包按预期标签构造回复（含 packet_sha256
+    回显与 packet.json 引用），跑 ``_parse_calibration_reply`` 与
+    ``check_calibration``，并构造/校验 ReviewRunReceipt。
+    """
+    groups = (["valid_positive", "pseudo_replication", "overclaim_universal"],
+              ["valid_uncertain", "fixed_pilot_scoped", "empty_limitations"])
+    problems: "list[str]" = []
+    all_results: "dict[str, dict[str, str]]" = {}
+    for pi, ids in enumerate(groups):
+        packet = build_calibration_packet(ids)
+        slot = RN.ReviewSlot(f"selftest-{pi + 1}", "scripted-reviewer",
+                             "selftest")
+        doc, packet_bytes, sha = seal_packet(packet, slot)
+        cases = {}
+        for cid in ids:
+            expected = RN.CALIBRATION_CASES[cid]["expected"]
+            cases[cid] = {"verdicts": {
+                item: {"verdict": expected.get(item, "PASS"),
+                       "reason": "scripted",
+                       "refs": [{"kind": "json_pointer", "file": "packet.json",
+                                 "pointer": "/cases/0"}]}
+                for item in RV.ITEMS_V13}}
+        reply = {"schema": CALIB_REVIEW_SCHEMA, "review_id": slot.review_id,
+                 "reviewer_id": slot.reviewer_id, "packet_sha256": sha,
+                 "cases": cases}
+        try:
+            parsed = _parse_calibration_reply(json.dumps(reply), sha, ids,
+                                              packet_bytes)
+            all_results.update(parsed)
+        except ReviewRunError as exc:
+            problems.append(f"packet{pi + 1}:{exc.code}:{exc.detail}")
+        isolation = RRc.IsolationEvidence(
+            fresh_context=True, fresh_process=True, env_scrubbed=True,
+            cache_dir="selftest", other_review_inputs_present=False,
+            created_by="scheduler",
+            evidence=({"kind": "fresh_dir", "sha256": "a" * 64},))
+        receipt = RRc.build_receipt(
+            review_id=slot.review_id, reviewer_id=slot.reviewer_id,
+            session_id="selftest", process_id=1, prompt=b"p", schema=b"s",
+            source=b"x", packet=packet_bytes,
+            request=b"req", response=json.dumps(reply).encode(),
+            access_log=b"log", input_allowlist=["packet.json"],
+            started_at_utc="2026-11-15T00:00:00Z",
+            ended_at_utc="2026-11-15T00:00:01Z", isolation=isolation,
+            packet_sha256=sha)
+        RRc.verify_receipt(receipt, review_id=slot.review_id,
+                           reviewer_id=slot.reviewer_id,
+                           packet_sha256=sha)
+    verdict = RN.check_calibration(all_results)
+    if not verdict["ok"]:
+        problems.extend(verdict["problems"])
+    return {"ok": not problems, "problems": problems, "packets": 2,
+            "cases": 6, "paid_posts": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +497,15 @@ def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
         doc = json.loads(str(spawned["call"]["text"]))
         reviews.append(doc)
         receipts.append(spawned["receipt"])
+        packet_sha = spawned["packet_sha256"]
+        evidence = _packet_evidence(spawned["packet_bytes"])
     combined = RV.combine_reviews(
         reviews, receipts=receipts,
-        expected_packet_sha256=_sha(packet_bytes), evidence=evidence)
+        expected_packet_sha256=packet_sha, evidence=evidence)
     doc = {"schema": "simpraxis.rsi_r13.review_combined.v1",
            "schema_version": 1, "envelope_id": ctx.envelope_id,
            "study": study, "task_id": task.task_id,
-           "packet_sha256": _sha(packet_bytes),
+           "packet_sha256": packet_sha,
            "combined": combined.to_dict()}
     ctx.write_json(f"reviews/{study}_combined.json", doc)
     return doc
