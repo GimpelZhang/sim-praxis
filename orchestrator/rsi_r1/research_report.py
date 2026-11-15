@@ -101,7 +101,9 @@ def resolve_locator(locator: Any, *, evidence: Mapping[str, bytes]) -> str:
         raise ReportError("LOCATOR_UNRESOLVED", f"证据根无文件 {path}")
     data = evidence[path]
     digest = hashlib.sha256(data).hexdigest()
-    if locator.get("sha256") != digest:
+    # 候选报告必须给 sha256（逐字节绑定）；审查包内的引用可只给 pointer
+    # （包字节本身由 ReviewRunReceipt.packet_sha256 绑定，解析仍指向实际内容）。
+    if locator.get("sha256") is not None and locator.get("sha256") != digest:
         raise ReportError("LOCATOR_SHA_MISMATCH", f"{path} sha256 不符")
     if kind == "json_pointer":
         try:

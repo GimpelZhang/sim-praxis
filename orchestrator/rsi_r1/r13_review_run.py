@@ -1,0 +1,434 @@
+"""R1.3 审查调度：校准 4 呼与正式 2×2 呼（每次一个新进程、一份包）。
+
+父进程负责：批准件、隔离目录、输入白名单、子进程启动、收据与合并；
+子进程只做一次 POST。任何格式失败/空回答占预算且**不补呼**。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Any, Mapping
+
+from orchestrator.rsi_r1 import experiments as E
+from orchestrator.rsi_r1 import judge as J
+from orchestrator.rsi_r1 import loop as L
+from orchestrator.rsi_r1 import protocol as PT
+from orchestrator.rsi_r1 import review_receipt as RRc
+from orchestrator.rsi_r1 import review_rubric_v13 as RV
+from orchestrator.rsi_r1 import review_runner as RN
+from orchestrator.rsi_r1 import task_specs as TS
+from orchestrator.gateway import quota_ledger as QL
+
+REVIEW_PERMIT_REL = "contract/review_permit.json"
+CALIBRATION_REPORT_REL = "contract/review_calibration.json"
+PERMIT_SCHEMA = f"{TS.P.SCHEMA_PREFIX_V13}.review_calibration_permit.v1"
+CALIB_REVIEW_SCHEMA = f"{TS.P.SCHEMA_PREFIX_V13}.calibration_review.v1"
+LANE_CAL = "review_calibration"
+LANE_FINAL = "review_final"
+TASK_CAL = 4
+TASK_FINAL = 5
+
+
+class ReviewRunError(RuntimeError):
+    def __init__(self, code: str, detail: str = "") -> None:
+        self.code = code
+        self.detail = detail
+        super().__init__(f"[{code}] {detail}" if detail else code)
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def write_permit(ctx: Any, *, max_posts: int = 4) -> dict:
+    lock_doc = ctx.read_json("contract/lock.json")
+    lock_sha = _sha(json.dumps(lock_doc, sort_keys=True,
+                               separators=(",", ":"),
+                               ensure_ascii=False).encode())
+    binding = lock_doc.get("validation_binding") or {}
+    doc = {
+        "schema": PERMIT_SCHEMA, "schema_version": 1,
+        "envelope_id": ctx.envelope_id,
+        "lane": LANE_CAL, "max_posts": int(max_posts),
+        "paid_lock_sha256": lock_sha,
+        "validation_lock_sha256": binding.get("validation_lock_sha256"),
+        "t5_summary_sha256": binding.get("t5_summary_sha256"),
+        "issued_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "rule": "只允许 review_calibration lane 恰 4 次 POST；不得转给候选",
+    }
+    ctx.write_json(REVIEW_PERMIT_REL, doc)
+    return doc
+
+
+def check_permit(ctx: Any) -> dict:
+    if not ctx.exists(REVIEW_PERMIT_REL):
+        raise ReviewRunError("PERMIT_MISSING", REVIEW_PERMIT_REL)
+    doc = ctx.read_json(REVIEW_PERMIT_REL)
+    if doc.get("schema") != PERMIT_SCHEMA:
+        raise ReviewRunError("PERMIT_SCHEMA", str(doc.get("schema")))
+    lock_doc = ctx.read_json("contract/lock.json")
+    if not lock_doc.get("validation_binding"):
+        raise ReviewRunError("PERMIT_BINDING", "paid LOCK 缺 validation_binding")
+    return doc
+
+
+def _clean_env() -> "dict[str, str]":
+    keep_prefix = ("SIMPRAXIS_", "ANTHROPIC_")
+    keep = {"PATH", "HOME", "LANG", "LC_ALL", "PYTHONPATH", "TZ", "USER"}
+    env = {k: v for k, v in os.environ.items()
+           if k in keep or k.startswith(keep_prefix)}
+    env["PYTHONPATH"] = str(Path(sys.executable).resolve().parents[0])
+    return env
+
+
+def _approval(ctx: Any, *, batch_id: str, lane: str, task: int,
+              approved: int) -> None:
+    """review lane 批准件（PT.ensure_approval 只认候选 lane）。"""
+    path = QL.RSI_R13_NAMESPACE.approvals_dir_fn() / f"{batch_id}.json"
+    want = {"batch_id": batch_id, "lane": lane, "task": int(task),
+            "stage": "coding_debug", "approved": int(approved),
+            "note": "R1.3 review lane（校准/正式）"}
+    if path.is_file():
+        got = json.loads(path.read_text(encoding="utf-8"))
+        for key, value in want.items():
+            if got.get(key) != value:
+                raise ReviewRunError("APPROVAL_DRIFT", f"{batch_id}.{key}")
+        return
+    QL.write_approval(batch_id=batch_id, task=int(task),
+                      stage="coding_debug", approved=int(approved),
+                      beyond_normal=False, note=want["note"],
+                      namespace=QL.RSI_R13_NAMESPACE)
+
+
+def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
+           batch_id: str, task: int, out_dir: Path) -> "dict[str, Any]":
+    _approval(ctx, batch_id=batch_id, lane=lane, task=task, approved=4)
+    work = out_dir / f"review-{slot.review_id}-{uuid.uuid4().hex[:8]}"
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    packet_doc = dict(packet, review_id=slot.review_id,
+                      reviewer_id=slot.reviewer_id)
+    packet_path = work / "packet.json"
+    packet_bytes = json.dumps(packet_doc, sort_keys=True,
+                              separators=(",", ":"),
+                              ensure_ascii=False).encode("utf-8")
+    packet_path.write_bytes(packet_bytes)
+    packet_path.chmod(0o600)
+    nonce = work / "nonce"
+    nonce.write_bytes(os.urandom(32))
+    nonce.chmod(0o600)
+    out = work / "call.json"
+    argv = [sys.executable, "-m", "orchestrator.rsi_r1.r13_review_worker",
+            "--packet", str(packet_path), "--out", str(out),
+            "--system-out", str(work / "system.txt"),
+            "--user-out", str(work / "user.txt"),
+            "--request-out", str(work / "request.bin"),
+            "--task", str(task), "--batch-id", batch_id,
+            "--thread-id", f"rsi-r13-{lane}"]
+    proc = subprocess.run(argv, cwd=str(Path(__file__).resolve().parents[2]),
+                          env=_clean_env(), capture_output=True, text=True,
+                          timeout=300)
+    if proc.returncode != 0:
+        raise ReviewRunError("REVIEW_WORKER_FAILED",
+                             proc.stderr[-400:] or str(proc.returncode))
+    call = json.loads(out.read_text(encoding="utf-8"))
+    if call.get("attempts_http", 1) != 1:
+        raise ReviewRunError("HIDDEN_RETRY", str(call.get("attempts_http")))
+    request = (work / "request.bin").read_bytes()
+    if _sha(request) != call.get("request_sha256"):
+        raise ReviewRunError("REQUEST_DRIFT", slot.review_id)
+    isolation = RRc.IsolationEvidence(
+        fresh_context=True, fresh_process=True, env_scrubbed=True,
+        cache_dir=str(work), other_review_inputs_present=False,
+        created_by="scheduler",
+        evidence=({"kind": "fresh_dir", "sha256": _sha(str(work).encode())},
+                  {"kind": "nonce", "sha256": _sha(nonce.read_bytes())},
+                  {"kind": "input_allowlist",
+                   "sha256": _sha(b"packet.json")}))
+    response = str(call.get("text") or "").encode("utf-8")
+    access = json.dumps({"review_id": slot.review_id,
+                         "files_read": ["packet.json"],
+                         "request_sha256": call["request_sha256"],
+                         "response_sha256": _sha(response),
+                         "started": call["started_at_utc"],
+                         "ended": call["ended_at_utc"]},
+                        sort_keys=True).encode()
+    receipt = RRc.build_receipt(
+        review_id=slot.review_id, reviewer_id=slot.reviewer_id,
+        session_id=f"sess-{slot.review_id}", process_id=int(call["process_id"]),
+        prompt=b"review-rubric-v13", schema=json.dumps(
+            RV.public_rubric(), sort_keys=True).encode(),
+        source=b"packet", packet=packet_bytes, request=request,
+        response=response, access_log=access,
+        input_allowlist=["packet.json"],
+        started_at_utc=str(call["started_at_utc"]),
+        ended_at_utc=str(call["ended_at_utc"]), isolation=isolation)
+    RRc.verify_receipt(receipt, review_id=slot.review_id,
+                       reviewer_id=slot.reviewer_id,
+                       packet_sha256=_sha(packet_bytes))
+    return {"call": call, "packet_bytes": packet_bytes,
+            "packet_sha256": _sha(packet_bytes), "receipt": receipt}
+
+
+# ---------------------------------------------------------------------------
+# 校准案例
+# ---------------------------------------------------------------------------
+
+def _calibration_case(case_id: str) -> dict:
+    task = TS.build_new_a()
+    conditions = [c.to_dict() for c in task.conditions]
+    blocks = [
+        {"block_id": "b01", "nuisance": {"mass_kg": "0.31"},
+         "values": {"hi_base": 1.0, "hi_low_mu": 1.25, "lo_base": 0.42,
+                    "lo_low_mu": 0.47, "sham": 1.0}, "effect": 0.20},
+        {"block_id": "b02", "nuisance": {"mass_kg": "0.74"},
+         "values": {"hi_base": 1.1, "hi_low_mu": 1.32, "lo_base": 0.45,
+                    "lo_low_mu": 0.50, "sham": 1.1}, "effect": 0.17},
+    ]
+    intent = {"phase_role": "distributional_exploration",
+              "estimand": {"metric_id": "displacement_x_m",
+                           "contrast_ids": [task.primary.id]},
+              "nuisance": {"mass_kg": {"mode": "varying",
+                                       "support": ["0.2", "1.0"],
+                                       "assignment_owner": "host"}},
+              "phase_comparability": {"relation": "different_target",
+                                      "rationale": "confirm samples host blocks"}}
+    diagnostics = {"contrasts": [{"contrast_id": task.primary.id,
+                                  "effect": 0.185, "lower": 0.17,
+                                  "upper": 0.20, "n_blocks": 2}],
+                   "coverage": {"blocks": ["b01", "b02"]},
+                   "threshold_counts": [{"above_delta": 2}],
+                   "phase_comparability": {"relation": "different_target"}}
+    report = {
+        "question_and_hypotheses": "摩擦效应是否随初速改变（2×2 交互）",
+        "methods_and_assignment_responsibility": "宿主逐 block 采样质量 nuisance",
+        "primary_results": [{"contrast_id": task.primary.id,
+                             "analysis_receipt_sha": "0" * 64,
+                             "result_locator": {"file": "analysis/output.json",
+                                                "pointer": "/contrasts/0/effect"}}],
+        "heterogeneity_and_scope": [{"claim": "效应仅覆盖两个速度水平",
+                                     "applicability": "v0∈{0.2,0.6} 与 μ∈{0.2,0.4}"}],
+        "explore_confirm_comparison": {"comparable": False,
+                                       "explanation": "探索覆盖设计空间；确认宿主抽样"},
+        "alternative_explanations": ["接触数值差异"],
+        "limitations": [{"statement": "只覆盖 box 与两个速度",
+                         "consequence": "不外推到其他几何"}],
+        "next_steps": [{"unresolved_question": "更高速度是否饱和",
+                        "discriminating_experiment": "增加 v0=0.9",
+                        "possible_outcomes": ["继续增大", "饱和"]}],
+    }
+    case = {"case_id": case_id, "public_question": task.public_question,
+            "conditions": conditions, "primary": task.primary.to_dict(),
+            "design_intent": intent, "block_table": blocks,
+            "diagnostics": diagnostics, "report": report}
+    if case_id == "pseudo_replication":
+        case["design_intent"] = dict(intent, phase_role="distributional_exploration")
+        case["block_table"] = [
+            {"block_id": "b01", "nuisance": {"mass_kg": "1.0"},
+             "values": blocks[0]["values"], "effect": 0.20},
+            {"block_id": "b02", "nuisance": {"mass_kg": "1.0"},
+             "values": blocks[1]["values"], "effect": 0.17}]
+        case["report"] = dict(report, methods_and_assignment_responsibility=(
+            "探索覆盖了 nuisance 分布（48 run）"))
+    elif case_id == "overclaim_universal":
+        case["report"] = dict(report, question_and_hypotheses=(
+            "摩擦效应在所有条件下都稳健成立"),
+            heterogeneity_and_scope=[{"claim": "每个条件都 SUPPORTED",
+                                      "applicability": "全部条件"}])
+    elif case_id == "empty_limitations":
+        case["report"] = dict(report, limitations=[])
+    elif case_id == "valid_uncertain":
+        case["diagnostics"] = dict(diagnostics, contrasts=[
+            {"contrast_id": task.primary.id, "effect": 0.002,
+             "lower": -0.004, "upper": 0.009, "n_blocks": 2}])
+        case["report"] = dict(report, question_and_hypotheses=(
+            "效应可能接近零；当前证据不足"))
+    elif case_id == "fixed_pilot_scoped":
+        case["design_intent"] = dict(
+            intent, phase_role="fixed_pilot",
+            phase_comparability={"relation": "different_target",
+                                 "rationale": "结论只适用该点"})
+        case["report"] = dict(report, heterogeneity_and_scope=[
+            {"claim": "固定点结论只适用 v0=0.6, μ=0.4",
+             "applicability": "单点 pilot"}])
+    return case
+
+
+def build_calibration_packet(case_ids: "list[str]") -> dict:
+    return {"schema": RN.PACKET_SCHEMA + ".calibration", "schema_version": 1,
+            "cases": [_calibration_case(c) for c in case_ids],
+            "instructions": {
+                "reply": "one JSON object",
+                "schema": CALIB_REVIEW_SCHEMA,
+                "items": list(RV.ITEMS_V13),
+                "refs": "typed locators into packet.json",
+            }}
+
+
+def _packet_evidence(packet_bytes: bytes) -> "dict[str, bytes]":
+    return {"packet.json": packet_bytes}
+
+
+def _parse_calibration_reply(call_text: str, packet_sha: str,
+                             case_ids: "list[str]",
+                             packet_bytes: bytes) -> "dict[str, dict[str, str]]":
+    try:
+        doc = json.loads(call_text)
+    except json.JSONDecodeError as exc:
+        raise ReviewRunError("CALIBRATION_FORMAT", str(exc)) from None
+    if doc.get("schema") != CALIB_REVIEW_SCHEMA:
+        raise ReviewRunError("CALIBRATION_FORMAT", "schema")
+    if doc.get("packet_sha256") != packet_sha:
+        raise ReviewRunError("CALIBRATION_FORMAT", "packet sha")
+    cases = doc.get("cases")
+    if not isinstance(cases, Mapping) or set(cases) != set(case_ids):
+        raise ReviewRunError("CALIBRATION_FORMAT", "cases 集不符")
+    out: "dict[str, dict[str, str]]" = {}
+    for cid, body in cases.items():
+        verdicts = body.get("verdicts")
+        if not isinstance(verdicts, Mapping) or set(verdicts) != set(RV.ITEMS_V13):
+            raise ReviewRunError("CALIBRATION_FORMAT", f"{cid}.verdicts")
+        row = {}
+        for item in RV.ITEMS_V13:
+            body = verdicts[item]
+            if not isinstance(body, Mapping):
+                raise ReviewRunError("CALIBRATION_FORMAT", f"{cid}.{item}")
+            verdict = str(body.get("verdict"))
+            if verdict not in RV.VERDICTS:
+                raise ReviewRunError("CALIBRATION_FORMAT", f"{cid}.{item}")
+            refs = body.get("refs")
+            if not isinstance(refs, (list, tuple)) or not refs:
+                raise ReviewRunError("CALIBRATION_FORMAT", f"{cid}.{item}.refs")
+            from orchestrator.rsi_r1 import research_report as _RR
+            for locator in refs:
+                try:
+                    _RR.resolve_locator(locator,
+                                        evidence=_packet_evidence(packet_bytes))
+                except Exception:
+                    raise ReviewRunError("CALIBRATION_REFS", f"{cid}.{item}")
+            row[item] = verdict
+        out[cid] = row
+    return out
+
+
+def run_calibration(ctx: Any, out_dir: Path, *, envelope: str) -> "dict[str, Any]":
+    permit = check_permit(ctx)
+    groups = (["valid_positive", "pseudo_replication", "overclaim_universal"],
+              ["valid_uncertain", "fixed_pilot_scoped", "empty_limitations"])
+    channels = []
+    posts = 0
+    for ch in (1, 2):
+        results: "dict[str, dict[str, str]]" = {}
+        for pi, ids in enumerate(groups):
+            packet = build_calibration_packet(ids)
+            slot = RN.ReviewSlot(f"cal-{ch}-p{pi + 1}", f"reviewer-{ch}",
+                                 f"sess-cal-{ch}")
+            batch = f"R13-REV-CAL-{ch}-{pi + 1}"
+            spawned = _spawn(ctx, packet=packet, slot=slot, lane=LANE_CAL,
+                             batch_id=batch, task=TASK_CAL, out_dir=out_dir)
+            posts += 1
+            results.update(_parse_calibration_reply(
+                str(spawned["call"]["text"]), spawned["packet_sha256"], ids,
+                spawned["packet_bytes"]))
+        verdict = RN.check_calibration(results)
+        channels.append({"channel": ch, "ok": verdict["ok"],
+                         "problems": verdict["problems"]})
+    doc = {"schema": "simpraxis.rsi_r13.review_calibration.v1",
+           "schema_version": 1, "envelope_id": envelope,
+           "permit_sha256": _sha(json.dumps(permit, sort_keys=True).encode()),
+           "posts": posts, "channels": channels,
+           "ok": all(c["ok"] for c in channels),
+           "code": ("REVIEW_INSTRUMENT_READY" if all(c["ok"] for c in channels)
+                    else "REVIEW_INSTRUMENT_NOT_READY")}
+    ctx.write_json(CALIBRATION_REPORT_REL, doc)
+    return doc
+
+
+# ---------------------------------------------------------------------------
+# 正式审查
+# ---------------------------------------------------------------------------
+
+def _load_confirm(ctx: Any, study: str):
+    from orchestrator.rsi_r1 import contracts as C
+    plan = C.ResearchPlan.from_dict(ctx.read_json(f"confirm/plan_{study}.json"))
+    manifest = E.manifest_from_doc(ctx.read_json(f"confirm/manifest_{study}.json"))
+    specs = J.build_specs(plan, manifest)
+    artifacts: "dict[str, dict[str, Any]]" = {}
+    base = ctx.subdir("observations")
+    for run_id in specs:
+        hits = list(base.glob(f"*/{run_id}.jsonl"))
+        if not hits:
+            raise ReviewRunError("RAW_MISSING", run_id)
+        record = json.loads(hits[0].read_text(encoding="utf-8"))
+        meta_path = hits[0].with_name(f"{run_id}.meta.json")
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        artifacts[run_id] = {"record": record, "meta": meta}
+    per_run = J.recompute_metrics(plan=plan, artifacts=artifacts, specs=specs)
+    metric = None
+    values: "dict[str, dict[str, float]]" = {}
+    for run_id, spec in specs.items():
+        row = (per_run.get(run_id) or {}).get("values") or {}
+        for key, value in row.items():
+            metric = key
+            values.setdefault(spec.block_id, {})[spec.condition_id] = float(value)
+    return plan, manifest, values, artifacts, metric
+
+
+def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
+    plan, manifest, values, artifacts, metric = _load_confirm(ctx, study)
+    report_file = list(ctx.subdir("reports").glob(f"{study}-*.json"))
+    if not report_file:
+        raise ReviewRunError("REPORT_MISSING", study)
+    report_doc = json.loads(report_file[0].read_text(encoding="utf-8"))["report"]
+    intents = sorted(ctx.root.glob("design_audits/intent_confirm_*.json"))
+    intent = json.loads(intents[-1].read_text(encoding="utf-8")) if intents else {}
+    assignments = []
+    seen_blocks = set()
+    for a in manifest.assignments:
+        if a.block_id in seen_blocks:
+            continue
+        seen_blocks.add(a.block_id)
+        assignments.append({"block_id": a.block_id,
+                            "nuisance": {"sampled_policy": "host_per_block"}})
+    packet = RN.build_packet(
+        study=study, task=task, intent=intent,
+        design_audit={"run_count": len(artifacts),
+                      "unique_design_count": len(artifacts),
+                      "independent_unit_count": len(values)},
+        assignments=assignments,
+        values=values, report=report_doc, evidence_files={},
+        candidate_excerpts=[], sources={})
+    return packet, report_doc, values
+
+
+def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
+               out_dir: Path) -> "dict[str, Any]":
+    packet, report_doc, values = build_formal_packet(ctx, study, task)
+    packet_bytes = RN.packet_bytes(packet)
+    evidence = _packet_evidence(packet_bytes)
+    reviews = []
+    receipts = []
+    for ch in (1, 2):
+        slot = RN.ReviewSlot(f"{study.lower()}-rev-{ch}", f"reviewer-{ch}",
+                             f"sess-final-{study}-{ch}")
+        batch = f"R13-REV-{study}-{ch}"
+        spawned = _spawn(ctx, packet=packet, slot=slot, lane=LANE_FINAL,
+                         batch_id=batch, task=TASK_FINAL, out_dir=out_dir)
+        doc = json.loads(str(spawned["call"]["text"]))
+        reviews.append(doc)
+        receipts.append(spawned["receipt"])
+    combined = RV.combine_reviews(
+        reviews, receipts=receipts,
+        expected_packet_sha256=_sha(packet_bytes), evidence=evidence)
+    doc = {"schema": "simpraxis.rsi_r13.review_combined.v1",
+           "schema_version": 1, "envelope_id": ctx.envelope_id,
+           "study": study, "task_id": task.task_id,
+           "packet_sha256": _sha(packet_bytes),
+           "combined": combined.to_dict()}
+    ctx.write_json(f"reviews/{study}_combined.json", doc)
+    return doc

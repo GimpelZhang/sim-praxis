@@ -246,7 +246,7 @@ class SpendContract:
         if self.mode == MODE_PAID:
             if self.consent is None:
                 raise AssemblyError("PAID_NOT_AUTHORIZED", "paid 模式缺 consent")
-            C.assert_paid_authorized(self.consent)
+            C.assert_paid_authorized_any(self.consent)
         elif self.consent is not None:
             raise AssemblyError("SPEND_MODE",
                                 f"{self.mode} 模式不得携带 consent")
@@ -547,10 +547,11 @@ class CampaignDispatcher:
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
         # 旧 profile/不传则维持 R1 行为，逐字节不变。
         if profile is not None and profile.is_r13:
-            # R1.3：任务规格是候选设计合法性/判据的唯一锚点；缺它不得装配。
-            if task is None:
+            # R1.3：正式 study 必须绑定 TaskSpecV13；probe/practice 是玩具
+            # 协议演练（R1.2 语义），允许 task=None。
+            if task is None and lane not in ("probe", "practice"):
                 raise AssemblyError("TASK_SPEC_MISSING",
-                                    "rsi-r1.3 分派器必须绑定 TaskSpecV13")
+                                    "rsi-r1.3 正式 study 必须绑定 TaskSpecV13")
         elif profile is not None and profile.is_r12:
             if resource_ledger is None:
                 raise AssemblyError(
@@ -574,6 +575,9 @@ class CampaignDispatcher:
         self.profile = profile
         self.resource_ledger = resource_ledger
         self.task = task
+        # R1.3 任务绑定仅在正式 study 成立；probe/practice 走 R1.2 语义。
+        self.r13_bound = bool(profile is not None and profile.is_r13
+                              and task is not None)
         # 维护参考链可选并行（T5）；默认 1 保持生产逐 spec 语义
         self.batch_workers = max(1, int(batch_workers))
         self.r13_explore_intent: "DI.DesignIntentV13 | None" = None
@@ -731,7 +735,7 @@ class CampaignDispatcher:
                 registered.append({"kind": kind,
                                    "source_sha256": rec.source_sha256})
         plan_doc = dict(action.doc["plan"])
-        if self.profile is not None and self.profile.is_r13:
+        if self.r13_bound:
             raw_intent = action.doc.get("design_intent")
             if raw_intent is None:
                 return self._fail(
@@ -753,7 +757,7 @@ class CampaignDispatcher:
                     side_effect_status="NONE")
             self.r13_explore_intent = intent
         out = self.state.append_plan(self.study, plan_doc)
-        if self.profile is not None and self.profile.is_r13:
+        if self.r13_bound:
             rel = f"design_audits/intent_explore_{out['plan_sha256'][:12]}.json"
             self.ctx.write_json(rel, self.r13_explore_intent.to_dict())
         return self._ok(plan_sha256=out["plan_sha256"], revision=out["revision"],
@@ -797,7 +801,7 @@ class CampaignDispatcher:
             matrix = json.loads(payload.decode("utf-8"))
         except (ValueError, UnicodeDecodeError) as exc:
             return self._fail("MATRIX_INVALID", str(exc), side_effect_status="NONE")
-        if self.profile is not None and self.profile.is_r13:
+        if self.r13_bound:
             # 前执行审计：声明 varying 却全用占位值必须拒绝（R1.2 §16 的教训）。
             if self.r13_explore_intent is None:
                 return self._fail("DESIGN_INTENT_MISSING",
@@ -1007,8 +1011,7 @@ class CampaignDispatcher:
         # meta 只有 condition_id，没有主张/δ），视图缺计划则合规脚本只能瞎猜。
         # 这两件由**宿主**按 `_design_inputs` 的同一份字节写入（候选不可覆盖）。
         extra_files = analysis_host_inputs(self.ctx, plan)
-        if (self.profile is not None and self.profile.is_r13
-                and self.task is not None):
+        if self.r13_bound:
             # R1.3：分析视图额外放任务公开件（条件/主对比/nuisance/阴性控制）。
             task_view = {
                 "task_id": self.task.task_id,
@@ -1111,9 +1114,7 @@ class CampaignDispatcher:
             return self._fail("ANALYSIS_RUNS_MISMATCH", "run_ids 为空",
                               side_effect_status="NONE")
         try:
-            expected = ([self.task.primary.id]
-                        if self.profile is not None and self.profile.is_r13
-                        else None)
+            expected = ([self.task.primary.id] if self.r13_bound else None)
             output, summary, _ = self._r12_analysis(
                 phase="explore", source_sha=source_sha, run_ids=wanted,
                 plan=plan, manifest_sha=None, expected_contrasts=expected)
@@ -1168,7 +1169,7 @@ class CampaignDispatcher:
         if plan.study_id != self.study:
             return self._fail("STUDY_MISMATCH", plan.study_id,
                                   side_effect_status="NONE")
-        if self.profile is not None and self.profile.is_r13:
+        if self.r13_bound:
             code, detail = self._r13_confirm_precheck(plan, action)
             if code:
                 return self._fail(code, detail, side_effect_status="NONE")
@@ -1307,7 +1308,7 @@ class CampaignDispatcher:
             # R1.2：自动在**确认批完整视图**上执行冻结分析并落凭据；
             # 不再回灌任何维护侧参考值（§5.1）。
             return self._r12_confirm_payload(run_ids, result_sha, plan, manifest)
-        if self.profile is not None and self.profile.is_r13:
+        if self.r13_bound:
             # R1.3：同样自动跑冻结分析（候选脚本），但**只**校验任务级主对比；
             # 不回传任何宿主参考值。
             self._r13_post_audit(plan, manifest)
@@ -1349,7 +1350,7 @@ class CampaignDispatcher:
 
     # -- 7) submit_claim -------------------------------------------------
     def _do_submit_claim(self, action: L.Action) -> "dict[str, Any]":
-        if self.profile is not None and self.profile.is_r13:
+        if self.r13_bound:
             return self._r13_submit(action)
         if self._r12():
             return self._r12_submit(action)
@@ -1828,20 +1829,20 @@ class CampaignDispatcher:
                               terminal=True)
         entries = [SB.ViewEntry(plan_path.name, _sha_file(plan_path)),
                    SB.ViewEntry(contract.name, _sha_file(contract))]
-        if (self.profile is not None and self.profile.is_r13
-                and self.task is not None):
+        if self.r13_bound:
             task_rel = "public/task.json"
             task_path = self.ctx.relative(task_rel)
-            if not task_path.is_file():
-                task_view = {
-                    "task_id": self.task.task_id,
-                    "study_id": self.task.mechanism_id.split("_")[0],
-                    "conditions": [c.to_dict() for c in self.task.conditions],
-                    "primary": self.task.primary.to_dict(),
-                    "nuisance_schema": dict(self.task.nuisance_schema),
-                    "negative_control_spec": self.task.negative_control_spec,
-                }
-                self.ctx.write_json(task_rel, task_view)
+            # 每个 study 的视图都必须写**本 study** 的任务件（A/B 串行复用同一
+            # 路径；只在缺失时写会让 B 拿到 A 的条件）。
+            task_view = {
+                "task_id": self.task.task_id,
+                "study_id": self.task.mechanism_id.split("_")[0],
+                "conditions": [c.to_dict() for c in self.task.conditions],
+                "primary": self.task.primary.to_dict(),
+                "nuisance_schema": dict(self.task.nuisance_schema),
+                "negative_control_spec": self.task.negative_control_spec,
+            }
+            self.ctx.write_json(task_rel, task_view)
             entries.append(SB.ViewEntry(task_path.name, _sha_file(task_path)))
         return entries
 

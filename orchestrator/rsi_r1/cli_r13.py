@@ -28,7 +28,13 @@ from orchestrator.rsi_r1 import family as FAM
 from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import resource_plan as RPL
 from orchestrator.rsi_r1 import review_capacity as RC
+from orchestrator.rsi_r1 import cli_r13_campaign as CC
+from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import closeout_r13 as CO13
+from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import lock as LK
+from orchestrator.rsi_r1 import lock_r13 as L13
+from orchestrator.rsi_r1 import state as S
 from orchestrator.rsi_r1 import task_specs as TS
 
 PLAN_PATH_R13 = Path("/home/vipuser/文档/RSI_R1.3_Plan_detailed.md")
@@ -524,6 +530,140 @@ def build_parser() -> argparse.ArgumentParser:
     p_t9.add_argument("--note", action="append", default=None)
     p_t9.add_argument("--out", default=None)
     p_t9.set_defaults(func=cmd_t9_closeout)
+
+    # ---- R1.3 campaign 门禁命令（2026-11-15 接线）----
+    pi = sub.add_parser("init", help="初始化 R1.3 envelope（零 POST）")
+    pi.add_argument("--campaign", default=P.PROFILE_R13)
+    pi.add_argument("--envelope", required=True)
+    pi.add_argument("--mode", choices=["paid", "offline_validation"],
+                    required=True)
+    pi.add_argument("--taskset", required=True)
+    pi.add_argument("--consent", default=None)
+    pi.add_argument("--plan", default=None)
+    pi.set_defaults(func=CC.cmd_init)
+
+    pc = sub.add_parser("make-consent", help="生成 R1.3 费用件（零 POST）")
+    pc.add_argument("--campaign", default=P.PROFILE_R13)
+    pc.add_argument("--envelope", required=True)
+    pc.add_argument("--out", default=None)
+    pc.set_defaults(func=CC.cmd_make_consent)
+
+    pa = sub.add_parser("authorize", help="付费授权（零 POST）")
+    pa.add_argument("--campaign", default=P.PROFILE_R13)
+    pa.add_argument("--envelope", required=True)
+    pa.add_argument("--consent", required=True)
+    pa.set_defaults(func=CC.cmd_authorize)
+
+    pao = sub.add_parser("authorize-offline", help="离线验证授权（零 POST）")
+    pao.add_argument("--campaign", default=P.PROFILE_R13)
+    pao.add_argument("--envelope", required=True)
+    pao.set_defaults(func=CC.cmd_authorize_offline)
+
+    pcal = sub.add_parser("calibrate-physics", help="物理校准（零 POST）")
+    pcal.add_argument("--campaign", default=P.PROFILE_R13)
+    pcal.add_argument("--envelope", required=True)
+    pcal.add_argument("--oracle", default=None)
+    pcal.set_defaults(func=CC.cmd_calibrate)
+
+    pvp = sub.add_parser("validate-production", help="T5 生产验证（零 POST）")
+    pvp.add_argument("--campaign", default=P.PROFILE_R13)
+    pvp.add_argument("--envelope", required=True)
+    pvp.set_defaults(func=CC.cmd_validate_production)
+
+    pvl = sub.add_parser("validation-lock", help="冻结 R1.3 validation LOCK")
+    pvl.add_argument("--campaign", default=P.PROFILE_R13)
+    pvl.add_argument("--envelope", required=True)
+    pvl.add_argument("--image", default=None)
+    pvl.set_defaults(func=CC.cmd_validation_lock)
+
+    psv = sub.add_parser("sign-validation", help="validation LOCK 三签之一")
+    psv.add_argument("--campaign", default=P.PROFILE_R13)
+    psv.add_argument("--envelope", required=True)
+    psv.add_argument("--role", required=True)
+    psv.add_argument("--actor", required=True)
+    psv.add_argument("--decision", choices=["APPROVE", "REJECT"],
+                     required=True)
+    psv.add_argument("--rationale", required=True)
+    psv.set_defaults(func=CC.cmd_sign_validation)
+
+    pvv = sub.add_parser("verify-validation", help="复核 validation LOCK")
+    pvv.add_argument("--campaign", default=P.PROFILE_R13)
+    pvv.add_argument("--envelope", required=True)
+    pvv.set_defaults(func=CC.cmd_verify_validation)
+
+    pf = sub.add_parser("freeze", help="冻结 R1.3 paid LOCK")
+    pf.add_argument("--campaign", default=P.PROFILE_R13)
+    pf.add_argument("--envelope", required=True)
+    pf.add_argument("--purpose", default="paid")
+    pf.add_argument("--validation-root", required=True)
+    pf.add_argument("--image", default=None)
+    pf.set_defaults(func=CC.cmd_freeze)
+
+    ps = sub.add_parser("sign", help="paid LOCK 签名")
+    ps.add_argument("--campaign", default=P.PROFILE_R13)
+    ps.add_argument("--envelope", required=True)
+    ps.add_argument("--role", required=True)
+    ps.add_argument("--actor", required=True)
+    ps.add_argument("--decision", choices=["APPROVE", "REJECT"],
+                    required=True)
+    ps.add_argument("--rationale", required=True)
+    ps.set_defaults(func=CC.cmd_sign)
+
+    pver = sub.add_parser("verify", help="复核 paid LOCK")
+    pver.add_argument("--campaign", default=P.PROFILE_R13)
+    pver.add_argument("--envelope", required=True)
+    pver.set_defaults(func=CC.cmd_verify)
+
+    pfc = sub.add_parser("family-close", help="关闭 R1.3 族成员")
+    pfc.add_argument("--campaign", default=P.PROFILE_R13)
+    pfc.add_argument("--envelope", required=True)
+    pfc.add_argument("--reason", required=True)
+    pfc.add_argument("--note", default=None)
+    pfc.set_defaults(func=CC.cmd_family_close)
+
+    for name, func, help_text in (
+            ("probe", CC.cmd_probe, "T6 probe 协议演练（12 呼帽）"),
+            ("practice", CC.cmd_practice, "T6 practice 演练（16 呼帽）")):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--campaign", default=P.PROFILE_R13)
+        p.add_argument("--envelope", required=True)
+        p.add_argument("--batch-id", required=True)
+        p.add_argument("--tokenizer", required=True)
+        p.add_argument("--tokenizer-sha256", required=True)
+        p.add_argument("--note", default=None)
+        p.set_defaults(func=func)
+
+    ps = sub.add_parser("study", help="T7 正式研究（A/B 各 48）")
+    ps.add_argument("--campaign", default=P.PROFILE_R13)
+    ps.add_argument("--envelope", required=True)
+    ps.add_argument("--study", required=True)
+    ps.add_argument("--batch-id", required=True)
+    ps.add_argument("--tokenizer", required=True)
+    ps.add_argument("--tokenizer-sha256", required=True)
+    ps.add_argument("--note", default=None)
+    ps.set_defaults(func=CC.cmd_study)
+
+    prp = sub.add_parser("review-permit", help="审查校准许可（typed permit）")
+    prp.add_argument("--campaign", default=P.PROFILE_R13)
+    prp.add_argument("--envelope", required=True)
+    prp.set_defaults(func=CC.cmd_review_permit)
+
+    prc = sub.add_parser("review-calibrate", help="T6 审查校准（4 POST）")
+    prc.add_argument("--campaign", default=P.PROFILE_R13)
+    prc.add_argument("--envelope", required=True)
+    prc.set_defaults(func=CC.cmd_review_calibrate)
+
+    prp2 = sub.add_parser("replay", help="T8 独立复跑（零模型 POST）")
+    prp2.add_argument("--campaign", default=P.PROFILE_R13)
+    prp2.add_argument("--envelope", required=True)
+    prp2.add_argument("--study", required=True)
+    prp2.set_defaults(func=CC.cmd_replay)
+
+    prv = sub.add_parser("review", help="T8 正式双审（每 study 2 POST）")
+    prv.add_argument("--campaign", default=P.PROFILE_R13)
+    prv.add_argument("--envelope", required=True)
+    prv.add_argument("--study", required=True)
+    prv.set_defaults(func=CC.cmd_review)
     return parser
 
 
@@ -532,8 +672,10 @@ def main(argv: "list[str] | None" = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.func(args))
-    except (Cli13Error, FAM.FamilyError, P.ProfileError,
-            RC.ReviewCapacityError, OSError) as exc:
+    except (Cli13Error, CC.Cli13Error, FAM.FamilyError, P.ProfileError,
+            RC.ReviewCapacityError, LK.LockError, L13.Lock13Error,
+            C.ContractError, CAL.CalibrationError, S.StateError,
+            OSError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2
 

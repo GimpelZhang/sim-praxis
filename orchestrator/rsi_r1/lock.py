@@ -140,6 +140,9 @@ CLOSURE_GROUPS_R12: "dict[str, tuple[str, ...]]" = {
 CLOSURE_GROUPS_R13: "dict[str, tuple[str, ...]]" = {
     **CLOSURE_GROUPS_R12,
     "instrument": tuple(sorted(set(CLOSURE_GROUPS_R12["instrument"]) | {
+        "orchestrator/rsi_r1/contracts_r13.py",
+        "orchestrator/rsi_r1/lock_r13.py",
+        "orchestrator/rsi_r1/r13_replay.py",
         "orchestrator/rsi_r1/contrasts.py",
         "orchestrator/rsi_r1/design_intent.py",
         "orchestrator/rsi_r1/diagnostics.py",
@@ -150,9 +153,13 @@ CLOSURE_GROUPS_R13: "dict[str, tuple[str, ...]]" = {
     })),
     "entry": tuple(sorted(set(CLOSURE_GROUPS_R12["entry"]) | {
         "orchestrator/rsi_r1/cli_r13.py",
+        "orchestrator/rsi_r1/cli_r13_campaign.py",
         "orchestrator/rsi_r1/protocol_r13.py",
+        "orchestrator/rsi_r1/r13_validation.py",
     })),
     "review": (
+        "orchestrator/rsi_r1/r13_review_run.py",
+        "orchestrator/rsi_r1/r13_review_worker.py",
         "orchestrator/rsi_r1/review_capacity.py",
         "orchestrator/rsi_r1/review_receipt.py",
         "orchestrator/rsi_r1/review_rubric_v13.py",
@@ -652,6 +659,16 @@ def freeze_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
             "roles": list(VALIDATION_ROLES),
             "report_relpath": VALIDATION_REPORT_RELPATH,
         }
+    elif str(envelope.get("profile_id") or "") == _P.PROFILE_R13:
+        # R1.3 付费 LOCK 必须单向绑定 T5 validation LOCK 与 T5 报告（Plan §7）：
+        # 绑定件只引用 T5 根字节/三签，T5 报告不引用 paid LOCK（无环）。
+        if not isinstance(validation_binding, Mapping) or not validation_binding:
+            raise LockError(
+                "PAID_BINDING_MISSING",
+                "R1.3 付费冻结必须绑定 T5 validation LOCK（--validation-root）")
+        from orchestrator.rsi_r1 import lock_r13 as _L13
+        _L13.verify_binding(validation_binding)
+        doc["validation_binding"] = dict(validation_binding)
     elif str(envelope.get("profile_id") or "") == _P.PROFILE_R12:
         # R1.2 付费 LOCK **必须**绑定 T5 验证件（Plan L247/L333）：不绑定的
         # 付费冻结等于绕开生产准入。冻结前按现场重算一次（T5 根全量验签 +
@@ -1039,7 +1056,12 @@ def verify_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
                               .get("profile_id") or "") == _P2.PROFILE_R12)
             except (OSError, ValueError):   # 坏 envelope 交给下游 fail-closed
                 is_r12 = False
-        if is_r12 or "validation_binding" in doc:
+        binding = doc.get("validation_binding")
+        if isinstance(binding, Mapping) and binding.get("schema") == \
+                "simpraxis.rsi_r13.validation_binding.v1":
+            from orchestrator.rsi_r1 import lock_r13 as _L13v
+            _L13v.verify_binding(binding)
+        elif is_r12 or "validation_binding" in doc:
             verify_paid_validation_binding(ctx, doc, repo_root=root)
     return {"ok": True, "lock_sha256": lock.sha256, "stage": lock.stage,
             "phase": lock.phase, "purpose": purpose,

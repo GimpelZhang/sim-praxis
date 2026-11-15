@@ -145,14 +145,27 @@ def build_request_text(*, packet: Mapping[str, Any],
                        rubric: Mapping[str, Any] | None = None) -> "tuple[str, str]":
     """确定性 request：1 条 system + 1 条 user（非 agentic，无文件工具）。"""
     rubric_doc = rubric or RV.public_rubric()
-    system = (
-        "You are an independent scientific reviewer. You receive ONE self-contained "
-        "packet. You cannot read host files. Return exactly one JSON object with keys "
-        "schema/review_id/reviewer_id/packet_sha256/items; items must have all six "
-        "rubric dimensions, each {verdict: PASS|FAIL|UNVERIFIABLE, reason, refs} "
-        "where refs are typed locators into the packet's evidence_index or "
-        "candidate_excerpts. Judge scientific honesty, not just format. Do not "
-        "assume other reviews exist.")
+    calibration = str(packet.get("schema") or "").endswith(".calibration")
+    if calibration:
+        system = (
+            "You are an independent scientific reviewer. You receive ONE "
+            "self-contained packet containing MULTIPLE cases. You cannot read host "
+            "files. Return exactly one JSON object with keys schema/review_id/"
+            "reviewer_id/packet_sha256/cases. schema must be "
+            "simpraxis.rsi_r13.calibration_review.v1. cases maps each case_id to "
+            "{\"verdicts\": {<six rubric dims>: {\"verdict\": PASS|FAIL|UNVERIFIABLE, "
+            "\"reason\": str, \"refs\": [typed locator into packet.json]}}}. Judge "
+            "scientific honesty per case; do not assume other reviews exist.")
+    else:
+        system = (
+            "You are an independent scientific reviewer. You receive ONE "
+            "self-contained packet. You cannot read host files. Return exactly one "
+            "JSON object with keys schema/review_id/reviewer_id/packet_sha256/items; "
+            "items must have all six rubric dimensions, each "
+            "{verdict: PASS|FAIL|UNVERIFIABLE, reason, refs} where refs are typed "
+            "locators into the packet's evidence_index or candidate_excerpts. "
+            "Judge scientific honesty, not just format. Do not assume other "
+            "reviews exist.")
     user = (
         "RUBRIC:\n" + json.dumps(rubric_doc, sort_keys=True, ensure_ascii=False)
         + "\n\nPACKET:\n" + packet_bytes(packet).decode("utf-8"))

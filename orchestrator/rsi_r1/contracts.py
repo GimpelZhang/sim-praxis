@@ -677,6 +677,9 @@ def budget_from_dict(obj: Any) -> "BudgetSpec | BudgetSpecV2":
         return BudgetSpec.from_dict(obj)
     if schema == _p12.BUDGET_SCHEMA_V2:
         return BudgetSpecV2.from_dict(obj)
+    if schema == _p12.BUDGET_SCHEMA_V13:
+        from orchestrator.rsi_r1 import contracts_r13 as C13
+        return C13.BudgetV13.from_dict(obj)
     raise ContractError("SCHEMA_MISMATCH",
                         f"budget.schema={schema!r} 未登记（合法：{BUDGET_SCHEMA!r} / "
                         f"{_p12.BUDGET_SCHEMA_V2!r}）")
@@ -1050,8 +1053,23 @@ def consent_from_dict(obj: Any) -> "Consent | ConsentV2":
         return Consent.from_dict(obj)
     if schema == CONSENT_SCHEMA_V2:
         return ConsentV2.from_dict(obj)
+    if schema == _p12.CONSENT_SCHEMA_V13:
+        from orchestrator.rsi_r1 import contracts_r13 as C13
+        return C13.ConsentV13.from_dict(obj)
     raise ContractError("SCHEMA_MISMATCH",
                         f"consent.schema={schema!r} 未登记")
+
+
+def assert_paid_authorized_any(consent: Any) -> None:
+    """付费门总入口：legacy Consent / R1.2 ConsentV2 / R1.3 ConsentV13。"""
+    from orchestrator.rsi_r1 import contracts_r13 as _c13
+    if isinstance(consent, _c13.ConsentV13):
+        _c13.assert_paid_authorized_v13(consent)
+        return
+    if isinstance(consent, ConsentV2):
+        assert_paid_authorized_v2(consent)
+        return
+    assert_paid_authorized(consent)
 
 
 def assert_paid_authorized_v2(consent: ConsentV2) -> None:

@@ -127,6 +127,13 @@ from orchestrator.common.runtime_paths import (
     rsi_r12_gateway_state_path,
     rsi_r12_ledger_path,
     rsi_r12_quota_dir,
+    assert_rsi_r13_roots_isolated,  # RSI-R1.3：十二根（含 R0…R1.2 家族根）互异互斥
+    rsi_r13_approvals_dir,
+    rsi_r13_counters_path,
+    rsi_r13_gateway_state_dir,
+    rsi_r13_gateway_state_path,
+    rsi_r13_ledger_path,
+    rsi_r13_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -699,6 +706,18 @@ RSI_R12_TASK_CAPS = _RSI_R12_TASK_CAPS
 RSI_R12_HARD_CAP = _RSI_R12_HARD_CAP
 RSI_R12_NORMAL_BUDGET = _RSI_R12_NORMAL_BUDGET
 
+# ---- RSI-R1.3：独立新账（T0，2026-11-15；期号 2905）----
+LEDGER_RSI_R13 = 2905
+from orchestrator.rsi_r1.profiles import (  # noqa: E402
+    RSI_R13_HARD_CAP as _RSI_R13_HARD_CAP,
+    RSI_R13_NORMAL_BUDGET as _RSI_R13_NORMAL_BUDGET,
+    RSI_R13_TASK_CAPS as _RSI_R13_TASK_CAPS,
+)
+
+RSI_R13_TASK_CAPS = _RSI_R13_TASK_CAPS
+RSI_R13_HARD_CAP = _RSI_R13_HARD_CAP
+RSI_R13_NORMAL_BUDGET = _RSI_R13_NORMAL_BUDGET
+
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
 # 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
 # 模板 scripts/milestone2/quota_pause_schema_v2.template.json）的书面签收并
@@ -782,19 +801,22 @@ class _LedgerNamespace:
         """
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
-                              LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12)
+                              LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
+                              LEDGER_RSI_R13)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
-                              LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12)
+                              LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
+                              LEDGER_RSI_R13)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
-                              LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12)
+                              LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
+                              LEDGER_RSI_R13)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -914,6 +936,20 @@ RSI_R1_NAMESPACE = _LedgerNamespace(
     task_caps=RSI_R1_TASK_CAPS,
     hard_cap=RSI_R1_HARD_CAP,
     normal_budget=RSI_R1_NORMAL_BUDGET,
+)
+
+
+RSI_R13_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_R13,
+    quota_dir_fn=rsi_r13_quota_dir,
+    ledger_path_fn=rsi_r13_ledger_path,
+    counters_path_fn=rsi_r13_counters_path,
+    approvals_dir_fn=rsi_r13_approvals_dir,
+    pause_dir_fn=rsi_r13_gateway_state_dir,
+    pause_path_fn=rsi_r13_gateway_state_path,
+    task_caps=RSI_R13_TASK_CAPS,
+    hard_cap=RSI_R13_HARD_CAP,
+    normal_budget=RSI_R13_NORMAL_BUDGET,
 )
 
 
@@ -1239,6 +1275,10 @@ class QuotaLedger:
         return cls(RSI_R1_NAMESPACE)
 
     @classmethod
+    def rsi_r13(cls) -> "QuotaLedger":
+        """RSI-R1.3 账（2905；campaign 由 SIMPRAXIS_RSI_R13_CAMPAIGN 选定）。"""
+        return cls(RSI_R13_NAMESPACE)
+
     def rsi_r12(cls) -> "QuotaLedger":
         """RSI-R1.2 账（家族账；已结案 campaign 由 closeout 标记封存只读，新战役须新建 campaign）。
 
