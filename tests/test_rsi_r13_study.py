@@ -445,3 +445,50 @@ def test_r13_results_released_only_allows_submit_claim(tmp_path):
                                        out["evidence_index"])}), None)
     assert done["ok"], done
     assert done.get("judge_verdict") == "JUDGE_OK", done
+
+
+def test_r13_formal_packet_reads_reports_under_campaign_root(tmp_path, monkeypatch):
+    """轮 O（R13-D9）：审查包必须从 campaign 根内的 ``reports/`` 取报告。
+
+    轮 N review A 实证：``ctx.subdir("reports")`` 走的是 R1 通用子目录表，
+    直接抛 CampaignError；``reports`` 只属 R1.3 子目录集，读取侧一律按
+    campaign 根内相对路径。
+    """
+    from orchestrator.rsi_r1 import r13_review_run as RR
+
+    task = TS.build_new_a()
+    ctx, state, dispatcher = _setup(tmp_path, task=task, values=_values_a())
+    (ctx.root / "reports").mkdir(mode=0o700, exist_ok=True)
+    (ctx.root / "reports" / "A-abc123.json").write_text(
+        json.dumps({"report": {"schema": "x", "task_id": task.task_id}}),
+        encoding="utf-8")
+    class _Manifest:
+        assignments: "list[Any]" = []
+
+    monkeypatch.setattr(
+        RR, "_load_confirm",
+        lambda ctx, study: ({}, _Manifest(),
+                            {"b0": {c.id: 1.0 for c in task.conditions},
+                             "b1": {c.id: 1.2 for c in task.conditions}}, {},
+                            task.primary.metric))
+    packet, report_doc, values = RR.build_formal_packet(ctx, "A", task)
+    assert report_doc["task_id"] == task.task_id
+    assert packet["candidate_report"]["task_id"] == task.task_id
+    # 缺报告时是合同拒绝，而不是宿主异常。
+    (ctx.root / "reports" / "A-abc123.json").unlink()
+    with pytest.raises(RR.ReviewRunError) as exc:
+        RR.build_formal_packet(ctx, "A", task)
+    assert exc.value.code == "REPORT_MISSING"
+
+
+def test_r13_review_reply_parsing_tolerates_fences():
+    """轮 O（R13-D9 同族）：审查回复的格式噪声不许变成宿主裸异常。"""
+    from orchestrator.rsi_r1 import r13_review_run as RR
+
+    assert RR._parse_review_doc('{"a": 1}') == {"a": 1}
+    assert RR._parse_review_doc('```json\n{"a": 1}\n```') == {"a": 1}
+    assert RR._parse_review_doc('说明如下：\n{"a": 1}\n以上。') == {"a": 1}
+    for bad in ("", "没有对象", "[1, 2]", "{坏 json"):
+        with pytest.raises(RR.ReviewRunError) as exc:
+            RR._parse_review_doc(bad)
+        assert exc.value.code == "REVIEW_REPLY_INVALID"

@@ -617,7 +617,12 @@ def _load_confirm(ctx: Any, study: str):
 
 def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
     plan, manifest, values, artifacts, metric = _load_confirm(ctx, study)
-    report_file = list(ctx.subdir("reports").glob(f"{study}-*.json"))
+    # 轮 O（R13-D9）：``reports`` 是 R1.3 的 campaign 子目录
+    # （``RSI_R13_CAMPAIGN_SUBDIRS``），不在 R1 通用子目录表里；走
+    # ``ctx.subdir`` 会以「未知 R1 campaign 子目录」硬崩（轮 N review A 实证）。
+    # 写入侧本来就是 ``ctx.write_json("reports/…")``（只做根内相对拼接），
+    # 读取侧同样按根内相对路径取。
+    report_file = list(ctx.relative("reports").glob(f"{study}-*.json"))
     if not report_file:
         raise ReviewRunError("REPORT_MISSING", study)
     report_doc = json.loads(report_file[0].read_text(encoding="utf-8"))["report"]
@@ -642,6 +647,36 @@ def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
     return packet, report_doc, values
 
 
+def _parse_review_doc(text: Any) -> "dict[str, Any]":
+    """把审查者回复解析成对象：容忍代码围栏/前后散文，但仍要求单对象。
+
+    轮 O（R13-D9 同族）：``run_formal`` 原来直接 ``json.loads(str(text))``，
+    一条带 ```json 围栏或前后说明的回复就是裸 ValueError（宿主异常，且该通道
+    已付费）。这里只放宽**格式噪声**：围栏剥离后仍必须是单个 JSON 对象。
+    """
+    raw = str(text if text is not None else "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1] if raw.count("```") >= 2 else raw.lstrip("`")
+        if raw.lstrip().lower().startswith("json"):
+            raw = raw.lstrip()[4:]
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            raise ReviewRunError("REVIEW_REPLY_INVALID",
+                                 "回复里没有 JSON 对象") from None
+        try:
+            doc = json.loads(raw[start:end + 1])
+        except json.JSONDecodeError:
+            raise ReviewRunError("REVIEW_REPLY_INVALID",
+                                 "回复 JSON 无法解析") from None
+    if not isinstance(doc, dict):
+        raise ReviewRunError("REVIEW_REPLY_INVALID", "回复顶层不是对象")
+    return doc
+
+
 def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
                out_dir: Path) -> "dict[str, Any]":
     packet, report_doc, values = build_formal_packet(ctx, study, task)
@@ -655,7 +690,7 @@ def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
         batch = f"R13-REV-{study}-{ch}"
         spawned = _spawn(ctx, packet=packet, slot=slot, lane=LANE_FINAL,
                          batch_id=batch, task=TASK_FINAL, out_dir=out_dir)
-        doc = json.loads(str(spawned["call"]["text"]))
+        doc = _parse_review_doc(spawned["call"]["text"])
         reviews.append(doc)
         receipts.append(spawned["receipt"])
         packet_sha = spawned["packet_sha256"]

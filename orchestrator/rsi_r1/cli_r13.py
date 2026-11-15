@@ -32,6 +32,9 @@ from orchestrator.rsi_r1 import cli_r13_campaign as CC
 from orchestrator.rsi_r1 import calibration as CAL
 from orchestrator.rsi_r1 import closeout_r13 as CO13
 from orchestrator.rsi_r1 import contracts as C
+from orchestrator.rsi_r1 import r13_review_run as RRUN
+from orchestrator.rsi_r1 import review_runner as RN
+from orchestrator.rsi_r1 import review_rubric_v13 as RV
 from orchestrator.rsi_r1 import lock as LK
 from orchestrator.rsi_r1 import lock_r13 as L13
 from orchestrator.rsi_r1 import state as S
@@ -675,6 +678,7 @@ def main(argv: "list[str] | None" = None) -> int:
     except (Cli13Error, CC.Cli13Error, FAM.FamilyError, P.ProfileError,
             RC.ReviewCapacityError, LK.LockError, L13.Lock13Error,
             C.ContractError, CAL.CalibrationError, S.StateError,
+            RRUN.ReviewRunError, RN.ReviewRunnerError, RV.ReviewError,
             OSError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         return 2

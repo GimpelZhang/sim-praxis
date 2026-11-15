@@ -300,6 +300,34 @@ def _finish(driver: _Driver, checks: "list[dict[str, Any]]",
     return doc
 
 
+def _formal_packet_selftest(ctx: Any, task: Any) -> "dict[str, Any]":
+    """零 POST：用 T5 参考链的产物构造正式审查包，校验自足性与块覆盖。"""
+    from orchestrator.rsi_r1 import r13_review_run as RRUN
+    from orchestrator.rsi_r1 import review_runner as RN
+    study = str(task.mechanism_id.split("_")[0])
+    problems: "list[str]" = []
+    try:
+        packet, report_doc, values = RRUN.build_formal_packet(ctx, study, task)
+        payload = RN.packet_bytes(packet)
+    except Exception as exc:  # noqa: BLE001 —— 任何宿主异常都是仪器缺陷
+        return {"study": study, "ok": False,
+                "problems": [f"{type(exc).__name__}: {exc}"]}
+    if not payload:
+        problems.append("packet 为空")
+    table_blocks = [str(row.get("block_id"))
+                    for row in (packet.get("block_table") or [])]
+    if sorted(table_blocks) != sorted(values):
+        problems.append("包内 block 集与确认批不一致")
+    if not report_doc.get("task_id"):
+        problems.append("报告缺 task_id")
+    if int((packet.get("primary_recomputation") or {}).get("n_blocks")
+           or -1) != len(values):
+        problems.append("主对比重算的 block 数与包内 block 数不一致")
+    return {"study": study, "ok": not problems, "problems": problems,
+            "blocks": len(values), "packet_bytes": len(payload),
+            "packet_sha256": _sha(payload)}
+
+
 def run_production_validation(ctx: Any, *, taskset_dir: Path,
                               out: Path) -> "dict[str, Any]":
     """CLI 入口：初始化后的根上跑两任务参考链，写 T5 汇总件。"""
@@ -314,13 +342,20 @@ def run_production_validation(ctx: Any, *, taskset_dir: Path,
     adapter = RRUN.review_adapter_selftest()
     results = [run_study_chain(ctx, state, task=task, out=out)
                for task in (task_a, task_b)]
+    # 轮 O（R13-D9）：正式审查包的**构造面**必须在 T5 就跑到——轮 N 的
+    # ``ctx.subdir("reports")`` 宿主异常直到第一个付费审查才暴露（review A 崩，
+    # 0 呼）。T5 的参考链走完 8 位后 root 内已有 reports/、confirm/、observations/，
+    # 正好可以在零 POST 下逐 study 构造正式包并校验其结构。
+    formal = [_formal_packet_selftest(ctx, task) for task in (task_a, task_b)]
     summary = {
         "schema": "simpraxis.rsi_r13.t5_summary.v1", "schema_version": 1,
         "captured_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "studies": results,
         "review_adapter": adapter,
+        "review_formal_packets": formal,
         "all_ok": (all(r.get("all_ok") for r in results)
-                   and bool(adapter.get("ok"))),
+                   and bool(adapter.get("ok"))
+                   and all(f.get("ok") for f in formal)),
         "paid_posts": 0,
         "identity": "offline_validation_root",
     }
