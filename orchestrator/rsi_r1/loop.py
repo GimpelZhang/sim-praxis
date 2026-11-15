@@ -229,6 +229,13 @@ def parse_action(text: str) -> Action:
         raise LoopError("MALFORMED_JSON", str(exc)) from None
     if not isinstance(doc, dict):
         raise LoopError("NOT_SINGLE_ACTION", "顶层必须是单个 JSON 对象")
+    # 轮 M（R13-D7）：Python 的 json.loads 接受 NaN/Infinity，而 T0 注册的
+    # NAN_OR_INF 是**前执行可恢复**错误。这里统一在动作入口拒绝，避免任何
+    # 候选文档把非有限数带进状态/证据写入面（宿主 write_json 会裸 ValueError）。
+    try:
+        C.require_no_nan(doc, where="action")
+    except C.ContractError as exc:
+        raise LoopError(exc.code, exc.detail or "NaN/Inf") from None
     name = doc.get("action")
     if not isinstance(name, str) or name not in ACTION_NAMES:
         raise LoopError("UNKNOWN_ACTION", f"action={name!r}")

@@ -331,3 +331,64 @@ def test_r13_missing_report_rejected(tmp_path):
     assert out["judge_verdict"] != "JUDGE_OK"
     assert "LIMITATIONS_MISSING" in out["reason_codes"]
     assert out["verdict"] == S.ST_VALID_FAIL
+
+
+# ---------------------------------------------------------------------------
+# 轮 M（R13-D7）：候选分析文档里的非有限数必须是**可恢复**拒绝，不是宿主崩溃
+# ---------------------------------------------------------------------------
+
+def _nan_analysis_source() -> str:
+    """在模板的自由字段里塞 NaN（对比字段本身合法）。"""
+    src = PR.ANALYSIS_TEMPLATE_R13
+    needle = '"independent_unit_count": len(by_block)'
+    assert needle in src
+    return src.replace(needle,
+                       '"independent_unit_count": len(by_block),\n'
+                       '                     "nan_probe": float("nan")')
+
+
+def test_r13_analysis_nonfinite_rejected_recoverably(tmp_path):
+    from orchestrator.rsi_r1 import recovery as RC
+
+    task = TS.build_new_a()
+    ctx, state, dispatcher = _setup(tmp_path, task=task, values=_values_a())
+    design = PR.DESIGN_TEMPLATE_R13
+    explore = PR._plan_template(task, phase="explore")
+    intent = PR._intent_template(task, role="distributional_exploration")
+
+    out = _dispatch(dispatcher, state, _act("write_artifact", {
+        "kind": "design", "source": design}), None)
+    assert out["ok"], out
+    design_sha = out["source_sha256"]
+    out = _dispatch(dispatcher, state, _act("propose_plan", {
+        "plan": explore, "design_intent": intent}), None)
+    assert out["ok"], out
+    out = _dispatch(dispatcher, state, _act("run_batch", {
+        "plan_sha256": out["plan_sha256"], "design_sha256": design_sha,
+        "phase": "explore"}), None)
+    assert out["ok"], out
+    run_ids = out["run_ids"]
+    out = _dispatch(dispatcher, state, _act("write_artifact", {
+        "kind": "analysis", "source": _nan_analysis_source()}), None)
+    assert out["ok"], out
+    analysis_sha = out["source_sha256"]
+
+    out = _dispatch(dispatcher, state, _act("analyze", {
+        "source_sha256": analysis_sha, "run_ids": run_ids}), None)
+    assert out["ok"] is False, out
+    assert out["code"] == "NAN_OR_INF", out
+    assert out["side_effect_status"] == "KNOWN_COMPLETE"
+    decision = RC.classify_failure(RC.FailureEvidence(
+        phase="analyze", frozen=False, open_intent=False,
+        effect_status=out["side_effect_status"], code=out["code"]))
+    assert decision.recoverable, decision
+    # 无效分析一律不落盘（不留「带 NaN 的归档件」）。
+    assert not list((ctx.root / "analysis").glob("explore-*.json"))
+
+
+def test_r13_parse_action_rejects_nonfinite():
+    with pytest.raises(L.LoopError) as info:
+        L.parse_action('{"action": "analyze", "source_sha256": "%s",'
+                       ' "run_ids": [], "sneaky": NaN}' % ("a" * 64))
+    assert info.value.code == "NAN_OR_INF"
+    assert info.value.terminal is False

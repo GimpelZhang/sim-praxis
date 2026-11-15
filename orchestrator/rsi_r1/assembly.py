@@ -684,6 +684,21 @@ class CampaignDispatcher:
         return {"ok": False, "code": code, "message": message,
                 "side_effect_status": side_effect_status}
 
+    def _analysis_failure(self, summary: Mapping[str, Any], message: str,
+                          *, side_effect_status: str = "KNOWN_COMPLETE"
+                          ) -> "dict[str, Any]":
+        """候选分析无效时的回包：**首个原因码若是 T0 注册的可恢复码就原样透出**。
+
+        轮 M（R13-D7）：过去一律折成 ``ANALYSIS_FAILED``——该码不在可恢复白名单，
+        于是「分析程序在空组上算出 NaN」这种合同内字段错误被当成终止类，烧掉整条
+        study。宿主侧修复点是显式拒绝非有限数（NAN_OR_INF，早就在 T0 注册）；
+        这里只做**码的透传**，不扩白名单、不改判定面。
+        """
+        tail = next((str(c) for c in (summary.get("reason_codes") or ())), "")
+        code = tail if tail in P.RECOVERABLE_ERROR_CODES else "ANALYSIS_FAILED"
+        return self._fail(code, f"{tail}; {message}" if tail else message,
+                          side_effect_status=side_effect_status)
+
     # -- 入口 ------------------------------------------------------------
     def execute_once(self, action: L.Action,
                      store: "L.Store") -> "Mapping[str, Any]":
@@ -1073,6 +1088,18 @@ class CampaignDispatcher:
                         parsed["contrasts"][cid] for cid in wanted]
                 except AR.ReceiptError as exc:
                     reasons.append(exc.code)
+                else:
+                    # 轮 M（R13-D7）：候选分析文档的**对比字段**由 parse_output
+                    # 查过有限性，但块表/覆盖率/诊断等自由字段没有——2026-11-15
+                    # 轮 L study A 的分析程序在空组上算出 NaN，宿主 write_json
+                    # （allow_nan=False）抛裸 ValueError，整条 study 崩在宿主异常上。
+                    # 输出文档是候选产物，不是宿主缺陷：按 T0 注册的可恢复码
+                    # NAN_OR_INF 拒绝（受领报告 validity=false），不让它落盘。
+                    try:
+                        C.require_no_nan(output_doc, where="analysis_output")
+                    except C.ContractError as exc:
+                        reasons.append(exc.code)
+                        output_doc = None
         output_bytes = payload or b""
         art = self._artifact_event(source_sha)
         receipt = AR.build_receipt(
@@ -1134,10 +1161,7 @@ class CampaignDispatcher:
             # 视图/作用域等**执行前**拒绝：零副作用，可自修。
             return self._fail(exc.code, exc.detail, side_effect_status="NONE")
         if not summary["validity"]:
-            tail = next((str(c) for c in summary["reason_codes"]), "")
-            return self._fail("ANALYSIS_FAILED",
-                              f"{tail}; 候选分析未通过执行有效门",
-                              side_effect_status="KNOWN_COMPLETE")
+            return self._analysis_failure(summary, "候选分析未通过执行有效门")
         # 只回候选自己的输出与它的凭据摘要；宿主不填参考答案。
         return self._ok(analysis_relpath=summary.get("output_relpath"),
                         n_runs=len(wanted), analysis=output,
@@ -1359,10 +1383,9 @@ class CampaignDispatcher:
             return self._fail(exc.code, exc.detail,
                               side_effect_status="KNOWN_COMPLETE")
         if not summary["validity"]:
-            return self._fail("ANALYSIS_FAILED",
-                              "确认批冻结分析未通过执行有效门；"
-                              "候选不得借用宿主数值继续提交",
-                              side_effect_status="KNOWN_COMPLETE")
+            return self._analysis_failure(
+                summary, "确认批冻结分析未通过执行有效门；"
+                         "候选不得借用宿主数值继续提交")
         return self._ok(run_ids_head=run_ids[:8], n_runs=len(run_ids),
                         result_sha256=result_sha,
                         candidate_output=output, analysis_receipt=summary)
@@ -1504,11 +1527,9 @@ class CampaignDispatcher:
             return self._fail(exc.code, exc.detail,
                               side_effect_status="KNOWN_COMPLETE")
         if not summary["validity"]:
-            return self._fail(
-                "ANALYSIS_FAILED",
-                "确认批冻结分析未通过执行有效门（检查输出 schema/run 集/"
-                f"主对比 {self.task.primary.id}）",
-                side_effect_status="KNOWN_COMPLETE")
+            return self._analysis_failure(
+                summary, "确认批冻结分析未通过执行有效门（检查输出 schema/"
+                         f"run 集/主对比 {self.task.primary.id}）")
         receipt_bytes = b""
         rel = self._receipt_rel(self.study, "confirm")
         if self.ctx.exists(rel):
