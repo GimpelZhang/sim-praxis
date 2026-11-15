@@ -1304,9 +1304,10 @@ class CampaignDispatcher:
         self.last_batch = {"phase": "confirm", "n_runs": len(run_ids),
                            "blocked": False, "run_ids": run_ids[:64],
                            "manifest_sha256": _sha_doc(manifest_out)}
-        if self._r12():
-            # R1.2：自动在**确认批完整视图**上执行冻结分析并落凭据；
-            # 不再回灌任何维护侧参考值（§5.1）。
+        if self._r12() or (self.profile is not None and self.profile.is_r13
+                           and not self.r13_bound):
+            # R1.2 / R1.3 probe-practice 玩具链：自动在确认批完整视图上执行
+            # 冻结分析并落凭据；不回灌维护侧参考值。
             return self._r12_confirm_payload(run_ids, result_sha, plan, manifest)
         if self.r13_bound:
             # R1.3：同样自动跑冻结分析（候选脚本），但**只**校验任务级主对比；
@@ -1352,7 +1353,7 @@ class CampaignDispatcher:
     def _do_submit_claim(self, action: L.Action) -> "dict[str, Any]":
         if self.r13_bound:
             return self._r13_submit(action)
-        if self._r12():
+        if self._r12() or (self.profile is not None and self.profile.is_r13):
             return self._r12_submit(action)
         response_id, _ = self._binding(action)
         claims = [dict(c) for c in action.doc["claims"]]

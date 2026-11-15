@@ -41,6 +41,9 @@ PLAN_PATH_R13 = Path("/home/vipuser/文档/RSI_R1.3_Plan_detailed.md")
 DEFAULT_ORACLE = Path(
     "/mnt/artifacts/simpraxis/rsi_r1_repair2/r1b_20261111/"
     "private/calibration_private/oracle.py")
+DEFAULT_ORACLE_V2 = Path(
+    "/mnt/artifacts/simpraxis/rsi_r12/r12-t5-offline-20261113r/"
+    "private/calibration_private/oracle_v2.py")
 AUTHORIZATION_TEXT = (
     "用户 2026-11-15 指示：完成上述付费接线并从 T5 生产验证重做，"
     "然后按 T6→T8 推进")
@@ -328,21 +331,79 @@ def cmd_calibrate(args: Any) -> int:
     # v1 校准（无 prior_attempt 前置）；v2 的 prior-attempt 检查在全新 R1.3
     # 根上没有可核历史，故用 R1 已批准算法与 v1 oracle（spec/scene 未变，
     # 来源显式留痕）。
-    design = CAL.DESIGN_V1
-    prereg = CAL.build_calibration_prereg(ctx=ctx, oracle_path=target,
-                                          design=design)
-    CAL.write_calibration_prereg(ctx, prereg, design=design)
     ledger = RP.rsi_r13_ledger_path()
-    CAL.issue_zero_post_permit(ctx, ledger_path=ledger)
-    report = CAL.run_calibration(ctx, runner=SB.DockerRunner(),
-                                 image=CAL.CAL_IMAGE, design=design)
+    design = CAL.DESIGN_V1
+    report = None
+    if ctx.exists("contract/calibration_report_v2.json"):
+        report = ctx.read_json("contract/calibration_report_v2.json")
+        design = CAL.DESIGN_V2
+    elif ctx.exists("contract/calibration_report.json"):
+        report = ctx.read_json("contract/calibration_report.json")
+    if report is None:
+        prereg = CAL.build_calibration_prereg(ctx=ctx, oracle_path=target,
+                                              design=design)
+        CAL.write_calibration_prereg(ctx, prereg, design=design)
+        CAL.issue_zero_post_permit(ctx, ledger_path=ledger)
+        report = CAL.run_calibration(ctx, runner=SB.DockerRunner(),
+                                     image=CAL.CAL_IMAGE, design=design,
+                                     ledger_path=ledger)
+    if report.get("verdict") != "CALIBRATION_PASS" and design["version"] == 1:
+        # v1 的已知缺口（A 首步速度门与 B 0.01 绝对容差）由 v2 的设计修订
+        # 处理；v2 必须携带 v1 历史件与 gap 分析（plan §T1b/R1.2 先例）。
+        gap = _write_gap_analysis(ctx, report)
+        oracle2 = Path(args.oracle_v2) if getattr(args, "oracle_v2", None) \
+            else DEFAULT_ORACLE_V2
+        target2 = ctx.relative(CAL.ORACLE_RELPATH_V2)
+        target2.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        shutil.copyfile(oracle2, target2)
+        target2.chmod(0o600)
+        prior = CAL.prior_attempt_manifest(ctx)
+        supersedes = {
+            "calibration_prereg_sha256": CAL._document_sha(
+                ctx.read_json("contract/calibration_prereg.json"))
+            if hasattr(CAL, "_document_sha") else _file_sha(
+                ctx.relative("contract/calibration_prereg.json")),
+            "calibration_report_sha256": _file_sha(
+                ctx.relative("contract/calibration_report.json")),
+            "gap_analysis_sha256": gap,
+            "reason": "v1 两个已知缺口由 v2 门修复（见 gap 分析）",
+        }
+        design = CAL.DESIGN_V2
+        prereg2 = CAL.build_calibration_prereg(
+            ctx=ctx, oracle_path=target2, design=design,
+            supersedes=supersedes, prior_attempt=prior)
+        CAL.write_calibration_prereg(ctx, prereg2, design=design)
+        report = CAL.run_calibration(ctx, runner=SB.DockerRunner(),
+                                     image=CAL.CAL_IMAGE, design=design,
+                                     ledger_path=ledger)
     state = S.ResearchState(ctx)
-    if state.root_state() == S.ROOT_AUTHORIZED:
+    if report.get("verdict") == "CALIBRATION_PASS" \
+            and state.root_state() == S.ROOT_AUTHORIZED:
         state.advance_root(S.ROOT_CALIBRATED, reason="calibration PASS")
     print(json.dumps({"verdict": report.get("verdict"),
-                      "report": "contract/calibration_report.json",
+                      "report": "contract/calibration_report_v2.json"
+                      if design["version"] == 2
+                      else "contract/calibration_report.json",
                       "root": state.root_state()}, ensure_ascii=False))
     return 0 if report.get("verdict") == "CALIBRATION_PASS" else 2
+
+
+def _write_gap_analysis(ctx: CampaignContext, report: Mapping[str, Any]) -> str:
+    failed = [c for c in report.get("checks") or [] if not c.get("ok")]
+    lines = ["# R1.3 校准 v1→v2 缺口分析", "",
+             "v1 在本根实跑的失败项（逐条来自报告，不改判）：", ""]
+    for check in failed[:20]:
+        lines.append(f"- `{check.get('id')}`: {check.get('detail')}")
+    lines += ["", "修订依据（沿 R1.2 已批准算法）：",
+              "- A 首步位移门：qvel 在首次 mj_step 前写入的容差按 1e-5 m 判；",
+              "- B 绝对容差：0.01 + 1%·|ref|（欠阻尼 b06 门 0.02596），并增报周期/包络；",
+              "- 矩阵/场景/seed 不变；v1 历史件与 raw 逐字节保留（prior_attempt）。",
+              ""]
+    text = "\n".join(lines)
+    path = ctx.relative("contract/calibration_gap_analysis.md")
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
+    return _sha(text.encode())
 
 
 def cmd_validate_production(args: Any) -> int:

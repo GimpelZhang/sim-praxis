@@ -27,7 +27,7 @@ def ctx(tmp_path):
     budget = C13.default_budget_v13("t5test", hard_cap_steps=11900000,
                                     aux_subenvelopes={"x": 1})
     c.write_json("contract/budget.json", budget.to_dict())
-    (root / "contract" / "taskset.json").write_text("{}\n")
+    (root / "contract" / "taskset_manifest.json").write_text("{}\n")
     (root / "contract" / "resource_plan.json").write_text("{}\n")
     c.write_json("contract/t5_summary.json", {"all_ok": True, "studies": []})
     return c
@@ -79,7 +79,7 @@ def test_validation_lock_rejects_t5_not_passed(tmp_path):
     for name in ("contract",):
         (root / name).mkdir(parents=True, exist_ok=True)
     c = RT.CampaignContext(envelope_id="x", root=root, protected_roots=())
-    (root / "contract" / "taskset.json").write_text("{}\n")
+    (root / "contract" / "taskset_manifest.json").write_text("{}\n")
     (root / "contract" / "resource_plan.json").write_text("{}\n")
     c.write_json("contract/t5_summary.json", {"all_ok": False})
     with pytest.raises(L13.Lock13Error) as exc:

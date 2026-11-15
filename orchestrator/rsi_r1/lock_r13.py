@@ -56,7 +56,7 @@ def build_validation_lock(ctx: Any, *, image_pin: str,
     t5 = json.loads(t5_path.read_text(encoding="utf-8"))
     if not bool(t5.get("all_ok")):
         raise Lock13Error("T5_NOT_PASSED", "T5 报告 all_ok != true")
-    taskset = ctx.relative("contract/taskset.json")
+    taskset = ctx.relative("contract/taskset_manifest.json")
     resource = ctx.relative("contract/resource_plan.json")
     for p in (taskset, resource):
         if not p.is_file():
@@ -135,7 +135,7 @@ def verify_validation(ctx: Any, *, repo_root: "Path | str | None" = None
         raise Lock13Error("ENVELOPE", "validation LOCK envelope 不符")
     if _sha_file(ctx.relative(VALIDATION_T5_REL)) != doc.get("t5_summary_sha256"):
         raise Lock13Error("T5_DRIFT", "T5 报告字节漂移")
-    if _sha_file(ctx.relative("contract/taskset.json")) != doc.get(
+    if _sha_file(ctx.relative("contract/taskset_manifest.json")) != doc.get(
             "taskset_sha256"):
         raise Lock13Error("TASKSET_DRIFT", "任务集漂移")
     if _sha_file(ctx.relative("contract/resource_plan.json")) != doc.get(
@@ -176,7 +176,7 @@ def build_binding(validation_ctx: Any) -> "dict[str, Any]":
         "t5_summary_sha256": _sha_file(
             validation_ctx.relative(VALIDATION_T5_REL)),
         "taskset_sha256": _sha_file(
-            validation_ctx.relative("contract/taskset.json")),
+            validation_ctx.relative("contract/taskset_manifest.json")),
         "resource_plan_sha256": _sha_file(
             validation_ctx.relative("contract/resource_plan.json")),
         "signatures": {role: _sha_file(validation_ctx.relative(
@@ -195,12 +195,12 @@ def verify_binding(binding: Mapping[str, Any]) -> None:
     checks = {
         "validation_lock.json": binding.get("validation_lock_sha256"),
         "t5_summary.json": binding.get("t5_summary_sha256"),
-        "taskset.json": binding.get("taskset_sha256"),
+        "taskset_manifest.json": binding.get("taskset_sha256"),
         "resource_plan.json": binding.get("resource_plan_sha256"),
     }
     rel_dirs = {"validation_lock.json": "contract",
                 "t5_summary.json": "contract",
-                "taskset.json": "contract",
+                "taskset_manifest.json": "contract",
                 "resource_plan.json": "contract"}
     for name, want in checks.items():
         path = root / rel_dirs[name] / name

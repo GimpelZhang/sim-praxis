@@ -161,6 +161,7 @@ def build_request_text(*, packet: Mapping[str, Any],
             "You are an independent scientific reviewer. You receive ONE "
             "self-contained packet. You cannot read host files. Return exactly one "
             "JSON object with keys schema/review_id/reviewer_id/packet_sha256/items; "
+            "schema must be \"simpraxis.rsi_r13.review.v1\"; "
             "items must have all six rubric dimensions, each "
             "{verdict: PASS|FAIL|UNVERIFIABLE, reason, refs} where refs are typed "
             "locators into the packet's evidence_index or candidate_excerpts. "
