@@ -95,6 +95,18 @@ class BudgetV13:
     def total_posts(self) -> int:
         return sum(int(v) for v in self.posts_by_lane.values())
 
+    def slots(self) -> "list[dict[str, Any]]":
+        """逐 POST 槽表（lane 表序；供 SlotBook/协议链复用同一真值）。"""
+        out: "list[dict[str, Any]]" = []
+        n = 0
+        for lane in P.LANE_ORDER_R13:
+            for i in range(int(self.posts_by_lane[lane])):
+                n += 1
+                out.append({"slot": n, "lane": lane,
+                            "lane_task_id": P.LANE_TASK_ID_R13[lane],
+                            "lane_index": i + 1, "reserve": False})
+        return out
+
     def to_dict(self) -> "dict[str, Any]":
         return {
             "schema": self.schema, "schema_version": 1,
