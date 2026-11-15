@@ -549,7 +549,7 @@ class CampaignDispatcher:
         if profile is not None and profile.is_r13:
             # R1.3：正式 study 必须绑定 TaskSpecV13；probe/practice 是玩具
             # 协议演练（R1.2 语义），允许 task=None。
-            if task is None and lane not in ("probe", "practice"):
+            if task is None and admission.lane not in ("probe", "practice"):
                 raise AssemblyError("TASK_SPEC_MISSING",
                                     "rsi-r1.3 正式 study 必须绑定 TaskSpecV13")
         elif profile is not None and profile.is_r12:
