@@ -323,6 +323,19 @@ def _formal_packet_selftest(ctx: Any, task: Any) -> "dict[str, Any]":
     if int((packet.get("primary_recomputation") or {}).get("n_blocks")
            or -1) != len(values):
         problems.append("主对比重算的 block 数与包内 block 数不一致")
+    # 轮 P（R13-D11）：包的块表效应必须与候选提交的主张（第 7 步 candidate_output
+    # 的逐字复制）同值。参考链里候选主张=宿主重算，两者不等只可能是宿主取错
+    # 指标/取错 study——这正是轮 O 审查包带错数据（A：stop_time_s）的情形。
+    claim_rel = f"claim/submission_{study}.json"
+    if not ctx.exists(claim_rel):
+        problems.append(f"缺主张提交 {claim_rel}")
+    else:
+        claim = (ctx.read_json(claim_rel).get("claims") or [{}])[0]
+        want = float(claim.get("estimate", "nan"))
+        got = float((packet.get("primary_recomputation") or {})
+                    .get("effect", "nan"))
+        if not (abs(got - want) <= 1e-9):
+            problems.append("块表主效应与参考链主张不一致（参考链主张=宿主重算，不等即宿主取错指标/study）")
     return {"study": study, "ok": not problems, "problems": problems,
             "blocks": len(values), "packet_bytes": len(payload),
             "packet_sha256": _sha(payload)}

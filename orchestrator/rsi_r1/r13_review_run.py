@@ -589,7 +589,7 @@ def review_adapter_selftest() -> "dict[str, Any]":
 # 正式审查
 # ---------------------------------------------------------------------------
 
-def _load_confirm(ctx: Any, study: str):
+def _load_confirm(ctx: Any, study: str, *, metric_id: str):
     from orchestrator.rsi_r1 import contracts as C
     plan = C.ResearchPlan.from_dict(ctx.read_json(f"confirm/plan_{study}.json"))
     manifest = E.manifest_from_doc(ctx.read_json(f"confirm/manifest_{study}.json"))
@@ -605,18 +605,24 @@ def _load_confirm(ctx: Any, study: str):
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         artifacts[run_id] = {"record": record, "meta": meta}
     per_run = J.recompute_metrics(plan=plan, artifacts=artifacts, specs=specs)
-    metric = None
+    # 轮 P（R13-D11）：块表只许取**任务登记的主指标**。旧实现遍历每 run 的
+    # values 全部键、后写覆盖先写——study A 的 run 同时有 displacement_x_m 与
+    # stop_time_s，块表最终是**停止时间**（0.10253 s），而候选分析与报告是
+    # 位移（0.04087 m）。轮 O review A 的两名审查者因此看到一张与报告对不上
+    # 的块表（D11）。取不到主指标就 fail-closed。
     values: "dict[str, dict[str, float]]" = {}
     for run_id, spec in specs.items():
         row = (per_run.get(run_id) or {}).get("values") or {}
-        for key, value in row.items():
-            metric = key
-            values.setdefault(spec.block_id, {})[spec.condition_id] = float(value)
-    return plan, manifest, values, artifacts, metric
+        if metric_id not in row:
+            raise ReviewRunError("METRIC_MISSING", f"{study}:{metric_id}")
+        values.setdefault(spec.block_id, {})[spec.condition_id] = float(
+            row[metric_id])
+    return plan, manifest, values, artifacts, metric_id
 
 
 def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
-    plan, manifest, values, artifacts, metric = _load_confirm(ctx, study)
+    plan, manifest, values, artifacts, metric = _load_confirm(
+        ctx, study, metric_id=task.primary.metric)
     # 轮 O（R13-D9）：``reports`` 是 R1.3 的 campaign 子目录
     # （``RSI_R13_CAMPAIGN_SUBDIRS``），不在 R1 通用子目录表里；走
     # ``ctx.subdir`` 会以「未知 R1 campaign 子目录」硬崩（轮 N review A 实证）。
@@ -626,8 +632,16 @@ def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
     if not report_file:
         raise ReviewRunError("REPORT_MISSING", study)
     report_doc = json.loads(report_file[0].read_text(encoding="utf-8"))["report"]
-    intents = sorted(ctx.root.glob("design_audits/intent_confirm_*.json"))
-    intent = json.loads(intents[-1].read_text(encoding="utf-8")) if intents else {}
+    # 轮 P（R13-D10）：确认意图必须按**本 study 的确认计划 sha** 取件。
+    # 轮 O review B 实证：旧实现取 `sorted(design_audits/intent_confirm_*)[-1]`，
+    # 全局最近一个文件恰是 study A 的意图（friction_x_speed/mass_kg），被塞进
+    # B 的审查包；两名审查者在 problem_and_hypothesis / exploration_declaration
+    # / confirmation_controls 上据此正确判 FAIL——**failed on a host defect**。
+    # 取不到就 fail-closed（缺意图是仪器错误，不是候选失败，更不许拿别人的意图顶）。
+    intent_rel = f"design_audits/intent_confirm_{plan.sha256[:12]}.json"
+    if not ctx.exists(intent_rel):
+        raise ReviewRunError("INTENT_MISSING", f"{study}:{intent_rel}")
+    intent = json.loads(ctx.relative(intent_rel).read_text(encoding="utf-8"))
     assignments = []
     seen_blocks = set()
     for a in manifest.assignments:

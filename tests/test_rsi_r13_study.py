@@ -465,9 +465,15 @@ def test_r13_formal_packet_reads_reports_under_campaign_root(tmp_path, monkeypat
     class _Manifest:
         assignments: "list[Any]" = []
 
+    class _Plan:
+        sha256 = "deadbeef" * 8
+
+    (ctx.root / "design_audits" / "intent_confirm_deadbeefdead.json"
+     ).write_text(json.dumps({"estimand": {"contrast_ids": [task.primary.id]}}),
+                  encoding="utf-8")
     monkeypatch.setattr(
         RR, "_load_confirm",
-        lambda ctx, study: ({}, _Manifest(),
+        lambda ctx, study, **kw: (_Plan(), _Manifest(),
                             {"b0": {c.id: 1.0 for c in task.conditions},
                              "b1": {c.id: 1.2 for c in task.conditions}}, {},
                             task.primary.metric))
@@ -492,3 +498,60 @@ def test_r13_review_reply_parsing_tolerates_fences():
         with pytest.raises(RR.ReviewRunError) as exc:
             RR._parse_review_doc(bad)
         assert exc.value.code == "REVIEW_REPLY_INVALID"
+
+
+def test_r13_formal_packet_intent_is_study_scoped(tmp_path):
+    """轮 P（R13-D10）：审查包里的 design_intent 必须是**本 study** 的。
+
+    轮 O review B 实证：全局 glob 取到的是 study A 的意图，两名审查者据此在
+    problem_and_hypothesis / exploration_declaration / confirmation_controls
+    上判 FAIL——审查证据被宿主缺陷污染。此处的复现：同一根里先有 A 的意图，
+    再建 B 的包，必须取到 B 自己的 estimand；取不到就 INTENT_MISSING。
+    """
+    from orchestrator.rsi_r1 import r13_review_run as RR
+    from orchestrator.rsi_r1 import contracts as C
+
+    task_b = TS.build_new_b()
+    ctx, state, dispatcher = _setup(tmp_path, task=task_b, values=_values_b())
+    out, state, ctx = _run_chain(ctx, state, dispatcher, task_b)
+    assert out["ok"], out
+    plan_b = C.ResearchPlan.from_dict(
+        ctx.read_json("confirm/plan_B.json"))
+    intent_b = json.loads(ctx.relative(
+        f"design_audits/intent_confirm_{plan_b.sha256[:12]}.json")
+        .read_text(encoding="utf-8"))
+    # 伪造一份"排序更大"的他 study 意图，模拟旧实现的污染路径。
+    (ctx.root / "design_audits" / "intent_confirm_zzzzzzzzzzzz.json").write_text(
+        json.dumps({**intent_b,
+                    "estimand": {**intent_b["estimand"],
+                                 "contrast_ids": ["friction_x_speed"],
+                                 "metric_id": "displacement_x_m"}}),
+        encoding="utf-8")
+    packet, _, _ = RR.build_formal_packet(ctx, "B", task_b)
+    assert packet["design_intent"]["estimand"]["contrast_ids"] == [
+        task_b.primary.id]
+    # fail-closed：本 study 的意图缺件时不许拿别人的顶。
+    ctx.relative(f"design_audits/intent_confirm_{plan_b.sha256[:12]}.json").unlink()
+    with pytest.raises(RR.ReviewRunError) as exc:
+        RR.build_formal_packet(ctx, "B", task_b)
+    assert exc.value.code == "INTENT_MISSING"
+
+
+def test_r13_formal_packet_uses_task_primary_metric(tmp_path):
+    """轮 P（R13-D11）：块表取任务登记的主指标，不被「最后写入的键」覆盖。
+
+    study A 的 run 同时含 displacement_x_m 与 stop_time_s；旧实现让块表变成
+    停止时间，审查者据此审了与报告不一致的数（轮 O review A）。
+    """
+    from orchestrator.rsi_r1 import r13_review_run as RR
+
+    task = TS.build_new_a()
+    ctx, state, dispatcher = _setup(tmp_path, task=task, values=_values_a())
+    out, state, ctx = _run_chain(ctx, state, dispatcher, task)
+    assert out["ok"], out
+    packet, _, values = RR.build_formal_packet(ctx, "A", task)
+    claim = ctx.read_json("claim/submission_A.json")["claims"][0]
+    effect = packet["primary_recomputation"]["effect"]
+    assert abs(float(effect) - float(claim["estimate"])) < 1e-12
+    assert len(values) == 32
+    assert packet["primary_contrast"]["metric"] == task.primary.metric
