@@ -368,6 +368,12 @@ def _calibration_case(case_id: str) -> dict:
     mean = sum(eff) / len(eff)
     delta = float(case["primary"]["delta"])
     case["diagnostics"]["contrasts"][0]["effect"] = mean
+    case["diagnostics"]["contrasts"][0]["contrast_id"] = case["primary"]["id"]
+    # 报告主结果必须引用本案例的 primary id 与一个非零 receipt 摘要
+    receipt_sha = hashlib.sha256(f"calibration:{case_id}".encode()).hexdigest()
+    primary_row = case["report"]["primary_results"][0]
+    primary_row["contrast_id"] = case["primary"]["id"]
+    primary_row["analysis_receipt_sha"] = receipt_sha
     case["diagnostics"]["threshold_counts"] = [{
         "contrast_id": case["primary"]["id"],
         "above_delta": sum(1 for v in eff if v > delta),
@@ -504,6 +510,12 @@ def review_adapter_selftest() -> "dict[str, Any]":
         for key, value in want.items():
             if int(counts.get(key, -1)) != value:
                 problems.append(f"{cid}: {key} {counts.get(key)} != {value}")
+        if case["report"]["primary_results"][0]["contrast_id"] != \
+                case["primary"]["id"]:
+            problems.append(f"{cid}: report.primary_results 未绑定 primary id")
+        if set(case["report"]["primary_results"][0]["analysis_receipt_sha"]) \
+                == {"0"}:
+            problems.append(f"{cid}: receipt sha 为占位全零")
         if cid == "fixed_pilot_scoped":
             if case["primary"]["kind"] != "pairwise_difference":
                 problems.append("fixed_pilot_scoped: primary 必须是单点 pairwise")
