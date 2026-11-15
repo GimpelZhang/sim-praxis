@@ -45,6 +45,7 @@ phase27}，五账【永不再写】；新代码写账一律走 ``phase281_ledger
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from orchestrator.common.fsutil import ensure_private_dir
@@ -1403,6 +1404,61 @@ def rsi_r13_root() -> Path:
     if root:
         return Path(root)
     return Path(DEFAULT_DATA_ROOT) / "rsi_r13"
+
+
+#: RSI-G1 诊断根（Plan §6：产物统一落 ``/mnt/artifacts/simpraxis/rsi_g1/<diagnostic_id>/``）。
+#: G1 是**独立诊断族**：与 rsi_r13 家族根互不嵌套，也不继承其族帽/账本。
+_RSI_G1_ROOT_ENV = "SIMPRAXIS_RSI_G1_ROOT"
+
+#: G1 诊断根下子目录（Plan §3 的产物面；quota 下再嵌 approvals）。
+RSI_G1_SUBDIRS: "tuple[str, ...]" = (
+    "manifest", "trace", "packet_sanity", "compiler_cases", "decision",
+    "quota", "probe", "logs",
+)
+
+
+def rsi_g1_root() -> Path:
+    """G1 诊断家族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_g1``。"""
+    root = os.environ.get(_RSI_G1_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_g1"
+
+
+#: G1 diagnostic_id 只允许安全字符（它会成为根目录名）。
+_RSI_G1_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def rsi_g1_diagnostic_root(diagnostic_id: str) -> Path:
+    """单个 G1 诊断根：``rsi_g1/<diagnostic_id>``（id 只允许安全字符）。"""
+    if not isinstance(diagnostic_id, str) or not _RSI_G1_ID_RE.match(diagnostic_id):
+        raise ValueError(f"diagnostic_id 非法：{diagnostic_id!r}")
+    return rsi_g1_root() / diagnostic_id
+
+
+def assert_rsi_g1_roots_isolated() -> "dict[str, str]":
+    """G1 根不得与任何研究族根重叠（fail-closed，Plan §6「独立诊断族」）。"""
+    def resolved(path: Path) -> Path:
+        return Path(path).resolve(strict=False)
+
+    def within(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    g1 = resolved(rsi_g1_root())
+    others = {
+        "rsi_r13": resolved(rsi_r13_root()),
+        "rsi_r12": resolved(Path(DEFAULT_DATA_ROOT) / "rsi_r12"),
+        "rsi_r1": resolved(Path(DEFAULT_DATA_ROOT) / "rsi_r1"),
+    }
+    for name, path in others.items():
+        if g1 == path or within(g1, path) or within(path, g1):
+            raise RuntimeError(f"G1 根与旧族根重叠：{name}={path}")
+    return {name: str(path) for name, path in others.items()}
+
 
 
 def rsi_r13_campaign_id() -> str:

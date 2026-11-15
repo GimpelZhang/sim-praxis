@@ -662,13 +662,34 @@ def build_formal_packet(ctx: Any, study: str, task: TS.TaskSpecV13) -> tuple:
                                  f"{study}:{block} 缺 {nuisance_names}")
         assignments.append({"block_id": block,
                             "nuisance": dict(by_block[block])})
+    # 轮 Q（R13-D13）：正式包必须有**非空 evidence_index**。轮 O 的两份历史包
+    # evidence_index 为空——审查者无法核「报告里的 receipt sha 是否真被封存」，
+    # 只能凭文字判断。这里把三件封存原件的 sha/n_bytes 登记进包：
+    # 确认批分析原始输出、分析凭据、逐 block 分配（含实际 nuisance）。
+    out_rel = f"private/analysis/{study}-confirm.raw.json"
+    rec_rel = f"private/receipts/{study}-confirm.json"
+    for rel in (out_rel, rec_rel):
+        if not ctx.exists(rel):
+            raise ReviewRunError("EVIDENCE_MISSING", f"{study}:{rel}")
+    blocks_doc = {"schema": "simpraxis.rsi_g1.confirm_blocks.v1",
+                  "schema_version": 1, "study_id": study,
+                  "blocks": [{"block_id": row["block_id"],
+                              "nuisance": row["nuisance"],
+                              "conditions": list(task.primary.condition_ids)}
+                             for row in assignments]}
+    evidence_files = {
+        "analysis/output.json": ctx.relative(out_rel).read_bytes(),
+        "analysis/receipt.json": ctx.relative(rec_rel).read_bytes(),
+        "confirm/blocks.json": json.dumps(blocks_doc, ensure_ascii=False,
+                                          sort_keys=True).encode("utf-8"),
+    }
     packet = RN.build_packet(
         study=study, task=task, intent=intent,
         design_audit={"run_count": len(artifacts),
                       "unique_design_count": len(artifacts),
                       "independent_unit_count": len(values)},
         assignments=assignments,
-        values=values, report=report_doc, evidence_files={},
+        values=values, report=report_doc, evidence_files=evidence_files,
         candidate_excerpts=[], sources={})
     return packet, report_doc, values
 

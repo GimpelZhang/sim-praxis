@@ -462,6 +462,13 @@ def test_r13_formal_packet_reads_reports_under_campaign_root(tmp_path, monkeypat
     (ctx.root / "reports" / "A-abc123.json").write_text(
         json.dumps({"report": {"schema": "x", "task_id": task.task_id}}),
         encoding="utf-8")
+    # 轮 Q（R13-D13）：正式包必须带封存原件的 evidence_index
+    (ctx.root / "private" / "analysis").mkdir(parents=True, exist_ok=True)
+    (ctx.root / "private" / "receipts").mkdir(parents=True, exist_ok=True)
+    (ctx.root / "private" / "analysis" / "A-confirm.raw.json").write_text(
+        "{}", encoding="utf-8")
+    (ctx.root / "private" / "receipts" / "A-confirm.json").write_text(
+        "{}", encoding="utf-8")
     class _Manifest:
         assignments: "list[Any]" = []
 
@@ -582,3 +589,21 @@ def test_r13_formal_packet_block_table_carries_actual_nuisance(tmp_path):
     for block, mass in want.items():
         assert rows[block].get("mass_kg") == mass, block
         assert "sampled_policy" not in rows[block]
+
+
+def test_r13_formal_packet_has_nonempty_evidence_index(tmp_path):
+    """轮 Q（R13-D13）：正式包必须登记封存原件的 sha（此前恒为空）。"""
+    from orchestrator.rsi_r1 import r13_review_run as RR
+
+    task = TS.build_new_a()
+    ctx, state, dispatcher = _setup(tmp_path, task=task, values=_values_a())
+    out, state, ctx = _run_chain(ctx, state, dispatcher, task)
+    assert out["ok"], out
+    packet, _, _ = RR.build_formal_packet(ctx, "A", task)
+    index = packet["evidence_index"]
+    assert set(index) == {"analysis/output.json", "analysis/receipt.json",
+                          "confirm/blocks.json"}
+    raw = ctx.relative("private/analysis/A-confirm.raw.json").read_bytes()
+    assert index["analysis/output.json"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    assert index["analysis/output.json"]["bytes"] == len(raw)
+    assert all(entry["bytes"] > 0 for entry in index.values())
