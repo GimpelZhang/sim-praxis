@@ -1281,6 +1281,7 @@ class QuotaLedger:
         """RSI-R1.3 账（2905；campaign 由 SIMPRAXIS_RSI_R13_CAMPAIGN 选定）。"""
         return cls(RSI_R13_NAMESPACE)
 
+    @classmethod
     def rsi_r12(cls) -> "QuotaLedger":
         """RSI-R1.2 账（家族账；已结案 campaign 由 closeout 标记封存只读，新战役须新建 campaign）。
 
