@@ -126,8 +126,10 @@ def cmd_init(args: Any) -> int:
     budget = C13.default_budget_v13(
         envelope, hard_cap_steps=int(resource["hard_cap_steps"]),
         aux_subenvelopes=resource.get("subenvelopes") or {})
-    budget_sha = _write_json(ctx.relative("contract/budget.json"),
-                             budget.to_dict())
+    _write_json(ctx.relative("contract/budget.json"), budget.to_dict())
+    # 信封/费用件绑定的是**预算文档 canonical sha**（与 R1.2 一致），不是文件
+    # 字节 sha；LOCK 复核用 budget_from_dict(...).sha256。
+    budget_sha = budget.sha256
     for name in ("taskset_manifest.json", "resource_plan.json",
                  "task_difference_table.md"):
         shutil.copyfile(taskset / name, ctx.relative(f"contract/{name}"))
