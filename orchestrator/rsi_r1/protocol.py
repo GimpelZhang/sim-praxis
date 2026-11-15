@@ -542,7 +542,10 @@ _ACTIONS_BLOCK_SOURCE = (
     "改写某个位置的动作会让它的下游位置失效：改写 design 后必须重新 "
     "propose_plan 才能推进 run_batch；改写 plan 后必须重新 run_batch；改写 "
     "analysis 后必须重新 analyze。失效位置已消耗的 POST 不退还；确认冻结后"
-    "禁止改写 design/plan/analysis（terminal）。\n")
+    "禁止改写 design/plan/analysis（terminal）。\n"
+    "**revision 纪律**：改写 design 后重新 propose_plan 时，`revision` 必须是"
+    "已有最大修订号 +1（通常首次探索 revision=1，此后 2、3…）；用旧号重提会被"
+    "REVISION_GAP 拒绝。\n")
 
 _ACTIONS_BLOCK = _ACTIONS_BLOCK_SOURCE.replace(
     "__RUN_CONFIRM_STEP__", _RUN_CONFIRM_STEP_LEGACY)

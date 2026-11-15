@@ -190,9 +190,9 @@ R13_FAMILY_CLOSED_ROUND_POSTS = 514
 #: 轮 A 首槽 1 呼（R13-D3）+ 轮 B review 校准 4 呼（R13-D4 案例夹具）已真实花掉，
 #: 已花不归还；新轮仍需完整 132 ⇒ 族帽 = 历史 554 + 已花 5 + 新轮 132 = 691。
 #: 旧 637 的余量 92 不结转（Plan §6 明写「不是把旧637余量92再加132」）。
-R13_PRIOR_SPENT_POSTS = 109        # 前8轮 + I(probe6)
+R13_PRIOR_SPENT_POSTS = 122        # 前9轮 + J(probe8+practice5)
 R13_FAMILY_CAP = (R13_FAMILY_HISTORY_POSTS + R13_PRIOR_SPENT_POSTS
-                  + RSI_R13_HARD_CAP)   # 795
+                  + RSI_R13_HARD_CAP)   # 808
 R13_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (R13_FAMILY_CAP,)
 #: 账外诊断的取证材料（2026-11-14，`/tmp` 脚本只从 env 读凭据，不落密）。
 R13_OFFLEDGER_EVIDENCE: "tuple[Mapping[str, Any], ...]" = (
@@ -446,6 +446,8 @@ RECOVERABLE_ERROR_CODES: "tuple[str, ...]" = (
     "HYPOTHESIS_INSUFFICIENT",
     "DISTRIBUTION",
     "DISTRIBUTION_DEGENERATE",
+    "REVISION_GAP",
+    "PLAN_NOT_EDITABLE",
     "CANDIDATE_PROCESS_EXIT",  # 可安全归因的候选设计/分析退出非 0（确认冻结前）
     "ARTIFACT_MALFORMED",
 )

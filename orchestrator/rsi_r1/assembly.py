@@ -700,7 +700,13 @@ class CampaignDispatcher:
             if exc.terminal:
                 raise
             return self._fail(exc.code, exc.detail)
-        except (C.ContractError, E.ExperimentError, S.StateError,
+        except S.StateError as exc:
+            # StateError 来自 append_plan/freeze 等原子状态操作：拒绝路径不写
+            # 任何事件（成功才 append），因此副作用恒为 NONE，候选可在同一
+            # attempt 自修（R1.3 轮 J 实证：REVISION_GAP 曾误标 UNKNOWN）。
+            return self._fail(str(exc.code), str(exc),
+                              side_effect_status="NONE")
+        except (C.ContractError, E.ExperimentError,
                 J.JudgeError, RP.ReplayError, CL.ClosureError,
                 SB.SandboxError, O.ObservationError, AssemblyError) as exc:
             # 合同/状态类失败是**可自修**反馈：只回公开条款，不终止。
