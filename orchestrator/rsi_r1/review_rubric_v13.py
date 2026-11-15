@@ -24,6 +24,7 @@ from typing import Any, Mapping, Sequence
 
 from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import research_report as RR
+from orchestrator.rsi_r1 import review_ref_policy as RREF
 
 REVIEW_SCHEMA = f"{P.SCHEMA_PREFIX_V13}.review.v1"
 VERDICT_SCHEMA = P.REVIEW_VERDICT_SCHEMA_V13
@@ -70,7 +71,8 @@ class CombinedReview:
 
 
 def validate_review_v13(doc: Any, *, evidence: Mapping[str, bytes],
-                        expected_packet_sha256: str) -> "dict[str, Any]":
+                        expected_packet_sha256: str,
+                        mode: str = "formal") -> "dict[str, Any]":
     """结构 + 引用解析；语义 PASS/FAIL 由审查者判断，机器不代判。"""
     if not isinstance(doc, Mapping):
         raise ReviewError("WRONG_TYPE", "review 必须是对象")
@@ -88,6 +90,10 @@ def validate_review_v13(doc: Any, *, evidence: Mapping[str, bytes],
     items = doc["items"]
     if not isinstance(items, Mapping) or set(items) != set(ITEMS_V13):
         raise ReviewError("ITEMS_MISMATCH", "六维必须逐项给出")
+    packet = evidence.get("packet.json")
+    if packet is None:
+        raise ReviewError("PACKET_MISSING", "evidence 缺 packet.json")
+    resolver = RREF.RefResolver(packet, mode=mode)
     out: "dict[str, Any]" = {}
     for name in ITEMS_V13:
         row = items[name]
@@ -103,14 +109,10 @@ def validate_review_v13(doc: Any, *, evidence: Mapping[str, bytes],
             raise ReviewError("REFS_EMPTY", name)
         for i, locator in enumerate(refs):
             try:
-                # 审查者的引用只需解析到包内位置；包字节由收据绑定。模型常把
-                # packet_sha256 字段当文件 sha 抄进来，这里不让它误伤解析。
-                clean = {k: v for k, v in locator.items() if k != "sha256"}
-                RR.resolve_locator(clean, evidence=evidence,
-                                   default_file="packet.json"
-                                   if "packet.json" in evidence else None)
-            except RR.ReportError as exc:
-                raise ReviewError(exc.code, f"{name}.refs[{i}]: {exc.detail}") from None
+                resolver.resolve(locator)
+            except RREF.RefPolicyError as exc:
+                raise ReviewError(exc.code,
+                                  f"{name}.refs[{i}]: {exc.detail}") from None
         out[name] = {"verdict": row["verdict"],
                      "reason": str(row["reason"]),
                      "refs": list(refs)}
@@ -124,14 +126,16 @@ def combine_reviews(reviews: Sequence[Any], *,
                     expected_packet_sha256: str,
                     evidence: Mapping[str, bytes],
                     rubric: "Sequence[str]" = ITEMS_V13,
-                    science_inconclusive: bool = False) -> CombinedReview:
+                    science_inconclusive: bool = False,
+                    mode: str = "formal") -> CombinedReview:
     """两份全部 PASS 才 REVIEW_PASS；任一分歧/UNVERIFIABLE → INCONCLUSIVE。"""
     if len(reviews) != 2:
         raise ReviewError("REVIEW_COUNT", f"必须恰好两审，实得 {len(reviews)}")
     if len(receipts) != 2:
         raise ReviewError("RECEIPT_COUNT", "必须恰好两份审查收据")
     parsed = [validate_review_v13(r, evidence=evidence,
-                                  expected_packet_sha256=expected_packet_sha256)
+                                  expected_packet_sha256=expected_packet_sha256,
+                                  mode=mode)
               for r in reviews]
     ids = {p["review_id"] for p in parsed}
     who = {p["reviewer_id"] for p in parsed}

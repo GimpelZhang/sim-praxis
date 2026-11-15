@@ -240,3 +240,32 @@ def test_review_schema_is_new_family():
     assert RRC.RECEIPT_SCHEMA == P.REVIEW_RECEIPT_SCHEMA_V13
     assert RN.PACKET_SCHEMA == P.REVIEW_PACKET_SCHEMA_V13
     assert len(RN.CALIBRATION_CASES) == 6
+
+
+def test_ref_policy_calibration_case_level_and_formal_prefix():
+    from orchestrator.rsi_r1 import review_ref_policy as RREF
+    packet = {"cases": [{"case_id": "c1", "design_intent": {"nuisance":
+                  {"mass_kg": {"mode": "varying"}}}}]}
+    raw = json.dumps(packet).encode()
+    cal = RREF.RefResolver(raw, mode="calibration")
+    # 案例级：深指针错层仍归到 case（预注册规则）
+    assert cal.resolve({"type": "json_pointer",
+                        "value": "/cases/0/design_intent/nuisance/mode"}
+                       )["case_id"] == "c1"
+    assert cal.resolve("c1")["index"] == 0
+    try:
+        cal.resolve({"case_id": "nope"})
+    except RREF.RefPolicyError as exc:
+        assert exc.code == "REF_CASE_UNKNOWN"
+    else:
+        raise AssertionError("unknown case accepted")
+    formal = RREF.RefResolver(raw, mode="formal")
+    assert formal.resolve({"pointer": "/cases/0/design_intent/nuisance/mode"}
+                          )["pointer_prefix"] == \
+        "/cases/0/design_intent/nuisance"
+    try:
+        formal.resolve({"pointer": "/nope/x"})
+    except RREF.RefPolicyError as exc:
+        assert exc.code == "REF_UNRESOLVED"
+    else:
+        raise AssertionError("nonexistent top-level accepted")

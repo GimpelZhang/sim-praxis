@@ -167,8 +167,11 @@ def build_request_text(*, packet: Mapping[str, Any],
             "locators into the packet's evidence_index or candidate_excerpts. "
             "Judge scientific honesty, not just format. Do not assume other "
             "reviews exist.")
+    from orchestrator.rsi_r1 import review_ref_policy as RREF
     user = (
         "RUBRIC:\n" + json.dumps(rubric_doc, sort_keys=True, ensure_ascii=False)
+        + "\n\nREFERENCE_POLICY:\n"
+        + json.dumps(RREF.policy_document(), sort_keys=True, ensure_ascii=False)
         + "\n\nPACKET:\n" + packet_bytes(packet).decode("utf-8"))
     return system, user
 

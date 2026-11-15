@@ -159,6 +159,7 @@ CLOSURE_GROUPS_R13: "dict[str, tuple[str, ...]]" = {
     })),
     "review": (
         "orchestrator/rsi_r1/r13_review_run.py",
+        "orchestrator/rsi_r1/review_ref_policy.py",
         "orchestrator/rsi_r1/r13_review_worker.py",
         "orchestrator/rsi_r1/review_capacity.py",
         "orchestrator/rsi_r1/review_receipt.py",

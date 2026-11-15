@@ -5,7 +5,7 @@
 * AC01 新 profile 显式选择、未知拒绝、旧两条 profile 数值不变；
 * AC02 新根/命名空间隔离，写入旧根被拒；
 * AC03 族账逐账本事件去重（R1.3 历史 = 31 + 514 + 9），未决 reservation 拒绝；
-* AC04 候选 124 + 审查 8 = 132，族帽 691；
+* AC04 候选 124 + 审查 8 = 132，族帽 692；
 * AC05 preflight/基线零 POST 留证；
 * §5 T0 审查包容量测量方法（真实 tokenizer；超限即 REVIEW_PACKET_TOO_LARGE）。
 """
@@ -34,7 +34,7 @@ def test_r13_profile_is_explicit_and_numbered():
     assert r13.namespace == 2905
     assert r13.consent_scope == "R1.3"
     assert r13.hard_cap == 132 == r13.normal_budget
-    assert r13.family_cap == 691
+    assert r13.family_cap == 692
     assert r13.family_history_posts == 554
     assert r13.data_root_name == "rsi_r13"
     assert r13.closure_groups_key == "r13"
@@ -79,7 +79,7 @@ def test_r13_budget_split_and_cap():
     assert sum(caps[l] for l in ("probe", "practice", "study_A", "study_B")) == 124
     assert sum(caps[l] for l in ("review_calibration", "review_final")) == 8
     assert sum(caps.values()) == 132
-    assert P.R13_FAMILY_CAP == 554 + 5 + 132 == 691
+    assert P.R13_FAMILY_CAP == 554 + 6 + 132 == 692
     assert P.R13_FAMILY_CAP != 637 + 132  # 不结转旧余量
 
 
@@ -230,7 +230,7 @@ def test_family_register_r13_reserves_candidate_plus_review(monkeypatch, tmp_pat
     assert permit["schema"] == P.FAMILY_PERMIT_SCHEMA_V13
     assert permit["posts_reserved"] == 132
     doc = F.load_family_doc(root, expected_schema=P.FAMILY_SCHEMA_V13)
-    assert doc["family_cap"] == 691
+    assert doc["family_cap"] == 692
     assert doc["history"]["total_call_rows"] == 554
     # 同 profile 第二轮在本轮关闭前被拒
     with pytest.raises(F.FamilyError) as exc:
@@ -272,7 +272,7 @@ def test_t0_baseline_is_zero_post_and_private(tmp_path, monkeypatch):
     assert doc["paid_posts"] == 0
     assert doc["schema"] == cli_r13.BASELINE_SCHEMA
     assert doc["profile_id"] == "rsi-r1.3"
-    assert doc["profiles"]["rsi-r1.3"]["family_cap"] == 691
+    assert doc["profiles"]["rsi-r1.3"]["family_cap"] == 692
     assert doc["review_capacity"]["input_tokens"] == 20000
     assert (out / "baseline.json").stat().st_mode & 0o077 == 0
 

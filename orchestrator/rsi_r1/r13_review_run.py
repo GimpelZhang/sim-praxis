@@ -380,16 +380,17 @@ def _parse_calibration_reply(call_text: str, packet_sha: str,
             refs = body.get("refs")
             if not isinstance(refs, (list, tuple)) or not refs:
                 raise ReviewRunError("CALIBRATION_FORMAT", f"{cid}.{item}.refs")
-            from orchestrator.rsi_r1 import research_report as _RR
+            from orchestrator.rsi_r1 import review_ref_policy as _RREF
+            resolver = _RREF.RefResolver(packet_bytes, mode="calibration")
             for locator in refs:
                 try:
-                    clean = {k: v for k, v in locator.items()
-                             if k != "sha256"}
-                    _RR.resolve_locator(clean,
-                                        evidence=_packet_evidence(packet_bytes),
-                                        default_file="packet.json")
-                except Exception:
-                    raise ReviewRunError("CALIBRATION_REFS", f"{cid}.{item}")
+                    resolved = resolver.resolve(locator)
+                except _RREF.RefPolicyError as exc:
+                    raise ReviewRunError("CALIBRATION_REFS",
+                                         f"{cid}.{item}:{exc.code}") from None
+                if resolved.get("case_id") != cid:
+                    raise ReviewRunError("CALIBRATION_REFS",
+                                         f"{cid}.{item}:ref 指向其他案例")
             row[item] = verdict
         out[cid] = row
     return out
@@ -460,14 +461,20 @@ def review_adapter_selftest() -> "dict[str, Any]":
                              "selftest")
         doc, packet_bytes, sha = seal_packet(packet, slot)
         cases = {}
-        for cid in ids:
+        for pos, cid in enumerate(ids):
             expected = RN.CALIBRATION_CASES[cid]["expected"]
+            styles = [{"case_id": cid},
+                      {"type": "case", "case_id": cid},
+                      {"type": "json_pointer",
+                       "path": f"/cases/{pos}"},
+                      # 预注册：故意错层的深指针仍按最长前缀归到该 case
+                      {"type": "json_pointer",
+                       "value": f"/cases/{pos}/design_intent/nuisance/mode"}]
             cases[cid] = {"verdicts": {
                 item: {"verdict": expected.get(item, "PASS"),
                        "reason": "scripted",
-                       "refs": [{"kind": "json_pointer", "file": "packet.json",
-                                 "pointer": "/cases/0"}]}
-                for item in RV.ITEMS_V13}}
+                       "refs": [styles[i % len(styles)]]}
+                for i, item in enumerate(RV.ITEMS_V13)}}
         reply = {"schema": CALIB_REVIEW_SCHEMA, "review_id": slot.review_id,
                  "reviewer_id": slot.reviewer_id, "packet_sha256": sha,
                  "cases": cases}
@@ -497,8 +504,10 @@ def review_adapter_selftest() -> "dict[str, Any]":
     verdict = RN.check_calibration(all_results)
     if not verdict["ok"]:
         problems.extend(verdict["problems"])
+    from orchestrator.rsi_r1 import review_ref_policy as _RREF
     return {"ok": not problems, "problems": problems, "packets": 2,
-            "cases": 6, "paid_posts": 0}
+            "cases": 6, "paid_posts": 0,
+            "ref_policy_sha256": _RREF.policy_sha256()}
 
 
 # ---------------------------------------------------------------------------
@@ -578,7 +587,7 @@ def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
         evidence = _packet_evidence(spawned["packet_bytes"])
     combined = RV.combine_reviews(
         reviews, receipts=receipts,
-        expected_packet_sha256=packet_sha, evidence=evidence)
+        expected_packet_sha256=packet_sha, evidence=evidence, mode="formal")
     doc = {"schema": "simpraxis.rsi_r13.review_combined.v1",
            "schema_version": 1, "envelope_id": ctx.envelope_id,
            "study": study, "task_id": task.task_id,
