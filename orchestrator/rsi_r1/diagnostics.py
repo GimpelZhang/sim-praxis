@@ -25,7 +25,7 @@ from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import rubric as R
 from orchestrator.rsi_r1 import task_specs as TS
 
-DIAG_SCHEMA = P.DIAGNOSTICS_SCHEMA_V13
+DIAG_SCHEMA = P.ANALYSIS_OUTPUT_SCHEMA_V13
 
 _KEYS = frozenset({"schema", "schema_version", "phase", "study_id", "task_id",
                    "input_sha256", "source_sha256", "contrasts", "coverage",
