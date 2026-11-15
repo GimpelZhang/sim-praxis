@@ -123,8 +123,54 @@ def seal_packet(packet: Mapping[str, Any], slot: RN.ReviewSlot
                            ensure_ascii=False).encode("utf-8"), sha
 
 
+def _load_spawned(work: Path, slot: RN.ReviewSlot) -> "dict[str, Any]":
+    """从已存在的槽目录重建（不重发 POST；用于续跑/重解析）。"""
+    call = json.loads((work / "call.json").read_text(encoding="utf-8"))
+    packet_bytes = (work / "packet.json").read_bytes()
+    packet_sha = json.loads(packet_bytes)["packet_sha256"]
+    request = (work / "request.bin").read_bytes()
+    response = str(call.get("text") or "").encode("utf-8")
+    isolation = RRc.IsolationEvidence(
+        fresh_context=True, fresh_process=True, env_scrubbed=True,
+        cache_dir=str(work), other_review_inputs_present=False,
+        created_by="scheduler",
+        evidence=({"kind": "fresh_dir", "sha256": _sha(str(work).encode())},
+                  {"kind": "nonce",
+                   "sha256": _sha((work / "nonce").read_bytes())},
+                  {"kind": "input_allowlist",
+                   "sha256": _sha(b"packet.json")}))
+    access = json.dumps({"review_id": slot.review_id,
+                         "files_read": ["packet.json"],
+                         "request_sha256": call["request_sha256"],
+                         "response_sha256": _sha(response),
+                         "started": call["started_at_utc"],
+                         "ended": call["ended_at_utc"]},
+                        sort_keys=True).encode()
+    receipt = RRc.build_receipt(
+        review_id=slot.review_id, reviewer_id=slot.reviewer_id,
+        session_id=f"sess-{slot.review_id}", process_id=int(call["process_id"]),
+        prompt=b"review-rubric-v13", schema=json.dumps(
+            RV.public_rubric(), sort_keys=True).encode(),
+        source=b"packet", packet=packet_bytes, request=request,
+        response=response, access_log=access,
+        input_allowlist=["packet.json"],
+        started_at_utc=str(call["started_at_utc"]),
+        ended_at_utc=str(call["ended_at_utc"]), isolation=isolation,
+        packet_sha256=packet_sha)
+    RRc.verify_receipt(receipt, review_id=slot.review_id,
+                       reviewer_id=slot.reviewer_id,
+                       packet_sha256=packet_sha)
+    return {"call": call, "packet_bytes": packet_bytes,
+            "packet_sha256": packet_sha, "receipt": receipt,
+            "reused": True}
+
+
 def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
            batch_id: str, task: int, out_dir: Path) -> "dict[str, Any]":
+    for existing in sorted(out_dir.glob(f"review-{slot.review_id}-*")):
+        if (existing / "call.json").is_file() and \
+                (existing / "packet.json").is_file():
+            return _load_spawned(existing, slot)
     _approval(ctx, batch_id=batch_id, lane=lane, task=task, approved=4)
     work = out_dir / f"review-{slot.review_id}-{uuid.uuid4().hex[:8]}"
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -247,6 +293,8 @@ def _calibration_case(case_id: str) -> dict:
              "values": blocks[0]["values"], "effect": 0.20},
             {"block_id": "b02", "nuisance": {"mass_kg": "1.0"},
              "values": blocks[1]["values"], "effect": 0.17}]
+        case["assignment_note"] = ("exploration cells all used the same "
+                                   "placeholder nuisance value 1.0")
         case["report"] = dict(report, methods_and_assignment_responsibility=(
             "探索覆盖了 nuisance 分布（48 run）"))
     elif case_id == "overclaim_universal":
@@ -257,19 +305,33 @@ def _calibration_case(case_id: str) -> dict:
     elif case_id == "empty_limitations":
         case["report"] = dict(report, limitations=[])
     elif case_id == "valid_uncertain":
+        # 与 block_table 自洽：交互效应急 0.004 / 0.000，均值 0.002。
+        case["block_table"] = [
+            {"block_id": "b01", "nuisance": {"mass_kg": "0.31"},
+             "values": {"hi_base": 1.0, "hi_low_mu": 1.003, "lo_base": 0.5,
+                        "lo_low_mu": 0.499, "sham": 1.0}, "effect": 0.004},
+            {"block_id": "b02", "nuisance": {"mass_kg": "0.74"},
+             "values": {"hi_base": 1.0, "hi_low_mu": 1.0, "lo_base": 0.5,
+                        "lo_low_mu": 0.5, "sham": 1.0}, "effect": 0.0}]
         case["diagnostics"] = dict(diagnostics, contrasts=[
             {"contrast_id": task.primary.id, "effect": 0.002,
-             "lower": -0.004, "upper": 0.009, "n_blocks": 2}])
+             "lower": -0.004, "upper": 0.009, "n_blocks": 2}],
+            threshold_counts=[{"above_delta": 0, "below_minus_delta": 0,
+                               "within": 2}])
         case["report"] = dict(report, question_and_hypotheses=(
-            "效应可能接近零；当前证据不足"))
+            "效应可能接近零；当前证据不足以支持或反驳"))
     elif case_id == "fixed_pilot_scoped":
         case["design_intent"] = dict(
             intent, phase_role="fixed_pilot",
+            estimand={**intent["estimand"],
+                      "target_population": "single point: v0=0.6, mu=0.4"},
             phase_comparability={"relation": "different_target",
                                  "rationale": "结论只适用该点"})
         case["report"] = dict(report, heterogeneity_and_scope=[
             {"claim": "固定点结论只适用 v0=0.6, μ=0.4",
-             "applicability": "单点 pilot"}])
+             "applicability": "单点 pilot"}],
+            limitations=[{"statement": "固定点 pilot 不外推到其他初速/摩擦",
+                          "consequence": "仅是可行性，不是总体效应"}])
     return case
 
 
@@ -376,6 +438,21 @@ def review_adapter_selftest() -> "dict[str, Any]":
     groups = (["valid_positive", "pseudo_replication", "overclaim_universal"],
               ["valid_uncertain", "fixed_pilot_scoped", "empty_limitations"])
     problems: "list[str]" = []
+    # 案例自洽性（R13-D4）：诊断效应必须等于 block_table 的交互均值。
+    for cid in RN.CALIBRATION_CASES:
+        case = _calibration_case(cid)
+        vals = [b["values"] for b in case["block_table"]]
+        eff = [v["hi_low_mu"] - v["hi_base"] - v["lo_low_mu"] + v["lo_base"]
+               for v in vals]
+        mean = sum(eff) / len(eff)
+        diag = case["diagnostics"]["contrasts"][0]["effect"]
+        if abs(mean - diag) > 1e-9:
+            problems.append(f"{cid}: block_table 均值 {mean} != 诊断 {diag}")
+        if cid == "fixed_pilot_scoped" and "single point" not in str(
+                case["design_intent"]["estimand"].get("target_population")):
+            problems.append("fixed_pilot_scoped: 未明示单点总体")
+        if cid == "pseudo_replication" and not case.get("assignment_note"):
+            problems.append("pseudo_replication: 缺占位值证据")
     all_results: "dict[str, dict[str, str]]" = {}
     for pi, ids in enumerate(groups):
         packet = build_calibration_packet(ids)

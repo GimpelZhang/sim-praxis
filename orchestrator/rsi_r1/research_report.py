@@ -118,7 +118,8 @@ def resolve_locator(locator: Any, *, evidence: Mapping[str, bytes],
             body = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise ReportError("LOCATOR_UNRESOLVED", f"{path} 不是 JSON") from None
-        pointer = locator.get("pointer")
+        pointer = (locator.get("pointer") or locator.get("path")
+                   or locator.get("json_pointer") or locator.get("value"))
         if not isinstance(pointer, str) or not _resolve_pointer(body, pointer):
             raise ReportError("LOCATOR_UNRESOLVED", f"{path}#{pointer!r}")
         return path
