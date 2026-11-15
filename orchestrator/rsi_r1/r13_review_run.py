@@ -335,6 +335,9 @@ def _calibration_case(case_id: str) -> dict:
         case["primary"] = pair
         case["conditions"] = [c for c in conditions
                               if c["id"] in ("hi_base", "hi_low_mu")]
+        case["public_question"] = (
+            "固定点 pilot：在 v0=0.6 m/s、μ=0.4 的工作点上，把滑动摩擦降到 0.2 "
+            "是否使 4 s 净位移增大？结论只适用该点。")
         case["design_intent"] = dict(
             intent, phase_role="fixed_pilot",
             estimand={**intent["estimand"],
@@ -345,9 +348,13 @@ def _calibration_case(case_id: str) -> dict:
         case["diagnostics"] = dict(diagnostics, contrasts=[
             {"contrast_id": "fixed_point_pair", "effect": 0.235,
              "lower": 0.22, "upper": 0.25, "n_blocks": 2}])
-        case["report"] = dict(report, heterogeneity_and_scope=[
-            {"claim": "固定点结论只适用 v0=0.6, μ=0.4",
-             "applicability": "单点 pilot"}],
+        case["report"] = dict(
+            report,
+            question_and_hypotheses=(
+                "固定点 pilot：v0=0.6、基准 μ=0.4 处，降低 μ 到 0.2 的位移增量"),
+            heterogeneity_and_scope=[
+                {"claim": "固定点结论只适用 v0=0.6, μ=0.4",
+                 "applicability": "单点 pilot"}],
             limitations=[{"statement": "固定点 pilot 不外推到其他初速/摩擦",
                           "consequence": "仅是可行性，不是总体效应"}])
     # 夹具归一（R13-D4）：诊断效应=primary terms 的 block 均值，δ 两侧计数
@@ -356,6 +363,8 @@ def _calibration_case(case_id: str) -> dict:
                for t in case["primary"]["terms"]}
     eff = [sum(w * b["values"][cond] for cond, w in weights.items())
            for b in case["block_table"]]
+    for block, value in zip(case["block_table"], eff):
+        block["effect"] = value
     mean = sum(eff) / len(eff)
     delta = float(case["primary"]["delta"])
     case["diagnostics"]["contrasts"][0]["effect"] = mean
@@ -484,6 +493,9 @@ def review_adapter_selftest() -> "dict[str, Any]":
         diag = case["diagnostics"]["contrasts"][0]["effect"]
         if abs(mean - diag) > 1e-9:
             problems.append(f"{cid}: block 均值 {mean} != 诊断 {diag}")
+        for b, value in zip(blocks, eff):
+            if abs(float(b.get("effect", float("nan"))) - value) > 1e-9:
+                problems.append(f"{cid}: {b['block_id']} effect != 计算值")
         delta = float(case["primary"]["delta"])
         counts = case["diagnostics"]["threshold_counts"][0]
         want = {"above_delta": sum(1 for v in eff if v > delta),

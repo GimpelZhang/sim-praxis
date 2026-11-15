@@ -44,7 +44,7 @@ def test_v13_contracts_and_ledger_namespace():
         envelope_id="env", profile_id=P.PROFILE_R13, plan_path="p",
         plan_sha256="a" * 64, budget_sha256=budget.sha256, scope="R1.3",
         max_posts=132, review_calibration_posts=4, review_final_posts=4,
-        family_cap=696, exposure_note="x", authorized_at_utc="2026-11-15T00:00:00Z",
+        family_cap=700, exposure_note="x", authorized_at_utc="2026-11-15T00:00:00Z",
         authorization={"source": "user"}, risk={"usd": "UNKNOWN"})
     assert C.consent_from_dict(consent.to_dict()).max_posts == 132
     assert QL.RSI_R13_NAMESPACE.hard_cap == 132
