@@ -139,3 +139,11 @@ def test_verify_inputs_cli_detects_tamper(tmp_path):
     f.write_text('{"x": 1}', encoding="utf-8")
     assert CLI.main(["verify-inputs", "--diagnostic-id", "g1t",
                      "--out", str(out), "--manifest", man]) == 2
+
+
+def test_resource_guard_uses_current_rss_not_lifetime_peak():
+    """全量套里早先测试会把 ru_maxrss 抬高；守卫必须读 VmRSS（当前值）。"""
+    guard = CLI._ResourceGuard  # noqa: SLF001
+    rss = guard._current_rss()  # noqa: SLF001
+    assert rss > 0
+    assert rss < guard.MAX_RSS_BYTES

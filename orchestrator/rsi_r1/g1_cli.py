@@ -56,11 +56,23 @@ class _ResourceGuard:
         self.out = Path(out)
 
     def __enter__(self) -> "_ResourceGuard":
-        import resource
         import time
         self._t0 = time.monotonic()
-        self._rss0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        self._rss0 = self._current_rss()
         return self
+
+    @staticmethod
+    def _current_rss() -> int:
+        """当前常驻内存（VmRSS）。**不用** ru_maxrss：那是进程生命周期峰值，
+        在全量测试套里会被早先的重活永久抬高，导致本守卫误报。"""
+        try:
+            for line in Path("/proc/self/status").read_text().splitlines():
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+        except OSError:
+            pass
+        import resource
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
 
     @staticmethod
     def _out_bytes(out: Path) -> int:
@@ -69,10 +81,9 @@ class _ResourceGuard:
         return sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
 
     def __exit__(self, exc_type, exc, tb) -> bool:
-        import resource
         import time
         elapsed = time.monotonic() - self._t0
-        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        rss = self._current_rss()
         out_bytes = self._out_bytes(self.out)
         problems = []
         if elapsed > self.MAX_SECONDS:
