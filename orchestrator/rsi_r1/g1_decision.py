@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 SCHEMA = "simpraxis.rsi_g1.decision.v1"
-SIDECAR_SCHEMA = "simpraxis.rsi_g1.closeout_sidecar.v1"
+SIDECAR_SCHEMA = "simpraxis.rsi_g1.closeout_bypass.v1"
 
 HISTORY_COMPLETE = "COMPLETE"
 HISTORY_PARTIAL = "PARTIAL"
