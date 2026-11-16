@@ -912,6 +912,149 @@ def cmd_closeout(args: argparse.Namespace) -> int:
 # argparse
 # ---------------------------------------------------------------------------
 
+def _g21():
+    from orchestrator.rsi_r1 import g21_bridge as G21
+    return G21
+
+
+def _bridge_root(args: argparse.Namespace) -> Path:
+    if not getattr(args, "root", None):
+        raise G2CliError("ROOT_MISSING", "bridge-* 必须给 --root")
+    return Path(args.root)
+
+
+def _bridge_manifest(root: Path, args: argparse.Namespace):
+    G21 = _g21()
+    frozen = root / "freeze" / "replay_manifest.json"
+    if frozen.is_file():
+        return G21.load_manifest(frozen)
+    explicit = getattr(args, "inputs", "") or ""
+    if explicit:
+        return G21.load_manifest(Path(explicit))
+    raise G2CliError("MANIFEST_MISSING", f"{frozen} 不存在且未给 --inputs")
+
+
+def cmd_bridge_init(args: argparse.Namespace) -> int:
+    """G21-0：建新根、冻结输入清单与 sha、写合同快照。"""
+    G21 = _g21()
+    root = _bridge_root(args)
+    RP.assert_rsi_g21_roots_isolated()
+    for sub in RP.RSI_G21_SUBDIRS:
+        ensure_private_dir(root / sub)
+    manifest = G21.load_manifest(Path(args.inputs))
+    frozen = G21.freeze_inputs(root, manifest)
+    scopes = G21.build_scopes(root, manifest)
+    snapshot = G21.snapshot_files(root)
+    G21.write_json_private(root / "freeze" / "replay_manifest.json", manifest)
+    G21.write_json_private(root / "freeze" / "freeze_report.json",
+                           {"frozen": frozen, "scopes": scopes})
+    print(json.dumps({"ok": True, "root": str(root),
+                      "closure_sha256": frozen["closure_sha256"],
+                      "snapshot_sha256": snapshot["snapshot_sha256"],
+                      "n_inputs": frozen["entries"]},
+                     ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+def cmd_bridge_preflight(args: argparse.Namespace) -> int:
+    """核实冻结件/实现闭包/批准 tokenizer/两 study 源就绪。"""
+    G21 = _g21()
+    root = _bridge_root(args)
+    manifest = _bridge_manifest(root, args)
+    closure = G21.verify_source_closure(root, manifest)
+    if not (root / "contract" / "scope_A.json").is_file():
+        G21.build_scopes(root, manifest)
+    freshness = G21.verify_signature_freshness(root, manifest)
+    tok = G21.tokenizer_contract(root)
+    readiness = {}
+    for study in G21.STUDIES:
+        task = G21.TS.TaskSpecV13.from_dict(
+            G21.read_json(manifest["studies"][study]["task"]))
+        readiness[study] = G21.source_readiness(manifest["studies"][study], task)
+    doc = {"ok": tok["ok"] and bool(closure["ok"]),
+           "closure": closure, "signature": freshness,
+           "tokenizer": {"status": tok["status"],
+                         "sha256": tok["contract"].get("sha256"),
+                         "approval_ref": tok["contract"].get("approval_ref")},
+           "source": readiness}
+    G21.write_json_private(root / "reports" / "preflight.json", doc)
+    print(json.dumps(doc, ensure_ascii=False, sort_keys=True))
+    blocked = [s for s, r in readiness.items()
+               if r["status"] != G21.SOURCE_READY]
+    return 0 if not blocked else 1
+
+
+def cmd_bridge_run(args: argparse.Namespace) -> int:
+    """真实 loop/state/dispatcher 的离线证据桥（读+submit，零 POST）。"""
+    G21 = _g21()
+    root = _bridge_root(args)
+    manifest = _bridge_manifest(root, args)
+    tok = G21.tokenizer_contract(root)
+    consumer = Path(args.consumer) if args.consumer else (
+        G21.repo_root() / "tests" / "fixtures" / "g21_consumer" / "consumer.py")
+    result = G21.run_study(root, manifest, str(args.study),
+                           consumer_path=consumer, python=sys.executable,
+                           max_turns=int(args.max_turns or 12),
+                           tokenizer=tok["tokenizer"])
+    print(json.dumps({k: result.get(k) for k in
+                      ("study", "ok", "status", "study_state",
+                       "envelope_sha256", "envelope_bytes")},
+                     ensure_ascii=False, sort_keys=True))
+    return 0 if result.get("ok") else 1
+
+
+def cmd_bridge_raw_check(args: argparse.Namespace) -> int:
+    """独立 trusted raw 复算（子进程；不 import 生产投影）。"""
+    G21 = _g21()
+    root = _bridge_root(args)
+    manifest = _bridge_manifest(root, args)
+    report = G21.run_raw_check(root, manifest, python=sys.executable)
+    print(json.dumps({"ok": report.get("ok"),
+                      "independent": report.get("independent"),
+                      "studies": sorted((report.get("studies") or {}))},
+                     ensure_ascii=False, sort_keys=True))
+    return 0 if report.get("ok") else 1
+
+
+def cmd_bridge_capacity(args: argparse.Namespace) -> int:
+    G21 = _g21()
+    root = _bridge_root(args)
+    manifest = _bridge_manifest(root, args)
+    tok = G21.tokenizer_contract(root)
+    if args.write_matrix:
+        matrix = G21.capacity_matrix(
+            G2.load_scope_contract(manifest["studies"]["A"]["scope_contract"]))
+        G21.write_json_private(root / "freeze" / "capacity_matrix.json", matrix)
+    report = G21.run_capacity(root, manifest, tokenizer=tok["tokenizer"])
+    print(json.dumps({k: report.get(k) for k in ("ok", "n_ok", "n_total")},
+                     ensure_ascii=False, sort_keys=True))
+    return 0 if report.get("ok") else 1
+
+
+def cmd_bridge_isolation(args: argparse.Namespace) -> int:
+    G21 = _g21()
+    root = _bridge_root(args)
+    report = G21.run_isolation(root, image_digest=str(args.image_digest))
+    print(json.dumps({"status": report.get("status"),
+                      "negative_control":
+                      (report.get("negative_control") or {}).get(
+                          "readable_private")},
+                     ensure_ascii=False, sort_keys=True))
+    return 0 if report.get("status") == "ISOLATION_OK" else 1
+
+
+def cmd_bridge_closeout(args: argparse.Namespace) -> int:
+    G21 = _g21()
+    root = _bridge_root(args)
+    report = G21.closeout(root)
+    print(json.dumps({"overall": report.get("overall"),
+                      "axes": report.get("axes"),
+                      "gaps": report.get("gaps")},
+                     ensure_ascii=False, sort_keys=True))
+    return 0 if report.get("overall") in (
+        "G2.1_ENGINEERING_READY_FOR_NEW_DESIGN",) else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="g2_cli", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -955,6 +1098,48 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--compat-report")
     p.add_argument("--diagnostic-id")
     p.set_defaults(func=cmd_closeout)
+
+    # ---- RSI-G2.1（Plan §4.1：沿 g2_cli 加 bridge-* 离线子命令）----
+    p = sub.add_parser("bridge-init")
+    p.add_argument("--root", required=True)
+    p.add_argument("--inputs", required=True)
+    p.add_argument("--source-commit", default="")
+    p.set_defaults(func=cmd_bridge_init)
+
+    p = sub.add_parser("bridge-preflight")
+    p.add_argument("--root", required=True)
+    p.add_argument("--inputs", default="")
+    p.add_argument("--tokenizer-contract", default="")
+    p.set_defaults(func=cmd_bridge_preflight)
+
+    p = sub.add_parser("bridge-run")
+    p.add_argument("--root", required=True)
+    p.add_argument("--study", required=True, choices=["A", "B"])
+    p.add_argument("--inputs", default="")
+    p.add_argument("--consumer", default="")
+    p.add_argument("--max-turns", type=int, default=12)
+    p.set_defaults(func=cmd_bridge_run)
+
+    p = sub.add_parser("bridge-raw-check")
+    p.add_argument("--root", required=True)
+    p.add_argument("--inputs", default="")
+    p.set_defaults(func=cmd_bridge_raw_check)
+
+    p = sub.add_parser("bridge-capacity")
+    p.add_argument("--root", required=True)
+    p.add_argument("--inputs", default="")
+    p.add_argument("--fixtures", default="")
+    p.add_argument("--write-matrix", action="store_true")
+    p.set_defaults(func=cmd_bridge_capacity)
+
+    p = sub.add_parser("bridge-isolation")
+    p.add_argument("--root", required=True)
+    p.add_argument("--image-digest", required=True)
+    p.set_defaults(func=cmd_bridge_isolation)
+
+    p = sub.add_parser("bridge-closeout")
+    p.add_argument("--root", required=True)
+    p.set_defaults(func=cmd_bridge_closeout)
     return parser
 
 
