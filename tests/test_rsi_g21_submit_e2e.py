@@ -145,5 +145,9 @@ def test_bridge_records_consumer_label_and_resources(tmp_path):
         (root / "logs" / "bridge-run-A-resources.json").read_text())
     assert resources["command"] == "bridge-run-A"
     assert resources["wall_s"] > 0
-    assert resources["problems"] == []
+    assert resources["problems_enforced"] == []
+    # 嵌入 pytest 时宿主峰值只记录不判（Plan §3.3）
+    assert set(resources["problems_observed"]) - set(
+        resources["problems_enforced"]) == {
+        p for p in resources["problems_observed"] if p.startswith("peak_rss=")}
     assert resources["limits"]["wall_s"] > 0

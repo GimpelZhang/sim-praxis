@@ -939,15 +939,20 @@ def _guarded(root: Path, command: str, fn):
     started = time.monotonic()
     with _ResourceGuard(root) as guard:
         result = fn()
+    observed = list(guard.last_problems)
+    enforced = ([p for p in observed if not p.startswith("peak_rss=")]
+                if guard.embedded else observed)
     doc = {"schema": "simpraxis.rsi_g21.resources.v1", "schema_version": 1,
-           "command": command,
+           "command": command, "embedded": bool(guard.embedded),
            "wall_s": round(time.monotonic() - started, 3),
            "peak_rss_bytes": guard.peak_rss(),
            "out_bytes": guard._out_bytes(),
-           "problems": list(guard.last_problems),
+           "problems_observed": observed,
+           "problems_enforced": enforced,
            "limits": {"wall_s": MAX_WALLCLOCK_S, "peak_rss": MAX_RSS_BYTES,
                       "out_bytes": MAX_OUT_BYTES},
-           "note": "peak_rss 在 pytest 宿主内只记录不判（Plan §3.3）"}
+           "note": ("embedded=true 时 peak_rss 只记录不判（Plan §3.3：pytest "
+                    "宿主不计成诊断进程）；enforced 为真正判失败的条目")}
     ensure_private_dir(root / "logs")
     _write_json(root / "logs" / f"{command}-resources.json", doc)
     return result
