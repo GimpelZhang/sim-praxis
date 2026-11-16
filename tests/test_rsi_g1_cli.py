@@ -141,9 +141,35 @@ def test_verify_inputs_cli_detects_tamper(tmp_path):
                      "--out", str(out), "--manifest", man]) == 2
 
 
-def test_resource_guard_uses_current_rss_not_lifetime_peak():
-    """全量套里早先测试会把 ru_maxrss 抬高；守卫必须读 VmRSS（当前值）。"""
-    guard = CLI._ResourceGuard  # noqa: SLF001
-    rss = guard._current_rss()  # noqa: SLF001
+def test_resource_guard_uses_current_rss_and_delta(tmp_path):
+    """守卫读 VmRSS（当前值）并按**增量**判限：全量套基线上 GB 也不误报。"""
+    guard_cls = CLI._ResourceGuard  # noqa: SLF001
+    rss = guard_cls._current_rss()  # noqa: SLF001
     assert rss > 0
-    assert rss < guard.MAX_RSS_BYTES
+    guard = guard_cls(tmp_path)
+    with guard:
+        pass                      # 空命令：增量≈0，不触发
+    guard = guard_cls(tmp_path)
+    guard.__enter__()
+    guard._rss0 = guard_cls._current_rss()  # noqa: SLF001
+    guard.__exit__(None, None, None)        # 显式基线=当前值，仍不触发
+
+
+def test_resource_guard_delta_semantics(tmp_path, monkeypatch):
+    """基线高（模拟全量套 2.4GB）不误报；增量超帽才 RESOURCE_LIMITED。"""
+    guard_cls = CLI._ResourceGuard  # noqa: SLF001
+    base = 2_400_000_000
+    monkeypatch.setattr(guard_cls, "_current_rss", staticmethod(lambda: base))
+    with guard_cls(tmp_path):
+        pass
+    calls = {"n": 0}
+
+    def growing() -> int:
+        calls["n"] += 1
+        return base if calls["n"] == 1 else base + guard_cls.MAX_RSS_BYTES + 1
+
+    monkeypatch.setattr(guard_cls, "_current_rss", staticmethod(growing))
+    with pytest.raises(CLI.G1CliError) as exc:
+        with guard_cls(tmp_path):
+            pass
+    assert exc.value.code == "RESOURCE_LIMITED"

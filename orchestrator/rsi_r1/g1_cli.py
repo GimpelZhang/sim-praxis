@@ -88,8 +88,10 @@ class _ResourceGuard:
         problems = []
         if elapsed > self.MAX_SECONDS:
             problems.append(f"wall={elapsed:.0f}s")
-        if max(rss, self._rss0) > self.MAX_RSS_BYTES:
-            problems.append(f"rss={rss}")
+        # 以**本命令的增量**计（embedded 运行的基线属环境，不归本命令）；
+        # 独立 CLI 运行时基线很小，增量≈绝对值。
+        if max(0, rss - self._rss0) > self.MAX_RSS_BYTES:
+            problems.append(f"rss_delta={rss - self._rss0}")
         if out_bytes > self.MAX_OUT_BYTES:
             problems.append(f"out={out_bytes}")
         if problems and exc_type is None:
