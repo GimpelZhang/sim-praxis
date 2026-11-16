@@ -870,12 +870,18 @@ class OfflineAdmission:
     def posts_used(self, lane: str) -> int:
         return 0
 
+    def require_lane_space(self, *, confirm_runs: int = 0,
+                           replay_runs: int = 0) -> None:
+        return None
+
 
 class OfflineBudget:
     """离线预算：每次 sender 调用记一个**离线回合**，永不产生 POST 行。"""
 
     def __init__(self) -> None:
         self.posts_by_lane = {"study_A": 1_000_000, "study_B": 1_000_000}
+        self.max_runs_by_lane = {"explore": 64, "confirm": 192, "replay": 192}
+        self.max_steps = 10_000_000
         self.offline_turns = 0
         self.paused = False
 
@@ -2329,7 +2335,12 @@ def _trace_axis(ctx: G21Context, gaps: "list[str]") -> str:
 def _submit_axis(a: "Mapping[str, Any] | None",
                  b: "Mapping[str, Any] | None",
                  gaps: "list[str]") -> str:
-    ready = [doc for doc in (a, b) if doc and
+    # 两 study 都必须有报告：单 study 根不得据此宣称 READY（避免 vacuous pass）。
+    docs = [doc for doc in (a, b) if doc]
+    if len(docs) < len(STUDIES):
+        gaps.append("MISSING_STUDY_REPORT")
+        return "UNKNOWN"
+    ready = [doc for doc in docs if
              doc.get("source", {}).get("status") == SOURCE_READY]
     if not ready:
         return "BLOCKED_SOURCE"
@@ -2343,6 +2354,9 @@ def _source_axis(a: "Mapping[str, Any] | None",
                  b: "Mapping[str, Any] | None",
                  gaps: "list[str]") -> str:
     docs = [doc for doc in (a, b) if doc]
+    if len(docs) < len(STUDIES):
+        gaps.append("MISSING_STUDY_REPORT")
+        return "UNKNOWN"
     incomplete = [doc["study"] for doc in docs
                   if doc.get("source", {}).get("status") == SOURCE_INCOMPLETE]
     if incomplete:

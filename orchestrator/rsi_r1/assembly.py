@@ -1194,6 +1194,9 @@ class CampaignDispatcher:
 
     def _r12_analyze(self, action: L.Action) -> "dict[str, Any]":
         self._binding(action)
+        # RSI-G2.1（replay 轮接缝）：`require_task_contrasts` 打开时探索期分析也接受
+        # 任务派生的必需集（含阴性对照）——否则同一份候选分析程序在探索批上会因
+        # 多出 NC 被判 OUTPUT_CONTRAST_UNKNOWN。默认关闭，旧路径逐字不变。
         source_sha = _require_sha256(action.doc["source_sha256"],
                                      where="source_sha256")
         plan = self._current_plan(phase="explore")
@@ -1202,7 +1205,7 @@ class CampaignDispatcher:
             return self._fail("ANALYSIS_RUNS_MISMATCH", "run_ids 为空",
                               side_effect_status="NONE")
         try:
-            expected = ([self.task.primary.id] if self.r13_bound else None)
+            expected = (self._expected_contrasts() if self.r13_bound else None)
             output, summary, _ = self._r12_analysis(
                 phase="explore", source_sha=source_sha, run_ids=wanted,
                 plan=plan, manifest_sha=None, expected_contrasts=expected)

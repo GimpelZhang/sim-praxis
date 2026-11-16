@@ -102,9 +102,13 @@ def limit_problems(*, wall_s: float, peak_rss: int, out_bytes: int,
 class _ResourceGuard:
     """独立进程**绝对峰值** RSS（VmHWM）守卫（Plan §3.3；不复用 G1 增量）。"""
 
-    def __init__(self, out: Path, *, inputs: "Sequence[Path]" = ()) -> None:
+    def __init__(self, out: Path, *, inputs: "Sequence[Path]" = (),
+                 skip_bytes: bool = False) -> None:
         self.out = Path(out)
         self.inputs = list(inputs)
+        # G2.1：输出/输入字节由调用方按"派生/物化"分列复核（见 _derived_bytes），
+        # 守卫只判墙钟与峰值，避免把数百 MB 的源数据副本算成"输出"。
+        self.skip_bytes = bool(skip_bytes)
 
     def __enter__(self) -> "_ResourceGuard":
         self._t0 = time.monotonic()
@@ -146,6 +150,9 @@ class _ResourceGuard:
                                   peak_rss=self.peak_rss(),
                                   out_bytes=self._out_bytes(),
                                   in_bytes=self._in_bytes())
+        if self.skip_bytes:
+            problems = [p for p in problems
+                        if not (p.startswith("out=") or p.startswith("in="))]
         self.last_problems = problems
         if self.embedded:
             # 宿主峰值不归本命令：只保留墙钟/输出类判定。
@@ -934,23 +941,57 @@ def _bridge_manifest(root: Path, args: argparse.Namespace):
     raise G2CliError("MANIFEST_MISSING", f"{frozen} 不存在且未给 --inputs")
 
 
+def _derived_bytes(root: Path) -> "tuple[int, int]":
+    """（派生输出字节, 物化输入字节）：观测/设计/凭据等源数据与派生面分列。
+
+    Plan §4 两条不同的帽：**输出 ≤100 MiB** 指本命令的派生输出；源数据物化
+    走 **输入 ≤2 GiB**。RSI-G2.1 两 study 都在场时原始观测副本可达数百 MB，
+    把它们算进"输出"会与 Plan 的输入帽重复计费（见 Complete §7 复盘）。
+    """
+    materialized = 0
+    derived = 0
+    for path in Path(root).rglob("*"):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(("observations/", "designs/", "confirm/",
+                           "private/")):
+            materialized += size
+        else:
+            derived += size
+    return derived, materialized
+
+
 def _guarded(root: Path, command: str, fn):
     """Plan §4 资源门：夹住一条 bridge 命令并记录墙钟/峰值/输出字节。"""
     started = time.monotonic()
-    with _ResourceGuard(root) as guard:
+    with _ResourceGuard(root, skip_bytes=True) as guard:
         result = fn()
     observed = list(guard.last_problems)
-    enforced = ([p for p in observed if not p.startswith("peak_rss=")]
-                if guard.embedded else observed)
+    derived, materialized = _derived_bytes(root)
+    total = derived + materialized
+    # 复核口径：把"总字节"那一条换成派生/物化分列；墙钟与峰值原样保留。
+    checked = [p for p in observed if not p.startswith("out=")]
+    if derived > MAX_OUT_BYTES:
+        checked.append(f"derived={derived}")
+    if total > MAX_INPUT_BYTES:
+        checked.append(f"total={total}")
+    enforced = ([p for p in checked if not p.startswith("peak_rss=")]
+                if guard.embedded else checked)
+    if enforced and not guard.embedded:
+        raise G2CliError("RESOURCE_LIMITED", ",".join(enforced))
     doc = {"schema": "simpraxis.rsi_g21.resources.v1", "schema_version": 1,
            "command": command, "embedded": bool(guard.embedded),
            "wall_s": round(time.monotonic() - started, 3),
            "peak_rss_bytes": guard.peak_rss(),
-           "out_bytes": guard._out_bytes(),
+           "out_bytes": total, "derived_bytes": derived,
+           "materialized_bytes": materialized,
            "problems_observed": observed,
            "problems_enforced": enforced,
            "limits": {"wall_s": MAX_WALLCLOCK_S, "peak_rss": MAX_RSS_BYTES,
-                      "out_bytes": MAX_OUT_BYTES},
+                      "derived_bytes": MAX_OUT_BYTES,
+                      "total_bytes": MAX_INPUT_BYTES},
            "note": ("embedded=true 时 peak_rss 只记录不判（Plan §3.3：pytest "
                     "宿主不计成诊断进程）；enforced 为真正判失败的条目")}
     ensure_private_dir(root / "logs")

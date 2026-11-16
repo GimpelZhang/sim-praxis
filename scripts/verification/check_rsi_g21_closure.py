@@ -191,6 +191,9 @@ class Judge:
                 if self._source_blocked(study):
                     self.bump("import_skipped_source_blocked")
                     continue
+                if self._study_absent(study):
+                    self.bump("import_skipped_study_absent")
+                    continue
                 self.fail(f"import.{study} 缺失")
                 continue
             doc = jload(path)
@@ -228,6 +231,9 @@ class Judge:
             if not path.is_file():
                 if self._source_blocked(study):
                     self.bump("trace_skipped_source_blocked")
+                    continue
+                if self._study_absent(study):
+                    self.bump("trace_skipped_study_absent")
                     continue
                 self.fail(f"trace.{study} 缺失")
                 continue
@@ -394,7 +400,10 @@ class Judge:
         for study, report in (doc.get("studies") or {}).items():
             rc = report.get("checker_rc")
             problems = list(report.get("problems") or [])
-            blocked_ok = (self._source_blocked(study) and rc == 1
+            # 源本身不完整的 study：checker rc=1 且只报 REQUIRED_CONTRAST_MISSING
+            # 是**预期**结论（报告自带 source_status，不依赖 bridge 报告是否在本根）。
+            blocked_ok = (report.get("source_status") == "SOURCE_EVIDENCE_INCOMPLETE"
+                          and rc == 1
                           and problems == ["REQUIRED_CONTRAST_MISSING"])
             if rc != 0 and not blocked_ok:
                 self.fail(f"raw_check.{study} rc={rc} problems={problems}")
@@ -521,6 +530,12 @@ class Judge:
             self.fail(f"isolation.status={doc.get('status')} != {want_status}")
         self.bump("isolation_neg_control")
 
+    def _study_absent(self, study: str) -> bool:
+        """该根根本不含此 study（双根设计：A 与 B 各建一根）。"""
+        return (not (self.root / "reports" / f"{study}-bridge.json").is_file()
+                and not (self.root / "import" / study).is_dir()
+                and not (self.root / "trace" / study / "events.jsonl").is_file())
+
     def _source_blocked(self, study: str) -> bool:
         path = self.root / "reports" / f"{study}-bridge.json"
         if not path.is_file():
@@ -543,7 +558,10 @@ class Judge:
             "content_integrity": "FAIL" if bad(("freeze", "snapshot",
                                                 "contract")) else "PASS",
             "visibility_observability": "FAIL" if bad(("trace",)) else "PASS",
-            "submit_e2e": "PASS" if self.counts.get("five_faces") else "UNKNOWN",
+            # 双根：本根只有一个 study 的 five_faces 时不得宣称 submit_e2e PASS
+            # （与 closeout 的 MISSING_STUDY_REPORT 语义一致）。
+            "submit_e2e": ("PASS" if self.counts.get("five_faces", 0)
+                           >= len(("A", "B")) else "UNKNOWN"),
             "raw_checker": "PASS" if raw_ok else "FAIL",
             "tokenizer_capacity": "FAIL" if bad(("capacity", "tokenizer")) else "PASS",
             "isolation": isolation,
