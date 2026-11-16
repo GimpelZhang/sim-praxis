@@ -40,6 +40,9 @@ POLICY_G2_ATOMIC = "g2_atomic_v1"
 DELIVERY_POLICIES = (POLICY_LEGACY, POLICY_G2_ATOMIC)
 G2_ENVELOPE_KEY = "result_envelope"
 G2_ENVELOPE_MAX_BYTES = 16 * 1024
+#: 只读分页/产物上限（RSI-G2.1：一源常量；``g2_contract`` 直接别名到这里）。
+G2_PAGE_MAX_BYTES = 8 * 1024
+G2_ARTIFACT_MAX_BYTES = 8 * 1024 ** 2
 G2_CONTEXT_HEADER = "### 活动结果视图（result_context；g2_atomic_v1，不可裁剪）\n"
 G2_ENVELOPE_HEADER = "### 结果视图（g2_atomic_v1 最小交付单元，不可裁剪）\n"
 #: 原子单元必需键（与 ``rsi_r1.g2_contract.ENVELOPE_REQUIRED`` 同名单；
@@ -127,6 +130,19 @@ def count_available(counter: Any) -> bool:
 # 截断（保结构，不静默丢键）
 # ---------------------------------------------------------------------------
 
+#: ``read_result_artifact`` 分页回包的判别键（全部必须同时在场）。
+READ_PAGE_KEYS = frozenset({"artifact_id", "artifact_sha256", "offset",
+                            "n_bytes", "total_bytes", "page_sha256",
+                            "encoding", "data", "next_cursor"})
+
+
+def is_read_page_result(result: Any) -> bool:
+    """是否为 G2 只读分页回包（结构判别；不依赖 action 名）。"""
+    if not isinstance(result, Mapping):
+        return False
+    return READ_PAGE_KEYS <= set(result) and bool(result.get("ok"))
+
+
 def clip_text(text: str, limit: int) -> str:
     raw = text.encode("utf-8")
     if len(raw) <= limit:
@@ -162,6 +178,22 @@ class Turn:
                                 "action": self.result.get("action"),
                                 G2_ENVELOPE_KEY: dict(envelope),
                                 "truncated": False})
+        if is_read_page_result(self.result):
+            # RSI-G2.1（AC G21-07）：只读分页回包同样是**原子交付单元**。
+            # 旧通用裁剪按 4096 帽把 8 KiB 页的 data 截成前缀，候选拿到的
+            # 页既无 next_cursor 也无完整 sha 校验面——读取会被仪器静默
+            # 破坏。这里只校验结构/页帽后逐字保留；超帽仍在发网前阻断。
+            page = dict(self.result)
+            data = page.get("data")
+            if not isinstance(data, str) or page.get("encoding") not in (
+                    "utf-8", "base64"):
+                raise ResultViewIncomplete("read page 结构不符")
+            n_bytes = page.get("n_bytes")
+            if (not isinstance(n_bytes, int) or isinstance(n_bytes, bool)
+                    or not 0 <= n_bytes <= G2_PAGE_MAX_BYTES):
+                raise ResultViewIncomplete(f"read page n_bytes={n_bytes!r}")
+            page["truncated"] = False
+            return Turn(model_text=text, result=page)
         # 非确认类结果（write_artifact/propose_plan 等）沿用旧裁剪：G2 只改
         # 确认结果的最小交付单元，不扩大其它回包的可见面。
         return Turn(model_text=text, result=self._clip_result(self.result))

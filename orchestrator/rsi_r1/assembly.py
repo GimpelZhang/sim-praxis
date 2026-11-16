@@ -548,7 +548,8 @@ class CampaignDispatcher:
                  task: "TS.TaskSpecV13 | None" = None,
                  batch_workers: int = 1,
                  delivery_policy: str = RT.POLICY_LEGACY,
-                 scope_contract: "G2.ScopeContractV1 | None" = None) -> None:
+                 scope_contract: "G2.ScopeContractV1 | None" = None,
+                 require_task_contrasts: bool = False) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
@@ -591,6 +592,10 @@ class CampaignDispatcher:
         self.delivery_policy = delivery_policy
         self.g2 = delivery_policy == RT.POLICY_G2_ATOMIC
         self.scope_contract = scope_contract
+        # RSI-G2.1（Plan §3.0 第 2 行 / AC G21-22）：必需对比全集由冻结 TaskSpec
+        # 派生（主对比 + 阴性对照），不从候选 output 现有项反推。默认 False ⇒
+        # G2 既有装配逐字不变；G2.1 证据桥显式打开。
+        self.require_task_contrasts = bool(require_task_contrasts)
         if self.g2:
             if scope_contract is None:
                 raise AssemblyError("POLICY_BINDING_MISSING",
@@ -1554,6 +1559,12 @@ class CampaignDispatcher:
             f"design_audits/confirm_post_{plan.sha256[:12]}.json",
             {**audit.to_dict(), "counts": counts})
 
+    def _expected_contrasts(self) -> "list[str]":
+        """G2.1：必需对比集合（默认只主对比，保持 G2/旧路径逐字行为）。"""
+        if self.require_task_contrasts:
+            return G2.derive_required_ids(self.task)
+        return [self.task.primary.id]
+
     def _r13_confirm_payload(self, run_ids: "list[str]", result_sha: str,
                              plan: C.ResearchPlan,
                              manifest: "E.ConfirmManifest") -> "dict[str, Any]":
@@ -1563,7 +1574,7 @@ class CampaignDispatcher:
             output, summary, output_bytes = self._r12_analysis(
                 phase="confirm", source_sha=source_sha, run_ids=run_ids,
                 plan=plan, manifest_sha=manifest.sha256,
-                expected_contrasts=[self.task.primary.id])
+                expected_contrasts=self._expected_contrasts())
         except SB.SandboxError as exc:
             return self._fail(exc.code, exc.detail,
                               side_effect_status="KNOWN_COMPLETE")
@@ -1618,9 +1629,6 @@ class CampaignDispatcher:
                             output_bytes: bytes, receipt_bytes: bytes
                             ) -> "dict[str, Any]":
         """G2：从候选自己的 output/receipt 投影 ResultEnvelopeV2（零宿主补值）。"""
-        required = [self.task.primary.id]
-        nc = (self.task.negative_control_spec or {}).get("contrast") or {}
-        nc_id = str(nc.get("contrast_id") or nc.get("id") or "")
         raw_contrasts = output.get("contrasts")
         present: "set[str]" = set()
         if isinstance(raw_contrasts, list):
@@ -1628,8 +1636,21 @@ class CampaignDispatcher:
                        if isinstance(item, Mapping)}
         elif isinstance(raw_contrasts, Mapping):
             present = {str(key) for key in raw_contrasts}
-        if nc_id and nc_id in present and nc_id not in required:
-            required.append(nc_id)
+        if self.require_task_contrasts:
+            # G2.1：必需集合只由冻结 TaskSpec 派生，**不**从 output 现有项反推。
+            required = G2.derive_required_ids(self.task)
+            missing = [cid for cid in required if cid not in present]
+            if missing:
+                return self._fail(
+                    "SOURCE_EVIDENCE_INCOMPLETE",
+                    f"候选输出缺必需对比 {missing}；不以宿主 raw 回填",
+                    side_effect_status="KNOWN_COMPLETE")
+        else:
+            required = [self.task.primary.id]
+            nc = (self.task.negative_control_spec or {}).get("contrast") or {}
+            nc_id = str(nc.get("contrast_id") or nc.get("id") or "")
+            if nc_id and nc_id in present and nc_id not in required:
+                required.append(nc_id)
         try:
             envelope = G2.envelope_from_output(
                 study_id=self.study, phase="confirm", plan_sha256=plan.sha256,
@@ -1716,7 +1737,7 @@ class CampaignDispatcher:
                 raw = json.loads(output_bytes.decode("utf-8"))
                 parsed = AR.parse_output(
                     raw, expected_run_ids=sorted(self._confirm_artifacts()),
-                    expected_contrasts=[self.task.primary.id])
+                    expected_contrasts=self._expected_contrasts())
                 output_norm = {"run_ids": parsed["run_ids"],
                                "contrasts": dict(parsed["contrasts"]),
                                "diagnostics": raw.get("diagnostics")}

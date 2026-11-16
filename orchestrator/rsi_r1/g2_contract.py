@@ -41,9 +41,9 @@ SCIENCE_SCHEMA = "simpraxis.rsi_g2.science_assessment.v1"
 CONTRACT_SNAPSHOT_SCHEMA = "simpraxis.rsi_g2.contract.v1"
 CASE_SCHEMA = "simpraxis.rsi_g2.case.v1"
 
-ENVELOPE_MAX_BYTES = 16 * 1024
-PAGE_MAX_BYTES = 8 * 1024
-ARTIFACT_MAX_BYTES = 8 * 1024 ** 2
+ENVELOPE_MAX_BYTES = T.G2_ENVELOPE_MAX_BYTES
+PAGE_MAX_BYTES = T.G2_PAGE_MAX_BYTES
+ARTIFACT_MAX_BYTES = T.G2_ARTIFACT_MAX_BYTES
 SUMMARY_MAX_BYTES = 512
 PROJECTION_VERSION = "g2_projection_v1"
 CAPTURE_VERSION = "g2_capture_v1"
@@ -676,6 +676,51 @@ def envelope_from_output(*, study_id: str, phase: str, plan_sha256: str,
         dropped={"count": 0, "ids": [], "ids_sha256": ""},
         diagnostics=diag_summary, artifacts=artifacts, evidence=evidence,
         summary={"n_required": len(records)})
+
+
+def derive_required_ids(task: Any) -> "list[str]":
+    """由**冻结 TaskSpec** 派生必需对比全集（主对比 + 阴性对照）。
+
+    RSI-G2.1（Plan §3.0 第 2 行 / AC G21-22）：必需集合必须在分析验证之前由
+    任务主张派生，**不得**从候选 output 现有项反推——否则「候选只算主对比」
+    就能把阴性对照静默排除。上游分析过滤器也不得删减该集合。
+    """
+    primary = getattr(task, "primary", None)
+    pid = str(getattr(primary, "id", "") or "")
+    if not pid:
+        raise G2Error("CONTRACT_INVALID", "task 缺 primary.id")
+    ids: "list[str]" = [pid]
+    nc = (getattr(task, "negative_control_spec", None) or {}).get("contrast") or {}
+    nc_id = str(nc.get("contrast_id") or nc.get("id") or "")
+    if nc_id and nc_id not in ids:
+        ids.append(nc_id)
+    return ids
+
+
+def resolve_pointer(doc: Any, pointer: str) -> Any:
+    """按 RFC6901 解析 JSON Pointer（空串表示整份文档）。"""
+    if not isinstance(pointer, str) or (pointer and not pointer.startswith("/")):
+        raise G2Error("POINTER_INVALID", repr(pointer))
+    node = doc
+    if pointer == "":
+        return node
+    for token in pointer.split("/")[1:]:
+        token = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, Mapping):
+            if token not in node:
+                raise G2Error("POINTER_INVALID", f"{pointer} 缺键 {token!r}")
+            node = node[token]
+        elif isinstance(node, list):
+            try:
+                index = int(token)
+            except ValueError:
+                raise G2Error("POINTER_INVALID", f"{pointer} 非列表下标") from None
+            if not 0 <= index < len(node):
+                raise G2Error("POINTER_INVALID", f"{pointer} 越界")
+            node = node[index]
+        else:
+            raise G2Error("POINTER_INVALID", f"{pointer} 走到标量 {token!r}")
+    return node
 
 
 def _index_of(raw_contrasts: Any, cid: str) -> int:

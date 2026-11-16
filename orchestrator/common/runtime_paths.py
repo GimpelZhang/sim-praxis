@@ -1515,6 +1515,64 @@ def assert_rsi_g2_roots_isolated() -> "dict[str, str]":
     return {name: str(path) for name, path in others.items()}
 
 
+# ---------------------------------------------------------------------------
+# RSI-G2.1：生产证据桥根（零 POST 工程诊断；Plan §0/§3 G21-0）
+# ---------------------------------------------------------------------------
+
+#: G2.1 工程根（默认 ``/mnt/artifacts/simpraxis/rsi_g21/<id>/``）。
+_RSI_G21_ROOT_ENV = "SIMPRAXIS_RSI_G21_ROOT"
+
+#: G2.1 根下产物面（Plan §4.1「产物」；不含 quota——G2.1 无付费）。
+RSI_G21_SUBDIRS: "tuple[str, ...]" = (
+    "freeze", "public", "trace", "state", "submit", "raw_check", "isolation",
+    "capacity", "reports", "decision", "logs", "import", "contract",
+)
+
+
+def rsi_g21_root() -> Path:
+    """G2.1 工程家族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_g21``。"""
+    root = os.environ.get(_RSI_G21_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_g21"
+
+
+_RSI_G21_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def rsi_g21_diagnostic_root(diagnostic_id: str) -> Path:
+    """单个 G2.1 根：``rsi_g21/<diagnostic_id>``（id 只允许安全字符）。"""
+    if not isinstance(diagnostic_id, str) or not _RSI_G21_ID_RE.match(diagnostic_id):
+        raise ValueError(f"diagnostic_id 非法：{diagnostic_id!r}")
+    return rsi_g21_root() / diagnostic_id
+
+
+def assert_rsi_g21_roots_isolated() -> "dict[str, str]":
+    """G2.1 根不得与任何研究族根、G1 或 G2 诊断根重叠（fail-closed）。"""
+    def resolved(path: Path) -> Path:
+        return Path(path).resolve(strict=False)
+
+    def within(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    g21 = resolved(rsi_g21_root())
+    others = {
+        "rsi_g1": resolved(rsi_g1_root()),
+        "rsi_g2": resolved(rsi_g2_root()),
+        "rsi_r13": resolved(rsi_r13_root()),
+        "rsi_r12": resolved(Path(DEFAULT_DATA_ROOT) / "rsi_r12"),
+        "rsi_r1": resolved(Path(DEFAULT_DATA_ROOT) / "rsi_r1"),
+    }
+    for name, path in others.items():
+        if g21 == path or within(g21, path) or within(path, g21):
+            raise RuntimeError(f"G2.1 根与既有族根重叠：{name}={path}")
+    return {name: str(path) for name, path in others.items()}
+
+
 def rsi_r13_campaign_id() -> str:
     cid = os.environ.get(_RSI_R13_CAMPAIGN_ENV, "")
     if not cid:
