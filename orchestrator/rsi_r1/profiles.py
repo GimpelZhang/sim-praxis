@@ -48,6 +48,29 @@ PROFILE_R12 = "rsi-r1.2"
 PROFILE_R13 = "rsi-r1.3"
 PROFILES: "tuple[str, ...]" = (PROFILE_LEGACY, PROFILE_R12, PROFILE_R13)
 
+#: RSI-G2 能力声明（Plan §3 G2-4）。G2 是**零 POST 工程诊断族**，不是 campaign
+#: profile：不进 ``_BY_ID``、不分配 namespace/账本/族帽、不改变 ``PROFILES``。
+#: 能力通过显式 ``delivery_policy`` 参数选择（默认 legacy ⇒ 旧路径逐字不变）。
+CAP_DELIVERY_ATOMIC_V1 = "delivery_atomic_v1"
+CAP_SCOPE_CONTRACT_V1 = "scope_contract_v1"
+CAP_READ_RESULT_ARTIFACT = "read_result_artifact"
+CAP_VISIBILITY_CAPTURE_V1 = "visibility_capture_v1"
+G2_CAPABILITIES: "frozenset[str]" = frozenset({
+    CAP_DELIVERY_ATOMIC_V1, CAP_SCOPE_CONTRACT_V1,
+    CAP_READ_RESULT_ARTIFACT, CAP_VISIBILITY_CAPTURE_V1,
+})
+
+
+def g2_capabilities() -> "frozenset[str]":
+    """G2 能力全集（离线装配/CLI 只按这份显式注册表分派）。"""
+    return G2_CAPABILITIES
+
+
+def supports_capability(profile: "CampaignProfile", capability: str) -> bool:
+    """profile 自带能力声明（``extra.capabilities``）；默认空 ⇒ 全不支持。"""
+    declared = profile.extra.get("capabilities") or ()
+    return capability in set(str(c) for c in declared)
+
 SCHEMA_PREFIX = "simpraxis.rsi_r1"
 SCHEMA_VERSION = 1
 

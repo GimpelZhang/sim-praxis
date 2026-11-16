@@ -822,7 +822,9 @@ class ResearchState:
     # ---- 提交 ----
 
     def submit_claim(self, *, study: str, claims: Sequence[Mapping[str, Any]],
-                     report_text: str, response_id: str) -> "dict[str, Any]":
+                     report_text: str, response_id: str,
+                     origin: "Mapping[str, Any] | None" = None
+                     ) -> "dict[str, Any]":
         _require_study(study)
         state = self.study_state(study)
         if state != ST_RESULTS_RELEASED:
@@ -837,12 +839,17 @@ class ResearchState:
             raise StateError("UNKNOWN_REPLY", response_id)
         report_sha = _sha_text(report_text)
         report_artifact_id = f"report-{study}-{report_sha[:12]}"
-        self.journal.append("claim", {
+        payload = {
             "study": study, "response_id": response_id,
             "claims": [dict(c) for c in claims],
             "report_text_sha256": report_sha, "report_bytes": n_bytes,
             "report_artifact_id": report_artifact_id,
-            "producer": PRODUCER_CANDIDATE})
+            "producer": PRODUCER_CANDIDATE}
+        # RSI-G2（Plan §3.0）：四路 sha 分开保存（raw reply / action / report
+        # doc / rendered）。legacy 不传 origin ⇒ 事件字节与旧行为逐字相同。
+        if origin is not None:
+            payload["origin"] = {str(k): str(v) for k, v in origin.items()}
+        self.journal.append("claim", payload)
         self.ctx.write_text(f"research_packets/{study}/{report_artifact_id}.txt",
                             report_text)
         self._advance_study(study, ST_CLAIM_SUBMITTED, reason="submit_claim")

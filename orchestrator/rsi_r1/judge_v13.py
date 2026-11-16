@@ -56,7 +56,8 @@ def judge_study_v13(*, task: TS.TaskSpecV13, plan: Any, manifest: Any,
                     candidate_origin: Mapping[str, Any] | None = None,
                     expected_reply_sha256: str = "",
                     evidence_files: "Mapping[str, bytes] | None" = None,
-                    design_counts: "Mapping[str, int] | None" = None
+                    design_counts: "Mapping[str, int] | None" = None,
+                    report_text: "str | None" = None
                     ) -> "dict[str, Any]":
     problems: "list[str]" = []
     checks: "list[dict[str, Any]]" = []
@@ -147,7 +148,8 @@ def judge_study_v13(*, task: TS.TaskSpecV13, plan: Any, manifest: Any,
                                                  receipt},
                 evidence=evidence_files or {},
                 candidate_origin=candidate_origin or {},
-                expected_reply_sha256=expected_reply_sha256)
+                expected_reply_sha256=expected_reply_sha256,
+                report_text=report_text)
             report_ok = True
             check("R13-REPORT", True, "structure/source/refs ok")
         except RR.ReportError as exc:

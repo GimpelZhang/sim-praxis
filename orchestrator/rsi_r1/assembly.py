@@ -35,11 +35,13 @@ from typing import Any, Callable, Mapping, Sequence
 
 from orchestrator.common.clock import utc_now_iso_z
 from orchestrator.common.fsutil import ensure_private_dir
+from orchestrator.common import research_transport as RT
 from orchestrator.rsi_r1 import analysis_receipt as AR
 from orchestrator.rsi_r1 import closure as CL
 from orchestrator.rsi_r1 import contracts as C
 from orchestrator.rsi_r1 import design_intent as DI
 from orchestrator.rsi_r1 import experiments as E
+from orchestrator.rsi_r1 import g2_contract as G2
 from orchestrator.rsi_r1 import judge as J
 from orchestrator.rsi_r1 import judge_v13 as JV
 from orchestrator.rsi_r1 import lanes as LANES
@@ -49,6 +51,7 @@ from orchestrator.rsi_r1 import observations as O
 from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import repair as RPR
 from orchestrator.rsi_r1 import replay as RP
+from orchestrator.rsi_r1 import research_report as RR
 from orchestrator.rsi_r1 import resources as RS
 from orchestrator.rsi_r1 import sandbox as SB
 from orchestrator.rsi_r1 import state as S
@@ -543,7 +546,9 @@ class CampaignDispatcher:
                  profile: "P.CampaignProfile | None" = None,
                  resource_ledger: "RS.ResourceLedger | None" = None,
                  task: "TS.TaskSpecV13 | None" = None,
-                 batch_workers: int = 1) -> None:
+                 batch_workers: int = 1,
+                 delivery_policy: str = RT.POLICY_LEGACY,
+                 scope_contract: "G2.ScopeContractV1 | None" = None) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
@@ -580,6 +585,24 @@ class CampaignDispatcher:
         # R1.3 任务绑定仅在正式 study 成立；probe/practice 走 R1.2 语义。
         self.r13_bound = bool(profile is not None and profile.is_r13
                               and task is not None)
+        # RSI-G2（Plan §2.4）：交付策略是冻结运行配置，缺任一接线即拒绝。
+        if delivery_policy not in RT.DELIVERY_POLICIES:
+            raise AssemblyError("POLICY_UNKNOWN", repr(delivery_policy))
+        self.delivery_policy = delivery_policy
+        self.g2 = delivery_policy == RT.POLICY_G2_ATOMIC
+        self.scope_contract = scope_contract
+        if self.g2:
+            if scope_contract is None:
+                raise AssemblyError("POLICY_BINDING_MISSING",
+                                    "g2_atomic_v1 必须显式绑定 ScopeContractV1")
+            if not self.r13_bound:
+                raise AssemblyError(
+                    "POLICY_BINDING_MISSING",
+                    "g2_atomic_v1 只用于 r13_bound 离线装配（需 r13 profile+TaskSpec）")
+            try:
+                scope_contract.validate()
+            except G2.G2Error as exc:
+                raise AssemblyError(exc.code, exc.detail) from None
         # 维护参考链可选并行（T5）；默认 1 保持生产逐 spec 语义
         self.batch_workers = max(1, int(batch_workers))
         self.r13_explore_intent: "DI.DesignIntentV13 | None" = None
@@ -714,8 +737,11 @@ class CampaignDispatcher:
         # 副作用 NONE（未写任何事件），但那一呼照常计账。
         if (self.profile is not None and self.profile.is_r13
                 and self.study in S.STUDIES):
+            # G2（Plan §2.4）：RESULTS_RELEASED 后的只读证据分页动作在**新注册表**
+            # 里显式放行；旧 R13 仍只许 submit_claim（本分支不因 G2 放宽 legacy）。
+            g2_read = self.g2 and action.name == "read_result_artifact"
             if (self.state.study_state(self.study) == S.ST_RESULTS_RELEASED
-                    and action.name != "submit_claim"):
+                    and action.name != "submit_claim" and not g2_read):
                 return self._fail(
                     "CLAIM_REQUIRED",
                     "study 已在 RESULTS_RELEASED：第 8 位 submit_claim 是唯一"
@@ -1549,6 +1575,10 @@ class CampaignDispatcher:
         rel = self._receipt_rel(self.study, "confirm")
         if self.ctx.exists(rel):
             receipt_bytes = self.ctx.relative(rel).read_bytes()
+        if self.g2:
+            # RSI-G2：最小交付单元（不是 4096 裁剪后的普通 dict）。
+            return self._g2_confirm_payload(run_ids, result_sha, plan,
+                                            output, output_bytes, receipt_bytes)
         evidence = self._r13_evidence(plan, manifest, output_bytes,
                                       receipt_bytes)
         index = {name: hashlib.sha256(data).hexdigest()
@@ -1582,6 +1612,78 @@ class CampaignDispatcher:
             "confirm/blocks.json": (json.dumps(table, sort_keys=True,
                                                ensure_ascii=False) + "\n").encode(),
         }
+
+    def _g2_confirm_payload(self, run_ids: "list[str]", result_sha: str,
+                            plan: C.ResearchPlan, output: Mapping[str, Any],
+                            output_bytes: bytes, receipt_bytes: bytes
+                            ) -> "dict[str, Any]":
+        """G2：从候选自己的 output/receipt 投影 ResultEnvelopeV2（零宿主补值）。"""
+        required = [self.task.primary.id]
+        nc = (self.task.negative_control_spec or {}).get("contrast") or {}
+        nc_id = str(nc.get("contrast_id") or nc.get("id") or "")
+        raw_contrasts = output.get("contrasts")
+        present: "set[str]" = set()
+        if isinstance(raw_contrasts, list):
+            present = {str(item.get("contrast_id")) for item in raw_contrasts
+                       if isinstance(item, Mapping)}
+        elif isinstance(raw_contrasts, Mapping):
+            present = {str(key) for key in raw_contrasts}
+        if nc_id and nc_id in present and nc_id not in required:
+            required.append(nc_id)
+        try:
+            envelope = G2.envelope_from_output(
+                study_id=self.study, phase="confirm", plan_sha256=plan.sha256,
+                output=output, output_bytes=output_bytes,
+                receipt_bytes=receipt_bytes,
+                scope_contract=self.scope_contract,
+                required_contrast_ids=required,
+                primary_contrast_id=self.task.primary.id)
+            G2.verify_envelope(envelope, scope_contract=self.scope_contract)
+        except G2.G2Error as exc:
+            # 投影失败 = 仪器交付失败：不改写已成功 confirm 的 raw，不伪称
+            # 候选科学 FAIL；回包给出可机读阻断码，由驱动停止。
+            return self._fail(exc.code, exc.detail,
+                              side_effect_status="KNOWN_COMPLETE")
+        self.ctx.write_json("state/g2_artifacts.json",
+                            {"study": self.study, "plan_sha256": plan.sha256,
+                             "envelope_sha256": envelope["envelope_sha256"],
+                             "artifacts": list(envelope["artifacts"])})
+        return self._ok(run_ids_head=run_ids[:8], n_runs=len(run_ids),
+                        result_sha256=result_sha,
+                        result_envelope=envelope,
+                        envelope_sha256=envelope["envelope_sha256"])
+
+    def _do_read_result_artifact(self, action: L.Action) -> "dict[str, Any]":
+        """G2 只读分页：仅当前 study 已登记且候选自产的 analysis 产物。"""
+        if not self.g2:
+            raise L.LoopError("UNKNOWN_ACTION", action.name, terminal=True)
+        self._binding(action)
+        state_now = self.state.study_state(self.study)
+        if state_now != S.ST_RESULTS_RELEASED:
+            return self._fail("RESULTS_NOT_RELEASED",
+                              f"study 在 {state_now}；读取只在结果发布后允许",
+                              side_effect_status="NONE")
+        if not self.ctx.exists("state/g2_artifacts.json"):
+            return self._fail("ARTIFACT_MISSING", "无已登记 envelope 产物",
+                              side_effect_status="NONE")
+        registry_doc = self.ctx.read_json("state/g2_artifacts.json")
+        plan = self._current_plan(phase="confirm")
+        if str(registry_doc.get("study")) != self.study \
+                or str(registry_doc.get("plan_sha256")) != plan.sha256:
+            return self._fail("PLAN_MISMATCH", "登记产物与当前 study/plan 不符",
+                              side_effect_status="NONE")
+        registry = G2.ArtifactRegistry(registry_doc.get("artifacts") or [])
+        try:
+            page = G2.read_page(
+                registry=registry,
+                read_bytes=lambda rel: self.ctx.relative(rel).read_bytes(),
+                artifact_id=str(action.doc["artifact_id"]),
+                output_sha256=str(action.doc["output_sha256"]),
+                cursor=int(action.doc["cursor"]),
+                page_bytes=int(action.doc["page_bytes"]))
+        except G2.G2Error as exc:
+            return self._fail(exc.code, exc.detail, side_effect_status="NONE")
+        return self._ok(**page)
 
     def _r13_submit(self, action: L.Action) -> "dict[str, Any]":
         """R1.3 提交：凭据/数值/诊断/报告/claim 全过才 JUDGE_OK。"""
@@ -1662,9 +1764,25 @@ class CampaignDispatcher:
             "claims": claims}
         evidence = self._r13_evidence(plan, manifest, output_bytes,
                                       receipt_bytes)
-        origin = {"producer": "candidate",
-                  "reply_sha256": _sha_doc(action.to_doc()),
-                  "assisted": False}
+        rendered_sha = hashlib.sha256(
+            RR.render_report(report_doc).encode("utf-8")).hexdigest()
+        if self.g2:
+            # RSI-G2（Plan §3.0 state 行）：raw reply / action / report doc /
+            # rendered 四路 sha **分开保存**，不能互代；旧代码把 action 规范
+            # sha 叫 reply_sha，是 G1 复盘指出的混用。
+            reply_ev = self.state._reply_event(response_id)
+            raw_reply_sha = str(((reply_ev.payload if reply_ev else {}) or {})
+                                .get("text_sha256") or "")
+            origin = {"producer": "candidate", "reply_sha256": raw_reply_sha,
+                      "raw_reply_sha256": raw_reply_sha,
+                      "action_sha256": action_sha,
+                      "report_doc_sha256": _sha_doc(report_doc),
+                      "rendered_sha256": rendered_sha,
+                      "assisted": False}
+        else:
+            origin = {"producer": "candidate",
+                      "reply_sha256": _sha_doc(action.to_doc()),
+                      "assisted": False}
         report = JV.judge_study_v13(
             task=self.task, plan=plan, manifest=manifest,
             artifacts=self._confirm_artifacts(),
@@ -1675,16 +1793,25 @@ class CampaignDispatcher:
             candidate_origin=origin,
             expected_reply_sha256=str(origin["reply_sha256"]),
             evidence_files=evidence,
-            design_counts=self.r13_design_counts)
+            design_counts=self.r13_design_counts,
+            # G2 严格面：报告正文必须与确定性 render 逐字相等（旧路径不传）。
+            report_text=report_text if self.g2 else None)
         self.state.submit_claim(study=self.study, claims=claims,
                                 report_text=report_text,
-                                response_id=response_id)
+                                response_id=response_id,
+                                origin=origin if self.g2 else None)
         CL.write_claim_submission(self.ctx, self.study, submission)
         CL.write_judge_report(self.ctx, self.study, report)
         self.ctx.write_json(
             f"reports/{self.study}-{plan.sha256[:12]}.json",
-            {"report": dict(report_doc), "rendered": None,
-             "reply_sha256": origin["reply_sha256"]})
+            ({"report": dict(report_doc), "rendered": None,
+              "reply_sha256": origin["reply_sha256"]}
+             if not self.g2 else
+             {"report": dict(report_doc),
+              "raw_reply_sha256": origin["raw_reply_sha256"],
+              "action_sha256": origin["action_sha256"],
+              "report_doc_sha256": origin["report_doc_sha256"],
+              "rendered_sha256": origin["rendered_sha256"]}))
         verdict = self._verdict_v13(report)
         self.state.conclude(self.study, verdict,
                             reason=f"judge {report['verdict']}")
