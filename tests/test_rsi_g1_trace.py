@@ -189,3 +189,22 @@ def test_tampered_event_is_detected(tmp_path):
     lines[0] = json.dumps(doc, ensure_ascii=False, sort_keys=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     assert GT.verify_trace(out / "trace" / "A")["ok"] is False
+
+
+def test_trace_materializes_artifacts_and_checks_receipt(tmp_path):
+    """R1/R4：历史原件复制进 G1 根；receipt 交叉核验在摘要里。"""
+    root = _source_root(tmp_path, claim_est=0.0407)
+    _write(root / "private" / "receipts" / "A-confirm.json",
+           {"output_sha256": __import__("hashlib").sha256(
+               (root / "private" / "analysis" / "A-confirm.raw.json").read_bytes()
+           ).hexdigest(), "confirm_manifest_sha256": ""})
+    result, out = _trace(tmp_path, root)
+    check = result["summary"]["receipt_check"]
+    assert check["present"] and check["output_sha_ok"] is True
+    for line in (out / "trace" / "A" / "events.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if row["visibility"] == "observed" and row["artifact_ref"]:
+            assert not row["artifact_ref"].startswith("/")
+            assert (out / row["artifact_ref"]).is_file()
+    env = json.loads((out / "trace" / "A" / "submit_envelope.json").read_text())
+    assert {"response_sha", "action_sha", "claim_sha"} <= set(env["shas"])

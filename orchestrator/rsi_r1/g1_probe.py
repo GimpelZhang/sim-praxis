@@ -591,9 +591,16 @@ def run_probe(*, root: Path, prereg: Mapping[str, Any], sender: Any,
         score = row.get("score") or {}
         cell.append({"mechanical_ok": bool(score.get("mechanical_ok")),
                      "semantic_ok": bool(score.get("semantic_ok")),
+                     "tuple_exactness": bool(score.get("binding_ok")
+                                             and score.get("numeric_ok")),
                      "replicate": row.get("replicate")})
+    tuple_exact = sum(1 for row in records
+                      if row.get("status") == "CALLED_OK"
+                      and (row.get("score") or {}).get("binding_ok")
+                      and (row.get("score") or {}).get("numeric_ok"))
     report = {"schema": SCHEMA_REPORT, "schema_version": 1,
               "cases_rollup": rollup,
+              "tuple_exactness_total": tuple_exact,
               "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
               "diagnostic_id": prereg["diagnostic_id"],
               "posts": posts, "max_posts": MAX_POSTS,
@@ -697,6 +704,7 @@ class G1Ledger:
         self.root = Path(root)
         self.path = self.root / "quota" / "ledger.jsonl"
         self.cap = int(cap)
+        self._pending: "dict[str, str]" = {}
         ensure_private_dir(self.root / "quota")
 
     def rows(self) -> "list[dict[str, Any]]":
@@ -708,6 +716,10 @@ class G1Ledger:
 
     def calls(self) -> int:
         return sum(1 for row in self.rows() if row.get("event") == "call")
+
+    def expect(self, batch_id: str, *, request_sha256: str) -> None:
+        """R9：调用前登记本批次的请求 hash，写进 ``event=call`` 行本体。"""
+        self._pending[batch_id] = request_sha256
 
     def preflight(self, stage: str, *, task: int, batch_id: str) -> "dict[str, Any]":
         if self.calls() >= self.cap:
@@ -741,6 +753,7 @@ class G1Ledger:
                "tokens_cache_read": tokens_cache_read,
                "tokens_cache_create": tokens_cache_create,
                "err": err, "evidence": evidence,
+               "request_sha256": self._pending.pop(batch_id, None),
                "global_used_after": used + 1, "cap": self.cap}
         self._append(row)
         return row
@@ -791,6 +804,7 @@ def build_sender(*, root: Path, diagnostic_id: str) -> Any:
                     *[dict(m) for m in request.messages]]
         capture: "dict[str, Any]" = {}
         batch = f"G1B-{slot_id}"
+        ledger.expect(batch, request_sha256=request.sha256)
         with billing_context(task=0, batch_id=batch,
                              thread_id=f"g1-{diagnostic_id}"):
             text, tokens = gateway.call(

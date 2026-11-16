@@ -59,15 +59,36 @@ def _trace_events(trace_dir: Path):
 
 def judge(root: Path, probe_report: "Path | None" = None) -> dict:
     problems: "list[str]" = []
-    summaries = []
+    summaries, captures = [], []
     for path in sorted((root / "trace").glob("*_summary.json")):
-        summaries.append(json.loads(path.read_text(encoding="utf-8")))
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        (captures if doc.get("kind") == "capture_demo" else summaries).append(doc)
     for study in ("A", "B"):
         d = root / "trace" / study
         if d.is_dir():
             rows = _trace_events(d)
             if rows is None:
                 problems.append(f"{study}: 缺 events.jsonl")
+    cap_dir = root / "trace" / "capture"
+    if cap_dir.is_dir():
+        rows = _trace_events(cap_dir)
+        if rows is None:
+            problems.append("capture: 缺 events.jsonl")
+        else:
+            for row in rows:
+                ref = row.get("artifact_ref")
+                if row.get("visibility") != "observed":
+                    continue
+                if not ref:
+                    problems.append("capture: observed 事件缺 artifact_ref")
+                    continue
+                path = root / ref
+                if not path.is_file():
+                    problems.append(f"capture: 缺原件 {ref}")
+                    continue
+                import hashlib as _h
+                if _h.sha256(path.read_bytes()).hexdigest() != row.get("bytes_sha256"):
+                    problems.append(f"capture: 原件 sha 不符 {ref}")
     if not summaries:
         history = "UNOBSERVABLE"
     elif any(s.get("gaps") for s in summaries):
@@ -126,6 +147,8 @@ def judge(root: Path, probe_report: "Path | None" = None) -> dict:
     return {"schema": "simpraxis.rsi_g1.closure_judge.v1", "ok": not problems,
             "problems": problems, "axes": axes, "consistent": consistent,
             "n_traces": len(summaries),
+            "capture_demo": [{"first_divergence": c.get("first_divergence")}
+                             for c in captures],
             "note": "独立重算；trace 事件 sha 与父链逐条复核"}
 
 

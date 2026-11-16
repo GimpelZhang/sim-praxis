@@ -33,23 +33,28 @@ class CaptureRecorder:
 
     def __init__(self, root: Path, *, diagnostic_id: str,
                  source_commit: str = "", study: str = "A") -> None:
+        self.root = Path(root)
         self.study = study
         self.writer = GT.TraceWriter(Path(root) / "trace" / "capture",
                                      diagnostic_id=diagnostic_id,
                                      source_commit=source_commit)
 
     def _add(self, kind: str, data: bytes, *, phase: str, extra=None,
-             request_sha: "str | None" = None) -> None:
+             request_sha: "str | None" = None) -> str:
+        digest = GT.sha_bytes(data)
+        rel = GT.materialize(self.root, "capture", data)
         self.writer.add(GT.TraceEvent(
             diagnostic_id=self.writer.diagnostic_id, seq=0, event_kind=kind,
             visibility="observed", study_id=self.study, phase=phase,
-            bytes_sha256=GT.sha_bytes(data), n_bytes=len(data),
+            artifact_ref=rel, bytes_sha256=digest, n_bytes=len(data),
             source_commit=self.writer.source_commit,
             request_sha256=request_sha, extra=dict(extra or {})))
+        return rel
 
-    def record_request(self, request: "T.Request", *, phase: str) -> None:
-        self._add("request_serialized", request.serialized.encode("utf-8"),
-                  phase=phase, request_sha=request.sha256)
+    def record_request(self, request: "T.Request", *, phase: str) -> str:
+        return self._add("request_serialized",
+                         request.serialized.encode("utf-8"), phase=phase,
+                         request_sha=request.sha256)
 
     def record_reply(self, reply: Any, request: "T.Request", *,
                      phase: str) -> None:
@@ -58,9 +63,9 @@ class CaptureRecorder:
                   extra={"response_id": reply.response_id})
 
     def record_dispatch(self, action: Any, result: Any, *,
-                        phase: str) -> None:
+                        phase: str) -> str:
         self._add("action_parsed", GT.canonical(action.to_doc()), phase=phase)
-        self._add("dispatch_return", GT.canonical(result), phase=phase)
+        return self._add("dispatch_return", GT.canonical(result), phase=phase)
 
     def record_clipped(self, turn: "T.Turn", *, phase: str) -> None:
         self._add("clipped_view", GT.canonical(dict(turn.result)), phase=phase,
@@ -203,12 +208,31 @@ def run_capture_demo(*, root: Path, diagnostic_id: str,
 
     # 下一回合请求（真实 build_request）：它看到上一回合的裁剪视图
     next_request = messages()
-    recorder.record_request(next_request, phase="confirm")
-
+    next_ref = recorder.record_request(next_request, phase="confirm")
+    # R1：本运行没有网关发送适配器捕获 ⇒ 按 Plan §2.1 记 MISSING，不补造
+    recorder.writer.add(GT.TraceEvent(
+        diagnostic_id=recorder.writer.diagnostic_id, seq=0,
+        event_kind="gateway_capture", visibility="missing",
+        study_id=recorder.study, phase="confirm", status="MISSING",
+        error_code="MISSING",
+        missing_reason="演示运行不经网关；生产无 gateway capture 适配器",
+        source_commit=recorder.writer.source_commit))
     manifest = recorder.close()
     payload = next_request.serialized
+    # R2：相邻 OBSERVED 节点的首个分歧（本运行可定位）
+    est_marker = "0.040867675677873194"
+    dispatch_ref = [event for event in recorder.writer.events
+                    if event.event_kind == "dispatch_return"][-1].artifact_ref
+    first_divergence = ("RETURN_VIEW" if est_marker not in next_request.serialized
+                        else "PERSISTED_CLAIM")
     summary = {
         "schema": SCHEMA_SUMMARY, "schema_version": 1,
+        "kind": "capture_demo",
+        "first_divergence": first_divergence,
+        "divergence_evidence": {"dispatch_return": dispatch_ref,
+                                "next_request": next_ref,
+                                "claim_in_next_request": est_marker in
+                                next_request.serialized},
         "diagnostic_id": diagnostic_id,
         "turn_ok": bool(outcome.ok), "action": outcome.action,
         "next_request": {"sha256": next_request.sha256,

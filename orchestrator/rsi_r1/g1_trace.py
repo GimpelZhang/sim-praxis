@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from orchestrator.common.clock import utc_now_iso_z
-from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
+from orchestrator.common.fsutil import (atomic_write_bytes, atomic_write_text,
+                                        ensure_private_dir)
 from orchestrator.common import research_transport as T
 
 SCHEMA_EVENT = "simpraxis.rsi_g1.trace_event.v1"
@@ -77,6 +78,18 @@ def sha_bytes(data: bytes) -> str:
 def field_sha(value: Any) -> str:
     """字段级摘要：与原件字节无关的**规范对象** hash（Plan §2.1 明确区分）。"""
     return sha_bytes(canonical(value))
+
+
+def materialize(root: Path, sub: str, data: bytes) -> str:
+    """把原字节写进 G1 根（0600，原子），返回根内相对路径（artifact_ref 唯一合法面）。"""
+    digest = sha_bytes(data)
+    rel = f"trace/{sub}/artifacts/{digest}.bin"
+    target = Path(root) / rel
+    ensure_private_dir(target.parent)
+    atomic_write_bytes(target, data, mode=0o600)
+    if sha_bytes(target.read_bytes()) != digest:  # 源/目标 hash 必须相等
+        raise G1TraceError("ARTIFACT_HASH", rel)
+    return rel
 
 
 def _is_json_value(value: Any) -> bool:
@@ -423,11 +436,13 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
     if raw_path.is_file() and not raw_path.is_symlink():
         data = raw_path.read_bytes()
         refs["analysis_output"] = data
+        ref_rel = materialize(Path(out_root), study, data)
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
                               event_kind="analysis_output", visibility="observed",
-                              study_id=study, artifact_ref=raw_rel,
+                              study_id=study, artifact_ref=ref_rel,
                               bytes_sha256=sha_bytes(data), n_bytes=len(data),
-                              source_commit=source_commit))
+                              source_commit=source_commit,
+                              extra={"source_relpath": raw_rel}))
     else:
         gaps.append("analysis_output")
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
@@ -463,9 +478,11 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
                 break
     if confirm_result is not None:
         cb = canonical(confirm_result)
+        cb_rel = materialize(Path(out_root), study, cb)
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
                               event_kind="dispatch_return", visibility="observed",
-                              study_id=study, bytes_sha256=sha_bytes(cb),
+                              study_id=study, artifact_ref=cb_rel,
+                              bytes_sha256=sha_bytes(cb),
                               n_bytes=len(cb), source_commit=source_commit))
     else:
         gaps.append("dispatch_return")
@@ -482,9 +499,11 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
         view = dict(clipped.result)
         vb = canonical(view)
         visible_keys = sorted(view)
+        vb_rel = materialize(Path(out_root), study, vb)
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
                               event_kind="clipped_view", visibility="reconstructed",
-                              study_id=study, bytes_sha256=sha_bytes(vb),
+                              study_id=study, artifact_ref=vb_rel,
+                              bytes_sha256=sha_bytes(vb),
                               n_bytes=len(vb), source_commit=source_commit,
                               extra={"retained_keys": visible_keys,
                                      "clip_limits": {
@@ -523,11 +542,13 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
     if reply_rel and (root / reply_rel).is_file():
         data = (root / reply_rel).read_bytes()
         refs["response_raw"] = data
+        reply_ref = materialize(Path(out_root), study, data)
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
                               event_kind="response_raw", visibility="observed",
                               study_id=study, response_id=submit_rid or "",
-                              artifact_ref=reply_rel, bytes_sha256=sha_bytes(data),
-                              n_bytes=len(data), source_commit=source_commit))
+                              artifact_ref=reply_ref, bytes_sha256=sha_bytes(data),
+                              n_bytes=len(data), source_commit=source_commit,
+                              extra={"source_relpath": reply_rel}))
     else:
         gaps.append("response_raw")
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
@@ -561,13 +582,69 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
         data = claim_path.read_bytes()
         claim_doc = json.loads(data)
         refs["claim_persisted"] = claim_doc
+        claim_ref = materialize(Path(out_root), study, data)
         writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
                               event_kind="claim_persisted", visibility="observed",
-                              study_id=study, artifact_ref=claim_rel,
+                              study_id=study, artifact_ref=claim_ref,
                               bytes_sha256=sha_bytes(data), n_bytes=len(data),
-                              source_commit=source_commit))
+                              source_commit=source_commit,
+                              extra={"source_relpath": claim_rel}))
     else:
         gaps.append("claim_persisted")
+
+    # -- R4：receipt 交叉核验（output_sha256 必须等于 analysis 原字节 hash） --
+    receipt_check = {"present": False, "output_sha_ok": None,
+                     "manifest_sha_ok": None, "problems": []}
+    rec_path = root / f"private/receipts/{study}-confirm.json"
+    man_path = root / f"confirm/manifest_{study}.json"
+    if rec_path.is_file():
+        receipt_check["present"] = True
+        rec = json.loads(rec_path.read_text(encoding="utf-8"))
+        raw_bytes = refs.get("analysis_output")
+        if raw_bytes is None:
+            receipt_check["problems"].append("analysis 原字节缺失")
+        else:
+            receipt_check["output_sha_ok"] = (
+                str(rec.get("output_sha256") or "") == sha_bytes(raw_bytes))
+            if not receipt_check["output_sha_ok"]:
+                receipt_check["problems"].append("output_sha256 不符")
+        if man_path.is_file():
+            # 凭据记的是 manifest 文档内的规范 sha（不含该字段本身），
+            # 不是文件字节 sha（轮 P 复盘实测）。
+            man_doc = json.loads(man_path.read_text(encoding="utf-8"))
+            receipt_check["manifest_sha_ok"] = (
+                str(rec.get("confirm_manifest_sha256") or "")
+                == str(man_doc.get("manifest_sha256") or ""))
+            if not receipt_check["manifest_sha_ok"]:
+                receipt_check["problems"].append("confirm_manifest sha 不符")
+    else:
+        receipt_check["problems"].append("凭据件缺失")
+
+    # -- R3：submit 五面信封（response/action/report/rendered/claim 各自 hash）--
+    envelope = {}
+    if refs.get("response_raw") is not None:
+        envelope["response_sha"] = sha_bytes(refs["response_raw"])
+    if action_doc is not None:
+        envelope["action_sha"] = sha_bytes(canonical(action_doc))
+        report_doc = action_doc.get("research_report")
+        if isinstance(report_doc, Mapping):
+            envelope["research_report_sha"] = sha_bytes(canonical(report_doc))
+        rendered = action_doc.get("report_text")
+        if isinstance(rendered, str):
+            envelope["rendered_sha"] = sha_bytes(rendered.encode("utf-8"))
+        claims = action_doc.get("claims")
+        if isinstance(claims, list) and claims:
+            envelope["claim_sha"] = sha_bytes(canonical(claims[0]))
+    if claim_doc is not None and "claim_sha" not in envelope:
+        claims = claim_doc.get("claims")
+        if isinstance(claims, list) and claims:
+            envelope["claim_sha"] = sha_bytes(canonical(claims[0]))
+    envelope_doc = {"schema": "simpraxis.rsi_g1.submit_envelope.v1",
+                    "schema_version": 1, "study": study, "shas": envelope}
+    ensure_private_dir(Path(out_root) / "trace" / study)
+    atomic_write_text(Path(out_root) / "trace" / study / "submit_envelope.json",
+                      json.dumps(envelope_doc, ensure_ascii=False,
+                                 sort_keys=True, indent=1) + "\n", mode=0o600)
 
     # -- 数值对照：candidate_output → (可见视图) → claim ------------------
     def _cand_estimate(doc: Mapping[str, Any]) -> "float | None":
@@ -616,6 +693,9 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
         },
         "first_divergence": first,
         "suspected": suspected,
+        "receipt_check": receipt_check,
+        "submit_envelope": envelope,
+        "kind": "history",
         "attribution_level": "RECONSTRUCTED" if suspected else None,
         "note": ("历史请求字节未归档：视图只能按固定旧代码重建，"
                  "按 Plan §5.1 不得据此给候选归因"),

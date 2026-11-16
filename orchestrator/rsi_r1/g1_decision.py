@@ -118,7 +118,11 @@ def aggregate_diagnostics(*, diagnostic_id: str,
                           compiler_cases: Sequence[Mapping[str, Any]],
                           probe: "Mapping[str, Any] | None" = None,
                           notes: Sequence[str] = ()) -> "dict[str, Any]":
-    history, delivery, gaps = _trace_axes(traces)
+    # 新运行（capture_demo）不参与**历史**可观测性轴（Plan §5.1：新捕获不能
+    # retrofit 历史）；它单独作为证据列出。
+    history_traces = [t for t in traces if t.get("kind", "history") != "capture_demo"]
+    capture = [t for t in traces if t.get("kind") == "capture_demo"]
+    history, delivery, gaps = _trace_axes(history_traces)
     packet, packet_codes = _packet_axis(packet_audits)
     compiler, failed_cases = _compiler_axis(compiler_cases)
     suspected = [str(t["suspected"]) for t in traces if t.get("suspected")]
@@ -135,6 +139,12 @@ def aggregate_diagnostics(*, diagnostic_id: str,
         "axes": axes,
         "evidence": {
             "trace_gaps": gaps,
+            "capture_demo": [{"first_divergence": c.get("first_divergence"),
+                              "evidence": c.get("divergence_evidence"),
+                              "carries_candidate_output":
+                                  (c.get("next_request") or {}).get(
+                                      "carries_candidate_output")}
+                             for c in capture],
             "suspected_hops": sorted(set(suspected)),
             "packet_codes": packet_codes,
             "failed_cases": failed_cases,

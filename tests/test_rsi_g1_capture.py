@@ -78,3 +78,32 @@ def test_a_layer_guard_blocks_sender(tmp_path):
         with pytest.raises(GP.ProbeError) as exc:
             GP.build_sender(root=tmp_path, diagnostic_id="g1t")
         assert exc.value.code == "G1_BLOCKED_PAID_GATE"
+
+
+def test_capture_materializes_artifacts_and_computes_divergence(tmp_path):
+    """R1/R2：原字节落 G1 根（artifact_ref 根内路径、sha 相等）；给出首分歧。"""
+    import hashlib
+    summary = GC.run_capture_demo(root=tmp_path, diagnostic_id="g1t")
+    assert summary["first_divergence"] == "RETURN_VIEW"
+    ev = [json.loads(line) for line in
+          (tmp_path / "trace" / "capture" / "events.jsonl").read_text().splitlines()]
+    for row in ev:
+        if row["visibility"] != "observed":
+            continue
+        ref = row["artifact_ref"]
+        assert ref and not ref.startswith("/")
+        path = tmp_path / ref
+        assert path.is_file()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == row["bytes_sha256"]
+    assert any(r["event_kind"] == "gateway_capture" and r["visibility"] == "missing"
+               for r in ev)
+    assert summary["divergence_evidence"]["claim_in_next_request"] is False
+
+
+def test_capture_demo_not_counted_in_history_axis(tmp_path):
+    from orchestrator.rsi_r1 import g1_decision as GD
+    summary = GC.run_capture_demo(root=tmp_path, diagnostic_id="g1t")
+    doc = GD.aggregate_diagnostics(diagnostic_id="g1t", traces=[summary],
+                                   packet_audits=[], compiler_cases=[])
+    assert doc["axes"]["history_observability"] == "UNOBSERVABLE"
+    assert doc["evidence"]["capture_demo"][0]["first_divergence"] == "RETURN_VIEW"
