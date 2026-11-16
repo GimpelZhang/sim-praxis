@@ -458,6 +458,11 @@ def run_probe(*, root: Path, prereg: Mapping[str, Any], sender: Any,
             posts += 1
             break
         posts += 1
+        # G1-D2：槽级原件必须留档（首轮只存了 sha，事后无法复核指针错误）。
+        slot_dir = Path(root) / "probe" / "slots" / slot_id
+        ensure_private_dir(slot_dir)
+        atomic_write_text(slot_dir / "request.txt", request.serialized, mode=0o600)
+        atomic_write_text(slot_dir / "reply.txt", str(reply["text"]), mode=0o600)
         score = score_slot(case, str(slot["interface"]), reply["text"])
         records.append({"slot_id": slot_id, "case_id": slot["case_id"],
                         "interface": slot["interface"],

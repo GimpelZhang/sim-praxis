@@ -155,7 +155,8 @@ def cmd_decision(args: Any) -> int:
     cases = (json.loads(cases_doc.read_text(encoding="utf-8")).get("results")
              if cases_doc.is_file() else [])
     probe_doc = None
-    probe_path = out / "probe" / "probe_report.json"
+    probe_path = (Path(args.probe_report) if getattr(args, "probe_report", None)
+                  else out / "probe" / "probe_report.json")
     if probe_path.is_file():
         probe_doc = json.loads(probe_path.read_text(encoding="utf-8"))
         probe_doc = {"overall": probe_doc.get("overall"),
@@ -268,6 +269,8 @@ def build_parser() -> argparse.ArgumentParser:
     pdec = sub.add_parser("decision", help="G4 多轴决策（零 POST）")
     common(pdec)
     pdec.add_argument("--note", action="append", default=None)
+    pdec.add_argument("--probe-report", default=None,
+                      help="可显式指定 B 层报告（默认 <root>/probe/probe_report.json）")
     pdec.set_defaults(func=cmd_decision)
 
     ppr = sub.add_parser("probe-preregister", help="冻结 B 层 24 槽（零 POST）")
