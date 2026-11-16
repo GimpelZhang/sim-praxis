@@ -36,6 +36,12 @@ ACTION_NAMES = (
     "freeze_confirm", "run_confirm", "submit_claim",
 )
 
+#: RSI-G2（Plan §2.4）：**窄动作注册表**。只在 g2_atomic_v1 分派器里存在处理器；
+#: 解析层接受，旧 R13/legacy 分派器无处理器 ⇒ `UNKNOWN_ACTION`（终态）。
+#: 不并入 ``ACTION_NAMES``：旧系统提示逐字不变（legacy/R1.3 不暴露该动作）。
+G2_ACTION_NAMES = ("read_result_artifact",)
+ALL_ACTION_NAMES = ACTION_NAMES + G2_ACTION_NAMES
+
 #: ``freeze_confirm.plan_sha256`` 的字面 sentinel：由宿主对收到的 confirm 计划
 #: 计算 canonical sha256 并回传（见 ``_validate_action_fields`` 的锁内适配说明）。
 HOST_PLAN_SHA = "host"
@@ -49,6 +55,8 @@ TERMINAL_CODES = frozenset({
     "AUTHORITY", "COST_UNKNOWN", "STATE_UNKNOWN", "SAFETY",
     "INSTRUMENT_BROKEN", "LOCK_MISSING", "LOCK_MISMATCH", "LOCK_DRIFT",
     "BUDGET_REFUSED", "INPUT_LIMIT", "HIDDEN_LEAK", "TOOL_OUTCOME_UNKNOWN",
+    # RSI-G2：最小交付单元无法完整送达（发网前阻断，旧路径不产生该码）。
+    "RESULT_VIEW_INCOMPLETE",
 })
 
 CHECK_POLICY_RULES = """\
@@ -107,6 +115,9 @@ _KEYS: "Mapping[str, frozenset[str]]" = {
                                  "analysis_sha256", "plan"}),
     "run_confirm": frozenset({"action", "confirm_token"}),
     "submit_claim": frozenset({"action", "claims", "report_text"}),
+    # G2 只读证据分页（Plan §2.4）：artifact_id 必须来自当前 envelope 登记。
+    "read_result_artifact": frozenset({"action", "artifact_id", "output_sha256",
+                                       "cursor", "page_bytes"}),
 }
 _OPTIONAL_KEYS: "Mapping[str, frozenset[str]]" = {
     "propose_plan": frozenset({"design_source", "analysis_source",
@@ -237,7 +248,7 @@ def parse_action(text: str) -> Action:
     except C.ContractError as exc:
         raise LoopError(exc.code, exc.detail or "NaN/Inf") from None
     name = doc.get("action")
-    if not isinstance(name, str) or name not in ACTION_NAMES:
+    if not isinstance(name, str) or name not in ALL_ACTION_NAMES:
         raise LoopError("UNKNOWN_ACTION", f"action={name!r}")
     allowed = _KEYS[name] | _OPTIONAL_KEYS.get(name, frozenset())
     missing = sorted(_KEYS[name] - set(doc))
@@ -310,6 +321,19 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
         if "research_report" in doc and not isinstance(
                 doc["research_report"], Mapping):
             raise LoopError("WRONG_TYPE", "research_report 必须是对象")
+    elif name == "read_result_artifact":
+        artifact_id = _require_str(doc, "artifact_id", max_bytes=256)
+        if artifact_id.startswith("/") or ".." in artifact_id.split("/") \
+                or not artifact_id.startswith("analysis/"):
+            raise LoopError("ARTIFACT_FORBIDDEN", artifact_id)
+        _require_hex(doc, "output_sha256")
+        cursor = doc["cursor"]
+        if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+            raise LoopError("CURSOR_INVALID", repr(cursor))
+        page = doc["page_bytes"]
+        if (not isinstance(page, int) or isinstance(page, bool)
+                or not 1 <= page <= 8 * 1024):
+            raise LoopError("PAGE_TOO_LARGE", repr(page))
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +843,15 @@ class ResearchLoop:
         self.capture = capture
 
     def turn(self) -> StepOutcome:
-        request = self.messages()
+        try:
+            request = self.messages()
+        except T.ResultViewIncomplete as exc:
+            # RSI-G2（Plan §2.4）：最小交付单元无法完整送达 ⇒ **发网前**停止。
+            # 这是仪器交付失败，不改写已成功的 raw、不重跑 confirm、不静默加帽。
+            self.store.stop_or_block(code=T.ResultViewIncomplete.code,
+                                     detail=exc.detail)
+            return StepOutcome(ok=False, code=T.ResultViewIncomplete.code,
+                               terminal=True)
         if self.capture is not None:
             self.capture.record_request(request, phase=self.phase)
         accounting = T.check_request(request)

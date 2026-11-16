@@ -33,6 +33,66 @@ VERDICT_TOKEN_OVER_CAP = "TOKEN_OVER_CAP"
 VERDICT_BYTE_OVER_CAP = "BYTE_OVER_CAP"
 VERDICT_COUNTER_UNAVAILABLE = "COUNTER_UNAVAILABLE"
 
+#: RSI-G2（Plan §2.4）：交付策略是**冻结运行配置**，不由模型在 action 里选择。
+#: 只有显式 ``g2_atomic_v1`` 才启用新 envelope 分支；``legacy`` 逐字旧行为。
+POLICY_LEGACY = "legacy"
+POLICY_G2_ATOMIC = "g2_atomic_v1"
+DELIVERY_POLICIES = (POLICY_LEGACY, POLICY_G2_ATOMIC)
+G2_ENVELOPE_KEY = "result_envelope"
+G2_ENVELOPE_MAX_BYTES = 16 * 1024
+G2_CONTEXT_HEADER = "### 活动结果视图（result_context；g2_atomic_v1，不可裁剪）\n"
+G2_ENVELOPE_HEADER = "### 结果视图（g2_atomic_v1 最小交付单元，不可裁剪）\n"
+#: 原子单元必需键（与 ``rsi_r1.g2_contract.ENVELOPE_REQUIRED`` 同名单；
+#: 一致性由 tests/test_rsi_g2_contract.py 机器核对）。
+G2_ENVELOPE_REQUIRED = (
+    "schema", "schema_version", "study_id", "phase", "policy_id",
+    "plan_sha256", "analysis_receipt_sha256", "analysis_output_sha256",
+    "scope_contract_sha256", "scope", "required_contrast_ids", "contrasts",
+    "primary", "diagnostics", "artifacts", "evidence", "summary_sha256",
+    "envelope_sha256", "truncation",
+)
+
+
+class ResultViewIncomplete(RuntimeError):
+    """最小交付单元无法完整构造/送达（**发网前**阻断；0 网络）。"""
+
+    code = "RESULT_VIEW_INCOMPLETE"
+
+    def __init__(self, detail: str = "") -> None:
+        self.detail = detail
+        super().__init__(f"[RESULT_VIEW_INCOMPLETE] {detail}" if detail else
+                         "RESULT_VIEW_INCOMPLETE")
+
+
+def g2_envelope_bytes(envelope: Any) -> bytes:
+    """原子校验 + 规范字节：缺任一必需键/超 16 KiB/NaN 一律阻断。"""
+    if not isinstance(envelope, Mapping):
+        raise ResultViewIncomplete("envelope 必须是对象")
+    missing = [key for key in G2_ENVELOPE_REQUIRED if key not in envelope]
+    if missing:
+        raise ResultViewIncomplete(f"缺必需字段 {missing}")
+    if envelope.get("truncation") is not False:
+        raise ResultViewIncomplete("truncation 必须为 false")
+    primary = envelope.get("primary")
+    if not isinstance(primary, Mapping) or not {
+            "estimand_id", "contrast_id", "metric_id", "estimate",
+            "interval"} <= set(primary):
+        raise ResultViewIncomplete("primary 不完整")
+    for key in ("scope", "artifacts", "evidence", "required_contrast_ids",
+                "contrasts"):
+        if not envelope.get(key):
+            raise ResultViewIncomplete(f"{key} 为空")
+    try:
+        data = json.dumps(envelope, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ResultViewIncomplete(f"非规范 JSON: {exc}") from None
+    if len(data) > G2_ENVELOPE_MAX_BYTES:
+        raise ResultViewIncomplete(
+            f"envelope {len(data)}B > {G2_ENVELOPE_MAX_BYTES}B（不偷偷只取 primary）")
+    return data
+
+
 
 class CounterUnavailable(RuntimeError):
     """分词器不可用：禁止用未钉哈希的计数器放行。"""
@@ -83,9 +143,29 @@ class Turn:
     model_text: str
     result: Mapping[str, Any]
 
-    def clipped(self) -> "Turn":
-        return Turn(model_text=clip_text(self.model_text, TOOL_REPLY_MAX_BYTES),
-                    result=self._clip_result(self.result))
+    def clipped(self, *, policy: str = POLICY_LEGACY) -> "Turn":
+        if policy == POLICY_LEGACY:
+            return Turn(model_text=clip_text(self.model_text, TOOL_REPLY_MAX_BYTES),
+                        result=self._clip_result(self.result))
+        if policy != POLICY_G2_ATOMIC:
+            raise ValueError(f"未知 delivery_policy={policy!r}")
+        return self._g2_clipped()
+
+    def _g2_clipped(self) -> "Turn":
+        """G2：envelope 走原子校验，**不进** 通用裁剪白名单（Plan §2.4）。"""
+        text = clip_text(self.model_text, TOOL_REPLY_MAX_BYTES)
+        if G2_ENVELOPE_KEY in self.result:
+            envelope = self.result[G2_ENVELOPE_KEY]
+            g2_envelope_bytes(envelope)          # 缺失/超帽 ⇒ ResultViewIncomplete
+            return Turn(model_text=text,
+                        result={"ok": bool(self.result.get("ok")),
+                                "action": self.result.get("action"),
+                                G2_ENVELOPE_KEY: dict(envelope),
+                                "truncated": False})
+        # 非确认类结果（write_artifact/propose_plan 等）沿用旧裁剪：G2 只改
+        # 确认结果的最小交付单元，不扩大其它回包的可见面。
+        return Turn(model_text=text, result=self._clip_result(self.result))
+
 
     @staticmethod
     def _clip_result(result: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -216,8 +296,46 @@ def _result_fields(turn: Turn) -> dict[str, Any]:
 
 def build_request(*, system: str, task_brief: str, turns: Sequence[Turn],
                   counter: Callable[[str], int],
-                  max_tokens: int = MAX_OUTPUT_TOKENS) -> Request:
-    """确定性构造完整请求：任务 + 最近两轮全文 + 更早固定字段摘要。"""
+                  max_tokens: int = MAX_OUTPUT_TOKENS,
+                  delivery_policy: str = POLICY_LEGACY,
+                  result_context: "Mapping[str, Any] | None" = None) -> Request:
+    """确定性构造完整请求：任务 + 最近两轮全文 + 更早固定字段摘要。
+
+    ``delivery_policy="legacy"``（默认）逐字旧行为；``g2_atomic_v1`` 走
+    最小交付分支：envelope 以规范字节**逐字**进入 messages（终检在场），
+    活动 result_context 固定携带、跨轮不重复。超界/缺失抛
+    ``ResultViewIncomplete``（发网前阻断，0 网络）。
+    """
+    if delivery_policy not in DELIVERY_POLICIES:
+        raise ValueError(f"未知 delivery_policy={delivery_policy!r}")
+    if delivery_policy == POLICY_LEGACY:
+        if result_context is not None:
+            raise ValueError("legacy 不支持 result_context（不得暗改旧请求）")
+        return _build_request_legacy(system=system, task_brief=task_brief,
+                                     turns=turns, counter=counter,
+                                     max_tokens=max_tokens)
+    return _build_request_g2(system=system, task_brief=task_brief,
+                             turns=turns, counter=counter,
+                             max_tokens=max_tokens,
+                             result_context=result_context)
+
+
+def _finalize_request(*, system: str, messages: "list[dict[str, str]]",
+                      counter: Callable[[str], int],
+                      max_tokens: int) -> Request:
+    payload = {"system": system, "messages": messages, "max_tokens": int(max_tokens)}
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    n_bytes = len(serialized.encode("utf-8"))
+    return Request(system=system, messages=tuple(messages), max_tokens=int(max_tokens),
+                   serialized=serialized,
+                   sha256=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+                   n_bytes=n_bytes, local_tokens=int(counter(serialized)))
+
+
+def _build_request_legacy(*, system: str, task_brief: str,
+                          turns: Sequence[Turn],
+                          counter: Callable[[str], int],
+                          max_tokens: int) -> Request:
     messages: list[dict[str, str]] = [{"role": "user", "content": task_brief}]
     clipped = [t.clipped() for t in turns]
     split = max(0, len(clipped) - FULL_HISTORY_ROUNDS)
@@ -231,13 +349,71 @@ def build_request(*, system: str, task_brief: str, turns: Sequence[Turn],
         messages.append({"role": "user",
                          "content": json.dumps(t.result, ensure_ascii=False,
                                                sort_keys=True)})
-    payload = {"system": system, "messages": messages, "max_tokens": int(max_tokens)}
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    n_bytes = len(serialized.encode("utf-8"))
-    return Request(system=system, messages=tuple(messages), max_tokens=int(max_tokens),
-                   serialized=serialized,
-                   sha256=hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
-                   n_bytes=n_bytes, local_tokens=int(counter(serialized)))
+    return _finalize_request(system=system, messages=messages,
+                             counter=counter, max_tokens=max_tokens)
+
+def _build_request_g2(*, system: str, task_brief: str, turns: Sequence[Turn],
+                      counter: Callable[[str], int], max_tokens: int,
+                      result_context: "Mapping[str, Any] | None") -> Request:
+    messages: list[dict[str, str]] = [{"role": "user", "content": task_brief}]
+    required_texts: "list[str]" = []
+    active_sha: "str | None" = None
+    if result_context is not None:
+        ctx_bytes = g2_envelope_bytes(result_context)
+        active_sha = str(result_context.get("envelope_sha256"))
+        ctx_text = ctx_bytes.decode("utf-8")
+        messages.append({"role": "user", "content": G2_CONTEXT_HEADER + ctx_text})
+        required_texts.append(ctx_text)
+    split = max(0, len(turns) - FULL_HISTORY_ROUNDS)
+    # 更早轮次只留固定字段摘要；若其中有 envelope 而调用方又没给
+    # result_context，则该 envelope 会被摘要丢弃——显式阻断，绝不静默丢证据。
+    for t in turns[:split]:
+        if G2_ENVELOPE_KEY in t.result and active_sha is None:
+            raise ResultViewIncomplete(
+                "早期 envelope 会落入摘要区；必须提供 result_context")
+    older = [summarize_event({"action": _action_of(t), **_result_fields(t)})
+             for t in turns[:split]]
+    if older:
+        messages.append({"role": "user",
+                         "content": "### 更早轮次（固定字段摘要）\n" + "\n".join(older)})
+    seen_env: "set[str]" = set()
+    for t in turns[split:]:
+        if G2_ENVELOPE_KEY not in t.result:
+            view = t.clipped(policy=POLICY_G2_ATOMIC)
+            messages.append({"role": "assistant", "content": view.model_text})
+            messages.append({"role": "user",
+                             "content": json.dumps(view.result,
+                                                   ensure_ascii=False,
+                                                   sort_keys=True)})
+            continue
+        envelope = t.result[G2_ENVELOPE_KEY]
+        env_bytes = g2_envelope_bytes(envelope)
+        env_sha = str(envelope.get("envelope_sha256"))
+        rest = {k: v for k, v in t.result.items() if k != G2_ENVELOPE_KEY}
+        messages.append({"role": "assistant",
+                         "content": clip_text(t.model_text, TOOL_REPLY_MAX_BYTES)})
+        if env_sha == active_sha or env_sha in seen_env:
+            # 同一 envelope 已在 result_context / 上一回合逐字出现：防重复叠加。
+            messages.append({"role": "user",
+                             "content": json.dumps(rest, ensure_ascii=False,
+                                                   sort_keys=True)})
+            continue
+        seen_env.add(env_sha)
+        env_text = env_bytes.decode("utf-8")
+        messages.append({"role": "user",
+                         "content": json.dumps(rest, ensure_ascii=False,
+                                               sort_keys=True)
+                         + "\n" + G2_ENVELOPE_HEADER + env_text})
+        required_texts.append(env_text)
+    req = _finalize_request(system=system, messages=messages,
+                            counter=counter, max_tokens=max_tokens)
+    # 终检（Plan §2.4）：完整 envelope 必须在**最终** messages 中逐字在场。
+    joined = "\n".join(message["content"] for message in req.messages)
+    for text in required_texts:
+        if text not in joined:
+            raise ResultViewIncomplete("最终 request 中 envelope 不在场（RETURN_VIEW）")
+    return req
+
 
 
 @dataclass(frozen=True)
