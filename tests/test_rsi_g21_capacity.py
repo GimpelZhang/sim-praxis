@@ -63,3 +63,15 @@ def test_capacity_requires_frozen_matrix(tmp_path):
         assert exc.code == "CAPACITY_MATRIX_MISSING"
     else:  # pragma: no cover - 冻结矩阵必须已写
         raise AssertionError("缺冻结矩阵时必须阻断")
+
+
+def test_capacity_matrix_entries_carry_frozen_limits(tmp_path):
+    root = _prepared(tmp_path)
+    matrix = G21.capacity_matrix(
+        G2.load_scope_contract(root / "contract" / "scope_A.json"))
+    for entry in matrix["entries"]:
+        assert entry["required_ids"]
+        assert entry["envelope_byte_limit"] == G2.ENVELOPE_MAX_BYTES
+        assert entry["request_token_limit"] > 0
+        assert entry["expected_outcome"] in (
+            "NORMAL_SUCCESS", "BLOCK_BEFORE_SEND", "SOURCE_OR_SUCCESS")

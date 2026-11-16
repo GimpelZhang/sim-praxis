@@ -823,7 +823,8 @@ class ResearchState:
 
     def submit_claim(self, *, study: str, claims: Sequence[Mapping[str, Any]],
                      report_text: str, response_id: str,
-                     origin: "Mapping[str, Any] | None" = None
+                     origin: "Mapping[str, Any] | None" = None,
+                     producer: str = PRODUCER_CANDIDATE
                      ) -> "dict[str, Any]":
         _require_study(study)
         state = self.study_state(study)
@@ -844,7 +845,8 @@ class ResearchState:
             "claims": [dict(c) for c in claims],
             "report_text_sha256": report_sha, "report_bytes": n_bytes,
             "report_artifact_id": report_artifact_id,
-            "producer": PRODUCER_CANDIDATE}
+            # RSI-G2.1（Plan §3.1）：脚本消费者必须据实标注，不能冒充模型成功。
+            "producer": str(producer)}
         # RSI-G2（Plan §3.0）：四路 sha 分开保存（raw reply / action / report
         # doc / rendered）。legacy 不传 origin ⇒ 事件字节与旧行为逐字相同。
         if origin is not None:

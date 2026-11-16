@@ -549,7 +549,8 @@ class CampaignDispatcher:
                  batch_workers: int = 1,
                  delivery_policy: str = RT.POLICY_LEGACY,
                  scope_contract: "G2.ScopeContractV1 | None" = None,
-                 require_task_contrasts: bool = False) -> None:
+                 require_task_contrasts: bool = False,
+                 claim_producer: str = S.PRODUCER_CANDIDATE) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
@@ -596,6 +597,8 @@ class CampaignDispatcher:
         # 派生（主对比 + 阴性对照），不从候选 output 现有项反推。默认 False ⇒
         # G2 既有装配逐字不变；G2.1 证据桥显式打开。
         self.require_task_contrasts = bool(require_task_contrasts)
+        # G2.1：脚本消费者提交的 claim 必须据实标 producer（默认仍 candidate）。
+        self.claim_producer = str(claim_producer or S.PRODUCER_CANDIDATE)
         if self.g2:
             if scope_contract is None:
                 raise AssemblyError("POLICY_BINDING_MISSING",
@@ -1820,7 +1823,8 @@ class CampaignDispatcher:
         self.state.submit_claim(study=self.study, claims=claims,
                                 report_text=report_text,
                                 response_id=response_id,
-                                origin=origin if self.g2 else None)
+                                origin=origin if self.g2 else None,
+                                producer=self.claim_producer)
         CL.write_claim_submission(self.ctx, self.study, submission)
         CL.write_judge_report(self.ctx, self.study, report)
         self.ctx.write_json(

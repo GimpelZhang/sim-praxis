@@ -107,3 +107,13 @@ def test_run_raw_check_end_to_end(tmp_path):
     assert report["independent"] is True
     assert all(report["studies"][s]["raw_ok"] for s in ("A", "B"))
     assert len(report["mutations"]) == len(CHK.MUTATIONS)
+
+
+def test_scope_unit_drift_is_detected(tmp_path):
+    payload = _inputs(tmp_path)
+    scope = dict(payload["scope"], unit="km")
+    report = CHK.run_check(study="A", task=payload["task"], scope=scope,
+                           stats=payload["stats"], raw_dir=payload["raw"],
+                           candidate=payload["candidate"])
+    assert "SCOPE_DRIFT" in report["problems"]
+    assert report["axes"]["scope_valid"] is False

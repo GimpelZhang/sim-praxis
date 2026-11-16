@@ -130,3 +130,20 @@ def test_closure_checker_rejects_self_asserted_ready(tmp_path):
     text = " ".join(report["problems"])
     assert "isolation.report 缺失" in text or "isolation" in text
     assert any(name.startswith("closeout 轴") for name in report["problems"])
+
+
+def test_bridge_records_consumer_label_and_resources(tmp_path):
+    manifest, root = _prepare(tmp_path)
+    assert CLI.main(["bridge-init", "--root", str(root),
+                     "--inputs", str(manifest)]) == 0
+    assert CLI.main(["bridge-run", "--root", str(root), "--study", "A"]) == 0
+    faces = json.loads((root / "submit/A/five_faces.json").read_text())
+    assert faces["consumer_label"] == "maintainer_scripted_consumer"
+    assert faces["claim_producer"] == "maintainer_scripted_consumer"
+    assert faces["counts_as_candidate_success"] is False
+    resources = json.loads(
+        (root / "logs" / "bridge-run-A-resources.json").read_text())
+    assert resources["command"] == "bridge-run-A"
+    assert resources["wall_s"] > 0
+    assert resources["problems"] == []
+    assert resources["limits"]["wall_s"] > 0

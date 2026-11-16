@@ -418,6 +418,10 @@ def compare(*, study: str, task: Mapping[str, Any], scope: Mapping[str, Any],
             problems.append("METRIC_UNREGISTERED")
             axes["tuple_match"] = False
             continue
+        unit = ((stats.get("metrics") or {}).get(metric) or {}).get("unit")
+        if unit and str(scope.get("unit")) != str(unit):
+            problems.append("SCOPE_DRIFT")
+            axes["scope_valid"] = False
         ref = recompute_contrast(
             terms=spec.get("terms") or [],
             blocks=blocks, delta=float(spec.get("delta")),

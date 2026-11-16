@@ -442,6 +442,23 @@ def plan_import(journal_path: "str | Path", study: str) -> dict[str, Any]:
         raise G21Error(SOURCE_INCOMPLETE,
                        f"源 journal 无 study {study} 的 RESULTS_RELEASED")
     imported = events[: cutoff + 1]
+    # Plan §3.1：核 plan/state/reply/artifact 关联（不只看事件名）。
+    reply_ids = {str(doc["payload"].get("response_id"))
+                 for doc in imported if doc.get("event") == "reply"}
+    for doc in imported:
+        payload = doc.get("payload") or {}
+        if doc.get("event") in ("artifact", "action"):
+            rid = payload.get("response_id")
+            if rid is not None and str(rid) not in reply_ids:
+                raise G21Error("IMPORT_UNBOUND",
+                               f"{doc.get('event')} 的 response_id={rid!r} 无对应 reply")
+        if doc.get("event") == "plan_revision":
+            plan_doc = payload.get("doc")
+            if not isinstance(plan_doc, Mapping):
+                raise G21Error("IMPORT_UNBOUND", "plan_revision 缺 doc")
+            want = C.ResearchPlan.from_dict(dict(plan_doc)).sha256
+            if payload.get("plan_sha256") not in (None, want):
+                raise G21Error("IMPORT_UNBOUND", "plan_revision.plan_sha256 与 doc 不符")
     typed: "list[dict[str, Any]]" = []
     for doc in imported:
         name = str(doc["event"])
@@ -468,7 +485,8 @@ def plan_import(journal_path: "str | Path", study: str) -> dict[str, Any]:
 
 
 def write_import(root: "str | Path", study: str,
-                 plan: Mapping[str, Any]) -> dict[str, Any]:
+                 plan: Mapping[str, Any], *,
+                 source_campaign: str = "") -> dict[str, Any]:
     """把 typed 事件写进新根 journal（幂等：已导入则复核后跳过）。"""
     ctx = G21Context(root)
     journal = S.Journal(ctx)
@@ -496,7 +514,7 @@ def write_import(root: "str | Path", study: str,
     doc = {"schema": IMPORT_SCHEMA, "schema_version": 1,
            "mode": MODE_OFFLINE_BRIDGE,
            "study": study,
-           "source_campaign": "",
+           "source_campaign": str(source_campaign),
            "source_journal_sha256": plan["source_journal_sha256"],
            "cutoff_source_seq": plan["cutoff_source_seq"],
            "source_events_total": plan["source_events_total"],
@@ -1027,7 +1045,7 @@ def build_offline_parts(*, root: "str | Path", study: str,
         backend_factory=_fail_backend_factory("physics"),
         profile=P.PROFILE_R13_DEF, task=task,
         delivery_policy=RT.POLICY_G2_ATOMIC, scope_contract=scope,
-        require_task_contrasts=True)
+        require_task_contrasts=True, claim_producer=CONSUMER_LABEL)
     system = L.render_system(extra_rules=(
         "### G2.1 证据桥（只读回放，零 POST）\n"
         "study 已在 RESULTS_RELEASED：确认批结果由封存原件重建，"
@@ -1171,6 +1189,10 @@ def five_faces(ctx: G21Context, study: str) -> dict[str, Any]:
            "faces": faces, "origin": origin, "checks": checks,
            "ok": all(checks.values()),
            "response_id": response_id,
+           # Plan §3.1：脚本消费者不计候选模型成功（与 journal claim.producer 对照）。
+           "consumer_label": CONSUMER_LABEL,
+           "claim_producer": str(claim_ev.payload.get("producer") or ""),
+           "counts_as_candidate_success": False,
            "created_at_utc": _utc_now()}
     write_json_private(ctx.relative(f"submit/{study}/five_faces.json"), doc)
     if rendered:
@@ -1215,7 +1237,8 @@ def run_study(root: "str | Path", manifest: Mapping[str, Any], study: str, *,
     plan = material["plan"]
     plan_doc = material["plan_doc"]
     import_plan = material["import_plan"]
-    write_import(root, study, import_plan)
+    write_import(root, study, import_plan,
+                 source_campaign=str(manifest.get("source_campaign") or ""))
     envelope = build_envelope_from_original(
         study=study, plan_sha256=plan.sha256,
         output_bytes=material["output_bytes"],
@@ -1297,6 +1320,10 @@ _IMPLEMENTATION_FILES = (
     "orchestrator/rsi_r1/research_report.py",
     "orchestrator/rsi_r1/g2_contract.py",
     "orchestrator/rsi_r1/g2_validation.py",
+    "orchestrator/rsi_r1/g2_cli.py",
+    "orchestrator/rsi_r1/rubric.py",
+    "orchestrator/rsi_r1/protocol.py",
+    "orchestrator/rsi_r1/protocol_r13.py",
     "orchestrator/rsi_r1/g21_bridge.py",
     "orchestrator/rsi_r1/g21_raw_checker.py",
     "orchestrator/rsi_r1/sandbox.py",
@@ -1709,29 +1736,32 @@ def _boundary_envelopes(scope: G2.ScopeContractV1
 
 def capacity_matrix(scope: G2.ScopeContractV1) -> dict[str, Any]:
     """冻结容量 fixture 矩阵（实现前写死；运行后不改预期凑绿）。"""
+    token_cap = int(P.REVIEW_INPUT_TOKENS_R13)
+
+    def entry(fixture_id: str, source_type: str, runs: int,
+              expected: str, required: "list[str] | None" = None,
+              envelope_limit: int = G2.ENVELOPE_MAX_BYTES) -> dict[str, Any]:
+        return {"fixture_id": fixture_id, "source_type": source_type,
+                "runs": runs, "required_ids": list(required or
+                                                  [scope.estimand_id]),
+                "expected_outcome": expected,
+                "envelope_byte_limit": envelope_limit,
+                "request_token_limit": token_cap}
+
     entries = [
-        {"fixture_id": "envelope_boundary_ok", "source_type": "synthetic",
-         "runs": 192, "expected_outcome": "NORMAL_SUCCESS"},
-        {"fixture_id": "envelope_16384_ok", "source_type": "synthetic",
-         "runs": 160, "expected_outcome": "NORMAL_SUCCESS"},
-        {"fixture_id": "envelope_16385_block", "source_type": "synthetic",
-         "runs": 192, "expected_outcome": "BLOCK_BEFORE_SEND"},
-        {"fixture_id": "page_8192_ok", "source_type": "synthetic",
-         "runs": 128, "expected_outcome": "NORMAL_SUCCESS"},
-        {"fixture_id": "page_8193_block", "source_type": "synthetic",
-         "runs": 128, "expected_outcome": "BLOCK_BEFORE_SEND"},
-        {"fixture_id": "artifact_over_8mib_block", "source_type": "synthetic",
-         "runs": 128, "expected_outcome": "BLOCK_BEFORE_SEND"},
-        {"fixture_id": "legacy_4096_boundary", "source_type": "synthetic",
-         "runs": 160, "expected_outcome": "NORMAL_SUCCESS"},
-        {"fixture_id": "sealed_A_160", "source_type": "sealed",
-         "runs": 160, "expected_outcome": "SOURCE_OR_SUCCESS"},
-        {"fixture_id": "sealed_B_128", "source_type": "sealed",
-         "runs": 128, "expected_outcome": "SOURCE_OR_SUCCESS"},
-        {"fixture_id": "required_negative_control_set", "source_type": "synthetic",
-         "runs": 128, "expected_outcome": "NORMAL_SUCCESS"},
-        {"fixture_id": "long_ids_multi_page", "source_type": "synthetic",
-         "runs": 128, "expected_outcome": "NORMAL_SUCCESS"},
+        entry("envelope_boundary_ok", "synthetic", 192, "NORMAL_SUCCESS"),
+        entry("envelope_16384_ok", "synthetic", 160, "NORMAL_SUCCESS"),
+        entry("envelope_16385_block", "synthetic", 192, "BLOCK_BEFORE_SEND"),
+        entry("page_8192_ok", "synthetic", 128, "NORMAL_SUCCESS"),
+        entry("page_8193_block", "synthetic", 128, "BLOCK_BEFORE_SEND"),
+        entry("artifact_over_8mib_block", "synthetic", 128,
+              "BLOCK_BEFORE_SEND"),
+        entry("legacy_4096_boundary", "synthetic", 160, "NORMAL_SUCCESS"),
+        entry("sealed_A_160", "sealed", 160, "SOURCE_OR_SUCCESS"),
+        entry("sealed_B_128", "sealed", 128, "SOURCE_OR_SUCCESS"),
+        entry("required_negative_control_set", "synthetic", 128,
+              "NORMAL_SUCCESS"),
+        entry("long_ids_multi_page", "synthetic", 128, "NORMAL_SUCCESS"),
     ]
     return {"schema": CAPACITY_SCHEMA, "schema_version": 1,
             "entries": entries,
@@ -1868,6 +1898,23 @@ def run_capacity(root: "str | Path", manifest: Mapping[str, Any], *,
         except G2.G2Error as exc:
             observed["outcome"] = "BLOCK_BEFORE_SEND"
             observed["block_detail"] = f"{exc.code}: {exc.detail}"
+        # 冻结矩阵的逐条上限：正常形状必须在登记的 envelope/token 限额内。
+        if observed.get("envelope_bytes") is not None:
+            observed["within_envelope_limit"] = (
+                int(observed["envelope_bytes"])
+                <= int(entry.get("envelope_byte_limit")
+                       or G2.ENVELOPE_MAX_BYTES))
+            if observed["outcome"] == "NORMAL_SUCCESS" and \
+                    not observed["within_envelope_limit"]:
+                observed["outcome"] = "UNEXPECTED_SUCCESS"
+        if observed.get("request_tokens") is not None:
+            observed["within_token_limit"] = (
+                int(observed["request_tokens"])
+                <= int(entry.get("request_token_limit")
+                       or P.REVIEW_INPUT_TOKENS_R13))
+            if observed["outcome"] == "NORMAL_SUCCESS" and \
+                    not observed["within_token_limit"]:
+                observed["outcome"] = "UNEXPECTED_SUCCESS"
         expected = entry["expected_outcome"]
         if expected == "SOURCE_OR_SUCCESS":
             observed["ok"] = observed["outcome"] in ("NORMAL_SUCCESS",

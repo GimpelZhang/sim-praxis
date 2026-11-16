@@ -199,3 +199,28 @@ def test_signature_freshness_detects_implementation_drift(tmp_path, monkeypatch)
     with pytest.raises(G21.G21Error) as exc:
         G21.verify_signature_freshness(root)
     assert exc.value.code == "STALE_SIGNATURE"
+
+
+def test_import_rejects_unbound_artifact_reply(tmp_path):
+    """Plan §3.1：导入必须核 plan/state/reply/artifact 关联，不只看事件名。"""
+    manifest_path = _manifest(tmp_path)
+    manifest = G21.load_manifest(manifest_path)
+    journal = Path(manifest["studies"]["A"]["journal"])
+    lines = journal.read_text(encoding="utf-8").splitlines()
+    # 去掉唯一的 reply 事件后重算整条 sha 链（模拟「artifact 无对应 reply」）
+    keep = [line for line in lines
+            if json.loads(line).get("event") != "reply"]
+    rebuilt: "list[str]" = []
+    prev = None
+    for index, line in enumerate(keep, 1):
+        doc = json.loads(line)
+        doc["seq"] = index
+        doc["prev_sha256"] = prev
+        doc["sha256"] = S._event_sha(index, doc["ts_iso"], doc["event"],
+                                     doc.get("payload") or {}, prev)
+        prev = doc["sha256"]
+        rebuilt.append(json.dumps(doc, ensure_ascii=False, sort_keys=True))
+    journal.write_text("\n".join(rebuilt) + "\n", encoding="utf-8")
+    with pytest.raises(G21.G21Error) as exc:
+        G21.plan_import(journal, "A")
+    assert exc.value.code == "IMPORT_UNBOUND"

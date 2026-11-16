@@ -174,8 +174,8 @@ def _assignments(params: Mapping[str, Mapping[str, str]], study: str
 
 
 def _journal_events(study: str, *, plan: Mapping[str, Any],
-                    reply_id: str, action_sha: str, primary_metric: str,
-                    primary_id: str,
+                    reply_id: str, reply_text: str, action_sha: str,
+                    primary_metric: str, primary_id: str,
                     design_sha: str, analysis_sha: str,
                     manifest_sha: str, plan_sha: str,
                     receipt_sha: str, block_count: int) -> "list[tuple[str, dict]]":
@@ -193,6 +193,12 @@ def _journal_events(study: str, *, plan: Mapping[str, Any],
         ("plan_revision", {"study": study, "doc": dict(plan),
                            "parent_sha256": None, "plan_sha256": plan_sha,
                            "revision": 1}),
+        # 关联顺序与真实 journal 一致：reply 先于它派生的 artifact/action。
+        ("reply", {"study": study, "response_id": reply_id,
+                   "text_sha256": sha_bytes(reply_text.encode("utf-8")),
+                   "n_bytes": len(reply_text.encode("utf-8")),
+                   "phase": "confirm", "nonce": "fixture",
+                   "relpath": f"state/replies/{reply_id}.txt"}),
         ("artifact", {"study": study, "kind": "design",
                       "source_sha256": design_sha, "response_id": reply_id,
                       "action_sha256": action_sha, "producer": PRODUCER_CANDIDATE,
@@ -415,7 +421,9 @@ def _finish(root: Path, *, study: str, task: TS.TaskSpecV13,
     _write(root / "private" / "receipts" / f"{study}-confirm.json",
            _json_doc(receipt))
     # 状态 journal（typed loader 的输入面）
+    reply_text = '{"action":"analyze","source_sha256":"%s","run_ids":[]}' % analysis_sha
     events = _journal_events(study, plan=plan_doc, reply_id=reply_id,
+                             reply_text=reply_text,
                              primary_metric=task.primary.metric,
                              primary_id=task.primary.id,
                              action_sha=action_sha, design_sha=design_sha,

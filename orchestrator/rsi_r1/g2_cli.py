@@ -934,6 +934,25 @@ def _bridge_manifest(root: Path, args: argparse.Namespace):
     raise G2CliError("MANIFEST_MISSING", f"{frozen} 不存在且未给 --inputs")
 
 
+def _guarded(root: Path, command: str, fn):
+    """Plan §4 资源门：夹住一条 bridge 命令并记录墙钟/峰值/输出字节。"""
+    started = time.monotonic()
+    with _ResourceGuard(root) as guard:
+        result = fn()
+    doc = {"schema": "simpraxis.rsi_g21.resources.v1", "schema_version": 1,
+           "command": command,
+           "wall_s": round(time.monotonic() - started, 3),
+           "peak_rss_bytes": guard.peak_rss(),
+           "out_bytes": guard._out_bytes(),
+           "problems": list(guard.last_problems),
+           "limits": {"wall_s": MAX_WALLCLOCK_S, "peak_rss": MAX_RSS_BYTES,
+                      "out_bytes": MAX_OUT_BYTES},
+           "note": "peak_rss 在 pytest 宿主内只记录不判（Plan §3.3）"}
+    ensure_private_dir(root / "logs")
+    _write_json(root / "logs" / f"{command}-resources.json", doc)
+    return result
+
+
 def cmd_bridge_init(args: argparse.Namespace) -> int:
     """G21-0：建新根、冻结输入清单与 sha、写合同快照。"""
     G21 = _g21()
@@ -992,10 +1011,12 @@ def cmd_bridge_run(args: argparse.Namespace) -> int:
     tok = G21.tokenizer_contract(root)
     consumer = Path(args.consumer) if args.consumer else (
         G21.repo_root() / "tests" / "fixtures" / "g21_consumer" / "consumer.py")
-    result = G21.run_study(root, manifest, str(args.study),
-                           consumer_path=consumer, python=sys.executable,
-                           max_turns=int(args.max_turns or 12),
-                           tokenizer=tok["tokenizer"])
+    result = _guarded(root, f"bridge-run-{args.study}",
+                      lambda: G21.run_study(
+                          root, manifest, str(args.study),
+                          consumer_path=consumer, python=sys.executable,
+                          max_turns=int(args.max_turns or 12),
+                          tokenizer=tok["tokenizer"]))
     print(json.dumps({k: result.get(k) for k in
                       ("study", "ok", "status", "study_state",
                        "envelope_sha256", "envelope_bytes")},
@@ -1008,7 +1029,9 @@ def cmd_bridge_raw_check(args: argparse.Namespace) -> int:
     G21 = _g21()
     root = _bridge_root(args)
     manifest = _bridge_manifest(root, args)
-    report = G21.run_raw_check(root, manifest, python=sys.executable)
+    report = _guarded(root, "bridge-raw-check",
+                      lambda: G21.run_raw_check(root, manifest,
+                                                python=sys.executable))
     print(json.dumps({"ok": report.get("ok"),
                       "independent": report.get("independent"),
                       "studies": sorted((report.get("studies") or {}))},
@@ -1025,7 +1048,9 @@ def cmd_bridge_capacity(args: argparse.Namespace) -> int:
         matrix = G21.capacity_matrix(
             G2.load_scope_contract(manifest["studies"]["A"]["scope_contract"]))
         G21.write_json_private(root / "freeze" / "capacity_matrix.json", matrix)
-    report = G21.run_capacity(root, manifest, tokenizer=tok["tokenizer"])
+    report = _guarded(root, "bridge-capacity",
+                      lambda: G21.run_capacity(root, manifest,
+                                               tokenizer=tok["tokenizer"]))
     print(json.dumps({k: report.get(k) for k in ("ok", "n_ok", "n_total")},
                      ensure_ascii=False, sort_keys=True))
     return 0 if report.get("ok") else 1
@@ -1034,7 +1059,9 @@ def cmd_bridge_capacity(args: argparse.Namespace) -> int:
 def cmd_bridge_isolation(args: argparse.Namespace) -> int:
     G21 = _g21()
     root = _bridge_root(args)
-    report = G21.run_isolation(root, image_digest=str(args.image_digest))
+    report = _guarded(root, "bridge-isolation",
+                      lambda: G21.run_isolation(
+                          root, image_digest=str(args.image_digest)))
     print(json.dumps({"status": report.get("status"),
                       "negative_control":
                       (report.get("negative_control") or {}).get(
