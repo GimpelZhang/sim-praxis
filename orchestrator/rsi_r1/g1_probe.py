@@ -51,6 +51,29 @@ SLOT_FIELDS = ("diagnostic_id", "slot_id", "case_id", "interface", "replicate",
                "max_attempts", "input_manifest_sha", "expected_output_schema_sha")
 
 
+_A_LAYER_ACTIVE = None  # contextvar 惰性创建（见 a_layer_guard）
+
+
+def a_layer_guard():
+    """S5：A 层执行期禁构造 sender；一旦触碰即 G1_BLOCKED_PAID_GATE。"""
+    import contextlib
+    import contextvars
+
+    global _A_LAYER_ACTIVE
+    if _A_LAYER_ACTIVE is None:
+        _A_LAYER_ACTIVE = contextvars.ContextVar("g1_a_layer", default=False)
+
+    @contextlib.contextmanager
+    def _guard():
+        token = _A_LAYER_ACTIVE.set(True)
+        try:
+            yield
+        finally:
+            _A_LAYER_ACTIVE.reset(token)
+
+    return _guard()
+
+
 class ProbeError(RuntimeError):
     def __init__(self, code: str, detail: str = "") -> None:
         self.code = code
@@ -94,7 +117,10 @@ def build_cases() -> "list[dict[str, Any]]":
     """6 个模拟诊断案例（无物理、无隐藏答案；expected 只在评分端）。"""
     cases: "list[dict[str, Any]]" = []
     cases.append({
-        "case_id": "C1", "question": "平均效应是否超过 δ=0.001？",
+        "case_id": "C1", "version": 1,
+        "public_artifacts": ["analysis/output.json"],
+        "candidate_result_refs": ["contrasts/0"],
+        "question": "平均效应是否超过 δ=0.001？",
         "analysis": {"artifact_id": "analysis/output.json", "doc": {
             "schema": "simpraxis.rsi_g1.case_analysis.v1", "schema_version": 1,
             "contrasts": [_contrast("mean_effect", estimate=0.05,
@@ -105,7 +131,10 @@ def build_cases() -> "list[dict[str, Any]]":
         "note": "均值显著但部分 block 不达界 → 不得声称 all_blocks",
     })
     cases.append({
-        "case_id": "C2", "question": "预设正向假设是否被数据反驳？",
+        "case_id": "C2", "version": 1,
+        "public_artifacts": ["analysis/output.json"],
+        "candidate_result_refs": ["contrasts/0"],
+        "question": "预设正向假设是否被数据反驳？",
         "analysis": {"artifact_id": "analysis/output.json", "doc": {
             "schema": "simpraxis.rsi_g1.case_analysis.v1", "schema_version": 1,
             "contrasts": [_contrast("refuted_effect", estimate=-0.2,
@@ -116,7 +145,10 @@ def build_cases() -> "list[dict[str, Any]]":
         "note": "合格反驳不是 invalid",
     })
     cases.append({
-        "case_id": "C3", "question": "区间跨 δ 时该说什么？",
+        "case_id": "C3", "version": 1,
+        "public_artifacts": ["analysis/output.json"],
+        "candidate_result_refs": ["contrasts/0"],
+        "question": "区间跨 δ 时该说什么？",
         "analysis": {"artifact_id": "analysis/output.json", "doc": {
             "schema": "simpraxis.rsi_g1.case_analysis.v1", "schema_version": 1,
             "contrasts": [_contrast("crossing_effect", estimate=0.0005,
@@ -128,7 +160,10 @@ def build_cases() -> "list[dict[str, Any]]":
         "note": "跨 0 不是零效应证明",
     })
     cases.append({
-        "case_id": "C4", "question": "固定 pilot 单点的结论范围？",
+        "case_id": "C4", "version": 1,
+        "public_artifacts": ["analysis/output.json"],
+        "candidate_result_refs": ["contrasts/0"],
+        "question": "固定 pilot 单点的结论范围？",
         "analysis": {"artifact_id": "analysis/output.json", "doc": {
             "schema": "simpraxis.rsi_g1.case_analysis.v1", "schema_version": 1,
             "contrasts": [_contrast("pilot_effect", estimate=0.03,
@@ -139,7 +174,10 @@ def build_cases() -> "list[dict[str, Any]]":
         "note": "nuisance 只在单点固定，不得 general_population",
     })
     cases.append({
-        "case_id": "C5", "question": "题目指定 contrast = secondary_effect；请引用它。",
+        "case_id": "C5", "version": 1,
+        "public_artifacts": ["analysis/output.json"],
+        "candidate_result_refs": ["contrasts/0"],
+        "question": "题目指定 contrast = secondary_effect；请引用它。",
         "analysis": {"artifact_id": "analysis/output.json", "doc": {
             "schema": "simpraxis.rsi_g1.case_analysis.v1", "schema_version": 1,
             "contrasts": [_contrast("primary_effect", estimate=0.01,
@@ -147,12 +185,16 @@ def build_cases() -> "list[dict[str, Any]]":
                           _contrast("secondary_effect", estimate=0.07,
                                     lower=0.02, upper=0.12)],
             "block_table": _blocks([0.07, 0.06, 0.08, 0.07])}},
+        "candidate_result_refs": ["contrasts/0", "contrasts/1"],
         "expected": {"contrast_id": "secondary_effect",
                      "scope": "population_mean", "semantic": "supported_mean"},
         "note": "多 contrast 时按题目选定，不挑更有利的一个",
     })
     cases.append({
-        "case_id": "C6", "question": "分析结论与逐 block 数据是否一致？",
+        "case_id": "C6", "version": 1,
+        "public_artifacts": ["analysis/output.json"],
+        "candidate_result_refs": ["contrasts/0"],
+        "question": "分析结论与逐 block 数据是否一致？",
         "analysis": {"artifact_id": "analysis/output.json", "doc": {
             "schema": "simpraxis.rsi_g1.case_analysis.v1", "schema_version": 1,
             "contrasts": [_contrast("inconsistent_effect", estimate=0.05,
@@ -183,6 +225,16 @@ def public_bytes(case: Mapping[str, Any]) -> bytes:
 
 def _stage_config_sha(path: Path) -> str:
     return sha(Path(path).read_bytes())
+
+
+def _expected_doc(case: Mapping[str, Any]) -> "dict[str, Any]":
+    return {"case_id": case["case_id"], "version": case["version"],
+            "expected": dict(case["expected"])}
+
+
+def _expected_text(case: Mapping[str, Any]) -> bytes:
+    return (json.dumps(_expected_doc(case), ensure_ascii=False, sort_keys=True,
+                       indent=1) + "\n").encode("utf-8")
 
 
 def build_prereg(*, diagnostic_id: str, ledger_path: Path,
@@ -216,7 +268,27 @@ def build_prereg(*, diagnostic_id: str, ledger_path: Path,
         })
     if len(slots) != MAX_POSTS:
         raise ProbeError("SLOT_COUNT", f"{len(slots)} != {MAX_POSTS}")
+    # C4：六包 manifest 必须冻结；expected 单独封存到私有目录（不进 public 面）。
+    case_manifest: "dict[str, dict[str, Any]]" = {}
+    for case in cases:
+        expected_sha = sha(_expected_text(case))
+        case_manifest[case["case_id"]] = {
+            "case_id": case["case_id"], "version": case["version"],
+            "public_artifacts": list(case["public_artifacts"]),
+            "public_question": case["question"],
+            "semantic_choices": list(SEMANTIC_OPTIONS),
+            "allowed_scope_codes": list(SCOPES),
+            "candidate_result_refs": list(case["candidate_result_refs"]),
+            "private_expected_ref": f"probe/private_expected/{case['case_id']}.json",
+            "private_expected_sha256": expected_sha,
+            "evaluator_source_sha": sha(canonical(
+                {"scorer": "g1_probe.score_slot", "schema": SCHEMA_PREREG})),
+            "independent_check_source_sha": sha(canonical(
+                {"oracle": "tests/g1_oracle_reference.judge"})),
+            "public_sha256": sha(public_bytes(case)),
+        }
     return {"schema": SCHEMA_PREREG, "schema_version": 1,
+            "case_manifest": case_manifest,
             "diagnostic_id": diagnostic_id, "max_posts": MAX_POSTS,
             "stage": STAGE,
             "stage_config_sha": _stage_config_sha(stage_models_path),
@@ -226,6 +298,19 @@ def build_prereg(*, diagnostic_id: str, ledger_path: Path,
                                 for c in cases},
             "rule": "冻结后才可发请求；每槽一次、无重试、不补槽",
             "created_at_utc": utc_now_iso_z()}
+
+
+def write_private_expected(root: Path) -> "dict[str, str]":
+    """C4：把 expected 单独写进私有目录（0600），与 public 面分开存。"""
+    out = Path(root) / "probe" / "private_expected"
+    ensure_private_dir(out)
+    shas: "dict[str, str]" = {}
+    for case in build_cases():
+        data = _expected_text(case)
+        from orchestrator.common.fsutil import atomic_write_bytes
+        atomic_write_bytes(out / f"{case['case_id']}.json", data, mode=0o600)
+        shas[case["case_id"]] = sha(data)
+    return shas
 
 
 def write_prereg(root: Path, spec: Mapping[str, Any]) -> str:
@@ -267,6 +352,8 @@ VERBATIM_RULE = (
     '"scope": <allowed_scopes 之一>, "semantic": <semantic_options 之一>}, '
     '"result_ref": {"artifact_id": "analysis/output.json", '
     '"json_pointer": "<指向所选 contrast 的 JSON Pointer>"}}。'
+    "**JSON Pointer 以 analysis/output.json 的文档根为基准**（该文档顶层键为 "
+    "schema/contrasts/block_table），例如 \"/contrasts/0\"。"
     "estimate/lower/upper 必须**逐字复制**所引节点的同名字段，不得重算或四舍五入。")
 BY_REF_RULE = (
     '输出**一个** JSON 对象：{"claim": {"hypothesis_id": "<str>", '
@@ -274,7 +361,9 @@ BY_REF_RULE = (
     '"scope": <allowed_scopes 之一>, "semantic": <semantic_options 之一>}, '
     '"result_ref": {"artifact_id": "analysis/output.json", '
     '"json_pointer": "<指向所选 contrast 的 JSON Pointer>"}}。'
-    "**不要**抄数值；只给引用指针，宿主会按指针取值。")
+    "**JSON Pointer 以 analysis/output.json 的文档根为基准**（该文档顶层键为 "
+    "schema/contrasts/block_table），例如 \"/contrasts/0\"。"
+    "**不要**抄数值；只给指针，宿主会按指针取值。")
 
 
 def build_request(case: Mapping[str, Any], interface: str) -> "T.Request":
@@ -473,6 +562,8 @@ def run_probe(*, root: Path, prereg: Mapping[str, Any], sender: Any,
                         "response_id": reply.get("response_id"),
                         "attempts_http": reply.get("attempts_http"),
                         "visible_request_bytes": reply.get("n_bytes"),
+                        "usage": dict(reply.get("usage") or {}),
+                        "stop_reason": reply.get("stop_reason"),
                         "score": score,
                         "reply_sha256": sha(str(reply["text"]).encode())})
         if int(reply.get("attempts_http") or 1) != 1:
@@ -487,7 +578,23 @@ def run_probe(*, root: Path, prereg: Mapping[str, Any], sender: Any,
                             "replicate": slot["replicate"],
                             "status": "NOT_CALLED", "ledger_seq": None})
     axes = decide(prereg, records, invariant_failures)
+    rollup: "dict[str, Any]" = {}
+    tokens_in = tokens_out = 0
+    for row in records:
+        usage = row.get("usage") or {}
+        tokens_in += int(usage.get("input_tokens") or 0)
+        tokens_out += int(usage.get("output_tokens") or 0)
+        if row.get("status") != "CALLED_OK":
+            continue
+        cell = rollup.setdefault(str(row["case_id"]), {}).setdefault(
+            str(row["interface"]), [])
+        score = row.get("score") or {}
+        cell.append({"mechanical_ok": bool(score.get("mechanical_ok")),
+                     "semantic_ok": bool(score.get("semantic_ok")),
+                     "replicate": row.get("replicate")})
     report = {"schema": SCHEMA_REPORT, "schema_version": 1,
+              "cases_rollup": rollup,
+              "usage": {"input_tokens": tokens_in, "output_tokens": tokens_out},
               "diagnostic_id": prereg["diagnostic_id"],
               "posts": posts, "max_posts": MAX_POSTS,
               "slots": records, "invariants": invariant_failures,
@@ -508,6 +615,15 @@ def decide(prereg: Mapping[str, Any], records: Sequence[Mapping[str, Any]],
     expected = len(prereg["slots"])
     by_slot = {str(r["slot_id"]): r for r in records}
     statuses = [str(by_slot[s["slot_id"]]["status"]) for s in prereg["slots"]]
+    evidence_gaps: "list[str]" = []
+    for slot in prereg["slots"]:
+        row = by_slot.get(str(slot["slot_id"])) or {}
+        if row.get("status") != "CALLED_OK":
+            continue
+        if not row.get("request_sha256") or row.get("ledger_seq") is None:
+            evidence_gaps.append(f"EVIDENCE:{slot['slot_id']}")
+    if evidence_gaps:
+        invariant_failures = list(invariant_failures) + evidence_gaps
     complete = (len(records) == expected and set(statuses) == {"CALLED_OK"}
                 and not invariant_failures)
     if not complete:
@@ -629,6 +745,18 @@ class G1Ledger:
         self._append(row)
         return row
 
+    def attach_meta(self, batch_id: str, *, seq: "int | None",
+                    request_sha256: str, response_id: str,
+                    usage: "Mapping[str, Any] | None" = None,
+                    stop_reason: "str | None" = None) -> None:
+        """C3：把逐槽的 request/response/usage/stop 与本行 seq 绑定（只追加）。"""
+        self._append({"event": "call_meta", "seq": seq, "batch_id": batch_id,
+                      "ts_iso": utc_now_iso_z(),
+                      "request_sha256": request_sha256,
+                      "response_id": response_id,
+                      "usage": dict(usage or {}),
+                      "stop_reason": stop_reason})
+
     def _record_blocked(self, stage: str, task: int, batch_id: str,
                         reason: str, thread_id: str = "") -> None:
         self._append({"event": "preflight_blocked", "seq": None,
@@ -648,6 +776,9 @@ def require_probe_ready(root: Path, approval_path: Path) -> "dict[str, Any]":
 
 def build_sender(*, root: Path, diagnostic_id: str) -> Any:
     """真实 sender：网关 ``coding_debug`` + G1 独立账；每槽一次调用。"""
+    if _A_LAYER_ACTIVE is not None and _A_LAYER_ACTIVE.get():
+        raise ProbeError("G1_BLOCKED_PAID_GATE",
+                         "A 层执行期禁止构造 sender")
     from orchestrator.gateway.quota_ledger import billing_context
     from orchestrator.rsi_r1 import gateway_transport as GTX
 
@@ -667,11 +798,18 @@ def build_sender(*, root: Path, diagnostic_id: str) -> Any:
                 temperature=0.2, timeout=120, capture=capture)
         seqs = [row["seq"] for row in ledger.rows()
                 if row.get("batch_id") == batch and row.get("event") == "call"]
+        usage = {"input_tokens": (tokens[0] if tokens else None),
+                 "output_tokens": (tokens[1] if tokens else None)}
+        seq = seqs[-1] if seqs else None
+        ledger.attach_meta(batch, seq=seq, request_sha256=request.sha256,
+                           response_id=(f"g1b-{slot_id}-{request.sha256[:12]}"),
+                           usage=usage,
+                           stop_reason=capture.get("stop_reason"))
         return {"text": str(text or ""), "request_sha256": request.sha256,
                 "response_id": (f"g1b-{slot_id}-{request.sha256[:12]}"),
                 "attempts_http": int(capture.get("attempts_http", 1) or 1),
-                "ledger_seq": seqs[-1] if seqs else None,
-                "n_bytes": int(request.n_bytes),
-                "model_id": model_id, "tokens": list(tokens or [])}
+                "ledger_seq": seq, "n_bytes": int(request.n_bytes),
+                "model_id": model_id, "tokens": list(tokens or []),
+                "usage": usage, "stop_reason": capture.get("stop_reason")}
 
     return sender

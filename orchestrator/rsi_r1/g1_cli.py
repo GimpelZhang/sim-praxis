@@ -28,6 +28,7 @@ from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from orchestrator.rsi_r1 import g1_decision as GD
 from orchestrator.rsi_r1 import g1_delivery as DV
 from orchestrator.rsi_r1 import g1_packet_audit as PA
+from orchestrator.rsi_r1 import g1_capture as GC
 from orchestrator.rsi_r1 import g1_probe as GP
 from orchestrator.rsi_r1 import g1_trace as GT
 
@@ -44,6 +45,52 @@ def _root(args: Any) -> Path:
     return out
 
 
+class _ResourceGuard:
+    """S4：墙钟 ≤30 min、RSS ≤2 GiB、输出 ≤100 MiB（Plan §6）。"""
+
+    MAX_SECONDS = 30 * 60
+    MAX_RSS_BYTES = 2 * 1024 ** 3
+    MAX_OUT_BYTES = 100 * 1024 ** 2
+
+    def __init__(self, out: Path) -> None:
+        self.out = Path(out)
+
+    def __enter__(self) -> "_ResourceGuard":
+        import resource
+        import time
+        self._t0 = time.monotonic()
+        self._rss0 = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        return self
+
+    @staticmethod
+    def _out_bytes(out: Path) -> int:
+        if not out.exists():
+            return 0
+        return sum(p.stat().st_size for p in out.rglob("*") if p.is_file())
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        import resource
+        import time
+        elapsed = time.monotonic() - self._t0
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        out_bytes = self._out_bytes(self.out)
+        problems = []
+        if elapsed > self.MAX_SECONDS:
+            problems.append(f"wall={elapsed:.0f}s")
+        if max(rss, self._rss0) > self.MAX_RSS_BYTES:
+            problems.append(f"rss={rss}")
+        if out_bytes > self.MAX_OUT_BYTES:
+            problems.append(f"out={out_bytes}")
+        if problems and exc_type is None:
+            raise G1CliError("RESOURCE_LIMITED", ",".join(problems))
+        return False
+
+
+def _state(out: Path, diagnostic_id: str, step: "str | None" = None) -> Any:
+    st = GT.G1State(out, diagnostic_id=diagnostic_id)
+    return st.advance(step) if step else st.load()
+
+
 def _write(out: Path, name: str, doc: Any) -> str:
     ensure_private_dir(out)
     text = json.dumps(doc, ensure_ascii=False, sort_keys=True, indent=1) + "\n"
@@ -57,6 +104,12 @@ def _write(out: Path, name: str, doc: Any) -> str:
 
 def cmd_inventory(args: Any) -> int:
     out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        _state(out, str(args.diagnostic_id))
+        return _do_inventory(args, out)
+
+
+def _do_inventory(args: Any, out: Path) -> int:
     spec = json.loads(Path(args.sources).read_text(encoding="utf-8"))
     roots = [GT.RootSpec(root_id=str(r["root_id"]), path=Path(r["path"]),
                          max_files=int(r.get("max_files", GT.DEFAULT_MAX_FILES)),
@@ -70,6 +123,7 @@ def cmd_inventory(args: Any) -> int:
     manifest = GT.inventory_evidence(roots, files, out_root=out,
                                      diagnostic_id=str(args.diagnostic_id),
                                      source_commit=str(args.source_commit or ""))
+    _state(out, str(args.diagnostic_id), "INVENTORIED")
     print(json.dumps({"n_files": manifest["n_files"],
                       "total_bytes": manifest["total_bytes"],
                       "missing": sum(1 for f in manifest["files"]
@@ -80,10 +134,16 @@ def cmd_inventory(args: Any) -> int:
 
 def cmd_trace(args: Any) -> int:
     out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        return _do_trace(args, out)
+
+
+def _do_trace(args: Any, out: Path) -> int:
     result = GT.trace_study(source_root=Path(args.source), study=str(args.study),
                             diagnostic_id=str(args.diagnostic_id), out_root=out,
                             source_commit=str(args.source_commit or ""))
     verify = GT.verify_trace(out / "trace" / str(args.study))
+    _state(out, str(args.diagnostic_id), "TRACED")
     print(json.dumps({"study": args.study,
                       "first_divergence": result["summary"]["first_divergence"],
                       "suspected": result["summary"]["suspected"],
@@ -94,6 +154,11 @@ def cmd_trace(args: Any) -> int:
 
 def cmd_packet_audit(args: Any) -> int:
     out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        return _do_packet_audit(args, out)
+
+
+def _do_packet_audit(args: Any, out: Path) -> int:
     source = Path(args.source)
     study = str(args.study)
     inputs = PA.load_study_inputs(source, study)
@@ -114,6 +179,7 @@ def cmd_packet_audit(args: Any) -> int:
         run_specs=inputs["run_specs"], expect_blocks=32)
     doc_fix = PA.audit_to_disk(repaired, out / "packet_sanity",
                                name=f"repaired_{study}")
+    _state(out, str(args.diagnostic_id), "AUDITED")
     print(json.dumps({"study": study, "historical": doc_hist["codes"],
                       "repaired": doc_fix["codes"],
                       "historical_sha": doc_hist["report_sha256"],
@@ -124,6 +190,11 @@ def cmd_packet_audit(args: Any) -> int:
 
 def cmd_delivery_test(args: Any) -> int:
     out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        return _do_delivery_test(args, out)
+
+
+def _do_delivery_test(args: Any, out: Path) -> int:
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
     results = [DV.run_case(case) for case in cases.get("cases") or []]
     summary = {"n": len(results),
@@ -133,6 +204,7 @@ def cmd_delivery_test(args: Any) -> int:
     ensure_private_dir(out / "compiler_cases")
     sha = _write(out / "compiler_cases", "results.json",
                  {"summary": summary, "results": results})
+    _state(out, str(args.diagnostic_id), "TESTED")
     print(json.dumps({"n": summary["n"], "passed": summary["passed"],
                       "failed": summary["failed"], "sha256": sha},
                      ensure_ascii=False))
@@ -148,6 +220,11 @@ def _load(out: Path, pattern: str) -> "list[dict[str, Any]]":
 
 def cmd_decision(args: Any) -> int:
     out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        return _do_decision(args, out)
+
+
+def _do_decision(args: Any, out: Path) -> int:
     traces = [json.loads(p.read_text(encoding="utf-8"))
               for p in sorted((out / "trace").glob("*_summary.json"))]
     audits = _load(out, "packet_sanity/*.json")
@@ -168,6 +245,7 @@ def cmd_decision(args: Any) -> int:
         notes=[str(n) for n in (args.note or [])])
     ensure_private_dir(out / "decision")
     sha = _write(out / "decision", "decision.json", doc)
+    _state(out, str(args.diagnostic_id), "CLOSED")
     print(json.dumps({"axes": doc["axes"], "sha256": sha}, ensure_ascii=False))
     return 0
 
@@ -189,6 +267,12 @@ def cmd_probe_preregister(args: Any) -> int:
                            stage_models_path=stage_models,
                            model_id=model_id,
                            input_manifest_sha=str(args.input_manifest_sha))
+    expected_shas = GP.write_private_expected(out)
+    for cid, got in expected_shas.items():
+        want = (spec.get("case_manifest") or {}).get(cid, {}).get(
+            "private_expected_sha256")
+        if want is not None and got != want:
+            raise G1CliError("EXPECTED_SHA", cid)
     sha = GP.write_prereg(out, spec)
     print(json.dumps({"slots": len(spec["slots"]), "prereg_sha256": sha,
                       "model_id": model_id}, ensure_ascii=False))
@@ -215,6 +299,39 @@ def cmd_probe(args: Any) -> int:
                       "axes": report["axes"],
                       "sha256": report["report_sha256"]}, ensure_ascii=False))
     return 0 if report["overall"] == "DIAGNOSTIC_COMPLETE" else 2
+
+
+def cmd_capture_demo(args: Any) -> int:
+    """新运行的边界捕获演示（脚本化 sender；零模型/零物理/零网络）。"""
+    out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        summary = GC.run_capture_demo(root=out,
+                                      diagnostic_id=str(args.diagnostic_id),
+                                      source_commit=str(args.source_commit or ""))
+    print(json.dumps({"turn_ok": summary["turn_ok"],
+                      "carries_candidate_output":
+                          summary["next_request"]["carries_candidate_output"],
+                      "n_events": summary["n_events"],
+                      "summary_sha256": summary["summary_sha256"]},
+                     ensure_ascii=False))
+    return 0
+
+
+def cmd_verify_inputs(args: Any) -> int:
+    """事后复核输入件未变（inventory→verify 窗口）。"""
+    out = _root(args)
+    with GP.a_layer_guard(), _ResourceGuard(out):
+        report = GT.verify_inputs_unchanged(Path(args.manifest))
+    print(json.dumps(report, ensure_ascii=False))
+    return 0 if report["ok"] else 2
+
+
+def cmd_state(args: Any) -> int:
+    out = _root(args)
+    doc = _state(out, str(args.diagnostic_id))
+    print(json.dumps({"step": doc.get("step"),
+                      "history": doc.get("history")}, ensure_ascii=False))
+    return 0
 
 
 def cmd_verify(args: Any) -> int:
@@ -284,6 +401,19 @@ def build_parser() -> argparse.ArgumentParser:
     pb.add_argument("--approval", required=True)
     pb.add_argument("--stage-models", required=True)
     pb.set_defaults(func=cmd_probe)
+
+    pc = sub.add_parser("capture-demo", help="边界捕获演示（零模型/零物理）")
+    common(pc)
+    pc.set_defaults(func=cmd_capture_demo)
+
+    pvi = sub.add_parser("verify-inputs", help="输入件窗口内未变复核（零 POST）")
+    common(pvi)
+    pvi.add_argument("--manifest", required=True)
+    pvi.set_defaults(func=cmd_verify_inputs)
+
+    pst = sub.add_parser("state", help="A 层步骤状态（零 POST）")
+    common(pst)
+    pst.set_defaults(func=cmd_state)
 
     pv = sub.add_parser("verify", help="复核 trace 完整性（零 POST）")
     common(pv)

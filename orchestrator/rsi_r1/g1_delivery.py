@@ -42,6 +42,15 @@ class DeliveryError(RuntimeError):
         super().__init__(f"[{code}] {detail}" if detail else code)
 
 
+def assert_store_isolation(store: Any) -> None:
+    """S3：编译器只接受**候选**store；维护侧 store 一进入即拒。"""
+    if getattr(store, "maintenance", False) is True:
+        raise DeliveryError("STORE_ISOLATION",
+                            "编译器不得接收维护侧 store（raw/judge/oracle）")
+    if getattr(store, "store_kind", "candidate") != "candidate":
+        raise DeliveryError("STORE_ISOLATION", str(getattr(store, "store_kind")))
+
+
 def tolerance(reference: float) -> float:
     return ABS_TOL + REL_TOL * abs(float(reference))
 
@@ -239,6 +248,7 @@ def compile_claim(submission: Submission,
                   next_steps: Sequence[str] = (),
                   ) -> CompiledClaim:
     """机械复制候选引用值；不做任何科学判断。"""
+    assert_store_isolation(store)
     claim = submission.claim
     ref = claim["result_ref"]
     node, artifact_bytes = _resolve_ref(
@@ -254,7 +264,36 @@ def compile_claim(submission: Submission,
                 raise DeliveryError(
                     "CLAIM_NUMERIC_MISMATCH",
                     f"{key}: 提交 {claim.get(key)!r} ≠ 引用 {values[key]!r}")
+    # C2：sample_scope 与 typed evidence 由编译器从**候选工件**机械补全
+    # （Plan §2 的 DeliveryClaimV1 字段），调用方可显式覆盖但不得引入新数值。
+    artifact_doc = json.loads(artifact_bytes.decode("utf-8"))
+    run_ids = artifact_doc.get("run_ids") or []
+    blocks = []
+    diag = artifact_doc.get("diagnostics") or {}
+    cov = ((diag.get("coverage") if isinstance(diag, Mapping) else None)
+           or artifact_doc.get("coverage") or {})
+    if isinstance(cov, Mapping) and cov.get("blocks"):
+        blocks = list(cov["blocks"])
+    elif artifact_doc.get("block_table"):
+        blocks = [str(row.get("block_id")) for row in artifact_doc["block_table"]]
+    auto_sample = {
+        "run_ids_sha": GT.sha_bytes(GT.canonical(sorted(str(r) for r in run_ids)))
+        if run_ids else None,
+        "block_ids_sha": GT.sha_bytes(GT.canonical(sorted(str(b) for b in blocks)))
+        if blocks else None,
+        "denominator": len(run_ids) if run_ids else None,
+        "dropped": [],
+    }
+    merged_scope = {**auto_sample, **dict(sample_scope or {})}
+    typed_locator = {"artifact_id": str(ref["artifact_id"]),
+                     "artifact_sha256": GT.sha_bytes(artifact_bytes),
+                     "json_pointer": str(ref["json_pointer"]),
+                     "field_sha256": GT.field_sha(node)}
+    evidence_out = [dict(item) for item in evidence] or [typed_locator]
     interval = claim.get("interval") or {}
+    level = interval.get("level")
+    if level is None:
+        level = node.get("level", 0.95)
     out_claim = {
         "schema": CLAIM_SCHEMA, "schema_version": 1,
         "claim_id": claim_id or str(claim.get("hypothesis_id")),
@@ -267,14 +306,14 @@ def compile_claim(submission: Submission,
         "metric_id": str(claim["metric_id"]),
         "population_scope": population_scope or "unspecified",
         "estimate": values["estimate"],
-        "interval": {"level": float(interval.get("level", 0.95)),
+        "interval": {"level": float(level),
                      "lower": values["lower"], "upper": values["upper"]},
         "direction": direction or str(claim.get("direction")
                                       or claim.get("proposition")),
         # 状态优先取候选显式声明，缺省时用其所引用节点的状态（仍是候选产物）
         "status": str(claim.get("status") or node.get("status") or "reported"),
-        "sample_scope": dict(sample_scope or {}),
-        "evidence": [dict(item) for item in evidence],
+        "sample_scope": merged_scope,
+        "evidence": evidence_out,
         "result_ref": dict(ref),
         "limitations": list(limitations),
         "alternative_explanations": list(alternative_explanations),

@@ -14,7 +14,8 @@ def test_cli_has_no_study_or_review_subcommands():
     parser = CLI.build_parser()
     subs = {a for a in parser._subparsers._group_actions[0].choices}  # noqa: SLF001
     assert subs == {"inventory", "trace", "packet-audit", "delivery-test",
-                    "decision", "verify", "probe-preregister", "probe"}
+                    "decision", "verify", "probe-preregister", "probe",
+                    "capture-demo", "verify-inputs", "state"}
     for forbidden in ("study", "review", "replay"):
         assert forbidden not in subs
 
@@ -106,3 +107,35 @@ def test_a_layer_modules_do_not_import_transport_or_gateway():
     src = (Path(__file__).resolve().parents[1] / "orchestrator" / "rsi_r1"
            / "g1_trace.py").read_text(encoding="utf-8")
     assert "GatewayTransport" not in src and "build_gateway" not in src
+
+
+def test_capture_demo_and_state_cli(tmp_path):
+    out = tmp_path / "g1"
+    assert CLI.main(["capture-demo", "--diagnostic-id", "g1t",
+                     "--out", str(out)]) == 0
+    doc = json.loads((out / "trace" / "capture_summary.json").read_text())
+    assert doc["next_request"]["carries_candidate_output"] is False
+    assert CLI.main(["state", "--diagnostic-id", "g1t",
+                     "--out", str(out)]) == 0
+
+
+def test_verify_inputs_cli_detects_tamper(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    f = src / "a.json"
+    f.write_text("{}", encoding="utf-8")
+    os.chmod(f, 0o600)
+    sources = tmp_path / "allow.json"
+    sources.write_text(json.dumps({
+        "roots": [{"root_id": "src", "path": str(src)}],
+        "files": [{"root_id": "src", "relpath": "a.json", "role": "x"}]}),
+        encoding="utf-8")
+    out = tmp_path / "g1"
+    assert CLI.main(["inventory", "--diagnostic-id", "g1t", "--out", str(out),
+                     "--sources", str(sources)]) == 0
+    man = str(out / "manifest" / "input_manifest.json")
+    assert CLI.main(["verify-inputs", "--diagnostic-id", "g1t",
+                     "--out", str(out), "--manifest", man]) == 0
+    f.write_text('{"x": 1}', encoding="utf-8")
+    assert CLI.main(["verify-inputs", "--diagnostic-id", "g1t",
+                     "--out", str(out), "--manifest", man]) == 2

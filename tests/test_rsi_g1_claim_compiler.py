@@ -77,3 +77,17 @@ def test_compiler_module_never_imports_judge_or_oracle():
                  if any(tok in m for tok in ("judge", "oracle", "closeout_r13",
                                               "gateway", "research_transport"))]
     assert forbidden == [], forbidden
+
+
+def test_claim_carries_sample_scope_and_typed_evidence():
+    """C2：编译器自动补 sample_scope 与 typed_locator（Plan §2 字段）。"""
+    cases = {c["case_id"]: c for c in build_cases()}
+    claim = DV.run_case(cases["c01_by_ref"])["actual"]["claim"]
+    scope = claim["sample_scope"]
+    assert scope["denominator"] == 2 and scope["dropped"] == []
+    assert len(scope["run_ids_sha"]) == 64 and len(scope["block_ids_sha"]) == 64
+    ev = claim["evidence"][0]
+    assert set(ev) == {"artifact_id", "artifact_sha256", "json_pointer",
+                       "field_sha256"}
+    assert ev["field_sha256"] == claim["evidence"][0]["field_sha256"]
+    assert claim["interval"]["level"] == 0.95

@@ -30,7 +30,8 @@ def analysis_doc(*, estimate: float = EST, lower: float = LO,
             "proposition": "increase_gt",
             "estimate": estimate, "lower": lower, "upper": upper,
             "status": status, "n_blocks": 32}],
-        "diagnostics": {"contrasts": [{"effect": estimate}], "coverage": {}},
+        "diagnostics": {"contrasts": [{"effect": estimate}],
+                        "coverage": {"blocks": ["b00", "b01"]}},
     }
 
 

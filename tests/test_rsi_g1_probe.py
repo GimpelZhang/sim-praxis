@@ -107,6 +107,7 @@ def _records_for(spec, *, fail_iface=None, fail_case=None):
         out.append({"slot_id": slot["slot_id"], "case_id": slot["case_id"],
                     "interface": slot["interface"],
                     "replicate": slot["replicate"], "status": "CALLED_OK",
+                    "request_sha256": "a" * 64, "ledger_seq": 1,
                     "score": score})
     return out
 

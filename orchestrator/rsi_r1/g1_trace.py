@@ -121,6 +121,7 @@ class TraceEvent:
     event_kind: str
     visibility: str
     study_id: str = ""
+    phase: str = ""
     attempt_id: str = ""
     action_id: str = ""
     response_id: str = ""
@@ -147,6 +148,7 @@ class TraceEvent:
             "schema": SCHEMA_EVENT, "diagnostic_id": self.diagnostic_id,
             "seq": self.seq, "event_kind": self.event_kind,
             "visibility": self.visibility, "study_id": self.study_id,
+            "phase": self.phase,
             "attempt_id": self.attempt_id, "action_id": self.action_id,
             "response_id": self.response_id,
             "state_sha256": self.state_sha256,
@@ -498,6 +500,13 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
                           study_id=study, status="MISSING", error_code="MISSING",
                           missing_reason="历史请求字节未归档（只存回复与结果）",
                           source_commit=source_commit))
+    # Plan §2.1：gateway capture 不存在时必须记 MISSING，不补造
+    gaps.append("gateway_capture")
+    writer.add(TraceEvent(diagnostic_id=diagnostic_id, seq=0,
+                          event_kind="gateway_capture", visibility="missing",
+                          study_id=study, status="MISSING", error_code="MISSING",
+                          missing_reason="历史无网关发送适配器捕获",
+                          source_commit=source_commit))
 
     # 5) 提交回复原文（submit_claim 那一轮）
     submit_rid = None
@@ -616,3 +625,95 @@ def trace_study(*, source_root: Path, study: str, diagnostic_id: str,
                       json.dumps(summary, ensure_ascii=False, sort_keys=True,
                                  indent=1) + "\n", mode=0o600)
     return {"manifest": manifest, "summary": summary}
+
+
+# ---------------------------------------------------------------------------
+# A 层状态机（Plan §3.1：REGISTERED→INVENTORIED→TRACED→AUDITED→TESTED→CLOSED）
+# ---------------------------------------------------------------------------
+
+STEPS: "tuple[str, ...]" = ("REGISTERED", "INVENTORIED", "TRACED", "AUDITED",
+                            "TESTED", "CLOSED")
+STATE_REL = "state.json"
+
+
+class G1State:
+    """按序推进的步骤记录；跳步/回退/UUID 缺失一律 fail-closed。"""
+
+    def __init__(self, root: Path, *, diagnostic_id: str) -> None:
+        if not _SAFE_ID.match(diagnostic_id):
+            raise G1TraceError("DIAGNOSTIC_ID", diagnostic_id)
+        self.root = Path(root)
+        self.diagnostic_id = diagnostic_id
+        self.path = self.root / STATE_REL
+
+    def load(self) -> "dict[str, Any]":
+        if not self.path.is_file():
+            return {"schema": "simpraxis.rsi_g1.state.v1", "schema_version": 1,
+                    "diagnostic_id": self.diagnostic_id, "step": "REGISTERED",
+                    "history": [{"step": "REGISTERED", "at_utc": None}]}
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def advance(self, step: str, *, now: "str | None" = None,
+                strict: bool = False) -> "dict[str, Any]":
+        """推进步骤；``strict=False`` 时乱序只记 warning（命令仍可跑）。"""
+        if step not in STEPS:
+            raise G1TraceError("STEP_UNKNOWN", step)
+        doc = self.load()
+        current = str(doc.get("step"))
+        if step == current:
+            return doc
+        idx_now, idx_next = STEPS.index(current), STEPS.index(step)
+        if idx_next != idx_now + 1:
+            if strict:
+                raise G1TraceError("STEP_ORDER", f"{current} → {step}")
+            warnings = list(doc.get("warnings") or [])
+            warnings.append({"step": step, "at_utc": now or utc_now_iso_z(),
+                             "out_of_order_from": current})
+            out = dict(doc, warnings=warnings)
+            ensure_private_dir(self.root)
+            atomic_write_text(self.path, json.dumps(out, ensure_ascii=False,
+                                                    sort_keys=True, indent=1)
+                              + "\n", mode=0o600)
+            return out
+        if step == "CLOSED" and any(s not in [h["step"] for h in doc["history"]]
+                                    for s in STEPS[:-1]):
+            if strict:
+                raise G1TraceError("STEP_SKIP", "CLOSED 前有未完成步骤")
+            warnings = list(doc.get("warnings") or [])
+            warnings.append({"step": "CLOSED", "at_utc": now or utc_now_iso_z(),
+                             "incomplete": True})
+            doc = dict(doc, warnings=warnings)
+        history = list(doc.get("history") or [])
+        history.append({"step": step, "at_utc": now or utc_now_iso_z()})
+        out = dict(doc, step=step, history=history)
+        ensure_private_dir(self.root)
+        atomic_write_text(self.path,
+                          json.dumps(out, ensure_ascii=False, sort_keys=True,
+                                     indent=1) + "\n", mode=0o600)
+        return out
+
+
+def verify_inputs_unchanged(manifest_path: Path) -> "dict[str, Any]":
+    """事后复核：逐件重算 sha，与 inventory 时的清单比对（窗口内未变）。"""
+    doc = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    roots = {r["root_id"]: Path(r["path"]) for r in doc.get("roots") or []}
+    changed: "list[str]" = []
+    missing: "list[str]" = []
+    checked = 0
+    for entry in doc.get("files") or []:
+        if entry.get("state") != "observed":
+            continue
+        base = roots.get(entry["root_id"])
+        if base is None:
+            changed.append(f"{entry['root_id']}:UNKNOWN_ROOT")
+            continue
+        path = base / entry["relpath"]
+        if not path.is_file() or path.is_symlink():
+            missing.append(f"{entry['root_id']}:{entry['relpath']}")
+            continue
+        checked += 1
+        if sha_bytes(path.read_bytes()) != entry.get("sha256"):
+            changed.append(f"{entry['root_id']}:{entry['relpath']}")
+    return {"ok": not changed and not missing, "checked": checked,
+            "changed": changed, "missing": missing,
+            "note": "只证明 inventory→verify 窗口内容未变；窗口之前无基线"}

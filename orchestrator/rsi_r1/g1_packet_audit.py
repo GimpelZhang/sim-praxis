@@ -231,6 +231,13 @@ def audit_to_disk(audit: PacketAudit, out_dir: Any, *, name: str) -> "dict[str, 
 # 真实历史输入装载（只读；维护侧自有路径）
 # ---------------------------------------------------------------------------
 
+class MaintenanceInputs(dict):
+    """维护侧输入包：明确标 store_kind=maintenance（编译器必须拒收）。"""
+
+    maintenance = True
+    store_kind = "maintenance"
+
+
 def load_study_inputs(root: Any, study: str) -> "dict[str, Any]":
     """读一个 study 的 TaskSpec/manifest/trusted raw/historical packet。
 
@@ -268,9 +275,9 @@ def load_study_inputs(root: Any, study: str) -> "dict[str, Any]":
     if not packets:
         raise FileNotFoundError(f"缺历史审查包：review-{study.lower()}-rev-*")
     packet = _json.loads((packets[0] / "packet.json").read_text(encoding="utf-8"))
-    return {"task": task, "plan": plan, "manifest": manifest,
+    return MaintenanceInputs({"task": task, "plan": plan, "manifest": manifest,
             "raw_metrics": raw_metrics, "packet": packet,
             "packet_dir": packets[0], "assignments": list(manifest.assignments),
             "run_specs": [{"run_id": spec.run_id, "block_id": spec.block_id,
                            "condition_id": spec.condition_id}
-                          for spec in specs.values()]}
+                          for spec in specs.values()]})

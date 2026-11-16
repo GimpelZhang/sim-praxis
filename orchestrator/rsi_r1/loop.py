@@ -801,7 +801,7 @@ class ResearchLoop:
                  dispatcher: Dispatcher, store: Store, messages: Callable[..., T.Request],
                  counter: Callable[[str], int], admission: Admission, budget: Budget,
                  envelope: Any, root_lock: Any, spend_contract: Any,
-                 phase: str = "explore"):
+                 phase: str = "explore", capture: "Any | None" = None):
         self.sender = sender
         self.parser = parser
         self.dispatcher = dispatcher
@@ -814,9 +814,14 @@ class ResearchLoop:
         self.root_lock = root_lock
         self.spend_contract = spend_contract
         self.phase = phase
+        # RSI-G1（Plan §3 G1）：可选**旁路捕获**。缺省 None ⇒ 生产路径逐字节不变；
+        # 捕获器只在四个边界记录事实，不改请求/结果对象。
+        self.capture = capture
 
     def turn(self) -> StepOutcome:
         request = self.messages()
+        if self.capture is not None:
+            self.capture.record_request(request, phase=self.phase)
         accounting = T.check_request(request)
         if not accounting.ok:
             # 资源停止：不缩帽、不截断后重发、不增第二模型摘要。
@@ -877,6 +882,8 @@ class ResearchLoop:
                 self.store.stop_or_block(code=code, detail=str(exc))
                 return StepOutcome(ok=False, code=code, terminal=True)
 
+        if self.capture is not None:
+            self.capture.record_reply(reply, request, phase=self.phase)
         self.store.record_reply(response_id=reply.response_id, text=reply.text,
                                 phase=self.phase, nonce=_nonce_of(request))
         self.budget.resolve_or_pause(reply)
@@ -900,6 +907,10 @@ class ResearchLoop:
         self.store.record_action(response_id=reply.response_id,
                                  action=action.to_doc())
         result = self.dispatcher.execute_once(action, self.store)
+        if self.capture is not None:
+            self.capture.record_dispatch(action, result, phase=self.phase)
+            self.capture.record_clipped(
+                T.Turn(model_text=reply.text, result=result), phase=self.phase)
         result = dict(result)
         result.setdefault("ok", False)
         result.setdefault("action", action.name)
