@@ -631,6 +631,9 @@ def _research_brief(study: str, task: Mapping[str, Any],
             f"delta={primary.get('delta')}）在给定确认设计下是否成立？"),
         "preregistered_hypotheses": [dict(h) for h in plan.get("hypotheses") or []],
         "primary_contrast": dict(plan.get("primary") or {}),
+        # 零 POST 票据 B（2026-11-17）：两种 id 的角色写进公开包本身，
+        # 避免 plan 的 primary_contrast 与 task.primary 并列而无用途说明。
+        "id_roles": contrast_roles(task, plan),
         "negative_control": dict(plan.get("negative_control") or {}) or None,
         "negative_control_expectation": (nc.get("expectation") if nc else None),
         "conditions": [dict(c) for c in task.get("conditions") or []],
@@ -1028,6 +1031,58 @@ def verify_public_package(root: "str | Path",
             "allowlist_sha256": allowlist.get("allowlist_sha256")}
 
 
+CONTRAST_ROLES_SCHEMA = f"{SCHEMA_PREFIX}.contrast_roles.v1"
+
+
+def _id_of(obj: Any, key: str) -> str:
+    if isinstance(obj, Mapping):
+        return str(obj.get(key) or "")
+    return str(getattr(obj, key, "") or "")
+
+
+def contrast_roles(task: Any, plan: Any = None) -> dict[str, Any]:
+    """两种 id 的唯一权威解释：task 对比 id 用于报告；plan 组件锚点只标假设归属。
+
+    2026-11-17 核验：B 的冻结 brief 里同时出现 ``tc_x_inertia``（task.primary.id）
+    与 ``component_single_factor``（plan.primary.id 与 plan.hypotheses[].contrast_id），
+    且 brief 把后者叫 ``primary_contrast``，没有角色说明；模型两轮把后者写进
+    ``primary_results[0].contrast_id``。提示、预检错误文本与 brief 注记都从这里取
+    同一份措辞。``task``/``plan`` 既可是契约对象也可是其公开 dict。
+    """
+    task_primary = (task.get("primary") if isinstance(task, Mapping)
+                    else getattr(task, "primary", None))
+    task_cid = _id_of(task_primary, "id")
+    hyps = (plan.get("hypotheses") if isinstance(plan, Mapping)
+            else getattr(plan, "hypotheses", ())) or ()
+    plan_cids = sorted({_id_of(h, "contrast_id") for h in hyps} - {""})
+    plan_primary = (plan.get("primary") if isinstance(plan, Mapping)
+                    else getattr(plan, "primary", None))
+    return {"schema": CONTRAST_ROLES_SCHEMA, "schema_version": 1,
+            "task_contrast_id": task_cid,
+            "task_contrast_role": "报告 primary_results[].contrast_id 与 claims 的"
+                                  "对比 id 必须用它（task.json primary.id）",
+            "plan_primary_contrast_id": _id_of(plan_primary, "id"),
+            "plan_primary_role": "plan 组件层主对比；brief.primary_contrast 就是它，"
+                                 "不是报告里的对比 id",
+            "plan_component_ids": plan_cids,
+            "plan_component_role": "plan.hypotheses[].contrast_id 是组件设计锚点，"
+                                   "只标注假设属于哪个组件；不是报告里的对比 id"}
+
+
+def render_contrast_roles(roles: Mapping[str, Any]) -> str:
+    lines = ["## 标识符角色（唯一权威解释）",
+             f"- task 对比 id：{roles['task_contrast_id']} —— "
+             f"{roles['task_contrast_role']}"]
+    if roles.get("plan_primary_contrast_id"):
+        lines.append(f"- plan 主对比：{roles['plan_primary_contrast_id']} —— "
+                     f"{roles.get('plan_primary_role', '')}")
+    if roles.get("plan_component_ids"):
+        lines.append("- plan 组件锚点："
+                     + ", ".join(roles["plan_component_ids"]) + " —— "
+                     + str(roles["plan_component_role"]))
+    return "\n".join(lines)
+
+
 __all__ = [
     "ARTIFACT_MAX_RV", "LEDGER_RSI_RV", "MAX_MANDATORY_READ_TURNS",
     "MAX_PATH_TURNS", "MIN_PATH_TURNS", "PAGE_BYTES_RV", "PUBLIC_FILES",
@@ -1037,8 +1092,9 @@ __all__ = [
     "RV_TASK_CAPS", "SCHEMA_PREFIX", "STUDIES", "aggregate_rv",
     "artifact_handles", "build_permit", "build_prereg",
     "build_public_package", "build_source_manifest", "canonical",
-    "canonical_sha", "merge_review_channels", "public_path", "public_rubric",
-    "read_json", "sha_bytes", "sha_file", "utc_now", "verify_permit",
+    "canonical_sha", "contrast_roles", "merge_review_channels",
+    "public_path", "public_rubric", "read_json", "render_contrast_roles",
+    "sha_bytes", "sha_file", "utc_now", "verify_permit",
     "verify_prereg", "verify_public_package", "verify_source_manifest",
     "write_json_private", "write_text_private",
 ]

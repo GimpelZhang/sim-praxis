@@ -1,0 +1,2030 @@
+{
+ "action_results": [
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 9
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "?",
+    "code": "WRONG_TYPE",
+    "ok": false,
+    "result": {
+     "code": "WRONG_TYPE",
+     "message": "plan.primary.condition_ids 必须恰 2 个条件 id"
+    }
+   },
+   "seq": 11
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "propose_plan",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 15
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "run_batch",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 18
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 22
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "analyze",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 25
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 29
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 33
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 37
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 41
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "analyze",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 44
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 48
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "analyze",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 51
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "analyze",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 54
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "?",
+    "code": "WRONG_TYPE",
+    "ok": false,
+    "result": {
+     "code": "WRONG_TYPE",
+     "message": "plan.primary.condition_ids 必须恰 2 个条件 id"
+    }
+   },
+   "seq": 56
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "freeze_confirm",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 61
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "run_confirm",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 69
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "run_confirm",
+    "code": "CLAIM_REQUIRED",
+    "ok": false,
+    "result": {
+     "code": "CLAIM_REQUIRED",
+     "message": "study 已在 RESULTS_RELEASED：第 8 位 submit_claim 是唯一合法动作；run_confirm 被拒（本呼照计预算）"
+    }
+   },
+   "seq": 72
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "submit_claim",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 79
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 84
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "propose_plan",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 88
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "run_batch",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 91
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 95
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "analyze",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 98
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 102
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "propose_plan",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 106
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "run_batch",
+    "code": "RESOURCE_EXCEEDED",
+    "ok": false,
+    "result": {
+     "code": "RESOURCE_EXCEEDED",
+     "message": "64 runs > 探索余量 32"
+    }
+   },
+   "seq": 109
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "?",
+    "code": "MALFORMED_JSON",
+    "ok": false,
+    "result": {
+     "code": "MALFORMED_JSON",
+     "message": "Expecting value: line 1 column 1 (char 0)"
+    }
+   },
+   "seq": 111
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "write_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 115
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "propose_plan",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 119
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "run_batch",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 122
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "analyze",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 125
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "freeze_confirm",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 130
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "?",
+    "code": "MISSING_KEY",
+    "ok": false,
+    "result": {
+     "code": "MISSING_KEY",
+     "message": "read_result_artifact missing ['output_sha256']; expected keys ['action', 'artifact_id', 'cursor', 'output_sha256', 'page_bytes']"
+    }
+   },
+   "seq": 139
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "read_result_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 142
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "read_result_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 145
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "submit_claim",
+    "code": "REPORT_PRECOMMIT_INVALID",
+    "ok": false,
+    "result": {
+     "code": "REPORT_PRECOMMIT_INVALID",
+     "message": "primary_results[0].contrast_id: expected 'tc_x_inertia' (got 'component_single_factor')"
+    }
+   },
+   "seq": 148
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "read_result_artifact",
+    "code": null,
+    "ok": true,
+    "result": {
+     "code": null,
+     "message": null
+    }
+   },
+   "seq": 151
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "submit_claim",
+    "code": "REPORT_PRECOMMIT_INVALID",
+    "ok": false,
+    "result": {
+     "code": "REPORT_PRECOMMIT_INVALID",
+     "message": "alternative_explanations: expected non-empty list of non-empty strings (got list[dict])"
+    }
+   },
+   "seq": 154
+  },
+  {
+   "event": "action_result",
+   "payload": {
+    "action": "submit_claim",
+    "code": "REPORT_PRECOMMIT_INVALID",
+    "ok": false,
+    "result": {
+     "code": "REPORT_PRECOMMIT_INVALID",
+     "message": "primary_results[0].contrast_id: expected 'tc_x_inertia' (got 'component_single_factor'); explore_confirm_comparison.estimands: expected non-empty string (got list[str])"
+    }
+   },
+   "seq": 157
+  }
+ ],
+ "events": [
+  {
+   "action": null,
+   "code": null,
+   "event": "root_transition",
+   "seq": 1
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "root_transition",
+   "seq": 2
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "root_transition",
+   "seq": 3
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "root_transition",
+   "seq": 4
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "root_transition",
+   "seq": 5
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 6
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 7
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 8
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 9
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 10
+  },
+  {
+   "action": "?",
+   "code": "WRONG_TYPE",
+   "event": "action_result",
+   "seq": 11
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 12
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 13
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "plan_revision",
+   "seq": 14
+  },
+  {
+   "action": "propose_plan",
+   "code": null,
+   "event": "action_result",
+   "seq": 15
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 16
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 17
+  },
+  {
+   "action": "run_batch",
+   "code": null,
+   "event": "action_result",
+   "seq": 18
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 19
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 20
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 21
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 22
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 23
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 24
+  },
+  {
+   "action": "analyze",
+   "code": null,
+   "event": "action_result",
+   "seq": 25
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 26
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 27
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 28
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 29
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 30
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 31
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 32
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 33
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 34
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 35
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 36
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 37
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 38
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 39
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 40
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 41
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 42
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 43
+  },
+  {
+   "action": "analyze",
+   "code": null,
+   "event": "action_result",
+   "seq": 44
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 45
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 46
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 47
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 48
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 49
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 50
+  },
+  {
+   "action": "analyze",
+   "code": null,
+   "event": "action_result",
+   "seq": 51
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 52
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 53
+  },
+  {
+   "action": "analyze",
+   "code": null,
+   "event": "action_result",
+   "seq": 54
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 55
+  },
+  {
+   "action": "?",
+   "code": "WRONG_TYPE",
+   "event": "action_result",
+   "seq": 56
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 57
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 58
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_lock",
+   "seq": 59
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 60
+  },
+  {
+   "action": "freeze_confirm",
+   "code": null,
+   "event": "action_result",
+   "seq": 61
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 62
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 63
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_intent",
+   "seq": 64
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 65
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_result",
+   "seq": 66
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_publish",
+   "seq": 67
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 68
+  },
+  {
+   "action": "run_confirm",
+   "code": null,
+   "event": "action_result",
+   "seq": 69
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 70
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 71
+  },
+  {
+   "action": "run_confirm",
+   "code": "CLAIM_REQUIRED",
+   "event": "action_result",
+   "seq": 72
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 73
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 74
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "claim",
+   "seq": 75
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 76
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_conclusion",
+   "seq": 77
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 78
+  },
+  {
+   "action": "submit_claim",
+   "code": null,
+   "event": "action_result",
+   "seq": 79
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "root_transition",
+   "seq": 80
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 81
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 82
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 83
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 84
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 85
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 86
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "plan_revision",
+   "seq": 87
+  },
+  {
+   "action": "propose_plan",
+   "code": null,
+   "event": "action_result",
+   "seq": 88
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 89
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 90
+  },
+  {
+   "action": "run_batch",
+   "code": null,
+   "event": "action_result",
+   "seq": 91
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 92
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 93
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 94
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 95
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 96
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 97
+  },
+  {
+   "action": "analyze",
+   "code": null,
+   "event": "action_result",
+   "seq": 98
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 99
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 100
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 101
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 102
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 103
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 104
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "plan_revision",
+   "seq": 105
+  },
+  {
+   "action": "propose_plan",
+   "code": null,
+   "event": "action_result",
+   "seq": 106
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 107
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 108
+  },
+  {
+   "action": "run_batch",
+   "code": "RESOURCE_EXCEEDED",
+   "event": "action_result",
+   "seq": 109
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 110
+  },
+  {
+   "action": "?",
+   "code": "MALFORMED_JSON",
+   "event": "action_result",
+   "seq": 111
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 112
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 113
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "artifact",
+   "seq": 114
+  },
+  {
+   "action": "write_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 115
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 116
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 117
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "plan_revision",
+   "seq": 118
+  },
+  {
+   "action": "propose_plan",
+   "code": null,
+   "event": "action_result",
+   "seq": 119
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 120
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 121
+  },
+  {
+   "action": "run_batch",
+   "code": null,
+   "event": "action_result",
+   "seq": 122
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 123
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 124
+  },
+  {
+   "action": "analyze",
+   "code": null,
+   "event": "action_result",
+   "seq": 125
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 126
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 127
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_lock",
+   "seq": 128
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 129
+  },
+  {
+   "action": "freeze_confirm",
+   "code": null,
+   "event": "action_result",
+   "seq": 130
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 131
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 132
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_intent",
+   "seq": 133
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 134
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_result",
+   "seq": 135
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "confirm_publish",
+   "seq": 136
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "study_transition",
+   "seq": 137
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 138
+  },
+  {
+   "action": "?",
+   "code": "MISSING_KEY",
+   "event": "action_result",
+   "seq": 139
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 140
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 141
+  },
+  {
+   "action": "read_result_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 142
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 143
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 144
+  },
+  {
+   "action": "read_result_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 145
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 146
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 147
+  },
+  {
+   "action": "submit_claim",
+   "code": "REPORT_PRECOMMIT_INVALID",
+   "event": "action_result",
+   "seq": 148
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 149
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 150
+  },
+  {
+   "action": "read_result_artifact",
+   "code": null,
+   "event": "action_result",
+   "seq": 151
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 152
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 153
+  },
+  {
+   "action": "submit_claim",
+   "code": "REPORT_PRECOMMIT_INVALID",
+   "event": "action_result",
+   "seq": 154
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "reply",
+   "seq": 155
+  },
+  {
+   "action": null,
+   "code": null,
+   "event": "action",
+   "seq": 156
+  },
+  {
+   "action": "submit_claim",
+   "code": "REPORT_PRECOMMIT_INVALID",
+   "event": "action_result",
+   "seq": 157
+  },
+  {
+   "action": null,
+   "code": "BUDGET_REFUSED",
+   "event": "loop_stop",
+   "seq": 158
+  }
+ ],
+ "provenance": {
+  "journal": "studies/B/state/journal.jsonl",
+  "journal_sha256": "504153426819f8162f30550ccfdfe962f766116da148f9242b34f7273d40d916",
+  "note": "2026-11-17 零 POST 回归夹具：候选三次真实提交载荷 + 原事件（未改写）",
+  "round_id": "rvfb3-prereg-20261117T060935Z",
+  "study": "B"
+ },
+ "schema": "simpraxis.rsi_rv.v3_offline_replay.v1",
+ "schema_version": 1,
+ "submits": [
+  {
+   "claims": [
+    {
+     "delta": 0.01,
+     "estimate": 0.10267914979126613,
+     "hypothesis_id": "h_interaction",
+     "lower": -0.11525227534240161,
+     "metric_id": "normalized_tracking_rmse",
+     "proposition": "increase_gt",
+     "upper": 0.3117777573673893
+    },
+    {
+     "delta": 0.01,
+     "estimate": 0.10267914979126613,
+     "hypothesis_id": "h_additive",
+     "lower": -0.11525227534240161,
+     "metric_id": "normalized_tracking_rmse",
+     "proposition": "increase_gt",
+     "upper": 0.3117777573673893
+    }
+   ],
+   "report": {
+    "alternative_explanations": [
+     "点估计方向为正（+0.1027）但不能排除真实的等效或反向效应：95% 区间 [-0.1153, 0.3118] 同时覆盖 0、δ=0.01 及其反向，故 increase_gt 方向证据与『差值在 ±δ 内』的可加解释在统计上不可分辨。",
+     "重尾可由宿主 nuisance 的频率水平调制解释：少数 block 的效应量达 -1.40 或 +1.47，量级比中位 block 大一个数量级，与 target_freq_hz 在 0.2–2.0 Hz 内取到高频端时跟踪误差饱和/相位滞后翻转符号一致；这是分块异质性解释，而非本分析证明的机制。",
+     "normalized_tracking_rmse 的归一化分母随条件变化：若某些 block 的基线误差极小，比值会被放大，产生看似巨大但度量上不可公度的 block 效应，从而人为放大等权均值的方差。",
+     "本设计未登记阴性对照/placebo（negative_control=null），因此不能声称已排除场景级系统偏差（如固定积分步长与 PD 参数导致的共同偏置）或标签错配等替代解释；上述解释均为待检验候选而非结论。"
+    ],
+    "explore_confirm_comparison": {
+     "comparable": false,
+     "estimands": "确认阶段估计的是 32 个宿主 block 上的 Tc×惯量差值的等权均值（normalized_tracking_rmse 尺度）；探索阶段针对的是覆盖设计空间的 explore grid，目标是设计空间扫描而非宿主 block 抽样。",
+     "evidence_refs": [
+      {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/diagnostics/phase_comparability/relation",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      },
+      {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/diagnostics/phase_comparability/confirm_target",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      }
+     ],
+     "explanation": "可用件显式登记 relation=different_target：confirm_target 为 32 host blocks，explore_target 为 explore grid，理由为『explore 覆盖设计空间；confirm 是宿主 block 抽样』。两者目标不同，因此探索阶段的观察既不能作为本主对比的确认证据，也不能用于收紧其区间或调参后重新判定。"
+    },
+    "heterogeneity_and_scope": [
+     {
+      "applicability": "仅适用于 registered_distribution 目标总体与给定 nuisance 支撑（target_freq_hz 0.2–2.0 Hz）、PD 控制、kp=5/kd=0.1/dt=0.001、惯量比 {0.5,2.0}、Tc {0.008,0.032} s 的仿真网格；不外推到其他频率区间、其他控制器或真实硬件。",
+      "claim": "逐 block 效应重尾：32 个 block 中 26 个效应大于 +δ，5 个显著为负（约 -1.4003、-1.2568、-1.2522 等），仅 1 个落在 ±δ 内；等权均值因此方差很大，区间宽约 0.43。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/threshold_counts/0/above_delta",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects/8/effect",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects/21/effect",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ]
+     },
+     {
+      "applicability": "适用于本确认批次的 32 个宿主 block 抽样；对未抽到的 block 或其他宿主抽样批次的可推广性未由本设计保证。",
+      "claim": "无删失、覆盖完整：32 个独立 block、128 次运行、128 个唯一设计全部观测，dropped=0，故等权均值即登记的 estimand 估计，结论的局限来自方差与指标构造而非缺失数据。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/coverage/independent_unit_count",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/n_blocks",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ]
+     }
+    ],
+    "limitations": [
+     {
+      "consequence": "只能报告点估计方向与不确定性，不能宣称交互成立或不成立；对两条假设的 claim 均按主对比数值登记，而不表示任一方向被证实。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/lower",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/upper",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "主对比 95% 区间宽约 0.427，跨过 0 与 δ=0.01，系统标签为 INCONCLUSIVE；无法在 95% 水平支持任何一条预登记假设。"
+     },
+     {
+      "consequence": "估计效率低、对单 block 敏感；在冻结 TaskSpec 下不能改用稳健估计，只能作为后续预登记的动机。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects/21/effect",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/threshold_counts/0/within",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "登记聚合为等权 mean 且不允许删失/加权调整，而逐 block 效应显著重尾（个别 |effect|>1，多数在 0.02–0.24），少数 block 主导均值与区间宽度。"
+     },
+     {
+      "consequence": "结论只能表述为对该登记设计下 estimand 的描述性推断，不能作为因果机制证明；替代解释明确保留。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/schema",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/status",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "缺少阴性对照/placebo 对比，无法把观测到的 Tc×惯量差值归因于干预而非场景或实现层面的共同偏置。"
+     },
+     {
+      "consequence": "不得以探索结果补充确认证据，也不得据此宣称结果已被复制。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/phase_comparability/relation",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "探索与确认目标不同（explore grid vs 32 host blocks），探索阶段信息不能用于确认阶段推断或区间收紧。"
+     }
+    ],
+    "methods_and_assignment_responsibility": "主对比为按宿主 block 配对的 difference-in-differences，block_to_contrast_formula=mean、等权、区间水平 0.95、censoring_rule 为非有限/缺失 block 记 dropped 且不补值；coverage=observed_blocks，目标总体为 registered_distribution。分配与 nuisance（target_freq_hz 在 0.2–2.0 Hz 支撑内变化、块内同频）由宿主负责，不由本研究 Agent 控制。本 Agent 只读取释放的确认产物并解释证据，未修改实验方法、分析源码，也未重跑任何仿真。覆盖率诊断显示 32 个 block、128 次运行、128 个唯一设计全部观测到，dropped=0。",
+    "next_steps": [
+     {
+      "discriminating_experiment": "在新的冻结 TaskSpec 下按 target_freq_hz 分层（低频/高频层）重新估计 Tc×惯量差值，并给出分层区间与分层间差值区间。",
+      "possible_outcomes": [
+       "若高频层差值为正且区间下界大于 δ、低频层差值近零且落在 ±δ 内，则支持效应受频率调制的交互解释。",
+       "若各层区间均跨 0 且分层区间重叠，则重尾来自 block 内噪声而非频率分层，increase_gt 仍不可判。"
+      ],
+      "unresolved_question": "重尾与符号翻转是否由宿主 nuisance 的频率水平（尤其 target_freq_hz 接近 2.0 Hz 的 block）驱动？"
+     },
+     {
+      "discriminating_experiment": "预登记 trimmed mean/中位数与 block 级 bootstrap（或 sign 检验）作为敏感性分析，与登记的等权 mean 并列报告。",
+      "possible_outcomes": [
+       "若稳健估计区间整体高于 δ，则主结论可能翻为支持 increase_gt（须在新预登记下判定）。",
+       "若稳健估计区间仍覆盖 0，则维持 INCONCLUSIVE，并把问题定位为样本量与重尾而非方向。"
+      ],
+      "unresolved_question": "等权 mean 的高方差是否由少数极端 block 主导，稳健聚合后方向是否仍然成立？"
+     },
+     {
+      "discriminating_experiment": "登记一个标签置换 placebo（在 block 内随机交换 Tc 或惯量标签后重算同一对比）与一个零效应条件对（同参数重复运行）作为阴性对照。",
+      "possible_outcomes": [
+       "若 placebo 对比的区间以 0 为中心并在 ±δ 内，则共同偏置证据较弱，主对比解释力增强。",
+       "若 placebo 对比也显示与主对比同量级的差值，则主对比不可归因于干预，方向性结论需撤回。"
+      ],
+      "unresolved_question": "观测到的差值是否可能来自场景/实现层面的共同偏置而非 Tc 与惯量的真实交互？"
+     }
+    ],
+    "primary_results": [
+     {
+      "analysis_receipt_sha": "b4f8d63380f456005ce0db9a40d254427c9f33938420fc804539237ae7e405ff",
+      "contrast_id": "component_single_factor",
+      "result_locator": {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/contrasts/0/estimate",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      }
+     }
+    ],
+    "question_and_hypotheses": "在 B_sampling_integration 场景、给定确认设计（32 个宿主 block、128 次运行、4 个条件 s_low/s_high/l_low/l_high）下，Tc×惯量比的 difference-in-differences（metric=normalized_tracking_rmse，proposition=increase_gt，δ=0.01）是否成立。预登记两条假设：h_interaction（Tc 效应随惯量比改变，差值超出 δ 可忽略带）与 h_additive（两因子效应可加，差值落在 ±δ 内）；二者共用同一主对比 tc_x_inertia（登记 id=component_single_factor），判据为 95% 区间相对 0 与 ±δ 的位置。",
+    "schema": "simpraxis.rsi_r13.research_report.v1",
+    "schema_version": 1,
+    "task_id": "r13-b-tc-inertia-interaction"
+   },
+   "seq": 147
+  },
+  {
+   "claims": [
+    {
+     "delta": 0.01,
+     "estimate": 0.10267914979126613,
+     "hypothesis_id": "h_interaction",
+     "lower": -0.11525227534240161,
+     "metric_id": "normalized_tracking_rmse",
+     "n_blocks": 32,
+     "proposition": "increase_gt",
+     "upper": 0.3117777573673893
+    },
+    {
+     "delta": 0.01,
+     "estimate": 0.10267914979126613,
+     "hypothesis_id": "h_additive",
+     "lower": -0.11525227534240161,
+     "metric_id": "normalized_tracking_rmse",
+     "n_blocks": 32,
+     "proposition": "increase_gt",
+     "upper": 0.3117777573673893
+    }
+   ],
+   "report": {
+    "alternative_explanations": [
+     {
+      "consequence": "若成立，等权 mean 会掩盖真实的方向性，需按频率分层重估后才有条件判断 increase_gt。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "重尾与符号翻转可能源自宿主 nuisance 频率的特定水平：高频极值下跟踪饱和或相位滞后改变 Tc 效应的方向。"
+     },
+     {
+      "consequence": "在此存疑前提下，区间不应被解释为对绝对跟踪性能差异的度量，只能作为有界的方向性证据。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/metric_id",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "normalized_tracking_rmse 以基线误差为分母，跨条件的分母不同使效应不可公度，可能人为放大某些 block 的差值与方差。"
+     }
+    ],
+    "explore_confirm_comparison": {
+     "comparable": false,
+     "estimands": "explore_target=explore grid（覆盖设计空间）对比 confirm_target=32 host blocks 抽样；两侧估计的 estimand 目标不同，不能等同。",
+     "evidence_refs": [
+      {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/diagnostics/phase_comparability",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      }
+     ],
+     "explanation": "公开件登记 relation=different_target，探索覆盖设计空间而确认是宿主 block 抽样；因此探索阶段数值不能用于缩小确认区间、也不能当作确认证据。"
+    },
+    "heterogeneity_and_scope": [
+     {
+      "applicability": "仅适用于登记的 registered_distribution 与给定 nuisance 支撑（PD 控制、给定 kp/kd/dt、惯量比 0.5 与 2.0、Tc 0.008 与 0.032 s、target_freq_hz 0.2–2.0 Hz）；不外推到其他工况、其他频率或真实硬件。",
+      "claim": "逐 block 效应重尾：26 个 block 大于 +δ，5 个低于 -δ（约 -1.400、-1.257、-1.252、-0.284、-0.059），1 个落在 ±δ 内，少数极端 block 主导方差使等权均值区间宽约 0.43。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/threshold_counts/0",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ]
+     },
+     {
+      "applicability": "无删失、无缺失，因此区间宽度反映真实 block 间异质性而非缺失造成的样本损失。",
+      "claim": "覆盖完整：32 个独立 block、128 次运行、128 个唯一设计，dropped=0，估计基于 observed_blocks 等权平均。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/coverage",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ]
+     }
+    ],
+    "limitations": [
+     {
+      "consequence": "本轮只能给出 INCONCLUSIVE 语义，任何方向性结论都不成立。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/lower",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "主区间同时跨过 0 与 δ，统计力不足，无法区分 h_interaction 与 h_additive。"
+     },
+     {
+      "consequence": "不能声称已排除所有替代解释，结论范围必须收敛到观测到的对比本身。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/status",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "本设计未登记阴性对照/placebo，无法用等效对照检验场景级系统偏差或流水线伪效。"
+     },
+     {
+      "consequence": "如需定量结论，应先预登记稳健估计量（trimmed mean/中位数、block 级 bootstrap）再解释均值。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/effect",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "等权 mean 对重尾极端 block 敏感（单 block 效应可达 ±1.4 量级），点估计稳定性低。"
+     }
+    ],
+    "methods_and_assignment_responsibility": "主对比为按宿主 block 配对的 difference-in-differences，block_to_contrast_formula=mean、等权、区间水平 0.95、censoring_rule 为 dropped 不补值；nuisance（target_freq_hz 在 0.2–2.0 Hz 支撑内变化）由宿主按 host_uniform_v1 分配，分配责任不在本 Agent。本 Agent 仅解释已冻结的确认产物，未改动分析源码或实验方法，也未重跑仿真。",
+    "next_steps": [
+     {
+      "discriminating_experiment": "冻结 TaskSpec 后预登记频率分层（0.2–2.0 Hz 分箱）与 block 级 bootstrap，重估分层效应并检查符号一致性。",
+      "possible_outcomes": [
+       "分层后各层符号一致且区间不跨 0：支持存在真实交互，此前宽区间是混合频率造成的。",
+       "分层后仍符号混杂或区间跨 0：交互为频率依赖的异质效应，主对比方向不可泛化。"
+      ],
+      "unresolved_question": "在按 target_freq_hz 分层的子总体内，Tc×惯量比的方向性效应是否仍不一致？"
+     },
+     {
+      "discriminating_experiment": "加入标签置换或空条件 placebo（同条件对同条件对比）作为阴性对照，检查其效应是否等效地偏离 0。",
+      "possible_outcomes": [
+       "placebo 效应区间紧贴 0：说明主对比偏差证据弱，宽区间来自真实异质性。",
+       "placebo 效应也显著偏离 0：说明存在场景级偏差，需先修正度量再解释主结果。"
+      ],
+      "unresolved_question": "观测到的重尾与正均值是否是流水线/场景偏差的伪效？"
+     },
+     {
+      "discriminating_experiment": "并行报告未归一化的跟踪 RMSE 与基线误差，比较两种度量下效应与区间的稳定性。",
+      "possible_outcomes": [
+       "未归一化度量给出同向且更窄的区间：归一化放大了噪声，方向性结论可保留。",
+       "未归一化度量区间更宽或符号反转：比值指标不可公度，应改用绝对误差度量重登记。"
+      ],
+      "unresolved_question": "normalized_tracking_rmse 的分母跨条件是否公度，是否会放大 block 间方差？"
+     }
+    ],
+    "primary_results": [
+     {
+      "analysis_receipt_sha": "b4f8d63380f456005ce0db9a40d254427c9f33938420fc804539237ae7e405ff",
+      "contrast_id": "tc_x_inertia",
+      "result_locator": {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/contrasts/0/estimate",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      }
+     }
+    ],
+    "question_and_hypotheses": "在 B_sampling_integration 场景、给定确认设计（32 个宿主 block、128 次运行、条件 s_low/s_high/l_low/l_high）下，Tc×惯量比的 difference-in-differences（metric=normalized_tracking_rmse，proposition=increase_gt，δ=0.01）是否成立。预登记两条假设：h_interaction（Tc 效应随惯量比改变，差值超出 δ 可忽略带）与 h_additive（两因子效应可加，差值落在 ±δ 内）；二者共用主对比 tc_x_inertia，判据为 95% 区间相对 0 与 ±δ 的位置。",
+    "schema": "simpraxis.rsi_r13.research_report.v1",
+    "schema_version": 1,
+    "task_id": "r13-b-tc-inertia-interaction"
+   },
+   "seq": 153
+  },
+  {
+   "claims": [
+    {
+     "delta": 0.01,
+     "estimate": 0.10267914979126613,
+     "hypothesis_id": "h_interaction",
+     "lower": -0.11525227534240161,
+     "metric_id": "normalized_tracking_rmse",
+     "n_blocks": 32,
+     "proposition": "increase_gt",
+     "upper": 0.3117777573673893
+    },
+    {
+     "delta": 0.01,
+     "estimate": 0.10267914979126613,
+     "hypothesis_id": "h_additive",
+     "lower": -0.11525227534240161,
+     "metric_id": "normalized_tracking_rmse",
+     "n_blocks": 32,
+     "proposition": "increase_gt",
+     "upper": 0.3117777573673893
+    }
+   ],
+   "report": {
+    "alternative_explanations": [
+     "宿主 nuisance 频率的特定水平可能驱动重尾：高频 block 处跟踪饱和或相位滞后可使 Tc 效应符号翻转，从而既产生大幅正向 block 效应也产生约 -1.4 的负向 block 效应。",
+     "指标 normalized_tracking_rmse 是比值型归一化量，其分母（基线误差）在惯量比与 Tc 之间可能不可公度，使 difference-in-differences 的差值解释不再是纯动态效应。",
+     "本设计未登记阴性对照或 placebo，因此不能排除场景级系统偏差（例如采样与积分伪效）作为等效替代解释，也无法量化其在估计中的份额。"
+    ],
+    "explore_confirm_comparison": {
+     "comparable": false,
+     "estimands": [
+      "explore 阶段在 explore grid 上的 Tc×惯量效应",
+      "confirm 阶段在 32 个宿主 block 抽样上的 Tc×惯量效应"
+     ],
+     "evidence_refs": [
+      {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/diagnostics/phase_comparability/relation",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      }
+     ],
+     "explanation": "公开件登记 explore_target=explore grid、confirm_target=32 host blocks，relation=different_target：两者目标总体不同，探索阶段估计不能当作确认证据，也不能用来缩窄本区间或作后验选择。"
+    },
+    "heterogeneity_and_scope": [
+     {
+      "applicability": "仅适用于登记的 registered_distribution 与给定 nuisance 支撑（PD 控制、固定 kp/kd/dt、惯量比 0.5 与 2.0、Tc 0.008 与 0.032 秒、target_freq_hz 0.2 至 2.0 Hz）；不外推到其他控制参数、其他频率支撑或真实硬件。",
+      "claim": "逐 block 效应重尾：26 个 block 效应大于正 delta、5 个低于负 delta、仅 1 个落在正负 delta 带内，少数极端 block 主导等权均值的方差，使 95% 区间宽约 0.43。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/threshold_counts/0",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ]
+     },
+     {
+      "applicability": "适用于本确认批次的 32 个宿主 block 观测；不适用于任何未观测工况。",
+      "claim": "区间 -0.1153 至 0.3118 同时跨过 0 与 delta=0.01，系统标签为 INCONCLUSIVE，因此 increase_gt 与可加等价都未被证实。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/lower",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       },
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/upper",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ]
+     }
+    ],
+    "limitations": [
+     {
+      "consequence": "结论必须停留为 INCONCLUSIVE，不能写成支持或反驳任一预登记假设。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/contrasts/0/lower",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "主区间宽度约 0.43，跨越 0 与 delta=0.01，统计功效不足以判定 increase_gt 或可加等价。"
+     },
+     {
+      "consequence": "点估计与其方向可能主要由少数 block 决定，不能作为稳健的总体效应读数。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/contrasts/0/block_effects",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "登记 scope 规定等权 mean 聚合；在重尾 block 效应下等权均值对少数极端 block 高度敏感。"
+     },
+     {
+      "consequence": "无法用等效证据排除场景级系统偏差，也不得声称已排除全部替代解释。",
+      "evidence_refs": [
+       {
+        "file": "analysis/output.json",
+        "kind": "json_pointer",
+        "pointer": "/diagnostics/phase_comparability/relation",
+        "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+       }
+      ],
+      "statement": "本 study 未登记阴性对照/placebo，且 explore 与 confirm 目标不可比。"
+     }
+    ],
+    "methods_and_assignment_responsibility": "主对比为按宿主 block 配对的 difference-in-differences，block_to_contrast_formula=mean、等权、区间水平 0.95、censoring_rule 为 dropped 不补值；nuisance（target_freq_hz 在 0.2 至 2.0 Hz 之间变化）由宿主负责分配，本 Agent 未参与分配也未重跑仿真。覆盖 observed_blocks：32/32 个独立 block、128 次运行、dropped=0，故无补值或删失偏倚。本 Agent 的责任限于解释已给定证据；设计层面的重尾与缺失阴性对照属给定设计的限制。",
+    "next_steps": [
+     {
+      "discriminating_experiment": "在冻结 TaskSpec 下预登记按 target_freq_hz 分层（低频 0.2 Hz 与高频 2.0 Hz 两 strata）的同构 difference-in-differences，并同时报告层内与合并估计。",
+      "possible_outcomes": [
+       "分层后两 strata 区间均完全在正 delta 之上且方向一致，则 increase_gt 获得支持。",
+       "分层后区间方向相反且各自离 0 较远，说明合并均值的重尾源于频率混杂，主对比不宜作因果解读。",
+       "分层后各层区间仍跨过 0 与 delta，则维持 INCONCLUSIVE，需要提高 block 数或降低指标噪声。"
+      ],
+      "unresolved_question": "Tc×惯量交互效应是否在按 target_freq_hz 分层后稳定存在，还是由特定频率水平驱动？"
+     },
+     {
+      "discriminating_experiment": "在冻结 TaskSpec 下预登记 block 级 bootstrap 与 trimmed mean/中位数等稳健估计作为敏感性分析，并加入标签置换 placebo 作为阴性对照。",
+      "possible_outcomes": [
+       "稳健估计区间仍跨过 0 与 delta，判定维持 INCONCLUSIVE。",
+       "稳健估计区间完全落在正 delta 之上而等权 mean 不落，说明极端 block 稀释了真实的一致正向效应。",
+       "placebo 也产生与主对比同量级的差值，说明估计主要由场景级系统偏差而非 Tc×惯量交互驱动。"
+      ],
+      "unresolved_question": "等权 mean 下的重尾是否使结论对少数极端 block 过于敏感，稳健估计是否改变判定？"
+     }
+    ],
+    "primary_results": [
+     {
+      "analysis_receipt_sha": "b4f8d63380f456005ce0db9a40d254427c9f33938420fc804539237ae7e405ff",
+      "contrast_id": "component_single_factor",
+      "result_locator": {
+       "file": "analysis/output.json",
+       "kind": "json_pointer",
+       "pointer": "/contrasts/0/estimate",
+       "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+      }
+     }
+    ],
+    "question_and_hypotheses": "在 B_sampling_integration 场景、给定确认设计（32 个宿主 block、128 次运行、条件 s_low/s_high/l_low/l_high）下，Tc 与惯量比的 difference-in-differences（metric=normalized_tracking_rmse，proposition=increase_gt，delta=0.01）是否成立。预登记两条假设：h_interaction（Tc 效应随惯量比改变，差值超出 delta 可忽略带）与 h_additive（两因子效应可加，差值落在正负 delta 内）；二者共用主对比 tc_x_inertia，判据为 95% 区间相对 0 与正负 delta 的位置。",
+    "schema": "simpraxis.rsi_r13.research_report.v1",
+    "schema_version": 1,
+    "task_id": "r13-b-tc-inertia-interaction"
+   },
+   "seq": 156
+  }
+ ]
+}

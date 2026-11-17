@@ -848,6 +848,7 @@ def _rule(where: str, expected: str, value: Any) -> str:
 
 
 def precommit_report_problems(report: Any, *, task: Any,
+                              plan: Any = None,
                               claims: "Sequence[Mapping[str, Any]] | None" = None
                               ) -> "list[str]":
     """提交前的**结构与类型**预检（Plan §3.2；不解析证据、不给答案）。
@@ -890,9 +891,16 @@ def precommit_report_problems(report: Any, *, task: Any,
                 continue
             expected_cid = str(getattr(task, "primary").id)
             if str(row["contrast_id"]) != expected_cid:
-                problems.append(
-                    f"{where}.contrast_id: expected {expected_cid!r} "
-                    f"(got {row['contrast_id']!r})")
+                message = (f"{where}.contrast_id: expected {expected_cid!r} "
+                           f"(got {row['contrast_id']!r})")
+                # 角色规则（零 POST 票据 B）：got 是 plan 组件锚点时点明它
+                # 不是报告对比 id；机器可判前缀不变。
+                component_ids = (RV.contrast_roles(task, plan).get(
+                    "plan_component_ids") if plan is not None else [])
+                if str(row["contrast_id"]) in component_ids:
+                    message += ("；角色: 该值是 plan 组件锚点，不是报告/claim "
+                                f"使用的 task 对比 id（{expected_cid}）")
+                problems.append(message)
             if not _is_hex64(row["analysis_receipt_sha"]):
                 problems.append(_rule(
                     f"{where}.analysis_receipt_sha", "64-hex sha256",

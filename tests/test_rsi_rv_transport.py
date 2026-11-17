@@ -65,6 +65,9 @@ class FakeAdmission:
     def check_all(self, **kwargs):
         return self.permit
 
+    def check_send(self, reservation):
+        return self.permit
+
 
 def _request(text: str = "hello") -> T.Request:
     serialized = json.dumps({"system": "s", "messages": [],
@@ -288,3 +291,30 @@ def test_rv_parse_public_type_rules_for_read_action():
     with pytest.raises(L.LoopError) as exc:
         L.parse_action(json.dumps({**base, "cursor": None}))
     assert exc.value.detail == "None"
+
+
+def test_sender_refuses_resending_same_call_id(tmp_path):
+    """零 POST 票据 A：同一 call_id 已定论发送后不得再发（幂等预留 ≠ 可重发）。"""
+    sender, permit, ledger, gateway = _sender_one_call(tmp_path)
+    request = _request()
+    call_id = f"round:{request.sha256[:16]}"
+    reservation = L.Reservation(call_id=call_id, permit=permit,
+                                slot_id="suffix_A#1")
+    sender.send_once(request, reservation)
+    with pytest.raises(L.LoopError) as exc:
+        sender.send_once(request, reservation)
+    assert exc.value.code == "SLOT_ALREADY_SENT"
+    assert len(ledger.rows) == 1 and len(gateway.calls) == 1
+
+
+def _sender_one_call(tmp_path):
+    ledger = FakeLedger()
+    gateway = FakeGateway(ledger)
+    transport = RT.RVTransport(gateway=gateway, lane="suffix_A",
+                               batch_id="rv-test-suffix_A")
+    permit = L.Permit(envelope_id="round", lock_sha256="a" * 64,
+                      budget_sha256="b" * 64, phase="rv")
+    sender = RT.RVSender(ctx=RT.RVContext(tmp_path), transport=transport,
+                         admission=FakeAdmission(permit), ledger=ledger,
+                         lane="suffix_A", study="A", round_id="round")
+    return sender, permit, ledger, gateway

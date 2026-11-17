@@ -278,14 +278,15 @@ def parse_action(text: str, *, public_rules: bool = False,
     if missing:
         raise LoopError(
             "MISSING_KEY",
-            (f"{name} missing {missing}; expected keys "
-             f"{sorted(_KEYS[name])}" if public_rules
+            (f"{name}: expected keys {sorted(_KEYS[name])} "
+             f"(got keys {sorted(doc)}; missing {missing})" if public_rules
              else f"{name} 缺 {missing}"))
     extra = sorted(set(doc) - allowed)
     if extra:
         raise LoopError(
             "UNKNOWN_KEY",
-            (f"{name} has extra keys {extra}; expected no extra keys"
+            (f"{name}: expected no extra keys "
+             f"(got extra keys {extra})"
              if public_rules else f"{name} 多余字段 {extra}"))
 
     _validate_action_fields(name, doc, public_rules=public_rules)

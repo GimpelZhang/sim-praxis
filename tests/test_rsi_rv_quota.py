@@ -149,3 +149,110 @@ def test_recovery_prereg_requires_consent_before_paid_authorization(tmp_path):
         "approved": True, "approver": "user",
         "prereg_sha256": RV.sha_file(root / "contract" / "recovery_prereg.json")})
     assert CLI.main(["authorize-calibration", "--root", str(root)]) == 0
+
+
+# ---------------------------------------------------------------------------
+# 零 POST 票据 A（2026-11-17）：末槽准入语义（申请 vs 发送）
+# ---------------------------------------------------------------------------
+
+class _CallLedger:
+    """最小账本替身：只有 `_read_rows` 与 call 行（无网络、无文件）。"""
+
+    def __init__(self) -> None:
+        self.rows: "list[dict]" = []
+
+    def _read_rows(self) -> "list[dict]":
+        return list(self.rows)
+
+    def add(self, lane: str) -> None:
+        self.rows.append({"seq": len(self.rows) + 1, "event": "call",
+                          "ok": True, "task": RV.RV_LANE_TASK_ID[lane]})
+
+
+def _admission(tmp_path, ledger, lane: str):
+    budget = RT.RVBudget(envelope_id="r",
+                         posts_by_lane=dict(RV.RV_LANE_POST_CAPS))
+    ctx = RT.RVContext(tmp_path / "round")
+    lanes = RT.RVSlotBook(ctx, budget)
+    admission = RT.RVAdmission(
+        ctx=ctx, round_id="round", study="B", study_ctx=None, prereg={},
+        budget=budget, ledger=ledger, lanes=lanes, permits={},
+        closure_reader=lambda: {}, public_verifier=lambda: {}, offline=True)
+    admission.enter_lane(lane)
+    return admission, lanes
+
+
+def _check(admission) -> "L.Permit":
+    return admission.check_all(envelope=None, root_lock=None, phase="rv",
+                               spend_contract=None)
+
+
+def test_last_reserved_slot_is_sendable(tmp_path):
+    """v3 实况：4 槽全预留后，第 4 个合法槽在发送前复核被自己拒绝。"""
+    ledger = _CallLedger()
+    admission, lanes = _admission(tmp_path, ledger, "review_calibration")
+    for index in range(1, 5):
+        permit = _check(admission)
+        reservation = lanes.reserve_atomic(call_id=f"c{index}", permit=permit)
+        assert admission.check_send(reservation) == permit
+        ledger.add("review_calibration")
+    assert lanes.count("review_calibration") == 4
+    with pytest.raises(L.LoopError) as exc:
+        _check(admission)
+    assert exc.value.code == "BUDGET_REFUSED"
+    with pytest.raises(L.LoopError) as exc:
+        lanes.reserve_atomic(call_id="c5", permit=permit)
+    assert exc.value.code == "BUDGET_REFUSED"
+
+
+def test_send_refuses_when_ledger_alone_is_at_cap(tmp_path):
+    ledger = _CallLedger()
+    admission, lanes = _admission(tmp_path, ledger, "review_calibration")
+    permit = _permit()
+    for index in range(1, 4):
+        _check(admission)
+        lanes.reserve_atomic(call_id=f"c{index}", permit=permit)
+        ledger.add("review_calibration")
+    reservation = lanes.reserve_atomic(call_id="c4", permit=permit)
+    ledger.add("review_calibration")          # 伪造：实呼已被别处占满
+    with pytest.raises(L.LoopError) as exc:
+        admission.check_send(reservation)
+    assert exc.value.code == "BUDGET_REFUSED"
+
+
+def test_send_refuses_foreign_or_unknown_slot(tmp_path):
+    ledger = _CallLedger()
+    admission, lanes = _admission(tmp_path, ledger, "review_calibration")
+    permit = _permit()
+    lanes.reserve_atomic(call_id="c1", permit=permit)
+    for slot_id in ("suffix_B#1", "review_calibration#x", "junk", "review_calibration#5"):
+        with pytest.raises(L.LoopError) as exc:
+            admission.check_send(L.Reservation(call_id="c1", permit=permit,
+                                               slot_id=slot_id))
+        assert exc.value.code == "SLOT_UNKNOWN"
+
+
+def test_send_refuses_out_of_order_slot(tmp_path):
+    ledger = _CallLedger()
+    admission, lanes = _admission(tmp_path, ledger, "review_calibration")
+    permit = _permit()
+    first = lanes.reserve_atomic(call_id="c1", permit=permit)
+    lanes.reserve_atomic(call_id="c2", permit=permit)
+    with pytest.raises(L.LoopError) as exc:
+        admission.check_send(first)
+    assert exc.value.code == "SLOT_OUT_OF_ORDER"
+
+
+def test_lanes_do_not_borrow_or_block_each_other(tmp_path):
+    ledger = _CallLedger()
+    admission, lanes = _admission(tmp_path, ledger, "review_calibration")
+    permit = _permit()
+    for index in range(1, 5):
+        _check(admission)
+        lanes.reserve_atomic(call_id=f"c{index}", permit=permit)
+        ledger.add("review_calibration")
+    admission.enter_lane("suffix_B")          # 另一 lane 仍可申请并发送
+    permit = _check(admission)
+    reservation = lanes.reserve_atomic(call_id="b1", permit=permit)
+    assert admission.check_send(reservation) == permit
+    assert lanes.count("review_calibration") == 4 and lanes.count("suffix_B") == 1

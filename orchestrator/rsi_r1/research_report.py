@@ -335,6 +335,11 @@ def public_schema() -> "dict[str, Any]":
         "rules": {
             "origin": "report 必须由候选 reply 产生；宿主/维护改稿标 assisted",
             "primary_results": "每条必须引用已封存 receipt 与可解析 locator",
+            # 零 POST 票据 B（2026-11-17）：两种 id 的角色规则进公开 schema。
+            "contrast_id": ("primary_results[].contrast_id 与 claims 必须用 "
+                            "task.primary.id；plan.primary 与 "
+                            "plan.hypotheses[].contrast_id 是组件锚点，"
+                            "不是报告里的对比 id"),
             "limitations": "每条必须有 statement/evidence_refs/consequence",
             "render": "report_text 若提供，必须与确定性 render 逐字相等",
         },

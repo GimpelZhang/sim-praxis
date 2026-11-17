@@ -38,6 +38,7 @@ from orchestrator.rsi_r1 import profiles as P
 from orchestrator.rsi_r1 import protocol as PT
 from orchestrator.rsi_r1 import research_report as RR
 from orchestrator.rsi_r1 import rv_contract as RV
+from orchestrator.rsi_r1 import rv_draft as DR
 from orchestrator.rsi_r1 import rv_worker as W
 from orchestrator.rsi_r1 import state as S
 from orchestrator.rsi_r1 import task_specs as TS
@@ -52,6 +53,7 @@ _IMPLEMENTATION_FILES = (
     "orchestrator/gateway/quota_ledger.py",
     "orchestrator/gateway/router.py",
     "orchestrator/rsi_r1/rv_contract.py",
+    "orchestrator/rsi_r1/rv_draft.py",
     "orchestrator/rsi_r1/rv_runtime.py",
     "orchestrator/rsi_r1/rv_worker.py",
     "orchestrator/rsi_r1/rv_review.py",
@@ -295,6 +297,65 @@ def posts_used(ledger: Any, lane: str) -> int:
     return sum(1 for r in ledger_call_rows(ledger) if int(r.get("task", -1)) == task)
 
 
+#: 解析层失败时 `record_result` 写入的动作占位符（loop.turn 的 except 分支）。
+ACTION_PARSE_MARKER = "?"
+
+
+def classify_action_results(rows: "Sequence[Mapping[str, Any]]") -> dict[str, Any]:
+    """按原事件分类动作层拒绝（零 POST、可复核；不依赖汇总件自述）。
+
+    2026-11-17 核验：v3 汇总件写 ``action_layer_rejections=[]``，但 seq 139
+    实有 1 次 ``MISSING_KEY``（缺 ``output_sha256``）。三句不同的话必须分开：
+
+    * ``no_any_action_rejection``：**任何**动作层拒绝都没有；
+    * ``no_cursor_type_rejection``：没有 cursor/page 类型拒绝；
+    * ``prereg_action_feedback_exercised``：预注册口径的 rule-bearing
+      （消息同时含 ``expected`` 与 ``(got``）动作层拒绝出现过。
+    """
+    rejects: "list[dict[str, Any]]" = []
+    for row in rows:
+        if row.get("event") != "action_result":
+            continue
+        payload = row.get("payload") or {}
+        if payload.get("ok") is not False:
+            continue
+        result = payload.get("result") or {}
+        message = str(result.get("message") or "")
+        rejects.append({
+            "seq": row.get("seq"),
+            "code": str(payload.get("code") or result.get("code") or ""),
+            "action": str(payload.get("action") or ""),
+            "parse_layer": str(payload.get("action") or "") == ACTION_PARSE_MARKER,
+            "rule_bearing": ("expected" in message and "(got" in message),
+            "message": message,
+        })
+    parse = [r for r in rejects if r["parse_layer"]]
+    tool = [r for r in rejects if r["action"] == "read_result_artifact"]
+    dispatch = [r for r in rejects
+                if not r["parse_layer"] and r["action"] != "read_result_artifact"]
+    action_layer = parse + tool
+    rule = [r for r in action_layer if r["rule_bearing"]]
+    cursor = [r for r in rule if r["code"] in ("CURSOR_INVALID", "PAGE_TOO_LARGE")]
+    return {
+        "schema": f"{RV.SCHEMA_PREFIX}.action_result_classification.v1",
+        "schema_version": 1,
+        "all_action_rejections": action_layer,
+        "parse_layer_rejections": parse,
+        "tool_layer_rejections": tool,
+        "dispatch_rejections": dispatch,
+        "rule_bearing_action_rejections": rule,
+        "counts": {"all_action_layer": len(action_layer),
+                   "parse_layer": len(parse), "tool_layer": len(tool),
+                   "dispatch": len(dispatch), "rule_bearing_action_layer": len(rule),
+                   "cursor_type": len(cursor)},
+        "statements": {
+            "no_any_action_rejection": not action_layer,
+            "no_cursor_type_rejection": not cursor,
+            "prereg_action_feedback_exercised": bool(rule),
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # 准入
 # ---------------------------------------------------------------------------
@@ -367,9 +428,8 @@ class RVAdmission:
                                   f"study {self.study} 无封存报告",
                                   terminal=True)
 
-    def check_all(self, *, envelope: Any, root_lock: Any, phase: str,
-                  spend_contract: Any) -> L.Permit:
-        del phase, spend_contract, envelope, root_lock
+    def _check_environment(self) -> Mapping[str, Any]:
+        """暂停件、许可、闭包/公开/预注册新鲜度与 root 状态（预算之外）。"""
         from orchestrator.rsi_r1 import watchdog as WDG
         pause = WDG.read_pause(self.ctx.subdir("state"))
         if pause is not None:
@@ -391,6 +451,19 @@ class RVAdmission:
                                   terminal=True)
             if self.prereg.get("prereg_sha256") != permit.get("prereg_sha256"):
                 raise L.LoopError("PREREG_DRIFT", "预注册与许可不符", terminal=True)
+        self._require_root()
+        return permit
+
+    def _permit_obj(self, permit: Mapping[str, Any]) -> L.Permit:
+        return L.Permit(envelope_id=self.round_id,
+                        lock_sha256=str(permit["permit_sha256"]),
+                        budget_sha256=self.budget.sha256, phase="rv")
+
+    def check_all(self, *, envelope: Any, root_lock: Any, phase: str,
+                  spend_contract: Any) -> L.Permit:
+        """申请新槽：预留前复核；`max(预留, 实呼) >= 帽` 即拒绝（不建第 9 槽）。"""
+        del phase, spend_contract, envelope, root_lock
+        permit = self._check_environment()
         used = self.posts_used(self.lane)
         cap = int(permit.get("lane_caps", {}).get(self.lane, -1))
         if cap < 0 or used >= cap:
@@ -403,10 +476,44 @@ class RVAdmission:
             raise L.LoopError("BUDGET_REFUSED",
                               f"整轮实呼/预留 {total} 已达帽 {RV.RV_HARD_CAP}",
                               terminal=True)
-        self._require_root()
-        return L.Permit(envelope_id=self.round_id,
-                        lock_sha256=str(permit["permit_sha256"]),
-                        budget_sha256=self.budget.sha256, phase="rv")
+        return self._permit_obj(permit)
+
+    def check_send(self, reservation: "L.Reservation") -> L.Permit:
+        """发送**已合法预留**的槽：只按账本实呼计帽。
+
+        v3 实测（2026-11-17）：8 个槽全预留后，发送前复核用
+        `max(预留, 实呼) >= 帽` 把第 8 个合法槽自己拒掉，模型实际只得到
+        7 次调用。申请新槽仍由 :meth:`check_all` 卡死；这里只核验：
+        预留属于本 lane、是**最新未消费**的预留、账本实呼 `+1 <= 帽`。
+        同一 call_id 的重复发送由 :class:`RVSender` 的 results 判定。
+        """
+        permit = self._check_environment()
+        slot_id = str(getattr(reservation, "slot_id", ""))
+        lane, sep, index_s = slot_id.partition("#")
+        if not sep or lane != self.lane or not index_s.isdigit():
+            raise L.LoopError("SLOT_UNKNOWN",
+                              f"预留槽 {slot_id!r} 不属于 lane {self.lane}",
+                              terminal=True)
+        index = int(index_s)
+        cap = int(permit.get("lane_caps", {}).get(self.lane, -1))
+        if cap < 0 or not 1 <= index <= cap:
+            raise L.LoopError("SLOT_UNKNOWN",
+                              f"预留槽 {slot_id!r} 超出帽 {cap}", terminal=True)
+        if index != self.lanes.count(self.lane):
+            raise L.LoopError("SLOT_OUT_OF_ORDER",
+                              f"只能发送本 lane 最新的预留（当前 {index}）",
+                              terminal=True)
+        ledger_used = posts_used(self.ledger, self.lane)
+        if ledger_used >= cap:
+            raise L.LoopError("BUDGET_REFUSED",
+                              f"lane {self.lane} 实呼 {ledger_used} / 帽 {cap}",
+                              terminal=True)
+        total = sum(posts_used(self.ledger, l) for l in RV.RV_LANE_ORDER)
+        if total >= RV.RV_HARD_CAP:
+            raise L.LoopError("BUDGET_REFUSED",
+                              f"整轮实呼 {total} 已达帽 {RV.RV_HARD_CAP}",
+                              terminal=True)
+        return self._permit_obj(permit)
 
 
 # ---------------------------------------------------------------------------
@@ -536,8 +643,15 @@ class RVSender:
                 or reservation.call_id.startswith(expected + ":a")):
             raise L.LoopError("LOCK_MISMATCH", "call_id 与请求不匹配",
                               terminal=True)
-        fresh = self.admission.check_all(envelope=None, root_lock=None,
-                                         phase="rv", spend_contract=None)
+        # 同 call_id 已定论发送 ⇒ 拒绝重复扣费（reserve_atomic 对 call_id 幂等，
+        # 幂等本身不能当作"可以再发一次"）。
+        sent = {r.get("call_id") for r in self._rows(self._result_path())
+                if r.get("resolved") is True}
+        if reservation.call_id in sent:
+            raise L.LoopError("SLOT_ALREADY_SENT",
+                              f"call {reservation.call_id} 已发送过",
+                              terminal=True)
+        fresh = self.admission.check_send(reservation)
         if fresh != reservation.permit:
             raise L.LoopError("PERMIT_DRIFT", "准入复核与预留不一致",
                               terminal=True)
@@ -902,6 +1016,9 @@ def _rv_system(study: str, brief: Mapping[str, Any], *, scripted: bool) -> str:
     ]
     if scripted:
         lines += ["（离线预演：维护脚本执行，不计候选成功。）", ""]
+    roles = brief.get("id_roles") if isinstance(brief, Mapping) else None
+    if isinstance(roles, Mapping) and roles.get("task_contrast_id"):
+        lines += [RV.render_contrast_roles(roles), ""]
     lines += ["## 研究简介（公开事实）",
               json.dumps(brief, ensure_ascii=False, sort_keys=True, indent=1)]
     return "\n".join(lines)
@@ -948,6 +1065,17 @@ def build_rv_parts(*, root: "str | Path", study: str, manifest: Mapping[str, Any
         offline=scripted)
     admission.enter_lane(lane)
     from orchestrator.rsi_r1 import rv_review as _RVW  # 延迟导入避免循环
+    drafts = DR.DraftBook(ctx=ctx, study=study, task=task)
+
+    def _precommit(report: Any, claims: Any) -> "list[str]":
+        # 零 POST 票据 B（2026-11-17）：先落候选这次提交的草稿与预检结果，
+        # 再返回拒绝；下一请求的「当前草稿」段总能重现最新一版，
+        # 已修正字段不再只存在于会被 clip_text/摘要裁剪的历史里。
+        problems = _RVW.precommit_report_problems(
+            report, task=task, plan=plan, claims=claims)
+        drafts.record(report=report, claims=claims, problems=problems)
+        return problems
+
     dispatcher = A.CampaignDispatcher(
         ctx=ctx, state=state, admission=admission, budget=budget,
         study=study, runner=G2.FailIfCalled("sandbox_runner"), image="",
@@ -959,8 +1087,7 @@ def build_rv_parts(*, root: "str | Path", study: str, manifest: Mapping[str, Any
         artifact_reader=reader, report_representation="model_text",
         submit_gate=lambda: [] if "analysis/output.json" in reader.completed
         else ["analysis/output.json"],
-        precommit=lambda report, claims: _RVW.precommit_report_problems(
-            report, task=task, claims=claims))
+        precommit=_precommit)
     brief_doc = JSON_load(round_root / "public" / study / "brief.json")
     system = _rv_system(study, brief_doc, scripted=scripted)
     counter = _token_counter()
@@ -968,9 +1095,14 @@ def build_rv_parts(*, root: "str | Path", study: str, manifest: Mapping[str, Any
         seed_capture.update({"system": system, "envelope": envelope})
 
     def messages() -> RT.Request:
+        brief_text = L.render_task_brief(dispatcher.visible_state())
+        draft_context = drafts.render_context()
+        if draft_context:
+            # 修订状态逐字进首条 user 消息；不参与历史裁剪。
+            brief_text = brief_text + "\n\n" + draft_context
         return RT.build_request(
             system=system,
-            task_brief=L.render_task_brief(dispatcher.visible_state()),
+            task_brief=brief_text,
             turns=store.history(), counter=counter,
             max_tokens=RV.RV_OUTPUT_TOKENS,
             delivery_policy=RT.POLICY_G2_ATOMIC,
@@ -1327,8 +1459,17 @@ def assert_offline_sender(sender: Any) -> None:
 # 容量（真实 tokenizer；必需读取页数 + submit ≤ 6）
 # ---------------------------------------------------------------------------
 
+def _draft_probe_text(n_bytes: int) -> str:
+    """最坏修订段探针：中文密度的确定性填充（≤ 3 B/token，保守上界）。"""
+    unit = "修订状态字段值 "
+    reps = max(1, int(n_bytes) // len(unit.encode("utf-8")) + 1)
+    raw = (unit * reps).encode("utf-8")[:int(n_bytes)]
+    return "\n\n" + raw.decode("utf-8", errors="ignore")
+
+
 def capacity_report(*, manifest: Mapping[str, Any], allowlist: Mapping[str, Any],
-                    system_probe: str, envelope_probe: Mapping[str, Any]) -> dict[str, Any]:
+                    system_probe: str, envelope_probe: Mapping[str, Any],
+                    draft_probe_bytes: int = 0) -> dict[str, Any]:
     from orchestrator.rsi_r1 import review_capacity as RC
     tokenizer = RC.load_tokenizer()
     sizes = {(row["study"], row["file"].split("/")[-1]): int(row["bytes"])
@@ -1353,18 +1494,23 @@ def capacity_report(*, manifest: Mapping[str, Any], allowlist: Mapping[str, Any]
             problems.append(f"{study}: 最低路径 {turns} > {RV.MIN_PATH_TURNS}")
     # 请求容量：用真实构造的 Request 计量（system+brief+envelope 同口径）
     from orchestrator.common import research_transport as RT
+    task_brief = "### 当前可见状态\n" + json.dumps(
+        {"study": "A", "state": "RESULTS_RELEASED",
+         "artifacts": {}, "budget_slots_remaining": 8, "nonce": "0" * 16},
+        sort_keys=True)
+    if draft_probe_bytes:
+        # 修订状态段最坏情形（票据 B）：按上限字节计，超帽必须在冻结前发现。
+        task_brief += _draft_probe_text(int(draft_probe_bytes))
     probe = RT.build_request(
         system=system_probe,
-        task_brief="### 当前可见状态\n" + json.dumps(
-            {"study": "A", "state": "RESULTS_RELEASED",
-             "artifacts": {}, "budget_slots_remaining": 8, "nonce": "0" * 16},
-            sort_keys=True),
+        task_brief=task_brief,
         turns=[], counter=lambda t: len(tokenizer.encode(t).ids),
         max_tokens=RV.RV_OUTPUT_TOKENS,
         delivery_policy=RT.POLICY_G2_ATOMIC, result_context=dict(envelope_probe))
     accounting = RT.check_request(probe)
     rows.append({"request_local_tokens": probe.local_tokens,
                  "request_bytes": probe.n_bytes,
+                 "draft_probe_bytes": int(draft_probe_bytes),
                  "within_cap": accounting.ok,
                  "verdict": accounting.verdict})
     if not accounting.ok:
@@ -1380,6 +1526,7 @@ __all__ = [
     "RVBudget", "RVContext", "RVError", "RVAdmission", "RVParts",
     "RVSender", "RVSlotBook", "RVTransport", "RV_PRODUCER", "SCRIPTED_PRODUCER",
     "ScriptedRVConsumer", "assert_offline_sender", "build_rv_envelope",
-    "build_rv_gateway", "build_rv_parts", "capacity_report", "ledger_call_rows",
+    "build_rv_gateway", "build_rv_parts", "capacity_report",
+    "classify_action_results", "ledger_call_rows",
     "materialize_rv_study", "posts_used", "repo_root", "run_turns", "rv_ledger",
 ]

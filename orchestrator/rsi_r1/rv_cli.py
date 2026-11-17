@@ -21,6 +21,7 @@ from orchestrator.rsi_r1 import g21_bridge as G21
 from orchestrator.rsi_r1 import g2_contract as G2
 from orchestrator.rsi_r1 import review_receipt as RRC
 from orchestrator.rsi_r1 import rv_contract as RV
+from orchestrator.rsi_r1 import rv_draft as DR
 from orchestrator.rsi_r1 import rv_review as RVW
 from orchestrator.rsi_r1 import rv_runtime as RT
 from orchestrator.rsi_r1 import rv_worker as W
@@ -346,7 +347,8 @@ def cmd_preflight(args: argparse.Namespace) -> int:
                     root / "public" / "A" / "brief.json"), scripted=False)
                 cap = RT.capacity_report(
                     manifest=manifest, allowlist=_allowlist(root),
-                    system_probe=system, envelope_probe=env_a)
+                    system_probe=system, envelope_probe=env_a,
+                    draft_probe_bytes=DR.DRAFT_CONTEXT_MAX_BYTES)
                 RV.write_json_private(root / "contract" / "capacity.json", cap)
             checks["capacity"] = cap["ok"]
             if not cap["ok"]:
@@ -1117,6 +1119,14 @@ def cmd_closeout(args: argparse.Namespace) -> int:
         else:
             row = dict(row)
             row["review_verdict"] = "REVIEW_NOT_RUN"
+        # 动作层拒绝按原事件分类（零 POST 可复核；不依赖任何汇总件自述）。
+        journal_path = root / "studies" / study / "state" / "journal.jsonl"
+        if journal_path.is_file():
+            events = [json.loads(line) for line in
+                      journal_path.read_text(encoding="utf-8").splitlines()
+                      if line.strip()]
+            row = dict(row)
+            row["action_layer"] = RT.classify_action_results(events)
         studies[study] = row
     iso_path = root / "offline" / "report.json"
     iso_ok = bool((RV.read_json(iso_path).get("isolation") or {}).get("ok")) \
