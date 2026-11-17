@@ -238,11 +238,15 @@ RSI_R1N_OUTPUT_TOKENS = 32768
 REVIEW_INPUT_TOKENS_R1N = 20000
 REVIEW_OUTPUT_TOKENS_R1N = RSI_R1N_OUTPUT_TOKENS
 REVIEW_PACKET_BYTES_R1N = 122_880
-#: R1-N 新族：旧余额一律不借用（Plan §2.1）；族帽 = 本轮硬帽，历史 0。
+#: R1-N 新族：旧余额一律不借用（Plan §2.1）；历史 0。
 R1N_FAMILY_HISTORY_POSTS = 0
-R1N_FAMILY_CLOSED_ROUND_POSTS = 0
-R1N_FAMILY_CAP = RSI_R1N_HARD_CAP
-R1N_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (R1N_FAMILY_CAP,)
+#: 2026-11-17 第二轮（r1n-paid-20261117b，用户裁决「新轮+加固」）：
+#: 首轮 r1n-paid-20261117a 实花 24 POST（按族账口径，已关闭成员按
+#: ``posts_used`` 继续占额，见 ``family._reserved_total``），故族帽
+#: = 24 + 本轮硬帽 132 = 156；只增不减，迁移写 ``cap_history``。
+R1N_FAMILY_CLOSED_ROUND_POSTS = 24
+R1N_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (132, 156)
+R1N_FAMILY_CAP = R1N_FAMILY_CAP_HISTORY[-1]
 
 #: 族历史（T0 对账，见 ``docs``/`family_reconciliation.json`）：
 #: 545 = 历史 31（R1 9 + R1.1 22，两本最终根账逐行冻结）
@@ -1373,7 +1377,9 @@ def assert_r1n_table_consistent() -> None:
         raise AssertionError("R1-N 无 repair_reserve，正常预算必须等于硬帽 132")
     if PROFILE_R1N_DEF.namespace != 2907:
         raise AssertionError("R1-N 账本期号必须是 T0 扫描后登记的 2907")
-    if PROFILE_R1N_DEF.family_cap != RSI_R1N_HARD_CAP:
-        raise AssertionError("R1-N 族帽 != 本轮硬帽（旧余额不借用）")
+    if PROFILE_R1N_DEF.family_cap != (RSI_R1N_HARD_CAP
+                                      + R1N_FAMILY_CLOSED_ROUND_POSTS):
+        raise AssertionError(
+            "R1-N 族帽 != 本轮硬帽 + 已关闭轮实花（旧余额不借用，已花不隐藏）")
     if PROFILE_R1N not in PROFILES or PROFILE_R1N_DEF.profile_id != PROFILE_R1N:
         raise AssertionError("R1-N profile 登记不完整")

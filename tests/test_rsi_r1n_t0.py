@@ -24,7 +24,8 @@ def test_r1n_profile_numbers_and_flags():
     assert dict(prof.lane_post_caps) == {
         "probe": 12, "practice": 16, "study_A": 48, "study_B": 48,
         "review_calibration": 4, "review_final": 4}
-    assert prof.family_cap == 132 and prof.family_history_posts == 0
+    # 2026-11-17 第二轮：族帽 = 首轮已花 24 + 本轮硬帽 132 = 156（只增不减）
+    assert prof.family_cap == 156 and prof.family_history_posts == 0
     assert prof.data_root_name == "rsi_r1_n"
     assert prof.closure_groups_key == "r1n"
     P.assert_r1n_table_consistent()
