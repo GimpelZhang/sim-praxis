@@ -46,7 +46,11 @@ PROFILE_R12 = "rsi-r1.2"
 #: R1.3（2026-11-15）：显式选择的新不可变 profile。旧两条 id 与全部序列化/
 #: 判决逐字节不变；未知 id 一律 `PROFILE_UNKNOWN`，不得 startswith 匹配。
 PROFILE_R13 = "rsi-r1.3"
-PROFILES: "tuple[str, ...]" = (PROFILE_LEGACY, PROFILE_R12, PROFILE_R13)
+#: RSI-R1-N（2026-11-17）：两个新机制问题的完整 R1 闭环（Plan §2.1）。
+#: 精确 id、独立 lane 表/账本/根路径；与旧 profile 逐字节隔离。
+PROFILE_R1N = "rsi-r1-n"
+PROFILES: "tuple[str, ...]" = (PROFILE_LEGACY, PROFILE_R12, PROFILE_R13,
+                               PROFILE_R1N)
 
 #: RSI-G2 能力声明（Plan §3 G2-4）。G2 是**零 POST 工程诊断族**，不是 campaign
 #: profile：不进 ``_BY_ID``、不分配 namespace/账本/族帽、不改变 ``PROFILES``。
@@ -196,6 +200,49 @@ RSI_R13_OUTPUT_TOKENS = 32768
 REVIEW_INPUT_TOKENS_R13 = 20000
 REVIEW_OUTPUT_TOKENS_R13 = RSI_R13_OUTPUT_TOKENS
 REVIEW_PACKET_BYTES_R13 = 122_880
+
+# ---------------------------------------------------------------------------
+# RSI-R1-N lane 表与预算（Plan §2.1；**独立字面量**，不复用 R1.3 表）
+# ---------------------------------------------------------------------------
+#: 六 lane 结构与 R1.3 相同（probe 12 / practice 16 / study 48+48 /
+#: review_calibration 4 / review_final 4），合计 132，不可跨 lane 借额。
+LANE_ORDER_R1N: "tuple[str, ...]" = (
+    "probe", "practice", "study_A", "study_B",
+    "review_calibration", "review_final",
+)
+LANE_TASK_ID_R1N: "Mapping[str, int]" = types.MappingProxyType({
+    "probe": 0,
+    "practice": 1,
+    "study_A": 2,
+    "study_B": 3,
+    "review_calibration": 4,
+    "review_final": 5,
+})
+LANE_POST_CAPS_R1N: "Mapping[str, int]" = types.MappingProxyType({
+    "probe": 12,
+    "practice": 16,
+    "study_A": 48,
+    "study_B": 48,
+    "review_calibration": 4,
+    "review_final": 4,
+})
+RSI_R1N_CANDIDATE_POSTS = 124
+RSI_R1N_REVIEW_POSTS = 8
+RSI_R1N_HARD_CAP = RSI_R1N_CANDIDATE_POSTS + RSI_R1N_REVIEW_POSTS   # 132
+RSI_R1N_NORMAL_BUDGET = RSI_R1N_HARD_CAP
+RSI_R1N_TASK_CAPS: "Mapping[int, int]" = types.MappingProxyType({
+    LANE_TASK_ID_R1N[lane]: LANE_POST_CAPS_R1N[lane]
+    for lane in LANE_ORDER_R1N
+})
+RSI_R1N_OUTPUT_TOKENS = 32768
+REVIEW_INPUT_TOKENS_R1N = 20000
+REVIEW_OUTPUT_TOKENS_R1N = RSI_R1N_OUTPUT_TOKENS
+REVIEW_PACKET_BYTES_R1N = 122_880
+#: R1-N 新族：旧余额一律不借用（Plan §2.1）；族帽 = 本轮硬帽，历史 0。
+R1N_FAMILY_HISTORY_POSTS = 0
+R1N_FAMILY_CLOSED_ROUND_POSTS = 0
+R1N_FAMILY_CAP = RSI_R1N_HARD_CAP
+R1N_FAMILY_CAP_HISTORY: "tuple[int, ...]" = (R1N_FAMILY_CAP,)
 
 #: 族历史（T0 对账，见 ``docs``/`family_reconciliation.json`）：
 #: 545 = 历史 31（R1 9 + R1.1 22，两本最终根账逐行冻结）
@@ -593,6 +640,21 @@ class CampaignProfile:
         # 精确匹配：绝不 startswith（防止 rsi-r1.3x 误收旧分支，Plan §8.2）。
         return self.profile_id == PROFILE_R13
 
+    @property
+    def is_r1n(self) -> bool:
+        return self.profile_id == PROFILE_R1N
+
+    @property
+    def is_r13_family(self) -> bool:
+        """R1.3 起建立的仪器面（R1.3 与 R1-N 共用）。
+
+        2026-11-17 R1-N：``is_r12``/``is_r13`` 在 protocol/assembly/review 等处
+        是**行为开关**；新 profile 若不接线会静默丢功能（design_intent、审查
+        容量、R13 brief、evidence 扩展等）。旧分支一律改读本属性，而 ``is_r13``
+        保持精确身份语义（旧测试与序列化不变）。
+        """
+        return self.profile_id in (PROFILE_R13, PROFILE_R1N)
+
     def task_caps(self) -> "Mapping[int, int]":
         return types.MappingProxyType({
             self.lane_task_id[lane]: self.lane_post_caps[lane]
@@ -748,10 +810,66 @@ PROFILE_R13_DEF = CampaignProfile(
     }),
 )
 
+PROFILE_R1N_DEF = CampaignProfile(
+    profile_id=PROFILE_R1N,
+    # 2026-11-17 实施决定：R1-N 复用 R1.3 的仪器合同 schema（envelope/budget/
+    # consent/public_contract），以 profile_id + 独立 namespace/根路径 区分；
+    # 不新造 schema 版本，避免在旧契约验证器上分叉。任务/报告/审查 schema 同。
+    budget_schema=BUDGET_SCHEMA_V13,
+    protocol_policy=R12_POLICY,
+    resource_limits=ResourceLimits(),
+    consent_scope="R1-N",
+    judge_version="r1.n",
+    namespace=2907,
+    lane_order=LANE_ORDER_R1N,
+    lane_task_id=LANE_TASK_ID_R1N,
+    lane_post_caps=LANE_POST_CAPS_R1N,
+    hard_cap=RSI_R1N_HARD_CAP,
+    normal_budget=RSI_R1N_NORMAL_BUDGET,
+    family_cap=R1N_FAMILY_CAP,
+    family_history_posts=R1N_FAMILY_HISTORY_POSTS,
+    data_root_name="rsi_r1_n",
+    envelope_schema=ENVELOPE_SCHEMA_V13,
+    consent_schema=CONSENT_SCHEMA_V13,
+    public_contract_schema=PUBLIC_CONTRACT_SCHEMA_V13,
+    closure_groups_key="r1n",
+    output_tokens=RSI_R1N_OUTPUT_TOKENS,
+    extra=types.MappingProxyType({
+        "candidate_lanes": ("probe", "practice", "study_A", "study_B"),
+        "review_lanes": ("review_calibration", "review_final"),
+        "candidate_posts": RSI_R1N_CANDIDATE_POSTS,
+        "review_posts": RSI_R1N_REVIEW_POSTS,
+        "review_input_tokens": REVIEW_INPUT_TOKENS_R1N,
+        "review_output_tokens": REVIEW_OUTPUT_TOKENS_R1N,
+        "review_packet_bytes": REVIEW_PACKET_BYTES_R1N,
+        "offline_validation_states": (
+            "registered", "offline_authorized", "calibrated",
+            "validation_locked", "validated",
+        ),
+        "paid_states": (
+            "registered", "authorized", "calibrated", "frozen",
+            "qualified", "study", "closed",
+        ),
+        "history_sources": [],
+        "ledger_history_posts": 0,
+        "offledger_diagnostic_posts": 0,
+        "closed_rounds_posts": 0,
+        "offledger_evidence": [],
+        "no_repair_entry": True,
+        "confirm_analysis_in_run_confirm": True,
+        "analysis_receipt_required": True,
+        "design_intent_required": True,
+        "research_report_required": True,
+        "review_receipt_required": True,
+        "review_calibration_permit_required": True,
+    }),
+)
+
 _BY_ID: "Mapping[str, CampaignProfile]" = types.MappingProxyType({
     PROFILE_LEGACY: PROFILE_LEGACY_DEF,
     PROFILE_R12: PROFILE_R12_DEF,
     PROFILE_R13: PROFILE_R13_DEF,
+    PROFILE_R1N: PROFILE_R1N_DEF,
 })
 
 
@@ -813,6 +931,10 @@ def resolve_profile(envelope_doc: Mapping[str, Any] | None = None, *,
         raise ProfileError(
             "PROFILE_MISMATCH",
             "R1.3 根必须在 contract/envelope.json 显式声明 profile_id=rsi-r1.3")
+    if requested == PROFILE_R1N and envelope_doc is not None and declared is None:
+        raise ProfileError(
+            "PROFILE_MISMATCH",
+            "R1-N 根必须在 contract/envelope.json 显式声明 profile_id=rsi-r1-n")
     return _BY_ID[requested]
 
 
@@ -1226,3 +1348,32 @@ def render_public_contract_v2(doc: Mapping[str, Any]) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def assert_r1n_table_consistent() -> None:
+    """R1-N 数值自洽（T0 自检 + AC R1N-21 机判共用；不成立即 fail-fast）。"""
+    if tuple(LANE_POST_CAPS_R1N) != LANE_ORDER_R1N:
+        raise AssertionError(
+            f"R1-N lane 表顺序与 LANE_ORDER_R1N 不一致：{tuple(LANE_POST_CAPS_R1N)}")
+    if sorted(LANE_TASK_ID_R1N.values()) != list(range(len(LANE_ORDER_R1N))):
+        raise AssertionError(
+            f"R1-N task id 必须是 0..{len(LANE_ORDER_R1N) - 1}："
+            f"{dict(LANE_TASK_ID_R1N)}")
+    candidate = sum(LANE_POST_CAPS_R1N[lane] for lane in
+                    ("probe", "practice", "study_A", "study_B"))
+    review = sum(LANE_POST_CAPS_R1N[lane] for lane in
+                 ("review_calibration", "review_final"))
+    if candidate != RSI_R1N_CANDIDATE_POSTS:
+        raise AssertionError(f"候选 lane 帽 {candidate} != {RSI_R1N_CANDIDATE_POSTS}")
+    if review != RSI_R1N_REVIEW_POSTS:
+        raise AssertionError(f"审查 lane 帽 {review} != {RSI_R1N_REVIEW_POSTS}")
+    if sum(LANE_POST_CAPS_R1N.values()) != RSI_R1N_HARD_CAP:
+        raise AssertionError("R1-N lane 帽之和 != 硬帽 132")
+    if RSI_R1N_HARD_CAP != RSI_R1N_NORMAL_BUDGET:
+        raise AssertionError("R1-N 无 repair_reserve，正常预算必须等于硬帽 132")
+    if PROFILE_R1N_DEF.namespace != 2907:
+        raise AssertionError("R1-N 账本期号必须是 T0 扫描后登记的 2907")
+    if PROFILE_R1N_DEF.family_cap != RSI_R1N_HARD_CAP:
+        raise AssertionError("R1-N 族帽 != 本轮硬帽（旧余额不借用）")
+    if PROFILE_R1N not in PROFILES or PROFILE_R1N_DEF.profile_id != PROFILE_R1N:
+        raise AssertionError("R1-N profile 登记不完整")

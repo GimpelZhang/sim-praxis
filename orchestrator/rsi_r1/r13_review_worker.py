@@ -33,6 +33,8 @@ def main(argv=None) -> int:
     ap.add_argument("--batch-id", required=True)
     ap.add_argument("--thread-id", required=True)
     ap.add_argument("--timeout", type=int, default=180)
+    # 2026-11-17 R1-N：同一审查仪器，独立账本（2907）；缺省 2905 旧行为不变。
+    ap.add_argument("--ledger-phase", type=int, default=2905)
     args = ap.parse_args(argv)
     packet = json.loads(Path(args.packet).read_text(encoding="utf-8"))
     system, user = RN.build_request_text(packet=packet)
@@ -44,9 +46,14 @@ def main(argv=None) -> int:
                          sort_keys=True, separators=(",", ":"),
                          ensure_ascii=False).encode("utf-8")
     Path(args.request_out).write_bytes(request)
+    if int(args.ledger_phase) == 2907:
+        ledger = QuotaLedger.rsi_r1n()
+        pause_path = RP.rsi_r1n_gateway_state_path()
+    else:
+        ledger = QuotaLedger.rsi_r13()
+        pause_path = RP.rsi_r13_gateway_state_path()
     gateway = ModelGateway(
-        max_attempts=1, ledger=QuotaLedger.rsi_r13(),
-        pause_state_path=RP.rsi_r13_gateway_state_path())
+        max_attempts=1, ledger=ledger, pause_state_path=pause_path)
     capture: "dict[str, object]" = {}
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     messages = [{"role": "system", "content": system},

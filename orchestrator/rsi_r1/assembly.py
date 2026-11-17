@@ -560,7 +560,7 @@ class CampaignDispatcher:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
         # 旧 profile/不传则维持 R1 行为，逐字节不变。
-        if profile is not None and profile.is_r13:
+        if profile is not None and profile.is_r13_family:
             # R1.3：正式 study 必须绑定 TaskSpecV13；probe/practice 是玩具
             # 协议演练（R1.2 语义），允许 task=None。
             if task is None and admission.lane not in ("probe", "practice"):
@@ -590,7 +590,7 @@ class CampaignDispatcher:
         self.resource_ledger = resource_ledger
         self.task = task
         # R1.3 任务绑定仅在正式 study 成立；probe/practice 走 R1.2 语义。
-        self.r13_bound = bool(profile is not None and profile.is_r13
+        self.r13_bound = bool(profile is not None and profile.is_r13_family
                               and task is not None)
         # RSI-G2（Plan §2.4）：交付策略是冻结运行配置，缺任一接线即拒绝。
         if delivery_policy not in RT.DELIVERY_POLICIES:
@@ -764,7 +764,7 @@ class CampaignDispatcher:
         # 「再修一次分析」里烧掉 39 呼直至 POSTS_EXHAUSTED、零主张提交。
         # 这里把状态机的唯一出口显式挡在入口：拒绝**非终止**（可自修），
         # 副作用 NONE（未写任何事件），但那一呼照常计账。
-        if (self.profile is not None and self.profile.is_r13
+        if (self.profile is not None and self.profile.is_r13_family
                 and self.study in S.STUDIES):
             # G2（Plan §2.4）：RESULTS_RELEASED 后的只读证据分页动作在**新注册表**
             # 里显式放行；旧 R13 仍只许 submit_claim（本分支不因 G2 放宽 legacy）。
@@ -964,7 +964,7 @@ class CampaignDispatcher:
 
     # -- 4) analyze ------------------------------------------------------
     def _do_analyze(self, action: L.Action) -> "dict[str, Any]":
-        if self._r12() or (self.profile is not None and self.profile.is_r13):
+        if self._r12() or (self.profile is not None and self.profile.is_r13_family):
             return self._r12_analyze(action)
         self._binding(action)
         source_sha = _require_sha256(action.doc["source_sha256"],
@@ -1330,7 +1330,7 @@ class CampaignDispatcher:
                 design_sha256=design_sha,
                 analysis_sha256=analysis_sha,
                 r12=bool(self._r12() or (self.profile is not None
-                                          and self.profile.is_r13)),
+                                          and self.profile.is_r13_family)),
                 profile=self.profile)
         except Exception:
             # D-13a：state 侧拒绝（重复冻结/终态/凭据不符）时回滚预留，
@@ -1342,7 +1342,7 @@ class CampaignDispatcher:
             raise
         if seed_is_new:
             _write_private(seed_path, (seed + "\n").encode("utf-8"))
-        if (self.profile is not None and self.profile.is_r13
+        if (self.profile is not None and self.profile.is_r13_family
                 and self.r13_confirm_intent is not None):
             self.ctx.write_json(
                 f"design_audits/intent_confirm_{plan.sha256[:12]}.json",
@@ -1419,7 +1419,7 @@ class CampaignDispatcher:
         self.last_batch = {"phase": "confirm", "n_runs": len(run_ids),
                            "blocked": False, "run_ids": run_ids[:64],
                            "manifest_sha256": _sha_doc(manifest_out)}
-        if self._r12() or (self.profile is not None and self.profile.is_r13
+        if self._r12() or (self.profile is not None and self.profile.is_r13_family
                            and not self.r13_bound):
             # R1.2 / R1.3 probe-practice 玩具链：自动在确认批完整视图上执行
             # 冻结分析并落凭据；不回灌维护侧参考值。
@@ -1467,7 +1467,7 @@ class CampaignDispatcher:
     def _do_submit_claim(self, action: L.Action) -> "dict[str, Any]":
         if self.r13_bound:
             return self._r13_submit(action)
-        if self._r12() or (self.profile is not None and self.profile.is_r13):
+        if self._r12() or (self.profile is not None and self.profile.is_r13_family):
             return self._r12_submit(action)
         response_id, _ = self._binding(action)
         claims = [dict(c) for c in action.doc["claims"]]
@@ -2241,6 +2241,7 @@ def build_campaign_parts(
         profile: "P.CampaignProfile | None" = None,
         resource_ledger: "RS.ResourceLedger | None" = None,
         task: "TS.TaskSpecV13 | None" = None,
+        precommit: "Callable[[Any, Any], list[str]] | None" = None,
 ) -> "tuple[CampaignAdmission, SlotBook, CampaignDispatcher, S.ResearchState]":
     """标准装配：状态 + 预算 + 准入 + 槽 + 分派（同 root 共享）。"""
     budget = C.budget_from_dict(ctx.read_json("contract/budget.json"))
@@ -2254,5 +2255,5 @@ def build_campaign_parts(
                                     image=image, backend_factory=backend_factory,
                                     profile=profile,
                                     resource_ledger=resource_ledger,
-                                    task=task)
+                                    task=task, precommit=precommit)
     return admission, slots, dispatcher, state

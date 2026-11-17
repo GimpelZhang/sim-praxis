@@ -49,6 +49,9 @@ from orchestrator.rsi_r1.profiles import (
     HISTORY_SOURCES,
     PROFILE_R12,
     PROFILE_R13,
+    PROFILE_R1N,
+    R1N_FAMILY_CAP,
+    R1N_FAMILY_HISTORY_POSTS,
     R13_FAMILY_CAP,
     R13_FAMILY_CLOSED_ROUND_POSTS,
     R13_FAMILY_HISTORY_POSTS,
@@ -113,6 +116,14 @@ FAMILY_SPEC_R13 = FamilySpec(
     family_cap=R13_FAMILY_CAP,
     history_posts=R13_FAMILY_HISTORY_POSTS,
 )
+#: R1-N 新族（2026-11-17）：历史 0、本轮帽 132、旧余额不借用（Plan §2.1）。
+FAMILY_SPEC_R1N = FamilySpec(
+    schema=FAMILY_SCHEMA_V13,
+    permit_schema=FAMILY_PERMIT_SCHEMA_V13,
+    profile_id=PROFILE_R1N,
+    family_cap=R1N_FAMILY_CAP,
+    history_posts=R1N_FAMILY_HISTORY_POSTS,
+)
 
 
 def family_spec_for(profile: CampaignProfile) -> FamilySpec:
@@ -120,8 +131,10 @@ def family_spec_for(profile: CampaignProfile) -> FamilySpec:
         return FAMILY_SPEC_R12
     if profile.profile_id == PROFILE_R13:
         return FAMILY_SPEC_R13
+    if profile.profile_id == PROFILE_R1N:
+        return FAMILY_SPEC_R1N
     raise FamilyError("PROFILE_NOT_ELIGIBLE",
-                      f"族账只服务 {PROFILE_R12}/{PROFILE_R13}，实为 "
+                      f"族账只服务 {PROFILE_R12}/{PROFILE_R13}/{PROFILE_R1N}，实为 "
                       f"{profile.profile_id}")
 
 
@@ -906,6 +919,17 @@ def import_history_v13(*, r12_family_doc: Path = R12_FAMILY_DOC_PATH,
 
 def _fresh_history(spec: FamilySpec, *,
                    now: "datetime | None" = None) -> "dict[str, Any]":
+    if spec.profile_id == PROFILE_R1N:
+        # R1-N 新族：历史为空，旧账不借用；结构与其他族一致以便幂等比较。
+        return {
+            "imported_at_utc": _utc_now(now),
+            "total_call_rows": 0,
+            "total_ok_rows": 0,
+            "total_fail_rows": 0,
+            "ledger_call_rows": 0,
+            "sources": [],
+            "note": "R1-N 新族（2026-11-17）：历史 0，旧族余额不借用。",
+        }
     if spec.profile_id == PROFILE_R13:
         return import_history_v13(now=now)
     return import_history(HISTORY_SOURCES, now=now)

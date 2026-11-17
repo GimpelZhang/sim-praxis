@@ -356,14 +356,16 @@ def check_calibration(case_results: Mapping[str, Mapping[str, str]]) -> "dict[st
                      else "REVIEW_INSTRUMENT_NOT_READY")}
 
 
-def public_contract() -> "dict[str, Any]":
+def public_contract(profile=None) -> "dict[str, Any]":
+    # 2026-11-17 R1-N：同一审查仪器按 profile 报告帽；缺省 R1.3 不变。
+    profile = profile or P.PROFILE_R13_DEF
     return {
         "schema": PACKET_SCHEMA,
         "request": {
             "messages": 2,
             "agentic": False,
             "tools": [],
-            "caps": RC.registered_caps(P.PROFILE_R13_DEF),
+            "caps": RC.registered_caps(profile),
         },
         "calibration": {
             "packets": 2, "cases_per_packet": 3, "channels": 2,

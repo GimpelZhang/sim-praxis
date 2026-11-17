@@ -38,7 +38,9 @@ def test_r13_profile_is_explicit_and_numbered():
     assert r13.family_history_posts == 554
     assert r13.data_root_name == "rsi_r13"
     assert r13.closure_groups_key == "r13"
-    assert P.PROFILES == ("rsi-r1-legacy", "rsi-r1.2", "rsi-r1.3")
+    # R1-N（2026-11-17）在尾部新增第四条；旧三条顺序/定义不变。
+    assert P.PROFILES == ("rsi-r1-legacy", "rsi-r1.2", "rsi-r1.3",
+                          "rsi-r1-n")
 
 
 def test_old_profiles_unchanged():

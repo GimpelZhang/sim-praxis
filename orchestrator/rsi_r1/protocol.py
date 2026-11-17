@@ -612,7 +612,7 @@ def _is_r12_profile(profile: Any) -> bool:
     """
     flag = getattr(profile, "is_r12", False)
     ok = bool(flag() if callable(flag) else flag)
-    flag = getattr(profile, "is_r13", False)
+    flag = getattr(profile, "is_r13_family", False)
     return ok or bool(flag() if callable(flag) else flag)
 
 
@@ -669,7 +669,7 @@ def render_study_brief(study: str, *, profile: "Any | None" = None,
     """正式研究 study 的 system 追加段（T7：真实研究，48 呼预算，不是演练）。"""
     if study not in S.STUDIES:
         raise ProtocolError("STUDY_UNKNOWN", repr(study))
-    flag = getattr(profile, "is_r13", False)
+    flag = getattr(profile, "is_r13_family", False)
     if (flag() if callable(flag) else flag) and task is not None:
         from orchestrator.rsi_r1 import protocol_r13
         return protocol_r13.render_study_brief_r13(study, task)

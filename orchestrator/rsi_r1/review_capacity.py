@@ -133,9 +133,9 @@ def assert_review_output_bytes(text: str) -> int:
 
 def registered_caps(profile: P.CampaignProfile) -> "dict[str, Any]":
     """从 profile 读 review 专用帽（单一真值；不允许消费者另写字面量）。"""
-    if not profile.is_r13:
+    if not profile.is_r13_family:
         raise ReviewCapacityError("PROFILE_NOT_ELIGIBLE",
-                                  f"review 容量只服务 R1.3，实为 {profile.profile_id}")
+                                  f"review 容量只服务 R1.3/R1-N，实为 {profile.profile_id}")
     extra = profile.extra
     return {
         "schema": CAPACITY_SCHEMA,

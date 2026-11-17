@@ -1618,7 +1618,7 @@ def validate_plan(plan: ResearchPlan, *,
     # 与 audit_design 替代该门（单因素可归因性由 2×2 全因子结构与权重模式
     # 机判保证）；旧 profile 逐字节不变。
     if plan.study_id == "B" and not (profile is not None
-                                     and getattr(profile, "is_r13", False)):
+                                     and getattr(profile, "is_r13_family", False)):
         found = _check_tc_dt_separable(plan.conditions)
         if found is None:
             raise ContractError(

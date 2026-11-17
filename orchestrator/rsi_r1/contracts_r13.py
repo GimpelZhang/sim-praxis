@@ -66,6 +66,19 @@ def _sha(doc: Any) -> str:
     ).encode("utf-8")).hexdigest()
 
 
+def _profile_definition(profile_id: str) -> "P.CampaignProfile":
+    """R1.3 合同面同时服务 R1-N（同一仪器、不同 profile/帽/族）。
+
+    2026-11-17 R1-N：两个 profile 的 lane 表值相同但对象独立；合同验证按
+    ``profile_id`` 取对应定义，旧 R1.3 行为逐字节不变。
+    """
+    if profile_id == P.PROFILE_R13:
+        return P.PROFILE_R13_DEF
+    if profile_id == P.PROFILE_R1N:
+        return P.PROFILE_R1N_DEF
+    raise Contract13Error("PROFILE_MISMATCH", str(profile_id))
+
+
 @dataclass(frozen=True)
 class BudgetV13:
     schema: str
@@ -80,12 +93,12 @@ class BudgetV13:
     def __post_init__(self) -> None:
         if self.schema != P.BUDGET_SCHEMA_V13:
             raise Contract13Error("SCHEMA_MISMATCH", str(self.schema))
-        if self.profile_id != P.PROFILE_R13:
-            raise Contract13Error("PROFILE_MISMATCH", str(self.profile_id))
-        if dict(self.posts_by_lane) != dict(P.LANE_POST_CAPS_R13):
+        definition = _profile_definition(self.profile_id)
+        if dict(self.posts_by_lane) != dict(definition.lane_post_caps):
             raise Contract13Error("LANE_TABLE", "posts_by_lane 与 profile 不一致")
-        if sum(self.posts_by_lane.values()) != P.RSI_R13_HARD_CAP:
-            raise Contract13Error("BUDGET_TOTAL", "lane 合计 != 132")
+        if sum(self.posts_by_lane.values()) != definition.hard_cap:
+            raise Contract13Error(
+                "BUDGET_TOTAL", f"lane 合计 != {definition.hard_cap}")
         if int(self.max_steps) <= 0:
             raise Contract13Error("MAX_STEPS", str(self.max_steps))
         if not isinstance(self.max_usd, Decimal):
@@ -98,12 +111,13 @@ class BudgetV13:
     def slots(self) -> "list[dict[str, Any]]":
         """逐 POST 槽表（lane 表序；供 SlotBook/协议链复用同一真值）。"""
         out: "list[dict[str, Any]]" = []
+        definition = _profile_definition(self.profile_id)
         n = 0
-        for lane in P.LANE_ORDER_R13:
+        for lane in definition.lane_order:
             for i in range(int(self.posts_by_lane[lane])):
                 n += 1
                 out.append({"slot": n, "lane": lane,
-                            "lane_task_id": P.LANE_TASK_ID_R13[lane],
+                            "lane_task_id": definition.lane_task_id[lane],
                             "lane_index": i + 1, "reserve": False})
         return out
 
@@ -207,12 +221,14 @@ class ConsentV13:
             _hex64(doc[key], where=key)
         if doc["schema"] != P.CONSENT_SCHEMA_V13:
             raise Contract13Error("SCHEMA_MISMATCH", str(doc["schema"]))
-        if doc["profile_id"] != P.PROFILE_R13:
-            raise Contract13Error("PROFILE_MISMATCH", str(doc["profile_id"]))
-        if int(doc["max_posts"]) != P.RSI_R13_HARD_CAP:
-            raise Contract13Error("MAX_POSTS", "consent.max_posts 必须为 132")
-        if int(doc["family_cap"]) != P.R13_FAMILY_CAP:
-            raise Contract13Error("FAMILY_CAP", f"consent.family_cap 必须为 {P.R13_FAMILY_CAP}")
+        definition = _profile_definition(str(doc["profile_id"]))
+        if int(doc["max_posts"]) != definition.hard_cap:
+            raise Contract13Error(
+                "MAX_POSTS", f"consent.max_posts 必须为 {definition.hard_cap}")
+        if int(doc["family_cap"]) != definition.family_cap:
+            raise Contract13Error(
+                "FAMILY_CAP",
+                f"consent.family_cap 必须为 {definition.family_cap}")
         return cls(
             decision=str(doc["decision"]),
             paid_authorized=bool(doc["paid_authorized"]),
@@ -237,9 +253,12 @@ def assert_paid_authorized_v13(consent: Any) -> None:
         raise Contract13Error("CONSENT_STALE", "R1.3 只接受 ConsentV13")
     if consent.decision != COST_AUTHORIZED or not consent.paid_authorized:
         raise Contract13Error("COST_GATE_BLOCKED", "费用门未授权")
+    definition = _profile_definition(consent.profile_id)
+    reviews = (int(definition.lane_post_caps["review_calibration"])
+               + int(definition.lane_post_caps["review_final"]))
     if int(consent.review_calibration_posts) + int(
-            consent.review_final_posts) != P.RSI_R13_REVIEW_POSTS:
-        raise Contract13Error("REVIEW_POSTS", "审查 POST 合计必须为 8")
+            consent.review_final_posts) != reviews:
+        raise Contract13Error("REVIEW_POSTS", f"审查 POST 合计必须为 {reviews}")
 
 
 def validate_envelope_v13(doc: Any, *, envelope_id: "str | None" = None
@@ -251,8 +270,7 @@ def validate_envelope_v13(doc: Any, *, envelope_id: "str | None" = None
                               f"未知/缺键 {sorted(set(doc) ^ ENVELOPE_KEYS)}")
     if doc["schema"] != P.ENVELOPE_SCHEMA_V13:
         raise Contract13Error("SCHEMA_MISMATCH", str(doc["schema"]))
-    if doc["profile_id"] != P.PROFILE_R13:
-        raise Contract13Error("PROFILE_MISMATCH", str(doc["profile_id"]))
+    _profile_definition(str(doc["profile_id"]))
     if envelope_id is not None and doc["envelope_id"] != envelope_id:
         raise Contract13Error("ENVELOPE_ID", "envelope_id 不一致")
     for key in ("budget_sha256", "plan_sha256", "taskset_sha256",

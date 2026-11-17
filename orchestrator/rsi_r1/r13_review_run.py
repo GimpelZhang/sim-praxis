@@ -88,9 +88,10 @@ def _clean_env() -> "dict[str, str]":
 
 
 def _approval(ctx: Any, *, batch_id: str, lane: str, task: int,
-              approved: int) -> None:
+              approved: int, namespace: Any = None) -> None:
     """review lane 批准件（PT.ensure_approval 只认候选 lane）。"""
-    path = QL.RSI_R13_NAMESPACE.approvals_dir_fn() / f"{batch_id}.json"
+    namespace = namespace or QL.RSI_R13_NAMESPACE
+    path = namespace.approvals_dir_fn() / f"{batch_id}.json"
     want = {"batch_id": batch_id, "lane": lane, "task": int(task),
             "stage": "coding_debug", "approved": int(approved),
             "note": "R1.3 review lane（校准/正式）"}
@@ -103,7 +104,7 @@ def _approval(ctx: Any, *, batch_id: str, lane: str, task: int,
     QL.write_approval(batch_id=batch_id, task=int(task),
                       stage="coding_debug", approved=int(approved),
                       beyond_normal=False, note=want["note"],
-                      namespace=QL.RSI_R13_NAMESPACE)
+                      namespace=namespace)
 
 
 def seal_packet(packet: Mapping[str, Any], slot: RN.ReviewSlot
@@ -166,12 +167,15 @@ def _load_spawned(work: Path, slot: RN.ReviewSlot) -> "dict[str, Any]":
 
 
 def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
-           batch_id: str, task: int, out_dir: Path) -> "dict[str, Any]":
+           batch_id: str, task: int, out_dir: Path,
+           namespace: Any = None) -> "dict[str, Any]":
     for existing in sorted(out_dir.glob(f"review-{slot.review_id}-*")):
         if (existing / "call.json").is_file() and \
                 (existing / "packet.json").is_file():
             return _load_spawned(existing, slot)
-    _approval(ctx, batch_id=batch_id, lane=lane, task=task, approved=4)
+    namespace = namespace or QL.RSI_R13_NAMESPACE
+    _approval(ctx, batch_id=batch_id, lane=lane, task=task, approved=4,
+              namespace=namespace)
     work = out_dir / f"review-{slot.review_id}-{uuid.uuid4().hex[:8]}"
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     packet_doc, packet_bytes, packet_sha = seal_packet(packet, slot)
@@ -188,6 +192,7 @@ def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
             "--user-out", str(work / "user.txt"),
             "--request-out", str(work / "request.bin"),
             "--task", str(task), "--batch-id", batch_id,
+            "--ledger-phase", str(int(namespace.phase)),
             "--thread-id", f"rsi-r13-{lane}"]
     proc = subprocess.run(argv, cwd=str(Path(__file__).resolve().parents[2]),
                           env=_clean_env(), capture_output=True, text=True,
@@ -443,7 +448,8 @@ def _parse_calibration_reply(call_text: str, packet_sha: str,
     return out
 
 
-def run_calibration(ctx: Any, out_dir: Path, *, envelope: str) -> "dict[str, Any]":
+def run_calibration(ctx: Any, out_dir: Path, *, envelope: str,
+                    namespace: Any = None) -> "dict[str, Any]":
     permit = check_permit(ctx)
     groups = (["valid_positive", "pseudo_replication", "overclaim_universal"],
               ["valid_uncertain", "fixed_pilot_scoped", "empty_limitations"])
@@ -457,7 +463,8 @@ def run_calibration(ctx: Any, out_dir: Path, *, envelope: str) -> "dict[str, Any
                                  f"sess-cal-{ch}")
             batch = f"R13-REV-CAL-{ch}-{pi + 1}"
             spawned = _spawn(ctx, packet=packet, slot=slot, lane=LANE_CAL,
-                             batch_id=batch, task=TASK_CAL, out_dir=out_dir)
+                             batch_id=batch, task=TASK_CAL, out_dir=out_dir,
+                             namespace=namespace)
             posts += 1
             results.update(_parse_calibration_reply(
                 str(spawned["call"]["text"]), spawned["packet_sha256"], ids,
@@ -725,7 +732,7 @@ def _parse_review_doc(text: Any) -> "dict[str, Any]":
 
 
 def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
-               out_dir: Path) -> "dict[str, Any]":
+               out_dir: Path, *, namespace: Any = None) -> "dict[str, Any]":
     packet, report_doc, values = build_formal_packet(ctx, study, task)
     packet_bytes = RN.packet_bytes(packet)
     evidence = _packet_evidence(packet_bytes)
@@ -736,7 +743,8 @@ def run_formal(ctx: Any, study: str, task: TS.TaskSpecV13,
                              f"sess-final-{study}-{ch}")
         batch = f"R13-REV-{study}-{ch}"
         spawned = _spawn(ctx, packet=packet, slot=slot, lane=LANE_FINAL,
-                         batch_id=batch, task=TASK_FINAL, out_dir=out_dir)
+                         batch_id=batch, task=TASK_FINAL, out_dir=out_dir,
+                         namespace=namespace)
         doc = _parse_review_doc(spawned["call"]["text"])
         reviews.append(doc)
         receipts.append(spawned["receipt"])

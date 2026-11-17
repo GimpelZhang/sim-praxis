@@ -45,6 +45,10 @@ OLD_B_TASK_ID = "r12-b-tc-dt-main"
 #: 新 R1.3 留出任务 id（机制沿 A/B，但研究问题与干预均已改变）。
 NEW_A_TASK_ID = "r13-a-friction-speed-interaction"
 NEW_B_TASK_ID = "r13-b-tc-inertia-interaction"
+#: RSI-R1-N（2026-11-17）：两个**新机制问题**的留出任务 id（Plan §1.1）。
+#: 与全部旧签名不同：A_N {mass_kg, sliding_friction}、B_N {kp, tc_s}。
+R1N_A_TASK_ID = "r1n-a-friction-mass-interaction"
+R1N_B_TASK_ID = "r1n-b-kp-tc-interaction"
 
 
 class TaskSpecError(ValueError):
@@ -621,3 +625,212 @@ def taskset_sha256(doc: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(
         doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# RSI-R1-N（2026-11-17）：两个新机制问题的留出任务（Plan §1.1）
+# ---------------------------------------------------------------------------
+
+def build_r1n_a(*, commitment: "str | None" = None,
+                resource_sha: "str | None" = None) -> TaskSpecV13:
+    """A_N：μ×mass 交互 DiD + sham 阴性对照（有效阴性承担者）。
+
+    - 干预：``sliding_friction∈{0.2,0.4}`` × ``mass_kg∈{0.2,1.0}`` 全因子；
+    - 主对比 ``friction_x_mass``（DiD，``displacement_x_m``，δ=0.001）：
+      DiD = [μ=.4−μ=.2 在 m=1.0 的效应] − [同效应在 m=0.2]；
+      理想 Coulomb 下位移 v0²/(2μg) 与质量无关，交互应 ≈0；**任何方向都是
+      合法结果**，不得把已知恒等式的复现包装成新发现；
+    - 阴性控制：sham = cell(μ=0.4, mass=1.0) 的克隆，仅 ``torsional_friction_m``
+      0.01→0.02，pairwise 等效界 ±0.001 m（``displacement_x_m_negative_equivalence``）；
+    - nuisance：``v0_mps`` 由 host 在 [0.1,0.6] 采样（块内同值）。
+    """
+    scene_id = S.SCENE_A
+    base = {"v0_mps": "0.4", "torsional_friction_m": "0.01"}
+    conditions = (
+        _condition("hi_mu_hi_mass", scene_id,
+                   {**base, "mass_kg": "1.0", "sliding_friction": "0.4"}),
+        _condition("hi_mu_lo_mass", scene_id,
+                   {**base, "mass_kg": "0.2", "sliding_friction": "0.4"}),
+        _condition("lo_mu_hi_mass", scene_id,
+                   {**base, "mass_kg": "1.0", "sliding_friction": "0.2"}),
+        _condition("lo_mu_lo_mass", scene_id,
+                   {**base, "mass_kg": "0.2", "sliding_friction": "0.2"}),
+        _condition("sham", scene_id,
+                   {"v0_mps": "0.4", "torsional_friction_m": "0.02",
+                    "mass_kg": "1.0", "sliding_friction": "0.4"}),
+    )
+    primary = X.ContrastV13(
+        id="friction_x_mass",
+        kind=X.KIND_DID,
+        metric="displacement_x_m",
+        proposition="decrease_gt",
+        delta=R.metric_delta("displacement_x_m"),
+        terms=X.did_terms(treatment_high="hi_mu_hi_mass",
+                          treatment_low="lo_mu_hi_mass",
+                          control_high="hi_mu_lo_mass",
+                          control_low="lo_mu_lo_mass"),
+    )
+    nc = X.ContrastV13(
+        id="negative_torsional",
+        kind=X.KIND_PAIRWISE,
+        metric="displacement_x_m_negative_equivalence",
+        proposition="equivalent",
+        delta=R.metric_delta("displacement_x_m_negative_equivalence"),
+        terms=(("hi_mu_hi_mass", Decimal("1")), ("sham", Decimal("-1"))),
+    )
+    spec = TaskSpecV13(
+        task_id=R1N_A_TASK_ID,
+        mechanism_id=scene_id,
+        split=SPLIT_HOLDOUT,
+        scene_version=S.scene_doc(scene_id).version,
+        public_question=(
+            "水平面单刚体滑动中，滑动摩擦（0.4→0.2）对 4 s 净位移的效应是否随"
+            "质量（1.0→0.2 kg）改变？主估计量 = 两质量水平下该摩擦效应之差。"
+            "理想 Coulomb 下位移与质量无关（交互≈0）；本任务的登记方向只表示"
+            "接触模型偏离的预期符号，区间包含 0 等任何结果都是合法结局。"),
+        allowed_design_space=_allowed_space(scene_id),
+        estimand={
+            "metric_id": "displacement_x_m",
+            "contrast_ids": ["friction_x_mass", "negative_torsional"],
+            "target_population": "32 个宿主分配的确认 block（初速度 nuisance）",
+            "aggregation": "paired_block_linear_contrast",
+            "weighting": "equal_block_weight",
+        },
+        nuisance_schema={
+            "v0_mps": {"mode": "varying", "support": ["0.1", "0.6"],
+                       "assignment_owner": "host",
+                       "note": "块内同初速；初速是位移量级的最强工况变量"},
+        },
+        negative_control_spec={
+            "contrast": nc.to_dict(),
+            "expectation": "90% 区间严格落在 ±0.001 m 内（等效）",
+            "note": ("sham 是 cell(μ=0.4, mass_kg=1.0) 的克隆，只改 "
+                     "torsional_friction_m；condim 恒 3"),
+        },
+        private_instance_commitment=commitment or ("0" * 64),
+        metric_method_sha=_metric_method_sha(),
+        resource_spec_sha=resource_sha or ("0" * 64),
+        conditions=conditions,
+        primary=primary,
+        fixed={**_fixed_of(scene_id),
+               "confirm_blocks": str(P.MAX_CONFIRM_BLOCKS),
+               "host_nuisance": "v0_mps"},
+    )
+    return spec.validate()
+
+
+def build_r1n_b(*, commitment: "str | None" = None,
+                resource_sha: "str | None" = None) -> TaskSpecV13:
+    """B_N：kp×tc 交互 DiD（开放问题，无解析答案）。
+
+    - 干预：``kp∈{1,10}`` × ``tc_s∈{0.008,0.032}`` 全因子；PD、kd=0.1、
+      dt=0.001、inertia_ratio=1.0、幅值 0.2 固定；
+    - 主对比 ``kp_x_tc``（DiD，``normalized_tracking_rmse``，δ=0.01）：
+      DiD = [kp 效应在 tc=0.032] − [同效应在 tc=0.008]；
+    - nuisance：``target_freq_hz`` 由 host 在 [0.2,2.0] 采样（块内同值）；
+    - 不虚设阴性控制（B 机制无 NC 注册）。
+    """
+    scene_id = S.SCENE_B
+    base = {"controller": "PD", "dt_s": "0.001", "kd": "0.1",
+            "target_amplitude_rad": "0.2", "target_freq_hz": "1.0",
+            "inertia_ratio": "1.0"}
+    conditions = (
+        _condition("hi_kp_hi_tc", scene_id,
+                   {**base, "kp": "10", "tc_s": "0.032"}),
+        _condition("hi_kp_lo_tc", scene_id,
+                   {**base, "kp": "10", "tc_s": "0.008"}),
+        _condition("lo_kp_hi_tc", scene_id,
+                   {**base, "kp": "1", "tc_s": "0.032"}),
+        _condition("lo_kp_lo_tc", scene_id,
+                   {**base, "kp": "1", "tc_s": "0.008"}),
+    )
+    primary = X.ContrastV13(
+        id="kp_x_tc",
+        kind=X.KIND_DID,
+        metric="normalized_tracking_rmse",
+        proposition="increase_gt",
+        delta=R.metric_delta("normalized_tracking_rmse"),
+        terms=X.did_terms(treatment_high="hi_kp_hi_tc",
+                          treatment_low="lo_kp_hi_tc",
+                          control_high="hi_kp_lo_tc",
+                          control_low="lo_kp_lo_tc"),
+    )
+    spec = TaskSpecV13(
+        task_id=R1N_B_TASK_ID,
+        mechanism_id=scene_id,
+        split=SPLIT_HOLDOUT,
+        scene_version=S.scene_doc(scene_id).version,
+        public_question=(
+            "单关节 PD 跟踪中，比例增益 kp（1→10）对归一化跟踪 RMSE 的效应是否随"
+            "控制采样周期 Tc（0.008→0.032 s）改变？主估计量 = 两采样周期下 kp"
+            "效应之差。增益与采样耦合的方向与大小没有解析答案，任何方向都合法。"),
+        allowed_design_space=_allowed_space(scene_id),
+        estimand={
+            "metric_id": "normalized_tracking_rmse",
+            "contrast_ids": ["kp_x_tc"],
+            "target_population": "32 个宿主分配的确认 block（目标频率 nuisance）",
+            "aggregation": "paired_block_linear_contrast",
+            "weighting": "equal_block_weight",
+        },
+        nuisance_schema={
+            "target_freq_hz": {"mode": "varying", "support": ["0.2", "2.0"],
+                               "assignment_owner": "host",
+                               "note": "块内同频；频率是跟踪难度的强工况变量"},
+        },
+        negative_control_spec=None,
+        private_instance_commitment=commitment or ("0" * 64),
+        metric_method_sha=_metric_method_sha(),
+        resource_spec_sha=resource_sha or ("0" * 64),
+        conditions=conditions,
+        primary=primary,
+        fixed={**_fixed_of(scene_id),
+               "confirm_blocks": str(P.MAX_CONFIRM_BLOCKS),
+               "host_nuisance": "target_freq_hz"},
+    )
+    return spec.validate()
+
+
+def assert_r1n_not_near_duplicate() -> "list[dict[str, Any]]":
+    """R1-N 两题对全部旧任务的近重复机判证据（Plan §1.1 / AC R1N-02）。"""
+    new = {"A": build_r1n_a(), "B": build_r1n_b()}
+    old = (("A", build_old_a()), ("A", build_new_a()),
+           ("B", build_old_b()), ("B", build_new_b()))
+    rows: "list[dict[str, Any]]" = []
+    for study, spec in old:
+        target = new[study]
+        assert_not_near_duplicate(spec, target)
+        rows.append({"old": spec.task_id, "new": target.task_id,
+                     "old_signature": list(spec.intervention_signature()),
+                     "new_signature": list(target.intervention_signature()),
+                     "old_estimand": [spec.primary.kind, spec.primary.metric],
+                     "new_estimand": [target.primary.kind, target.primary.metric],
+                     "ok": True})
+    return rows
+
+
+def build_taskset_r1n(*, a_commitment: str, b_commitment: str,
+                      a_resource_sha: str, b_resource_sha: str,
+                      difference_table_sha: str) -> "dict[str, Any]":
+    """R1-N 任务集清单：两留出（A_N/B_N）+ 四开发（旧 A/B 两代）。"""
+    old_a, old_b = build_old_a(), build_old_b()
+    prev_a, prev_b = build_new_a(), build_new_b()
+    new_a = build_r1n_a(commitment=a_commitment, resource_sha=a_resource_sha)
+    new_b = build_r1n_b(commitment=b_commitment, resource_sha=b_resource_sha)
+    checks = assert_r1n_not_near_duplicate()
+    if new_a.mechanism_id == new_b.mechanism_id:
+        raise TaskSpecError("MECHANISM_MISMATCH", "两留出任务必须是不同机制")
+    return {
+        "schema": P.TASKSET_MANIFEST_SCHEMA_V13,
+        "schema_version": 1,
+        "profile_id": P.PROFILE_R1N,
+        "split_policy": ("R1-N 两题在首个 POST 前封存为 holdout，只跑一次；"
+                         "旧 A/B（r12/r13 两代）与 R1-RV 材料一律 development，"
+                         "不得向新候选提供其数值/分层/结论。"),
+        "difference_table_sha256": difference_table_sha,
+        "near_duplicate_checks": checks,
+        "tasks": [old_a.to_dict(), old_b.to_dict(), prev_a.to_dict(),
+                  prev_b.to_dict(), new_a.to_dict(), new_b.to_dict()],
+        "holdout_task_ids": [new_a.task_id, new_b.task_id],
+        "development_task_ids": [old_a.task_id, old_b.task_id,
+                                 prev_a.task_id, prev_b.task_id],
+    }

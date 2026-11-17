@@ -17,12 +17,15 @@ from orchestrator.rsi_r1 import profiles as P
 
 
 def test_profile_ids_are_frozen_triple():
-    # R1.3（2026-11-15）把已登记 profile 从两条扩到三条：旧两条的 id/定义
-    # 逐字节不变（下方各测试仍逐项断言），新增 rsi-r1.3 显式登记。
-    assert P.PROFILES == ("rsi-r1-legacy", "rsi-r1.2", "rsi-r1.3")
+    # R1.3（2026-11-15）把已登记 profile 从两条扩到三条；R1-N（2026-11-17）
+    # 再扩到四条：旧三条的 id/定义逐字节不变（下方各测试仍逐项断言），
+    # 新增 rsi-r1-n 显式登记（Plan §2.1）。
+    assert P.PROFILES == ("rsi-r1-legacy", "rsi-r1.2", "rsi-r1.3",
+                          "rsi-r1-n")
     assert P.profile_by_id("rsi-r1-legacy") is P.PROFILE_LEGACY_DEF
     assert P.profile_by_id("rsi-r1.2") is P.PROFILE_R12_DEF
     assert P.profile_by_id("rsi-r1.3") is P.PROFILE_R13_DEF
+    assert P.profile_by_id("rsi-r1-n") is P.PROFILE_R1N_DEF
 
 
 def test_legacy_profile_matches_lanes_single_source():

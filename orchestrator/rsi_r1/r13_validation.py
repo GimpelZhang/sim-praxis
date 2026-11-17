@@ -40,8 +40,10 @@ def _act(name: str, doc: Mapping[str, Any]) -> L.Action:
 
 
 class _Driver:
-    def __init__(self, ctx: Any, study: str, task: TS.TaskSpecV13) -> None:
+    def __init__(self, ctx: Any, study: str, task: TS.TaskSpecV13,
+                 profile: Any = None) -> None:
         self.ctx = ctx
+        self.profile = profile
         self.study = study
         self.task = task
         self.n = 0
@@ -62,7 +64,8 @@ class _Driver:
         self.dispatcher = A.CampaignDispatcher(
             ctx=ctx, state=self.state, admission=self.admission, budget=budget,
             study=study, runner=SB.DockerRunner(), image=BASE_IMAGE,
-            backend_factory=factory, profile=P.PROFILE_R13_DEF, task=task,
+            backend_factory=factory,
+            profile=(self.profile or P.PROFILE_R13_DEF), task=task,
             batch_workers=8)
 
     def dispatch(self, action: L.Action) -> Mapping[str, Any]:
@@ -83,9 +86,10 @@ def _advance_to_practiced(state: Any) -> None:
 
 
 def run_study_chain(ctx: Any, state: Any, *, task: TS.TaskSpecV13,
-                    out: Path) -> "dict[str, Any]":
+                    out: Path, profile: Any = None) -> "dict[str, Any]":
     t0 = time.time()
-    driver = _Driver(ctx, task.mechanism_id.split("_")[0], task)
+    driver = _Driver(ctx, task.mechanism_id.split("_")[0], task,
+                     profile=profile)
     checks: "list[dict[str, Any]]" = []
 
     def check(cid: str, ok: bool, detail: Any = "") -> None:
@@ -342,7 +346,8 @@ def _formal_packet_selftest(ctx: Any, task: Any) -> "dict[str, Any]":
 
 
 def run_production_validation(ctx: Any, *, taskset_dir: Path,
-                              out: Path) -> "dict[str, Any]":
+                              out: Path,
+                              profile: Any = None) -> "dict[str, Any]":
     """CLI 入口：初始化后的根上跑两任务参考链，写 T5 汇总件。"""
     state = S.ResearchState(ctx)
     _advance_to_practiced(state)
@@ -353,7 +358,8 @@ def run_production_validation(ctx: Any, *, taskset_dir: Path,
         (taskset / "task_b.json").read_text(encoding="utf-8")))
     from orchestrator.rsi_r1 import r13_review_run as RRUN
     adapter = RRUN.review_adapter_selftest()
-    results = [run_study_chain(ctx, state, task=task, out=out)
+    results = [run_study_chain(ctx, state, task=task, out=out,
+                               profile=profile)
                for task in (task_a, task_b)]
     # 轮 O（R13-D9）：正式审查包的**构造面**必须在 T5 就跑到——轮 N 的
     # ``ctx.subdir("reports")`` 宿主异常直到第一个付费审查才暴露（review A 崩，

@@ -141,6 +141,13 @@ from orchestrator.common.runtime_paths import (
     rsi_rv_gateway_state_path,
     rsi_rv_ledger_path,
     rsi_rv_quota_dir,
+    assert_rsi_r1n_roots_isolated,  # RSI-R1-N：全旧族根（含 RV）+ 诊断族互异互斥
+    rsi_r1n_approvals_dir,
+    rsi_r1n_counters_path,
+    rsi_r1n_gateway_state_dir,
+    rsi_r1n_gateway_state_path,
+    rsi_r1n_ledger_path,
+    rsi_r1n_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -740,6 +747,23 @@ RSI_RV_TASK_CAPS = _RV_TASK_CAPS
 RSI_RV_HARD_CAP = _RV_HARD_CAP
 RSI_RV_NORMAL_BUDGET = _RV_HARD_CAP
 
+# ---- RSI-R1-N：独立新账（2026-11-17；期号 2907；单轮 132 POST）----
+# T0 全仓扫描确认 2/25/26/27/281/2900/2901/2902/2903/2904/2905/2906 已占用、
+# 2907 无冲突后锁定。记账单位是 Plan §2.1 的六条 lane：
+#   probe 12 / practice 16 / study_A 48 / study_B 48 /
+#   review_calibration 4 / review_final 4 = 132。
+# lane 单一真值在 ``orchestrator/rsi_r1/profiles.py``，此处只转出。
+LEDGER_RSI_R1N = 2907
+from orchestrator.rsi_r1.profiles import (  # noqa: E402
+    RSI_R1N_HARD_CAP as _RSI_R1N_HARD_CAP,
+    RSI_R1N_NORMAL_BUDGET as _RSI_R1N_NORMAL_BUDGET,
+    RSI_R1N_TASK_CAPS as _RSI_R1N_TASK_CAPS,
+)
+
+RSI_R1N_TASK_CAPS = _RSI_R1N_TASK_CAPS
+RSI_R1N_HARD_CAP = _RSI_R1N_HARD_CAP
+RSI_R1N_NORMAL_BUDGET = _RSI_R1N_NORMAL_BUDGET
+
 # Task0：quota_pause v2 schema 签收冻结。代码只允许写这 12 个键；扩键/改名
 # 必须先取得用户对操作件（$PHASE2_ROOT/quota/quota_pause_schema_v2.signed.json，
 # 模板 scripts/milestone2/quota_pause_schema_v2.template.json）的书面签收并
@@ -824,21 +848,24 @@ class _LedgerNamespace:
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
-                              LEDGER_RSI_R13, LEDGER_RSI_RV)
+                              LEDGER_RSI_R13, LEDGER_RSI_RV,
+                              LEDGER_RSI_R1N)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
-                              LEDGER_RSI_R13, LEDGER_RSI_RV)
+                              LEDGER_RSI_R13, LEDGER_RSI_RV,
+                              LEDGER_RSI_R1N)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
         return self.phase in (LEDGER_PHASE25, LEDGER_PHASE26, LEDGER_PHASE27,
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
-                              LEDGER_RSI_R13, LEDGER_RSI_RV)
+                              LEDGER_RSI_R13, LEDGER_RSI_RV,
+                              LEDGER_RSI_R1N)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -1002,6 +1029,19 @@ RSI_RV_NAMESPACE = _LedgerNamespace(
     normal_budget=RSI_RV_NORMAL_BUDGET,
 )
 
+RSI_R1N_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_R1N,
+    quota_dir_fn=rsi_r1n_quota_dir,
+    ledger_path_fn=rsi_r1n_ledger_path,
+    counters_path_fn=rsi_r1n_counters_path,
+    approvals_dir_fn=rsi_r1n_approvals_dir,
+    pause_dir_fn=rsi_r1n_gateway_state_dir,
+    pause_path_fn=rsi_r1n_gateway_state_path,
+    task_caps=RSI_R1N_TASK_CAPS,
+    hard_cap=RSI_R1N_HARD_CAP,
+    normal_budget=RSI_R1N_NORMAL_BUDGET,
+)
+
 
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
@@ -1036,6 +1076,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_r13_roots_isolated()
     elif ns.phase == LEDGER_RSI_RV:
         assert_rsi_rv_roots_isolated()
+    elif ns.phase == LEDGER_RSI_R1N:
+        assert_rsi_r1n_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1323,6 +1365,11 @@ class QuotaLedger:
     def rsi_rv(cls) -> "QuotaLedger":
         """RSI-R1-RV 账（2906；campaign 由 SIMPRAXIS_RSI_RV_CAMPAIGN 选定）。"""
         return cls(RSI_RV_NAMESPACE)
+
+    @classmethod
+    def rsi_r1n(cls) -> "QuotaLedger":
+        """RSI-R1-N 账（2907；campaign 由 SIMPRAXIS_RSI_R1N_CAMPAIGN 选定）。"""
+        return cls(RSI_R1N_NAMESPACE)
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":

@@ -152,7 +152,7 @@ class DesignIntentV13:
 def parse_design_intent(doc: Any, *, profile: P.CampaignProfile,
                         task_spec: TS.TaskSpecV13) -> DesignIntentV13:
     """解析并绑定任务：估计对象必须与任务登记一致，nuisance 责任不得漂移。"""
-    if not profile.is_r13:
+    if not profile.is_r13_family:
         raise DesignError("PROFILE_NOT_ELIGIBLE", profile.profile_id)
     intent = DesignIntentV13.from_dict(doc)
     metric = task_spec.estimand["metric_id"]

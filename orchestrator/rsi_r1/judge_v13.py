@@ -101,6 +101,28 @@ def judge_study_v13(*, task: TS.TaskSpecV13, plan: Any, manifest: Any,
         problems.extend(numeric[:8])
         problems.append("INVALID_NUMERICS")
 
+    # R1-N（有效阴性）：宿主用同一 raw 独立重算阴性对照，记录在判据件里；
+    # 不参与 verdict（NC 是 r1 聚合条件，不是候选报告合格条件）。
+    negative = None
+    nc_spec = getattr(task, "negative_control_spec", None)
+    if nc_spec:
+        try:
+            from orchestrator.rsi_r1 import contrasts as _X
+            nc = _X.ContrastV13.from_dict(nc_spec["contrast"])
+            nc_val = nc.estimate(values)
+            negative = {"contrast_id": nc.id, "metric": nc.metric,
+                        "proposition": nc.proposition, "delta": str(nc.delta),
+                        "effect": nc_val.get("effect"),
+                        "lower": nc_val.get("lower"),
+                        "upper": nc_val.get("upper"),
+                        "n_blocks": nc_val.get("n_blocks"),
+                        "status": str(nc_val.get("claim")),
+                        "source": "host_recomputed_from_raw"}
+        except Exception as exc:  # noqa: BLE001 —— 记录失败原因，不冒充通过
+            negative = {"contrast_id": str((nc_spec.get("contrast") or {}).get("id")),
+                        "status": "UNVERIFIABLE",
+                        "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
     diagnostics_ok = False
     diag = output.get("diagnostics")
     if diag is None:
@@ -164,7 +186,9 @@ def judge_study_v13(*, task: TS.TaskSpecV13, plan: Any, manifest: Any,
                    else "INVALID_ANALYSIS")
     return _report(task, checks, problems, claim_status=claim_status,
                    verdict=verdict, diagnostics_ok=diagnostics_ok,
-                   report_ok=report_ok)
+                   report_ok=report_ok,
+                   extra={**({"negative_control": negative} if negative else {}),
+                          "primary_status": str(reference.get("claim"))})
 
 
 def _analysis_sha(plan: Any) -> str:
@@ -174,7 +198,8 @@ def _analysis_sha(plan: Any) -> str:
 def _report(task: TS.TaskSpecV13, checks: "list[dict[str, Any]]",
             problems: Sequence[str], *, claim_status: str,
             verdict: str = "JUDGE_REJECT", diagnostics_ok: bool = False,
-            report_ok: bool = False) -> "dict[str, Any]":
+            report_ok: bool = False,
+            extra: "Mapping[str, Any] | None" = None) -> "dict[str, Any]":
     by_id = {c["id"]: bool(c["ok"]) for c in checks}
     layers = {
         "schema_accepted": by_id.get("R13-RECEIPT", False),
@@ -185,7 +210,7 @@ def _report(task: TS.TaskSpecV13, checks: "list[dict[str, Any]]",
         "diagnostics_valid": diagnostics_ok,
         "report_valid": report_ok,
     }
-    return {
+    doc = {
         "schema": JUDGE_SCHEMA,
         "schema_version": 1,
         "study_id": task.mechanism_id.split("_")[0],
@@ -195,3 +220,8 @@ def _report(task: TS.TaskSpecV13, checks: "list[dict[str, Any]]",
         "checks": checks,
         "reason_codes": list(dict.fromkeys(problems)),
     }
+    if extra:
+        # 2026-11-17 R1-N：阴性对照由宿主从 raw 独立重算，写进判据件
+        # （不改 verdict/layers；旧轮判件不含此字段，逐字节不变）。
+        doc.update(dict(extra))
+    return doc
