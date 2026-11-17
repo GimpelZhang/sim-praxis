@@ -647,11 +647,18 @@ class Reply:
     attempts_http: int = 1
     is_actionable: bool = True
     reason: str = ""
+    #: 本轮**声明**的每槽 HTTP 尝试上限。旧轮恒 1；RSI-R1-N 第二轮（2026-11-17
+    #: 加固）为 3，由 transport 传入并在 retry 审计件逐行留痕——超过声明值仍判
+    #: HIDDEN_RETRY，声明值本身不是隐式重试的挡箭牌。
+    expected_attempts: int = 1
 
     def __post_init__(self) -> None:
-        if int(self.attempts_http) > 1:
-            raise LoopError("HIDDEN_RETRY",
-                            f"单次逻辑调用出现 {self.attempts_http} 次 HTTP 尝试")
+        limit = int(self.expected_attempts)
+        if int(self.attempts_http) > limit:
+            raise LoopError(
+                "HIDDEN_RETRY",
+                f"单次逻辑调用出现 {self.attempts_http} 次 HTTP 尝试"
+                f"（声明上限 {limit}）")
 
 
 class Admission(Protocol):
@@ -786,13 +793,15 @@ class LockedSender:
 
     def __init__(self, transport: Callable[[T.Request], Reply], *,
                  lock: LockDocument, admission: Admission, budget: Budget,
-                 envelope: Any, spend_contract: Any):
+                 envelope: Any, spend_contract: Any,
+                 max_http_attempts: int = 1):
         self._transport = transport
         self.lock = lock
         self.admission = admission
         self.budget = budget
         self.envelope = envelope
         self.spend_contract = spend_contract
+        self.max_http_attempts = int(max_http_attempts)
 
     def send_once(self, request: T.Request, reservation: Reservation) -> Reply:
         permit = reservation.permit
@@ -821,8 +830,11 @@ class LockedSender:
         reply = self._transport(request)
         if not isinstance(reply, Reply):
             raise LoopError("STATE_UNKNOWN", "transport 返回非 Reply", terminal=True)
-        if reply.attempts_http > 1:
-            raise LoopError("HIDDEN_RETRY", "出现隐性重试", terminal=True)
+        if reply.attempts_http > self.max_http_attempts:
+            raise LoopError(
+                "HIDDEN_RETRY",
+                f"出现隐性重试（{reply.attempts_http} > 声明上限 "
+                f"{self.max_http_attempts}）", terminal=True)
         return reply
 
 
@@ -837,8 +849,12 @@ def build_production_sender(*, lock_reader: Callable[[], Mapping[str, Any]],
     if sha_of is not None:
         check_lock_drift(lock, sha_of)
     transport = transport_factory()
+    # 每槽 HTTP 尝试上限取 transport 的**声明值**（旧 transport 无此属性 → 1）：
+    # 声明必须与本轮公开合同一致，Reply 已按同一声明值自检，这里再卡一次出口。
+    declared = int(getattr(transport, "expected_attempts", 1) or 1)
     return LockedSender(transport, lock=lock, admission=admission, budget=budget,
-                        envelope=envelope, spend_contract=spend_contract)
+                        envelope=envelope, spend_contract=spend_contract,
+                        max_http_attempts=declared)
 
 
 # ---------------------------------------------------------------------------

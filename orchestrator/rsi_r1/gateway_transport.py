@@ -148,7 +148,8 @@ class GatewayTransport:
             response_id=(f"r1-{self.lane}-{self._n:03d}-"
                          f"{request.sha256[:12]}"),
             usage=_usage_of(capture, tokens),
-            attempts_http=attempts)
+            attempts_http=attempts,
+            expected_attempts=int(self.expected_attempts))
         self.calls.append({"n": self._n, "request_sha256": request.sha256,
                            "response_id": reply.response_id,
                            "attempts_http": attempts,

@@ -157,3 +157,17 @@ def test_build_transport_passes_timeout_and_attempts(monkeypatch):
                            batch_id="b", env={"SIMPRAXIS_ALLOW_PAID": "1"},
                            timeout=300, expected_attempts=3)
     assert t.timeout == 300 and t.expected_attempts == 3
+
+
+def test_reply_attempts_bounded_by_declared_policy():
+    """Reply 只按**声明值**放宽；旧轮（无声明＝1）仍判 HIDDEN_RETRY。"""
+    from orchestrator.rsi_r1 import loop as L
+
+    ok = L.Reply(text="x", response_id="r", attempts_http=3,
+                 expected_attempts=3)
+    assert ok.attempts_http == 3
+    with pytest.raises(L.LoopError, match="HIDDEN_RETRY"):
+        L.Reply(text="x", response_id="r", attempts_http=2)
+    with pytest.raises(L.LoopError, match="HIDDEN_RETRY"):
+        L.Reply(text="x", response_id="r", attempts_http=4,
+                expected_attempts=3)
