@@ -255,3 +255,36 @@ def test_sender_lineage_filters_by_lane(tmp_path):
     assert all(r.get("lane") == "suffix_A" for r in lineage["intents"])
     assert all(r.get("lane") == "suffix_A" for r in lineage["results"])
     assert len(lineage["results"]) == 1
+
+
+def test_rv_parse_public_type_rules_for_read_action():
+    from orchestrator.rsi_r1 import loop as L
+    base = {"action": "read_result_artifact",
+            "artifact_id": "analysis/output.json",
+            "output_sha256": "a" * 64, "page_bytes": 4096}
+    for cursor, shape in ((None, "null"), ("0", "string"), ("", "empty string")):
+        doc = {**base, "cursor": cursor}
+        with pytest.raises(L.LoopError) as exc:
+            L.parse_action(json.dumps(doc), public_rules=True,
+                           allowed_actions=("read_result_artifact",
+                                            "submit_claim"))
+        assert exc.value.code == "CURSOR_INVALID"
+        assert "expected non-negative integer" in exc.value.detail
+        assert f"got {shape}" in exc.value.detail
+    doc = dict(base)  # missing cursor
+    with pytest.raises(L.LoopError) as exc:
+        L.parse_action(json.dumps(doc), public_rules=True,
+                       allowed_actions=("read_result_artifact", "submit_claim"))
+    assert exc.value.code == "MISSING_KEY"
+    assert "expected keys" in exc.value.detail
+    with pytest.raises(L.LoopError) as exc:
+        L.parse_action(json.dumps({"action": "analyze", "source_sha256": "a" * 64,
+                                   "run_ids": ["r"]}), public_rules=True,
+                       allowed_actions=("read_result_artifact", "submit_claim"))
+    assert exc.value.code == "ACTION_FORBIDDEN"
+    assert exc.value.terminal is True
+    assert "expected one of" in exc.value.detail
+    # 旧路径默认消息不变（legacy 不受影响）
+    with pytest.raises(L.LoopError) as exc:
+        L.parse_action(json.dumps({**base, "cursor": None}))
+    assert exc.value.detail == "None"

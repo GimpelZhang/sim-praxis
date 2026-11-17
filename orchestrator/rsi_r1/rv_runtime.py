@@ -977,11 +977,10 @@ def build_rv_parts(*, root: "str | Path", study: str, manifest: Mapping[str, Any
             result_context=dict(envelope))
 
     def _rv_parse(text: str) -> L.Action:
-        action = L.parse_action(text)
-        if action.name not in ("read_result_artifact", "submit_claim"):
-            # Plan §3.2：write/plan/analyze/freeze/run 一律越界终止（安全门）。
-            raise L.LoopError("ACTION_FORBIDDEN", action.name, terminal=True)
-        return action
+        # RV（v3 动作层反馈）：公开类型规则 + 动作白名单都在解析层给出。
+        return L.parse_action(
+            text, public_rules=True,
+            allowed_actions=("read_result_artifact", "submit_claim"))
 
     loop = L.ResearchLoop(
         sender=sender, parser=_rv_parse, dispatcher=dispatcher, store=store,

@@ -164,6 +164,7 @@ def test_non_rv_action_is_terminal(tmp_path):
         sender=ForbiddenConsumer(), lane="suffix_A",
         policy=RT.W.WorkerPolicy(), scripted=True)
     outcome = RT.run_turns(parts, max_turns=3)
+    # v3 动作层：白名单在解析层执行，越界动作是 ACTION_FORBIDDEN（终态）
     assert outcome["turns"][0]["code"] == "ACTION_FORBIDDEN"
     assert outcome["turns"][0]["terminal"] is True
     assert outcome["study_state"] == "RESULTS_RELEASED"

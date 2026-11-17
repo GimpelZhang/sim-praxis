@@ -230,7 +230,23 @@ def _validate_claims(raw: Any) -> "list[dict[str, Any]]":
     return out
 
 
-def parse_action(text: str) -> Action:
+def _shape(value: Any) -> str:
+    """动作错误的公开形状描述（只描述类型/形状，不给答案）。"""
+    if isinstance(value, str):
+        return "empty string" if not value.strip() else "string"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, Mapping):
+        return "object"
+    if value is None:
+        return "null"
+    return type(value).__name__
+
+
+def parse_action(text: str, *, public_rules: bool = False,
+                 allowed_actions: "Sequence[str] | None" = None) -> Action:
     """严格解析单个动作；任何偏差都以公开条款拒绝（可自修，除非越权）。"""
     if not isinstance(text, str) or not text.strip():
         raise LoopError("NOT_SINGLE_ACTION", "回复为空")
@@ -248,21 +264,36 @@ def parse_action(text: str) -> Action:
     except C.ContractError as exc:
         raise LoopError(exc.code, exc.detail or "NaN/Inf") from None
     name = doc.get("action")
+    if allowed_actions is not None and name not in allowed_actions:
+        # RV 动作白名单：越界动作是**终态**（Plan §3.2），但消息给公开允许集。
+        raise LoopError(
+            "ACTION_FORBIDDEN",
+            (f"action={name!r}; expected one of {list(allowed_actions)}"
+             if public_rules else f"action={name!r}"),
+            terminal=True)
     if not isinstance(name, str) or name not in ALL_ACTION_NAMES:
         raise LoopError("UNKNOWN_ACTION", f"action={name!r}")
     allowed = _KEYS[name] | _OPTIONAL_KEYS.get(name, frozenset())
     missing = sorted(_KEYS[name] - set(doc))
     if missing:
-        raise LoopError("MISSING_KEY", f"{name} 缺 {missing}")
+        raise LoopError(
+            "MISSING_KEY",
+            (f"{name} missing {missing}; expected keys "
+             f"{sorted(_KEYS[name])}" if public_rules
+             else f"{name} 缺 {missing}"))
     extra = sorted(set(doc) - allowed)
     if extra:
-        raise LoopError("UNKNOWN_KEY", f"{name} 多余字段 {extra}")
+        raise LoopError(
+            "UNKNOWN_KEY",
+            (f"{name} has extra keys {extra}; expected no extra keys"
+             if public_rules else f"{name} 多余字段 {extra}"))
 
-    _validate_action_fields(name, doc)
+    _validate_action_fields(name, doc, public_rules=public_rules)
     return Action(name=name, doc=doc)
 
 
-def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
+def _validate_action_fields(name: str, doc: Mapping[str, Any], *,
+                            public_rules: bool = False) -> None:
     if name == "write_artifact":
         kind = doc["kind"]
         if kind not in ("design", "analysis"):
@@ -325,15 +356,24 @@ def _validate_action_fields(name: str, doc: Mapping[str, Any]) -> None:
         artifact_id = _require_str(doc, "artifact_id", max_bytes=256)
         if artifact_id.startswith("/") or ".." in artifact_id.split("/") \
                 or not artifact_id.startswith("analysis/"):
-            raise LoopError("ARTIFACT_FORBIDDEN", artifact_id)
+            raise LoopError(
+                "ARTIFACT_FORBIDDEN",
+                (f"expected analysis/<artifact_id> (got {artifact_id!r})"
+                 if public_rules else artifact_id))
         _require_hex(doc, "output_sha256")
         cursor = doc["cursor"]
         if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
-            raise LoopError("CURSOR_INVALID", repr(cursor))
+            raise LoopError(
+                "CURSOR_INVALID",
+                (f"expected non-negative integer (got {_shape(cursor)})"
+                 if public_rules else repr(cursor)))
         page = doc["page_bytes"]
         if (not isinstance(page, int) or isinstance(page, bool)
                 or not 1 <= page <= 8 * 1024):
-            raise LoopError("PAGE_TOO_LARGE", repr(page))
+            raise LoopError(
+                "PAGE_TOO_LARGE",
+                (f"expected integer 1..8192 (got {_shape(page)})"
+                 if public_rules else repr(page)))
 
 
 # ---------------------------------------------------------------------------
