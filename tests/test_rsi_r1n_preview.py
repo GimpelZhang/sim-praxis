@@ -198,3 +198,108 @@ def test_face_root_separation_and_fail_closed(tmp_path, monkeypatch):
     root = RP.rsi_r1n_campaign_root().resolve(strict=False)
     for name, prot in RP.rsi_r1n_protected_write_roots().items():
         assert root != Path(prot).resolve(strict=False)
+
+
+def _sender_stack(tmp_path):
+    """真实 build_production_sender→CampaignAdmission→SlotBook→(mock)gateway。"""
+    import hashlib
+    from types import SimpleNamespace
+
+    repo = Path(__file__).resolve().parents[1]
+
+    def sha(path: str) -> str:
+        return hashlib.sha256((repo / path).read_bytes()).hexdigest()
+
+    from orchestrator.rsi_r1 import contracts_r13 as _C13
+    from orchestrator.rsi_r1 import lock as _LK
+    from orchestrator.rsi_r1 import runtime as _RT
+    from orchestrator.rsi_r1 import state as _S
+
+    (tmp_path / "contract").mkdir(parents=True, exist_ok=True)
+    ctx = _RT.CampaignContext(envelope_id="e", root=tmp_path,
+                              protected_roots=())
+    budget = _C13.BudgetV13(
+        schema=P.BUDGET_SCHEMA_V13, envelope_id="e",
+        profile_id=P.PROFILE_R1N, posts_by_lane=dict(P.LANE_POST_CAPS_R1N),
+        max_usd=Decimal("0"),
+        max_runs_by_lane={lane: 200 for lane in P.LANE_ORDER_R1N},
+        max_steps=10_000)
+    ctx.write_json("contract/budget.json", budget.to_dict())
+    ctx.write_json("contract/envelope.json",
+                   {"envelope_id": "e", "mode": "offline_validation"})
+    ctx.write_json("contract/lock.json", {
+        "schema": L.LOCK_SCHEMA, "schema_version": 1, "envelope_id": "e",
+        "budget_sha256": budget.sha256, "stage": "coding_debug",
+        "phase": "paid",
+        "dependencies": {"orchestrator/rsi_r1/loop.py":
+                         sha("orchestrator/rsi_r1/loop.py")}})
+    lock = L.load_lock(_LK.lock_reader(ctx))
+    state = _S.ResearchState(ctx)
+    for target in (_S.ROOT_AUTHORIZED, _S.ROOT_CALIBRATED, _S.ROOT_FROZEN):
+        if _S.ROOT_ORDER.index(target) > _S.ROOT_ORDER.index(state.root_state()):
+            state.advance_root(target, reason="preview")
+    spend = A.SpendContract(mode=A.MODE_OFFLINE_VALIDATION)
+    admission = A.CampaignAdmission(ctx=ctx, state=state, budget=budget,
+                                    lock_sha256=lock.sha256, spend=spend,
+                                    lane="probe")
+    slots = A.SlotBook(ctx, budget)
+    admission.attach_slots(slots)
+    envelope = SimpleNamespace(envelope_id="e")
+    calls: "list[object]" = []
+
+    def transport(request):
+        calls.append(request)
+        return L.Reply(text="ok", response_id="r1", attempts_http=1)
+
+    sender = L.build_production_sender(
+        lock_reader=_LK.lock_reader(ctx), transport_factory=lambda: transport,
+        admission=admission, budget=slots, envelope=envelope,
+        spend_contract=spend, sha_of=sha)
+    return ctx, sender, admission, slots, envelope, spend, lock, calls
+
+
+def test_face_real_sender_wiring(tmp_path):
+    ctx, sender, admission, slots, envelope, spend, lock, calls = _sender_stack(
+        tmp_path)
+    from types import SimpleNamespace
+    permit = admission.check_all(envelope=envelope, root_lock=lock,
+                                 phase="paid", spend_contract=spend)
+    reservation = slots.reserve_atomic(call_id=f"e:{'a' * 16}", permit=permit)
+    request = SimpleNamespace(sha256="a" * 64)
+    reply = sender.send_once(request, reservation)
+    assert reply.text == "ok" and len(calls) == 1
+    # call_id 与请求不匹配 → 终态拒绝，且不再触达 transport
+    with pytest.raises(L.LoopError) as exc:
+        sender.send_once(SimpleNamespace(sha256="b" * 64), reservation)
+    assert exc.value.code == "LOCK_MISMATCH" and len(calls) == 1
+    # LOCK 依赖漂移 → 装配期拒绝
+    import hashlib
+    from orchestrator.rsi_r1 import lock as _LK
+    with pytest.raises(L.LoopError) as exc:
+        L.build_production_sender(
+            lock_reader=_LK.lock_reader(ctx),
+            transport_factory=lambda: (lambda r: L.Reply("x", "r", 1)),
+            admission=admission, budget=slots, envelope=envelope,
+            spend_contract=spend,
+            sha_of=lambda p: "0" * 64)
+    assert exc.value.code == "LOCK_DRIFT"
+    # probe lane 12 槽：第 13 个申请拒绝（不借额）
+    for i in range(1, 12):
+        slots.reserve_atomic(call_id=f"e:{i:016x}", permit=permit)
+    with pytest.raises(L.LoopError) as exc:
+        slots.reserve_atomic(call_id=f"e:{99:016x}", permit=permit)
+    assert exc.value.code == "BUDGET_REFUSED"
+
+
+def test_face_review_echo_contract():
+    from orchestrator.rsi_r1 import r13_review_run as RRU
+    slot = RN.ReviewSlot("a-rev-1", "reviewer-1", "sess-1")
+    packet = {"study": "A", "review_id": slot.review_id,
+              "reviewer_id": slot.reviewer_id, "payload": {"k": "v"}}
+    doc, raw, sha = RRU.seal_packet(packet, slot)
+    assert doc["review_id"] == slot.review_id
+    assert doc["reviewer_id"] == slot.reviewer_id
+    assert doc["packet_sha256"] == sha and len(raw) > 0
+    caps = RN.public_contract(P.PROFILE_R1N_DEF)["request"]["caps"]
+    assert caps["input_tokens"] == P.REVIEW_INPUT_TOKENS_R1N
+    assert caps["packet_bytes"] == P.REVIEW_PACKET_BYTES_R1N
