@@ -383,6 +383,11 @@ def test_precommit_rejects_real_b_report_types_and_plan_contrast_id():
     assert any(p.startswith("methods_and_assignment_responsibility")
                for p in problems)
     assert any("primary_results[0].contrast_id" in p for p in problems)
+    # I15 修复：拒绝文本必须给出公开类型规则（expected/got），而不是裸字段名
+    q = next(p for p in problems if p.startswith("question_and_hypotheses"))
+    assert "expected non-empty string" in q and "got object" in q
+    c = next(p for p in problems if "primary_results[0].contrast_id" in p)
+    assert "expected 'tc_x_inertia'" in c
 
 
 def test_precommit_accepts_contract_valid_report(tmp_path):

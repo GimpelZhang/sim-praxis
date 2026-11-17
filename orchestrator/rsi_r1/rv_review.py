@@ -824,119 +824,176 @@ def _locator_ok(loc: Any) -> bool:
     return True
 
 
+def _got(value: Any) -> str:
+    """给拒绝文本用的**形状描述**（只描述类型/形状，不给正确值/答案）。"""
+    if isinstance(value, str):
+        return "empty string" if not value.strip() else "string"
+    if isinstance(value, list):
+        if not value:
+            return "empty list"
+        kinds = sorted({type(v).__name__ for v in value})
+        return f"list[{','.join(kinds)}]"
+    if isinstance(value, Mapping):
+        return "object"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    return type(value).__name__
+
+
+def _rule(where: str, expected: str, value: Any) -> str:
+    """公开规则式拒绝：字段 + 期望形状 + 实际形状（不含答案/统计/结论）。"""
+    return f"{where}: expected {expected} (got {_got(value)})"
+
+
 def precommit_report_problems(report: Any, *, task: Any,
                               claims: "Sequence[Mapping[str, Any]] | None" = None
                               ) -> "list[str]":
     """提交前的**结构与类型**预检（Plan §3.2；不解析证据、不给答案）。
 
-    任何一条命中都返回字段路径；调用方必须在写 claim/推进终态**之前**拒绝，
-    标 ``side_effect=NONE``，允许同 lane 在剩余预算内自修。
+    每条拒绝都是 ``字段: expected <公开形状> (got <实际形状>)``：只给公开类型
+    规则，不给正确统计/结论/审查建议。调用方必须在写 claim/推进终态**之前**
+    拒绝，标 ``side_effect=NONE``，允许同 lane 在剩余预算内自修。
     """
     problems: "list[str]" = []
     if not isinstance(report, Mapping):
-        return ["report:not_object"]
+        return ["report: expected object (got " + _got(report) + ")"]
     unknown = sorted(set(report) - set(RR.TOP_KEYS))
     missing = sorted(set(RR.TOP_KEYS) - set(report))
     if unknown:
-        problems.append(f"report:unknown_keys:{unknown}")
+        problems.append(_rule("report", "no unknown keys", unknown))
     if missing:
-        problems.append(f"report:missing_keys:{missing}")
+        problems.append(_rule("report", "all required keys", missing))
     if report.get("schema") != "simpraxis.rsi_r13.research_report.v1":
-        problems.append("report.schema")
+        problems.append(f"report.schema: expected simpraxis.rsi_r13.research_report.v1 (got {report.get('schema')!r})")
     if report.get("schema_version") != 1:
-        problems.append("report.schema_version")
+        problems.append(f"report.schema_version: expected 1 (got {report.get('schema_version')!r})")
     if str(report.get("task_id")) != str(getattr(task, "task_id", "")):
-        problems.append("report.task_id")
+        problems.append(f"report.task_id: expected {getattr(task, 'task_id')!r} (got {report.get('task_id')!r})")
     for key in ("question_and_hypotheses",
                 "methods_and_assignment_responsibility"):
         value = report.get(key)
         if not isinstance(value, str) or not value.strip():
-            problems.append(f"{key}:type_or_empty")
+            problems.append(_rule(key, "non-empty string", value))
     primary = report.get("primary_results")
     if not isinstance(primary, list) or not primary:
-        problems.append("primary_results:type_or_empty")
+        problems.append(_rule("primary_results", "non-empty list", primary))
     else:
         for i, row in enumerate(primary):
+            where = f"primary_results[{i}]"
             if not isinstance(row, Mapping) or set(row) != {
                     "contrast_id", "analysis_receipt_sha", "result_locator"}:
-                problems.append(f"primary_results[{i}]:keys")
+                problems.append(_rule(
+                    where, "keys {contrast_id,analysis_receipt_sha,result_locator}",
+                    row))
                 continue
-            if str(row["contrast_id"]) != str(getattr(task, "primary").id):
+            expected_cid = str(getattr(task, "primary").id)
+            if str(row["contrast_id"]) != expected_cid:
                 problems.append(
-                    f"primary_results[{i}].contrast_id(expect={getattr(task, 'primary').id})")
+                    f"{where}.contrast_id: expected {expected_cid!r} "
+                    f"(got {row['contrast_id']!r})")
             if not _is_hex64(row["analysis_receipt_sha"]):
-                problems.append(f"primary_results[{i}].analysis_receipt_sha")
+                problems.append(_rule(
+                    f"{where}.analysis_receipt_sha", "64-hex sha256",
+                    row["analysis_receipt_sha"]))
             if not _locator_ok(row["result_locator"]):
-                problems.append(f"primary_results[{i}].result_locator")
+                problems.append(_rule(
+                    f"{where}.result_locator",
+                    "locator {kind,file,sha256,pointer}", row["result_locator"]))
     hetero = report.get("heterogeneity_and_scope")
     if not isinstance(hetero, list) or not hetero:
-        problems.append("heterogeneity_and_scope:type_or_empty")
+        problems.append(_rule("heterogeneity_and_scope",
+                              "non-empty list", hetero))
     else:
         for i, row in enumerate(hetero):
+            where = f"heterogeneity_and_scope[{i}]"
             if not isinstance(row, Mapping) or set(row) != {
                     "claim", "evidence_refs", "applicability"}:
-                problems.append(f"heterogeneity[{i}]:keys")
+                problems.append(_rule(
+                    where, "keys {claim,evidence_refs,applicability}", row))
                 continue
             for key in ("claim", "applicability"):
                 if not isinstance(row[key], str) or not row[key].strip():
-                    problems.append(f"heterogeneity[{i}].{key}")
+                    problems.append(_rule(f"{where}.{key}",
+                                          "non-empty string", row[key]))
             refs = row.get("evidence_refs")
             if not isinstance(refs, list) or not refs or not all(
                     _locator_ok(r) for r in refs):
-                problems.append(f"heterogeneity[{i}].evidence_refs")
+                problems.append(_rule(f"{where}.evidence_refs",
+                                      "non-empty list of typed locators", refs))
     comp = report.get("explore_confirm_comparison")
     if not isinstance(comp, Mapping) or set(comp) != {
             "estimands", "comparable", "explanation", "evidence_refs"}:
-        problems.append("explore_confirm_comparison:keys")
+        problems.append(_rule(
+            "explore_confirm_comparison",
+            "keys {estimands,comparable,explanation,evidence_refs}", comp))
     else:
         for key in ("estimands", "explanation"):
             if not isinstance(comp[key], str) or not comp[key].strip():
-                problems.append(f"explore_confirm_comparison.{key}")
+                problems.append(_rule(f"explore_confirm_comparison.{key}",
+                                      "non-empty string", comp[key]))
         if not isinstance(comp["comparable"], bool):
-            problems.append("explore_confirm_comparison.comparable")
+            problems.append(_rule("explore_confirm_comparison.comparable",
+                                  "bool", comp["comparable"]))
         if not isinstance(comp["evidence_refs"], list) or not comp[
                 "evidence_refs"] or not all(_locator_ok(r) for r in comp[
                 "evidence_refs"]):
-            problems.append("explore_confirm_comparison.evidence_refs")
+            problems.append(_rule(
+                "explore_confirm_comparison.evidence_refs",
+                "non-empty list of typed locators", comp["evidence_refs"]))
     alternatives = report.get("alternative_explanations")
     if not isinstance(alternatives, list) or not alternatives or not all(
             isinstance(x, str) and x.strip() for x in alternatives):
-        problems.append("alternative_explanations")
+        problems.append(_rule("alternative_explanations",
+                              "non-empty list of non-empty strings",
+                              alternatives))
     limits = report.get("limitations")
     if not isinstance(limits, list) or not limits:
-        problems.append("limitations:type_or_empty")
+        problems.append(_rule("limitations", "non-empty list", limits))
     else:
         for i, row in enumerate(limits):
+            where = f"limitations[{i}]"
             if not isinstance(row, Mapping) or set(row) != {
                     "statement", "evidence_refs", "consequence"}:
-                problems.append(f"limitations[{i}]:keys")
+                problems.append(_rule(
+                    where, "keys {statement,evidence_refs,consequence}", row))
                 continue
             for key in ("statement", "consequence"):
                 if not isinstance(row[key], str) or not row[key].strip():
-                    problems.append(f"limitations[{i}].{key}")
+                    problems.append(_rule(f"{where}.{key}",
+                                          "non-empty string", row[key]))
             refs = row.get("evidence_refs")
             if not isinstance(refs, list) or not refs or not all(
                     _locator_ok(r) for r in refs):
-                problems.append(f"limitations[{i}].evidence_refs")
+                problems.append(_rule(f"{where}.evidence_refs",
+                                      "non-empty list of typed locators", refs))
     steps = report.get("next_steps")
     if not isinstance(steps, list) or not steps:
-        problems.append("next_steps:type_or_empty")
+        problems.append(_rule("next_steps", "non-empty list", steps))
     else:
         for i, row in enumerate(steps):
+            where = f"next_steps[{i}]"
             if not isinstance(row, Mapping) or set(row) != {
                     "unresolved_question", "discriminating_experiment",
                     "possible_outcomes"}:
-                problems.append(f"next_steps[{i}]:keys")
+                problems.append(_rule(
+                    where,
+                    "keys {unresolved_question,discriminating_experiment,possible_outcomes}",
+                    row))
                 continue
             for key in ("unresolved_question", "discriminating_experiment"):
                 if not isinstance(row[key], str) or not row[key].strip():
-                    problems.append(f"next_steps[{i}].{key}")
+                    problems.append(_rule(f"{where}.{key}",
+                                          "non-empty string", row[key]))
             outcomes = row.get("possible_outcomes")
             if not isinstance(outcomes, list) or len(outcomes) < 2 or not all(
                     isinstance(x, str) and x.strip() for x in outcomes):
-                problems.append(f"next_steps[{i}].possible_outcomes")
+                problems.append(_rule(
+                    f"{where}.possible_outcomes",
+                    "list of >=2 non-empty strings", outcomes))
     if claims is not None and (not isinstance(claims, list) or not claims):
-        problems.append("claims:type_or_empty")
+        problems.append(_rule("claims", "non-empty list", claims))
     return problems
 
 
