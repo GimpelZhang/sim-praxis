@@ -224,3 +224,15 @@ def test_closeout_claim_match_is_not_science_support(tmp_path):
     assert doc["axes"]["claim"] == CO.CLAIM_SUPPORTED
     assert a["science_direction"] == "SUPPORTED"  # A_N 主对比登记方向
     assert doc["facts"]["claim_scope"] == "two_case_feasibility"
+
+
+def test_cli_replay_parser_accepts_optional_batch_id():
+    """2026-11-18 补口：cmd_replay 读 args.batch_id，解析器必须给出该字段。"""
+    from orchestrator.rsi_r1 import cli_r1n as CLI
+
+    parser = CLI.build_parser()
+    args = parser.parse_args(["replay", "--envelope", "e", "--study", "A"])
+    assert args.batch_id is None
+    args2 = parser.parse_args(["replay", "--envelope", "e", "--study", "A",
+                               "--batch-id", "r1n-replay-A-1"])
+    assert args2.batch_id == "r1n-replay-A-1"

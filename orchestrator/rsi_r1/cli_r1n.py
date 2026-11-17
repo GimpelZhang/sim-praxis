@@ -690,6 +690,10 @@ def build_parser() -> argparse.ArgumentParser:
     prp2.add_argument("--campaign", default=P.PROFILE_R1N)
     prp2.add_argument("--envelope", required=True)
     prp2.add_argument("--study", required=True)
+    # 2026-11-18 补口：cmd_replay 读 args.batch_id，但解析器没定义该参数
+    # （首轮 replay 从未实跑，故未暴露）。缺省 None → cmd_replay 用
+    # f"r1n-replay-{study}"。
+    prp2.add_argument("--batch-id", default=None)
     prp2.set_defaults(func=CC.cmd_replay)
 
     prv = sub.add_parser("review", help="T8 正式双审（每 study 2 POST）")
