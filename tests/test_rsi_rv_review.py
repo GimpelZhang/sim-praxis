@@ -316,7 +316,9 @@ def test_packet_compaction_keeps_facts_and_drops_duplicates(tmp_path):
     assert "candidate_block_effects" not in packet
     assert "contrast_specs" not in packet
     assert "rendered" not in packet["model_report"]
-    assert "contrasts" not in packet["analysis_output"]["diagnostics"]
+    # 报告实际引用的诊断段必须保留（Plan §4.4 只删等价重复）
+    assert "contrasts" in packet["analysis_output"]["diagnostics"]
+    assert "summaries" in packet["analysis_output"]["diagnostics"]
     assert len(packet["block_table"]) == 32
     assert all(row["values"] for row in packet["block_table"])
     for row in packet["raw_recomputation"]["contrasts"].values():
@@ -333,3 +335,60 @@ def test_block_table_carries_per_block_nuisance_values(tmp_path):
         values = [row["nuisance"].get(key) for row in packet["block_table"]]
         assert all(v is not None and v != "" for v in values), (study, values[:3])
         assert len(set(values)) > 1, (study, values[:3])
+
+
+def _report_with_ref(packet, pointer):
+    report = RVW._case_report("valid_positive", packet)
+    report["limitations"][0]["evidence_refs"] = [{
+        "kind": "json_pointer", "file": "analysis/output.json",
+        "sha256": str((packet.get("analysis_receipt_public") or {})
+                      .get("output_sha256") or ""), "pointer": pointer}]
+    return report
+
+
+def test_packet_keeps_diagnostics_cited_by_reports(tmp_path):
+    root = _prepared(tmp_path)
+    base = RVW.build_rv_packet(root=root, study="A", report=None)
+    report = _report_with_ref(base, "/diagnostics/contrasts/0/block_effects/7/effect")
+    packet = RVW.build_rv_packet(
+        root=root, study="A", report=report, report_text="正文",
+        model_lineage={"analysis_receipt_sha": str(
+            (base.get("analysis_receipt_public") or {}).get("output_sha256"))})
+    assert packet["model_report"]["report"]
+
+
+def test_packet_rejects_dangling_report_ref(tmp_path):
+    root = _prepared(tmp_path)
+    base = RVW.build_rv_packet(root=root, study="A", report=None)
+    report = _report_with_ref(base, "/diagnostics/does_not_exist")
+    with pytest.raises(RVW.ReviewError) as exc:
+        RVW.build_rv_packet(
+            root=root, study="A", report=report, report_text="正文",
+            model_lineage={"analysis_receipt_sha": str(
+                (base.get("analysis_receipt_public") or {}).get(
+                    "output_sha256"))})
+    assert exc.value.code == "PACKET_REPORT_REF_UNRESOLVED"
+
+
+def test_precommit_rejects_real_b_report_types_and_plan_contrast_id():
+    import json
+    from pathlib import Path
+    from orchestrator.rsi_r1 import task_specs as TS
+    fixture = json.loads((Path("tests/fixtures") /
+                          "rv_b_real_report_20261116.json").read_text())
+    task = TS.build_new_b(commitment="c" * 64)
+    problems = RVW.precommit_report_problems(
+        fixture["research_report"], task=task, claims=fixture["claims"])
+    assert any(p.startswith("question_and_hypotheses") for p in problems)
+    assert any(p.startswith("methods_and_assignment_responsibility")
+               for p in problems)
+    assert any("primary_results[0].contrast_id" in p for p in problems)
+
+
+def test_precommit_accepts_contract_valid_report(tmp_path):
+    root = _prepared(tmp_path)
+    base = RVW.build_rv_packet(root=root, study="A", report=None)
+    report = RVW._case_report("valid_positive", base)
+    from orchestrator.rsi_r1 import task_specs as TS
+    task = TS.build_new_a(commitment="c" * 64)
+    assert RVW.precommit_report_problems(report, task=task) == []

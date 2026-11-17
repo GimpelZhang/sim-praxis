@@ -184,9 +184,11 @@ def compact_packet(packet: Mapping[str, Any]) -> dict[str, Any]:
         "run_ids_count": len(raw.get("run_ids") or []),
         "contrasts": [dict(c) for c in raw.get("contrasts") or []
                       if isinstance(c, Mapping)],
-        "diagnostics": {"coverage": diag.get("coverage"),
-                        "phase_comparability": diag.get("phase_comparability"),
-                        "threshold_counts": diag.get("threshold_counts")},
+        # 报告引用会用到这些段（轮 9 B 引用了 contrasts/summaries）；压缩只删
+        # task/plan 的重复键，不删 reviewer 需要核对的诊断事实。
+        "diagnostics": {k: diag.get(k) for k in (
+            "coverage", "phase_comparability", "threshold_counts",
+            "contrasts", "summaries")},
     }
     dropped.append("analysis_output.diagnostics.full")
     out.pop("candidate_block_effects", None)
@@ -312,12 +314,20 @@ def validate_packet(packet: Any, *, expected_study: "str | None" = None) -> dict
     if n_blocks and len(table) != n_blocks:
         raise ReviewError("PACKET_BLOCKS_INCOMPLETE",
                           f"{len(table)} != {n_blocks}")
+    nuisance_keys = set((task.get("nuisance_schema") or {}).keys())
     for i, row in enumerate(table):
         if not isinstance(row, Mapping) or set(row) != {
                 "block_id", "nuisance", "values", "effects"}:
             raise ReviewError("PACKET_BLOCK_INVALID", f"block_table[{i}]")
         if not isinstance(row.get("nuisance"), Mapping):
             raise ReviewError("PACKET_NUISANCE_MISSING", f"block_table[{i}]")
+        # Plan §2.2/§4.1 事实守恒：声明为 nuisance 的每个键都必须有真实逐 block 值
+        # （I11：空 nuisance 让 reviewer 把“变异已发生”看成“未发生”）。
+        missing_n = [k for k in sorted(nuisance_keys)
+                     if not str(row["nuisance"].get(k) or "").strip()]
+        if missing_n:
+            raise ReviewError("PACKET_NUISANCE_MISSING",
+                              f"block_table[{i}] 缺 {missing_n}")
         if not isinstance(row.get("values"), Mapping) or not row["values"]:
             raise ReviewError("PACKET_BLOCK_VALUES", f"block_table[{i}]")
     recompute = packet.get("raw_recomputation") or {}
@@ -339,6 +349,10 @@ def validate_packet(packet: Any, *, expected_study: "str | None" = None) -> dict
             or "")
         if expected_receipt and shipped != {expected_receipt}:
             raise ReviewError("PACKET_REPORT_RECEIPT", str(sorted(shipped)))
+    ref_problems = _packet_report_refs_problems(packet)
+    if ref_problems:
+        raise ReviewError("PACKET_REPORT_REF_UNRESOLVED",
+                          "; ".join(ref_problems[:6]))
     body = {k: v for k, v in packet.items() if k != "packet_body_sha256"}
     if RV.canonical_sha(body) != packet.get("packet_body_sha256"):
         raise ReviewError("PACKET_SHA_DRIFT", "packet_body_sha256")
@@ -785,6 +799,218 @@ def _case_report(case_id: str, packet: Mapping[str, Any]) -> dict[str, Any]:
               "discriminating_experiment": "随机化 nuisance 的新确认批。",
               "possible_outcomes": ["异质可归因", "异质不可归因"]}])
     raise ReviewError("CALIBRATION_CASE_UNKNOWN", case_id)
+
+
+_HEX64 = __import__("re").compile(r"^[0-9a-f]{64}$")
+
+
+def _is_hex64(v: Any) -> bool:
+    return isinstance(v, str) and bool(_HEX64.fullmatch(v))
+
+
+def _locator_ok(loc: Any) -> bool:
+    if not isinstance(loc, Mapping):
+        return False
+    kind = loc.get("kind")
+    if kind not in ("json_pointer", "byte_range", "line_range"):
+        return False
+    if not isinstance(loc.get("file"), str) or not loc["file"]:
+        return False
+    if not _is_hex64(loc.get("sha256")):
+        return False
+    if kind == "json_pointer":
+        p = loc.get("pointer") or loc.get("json_pointer")
+        return isinstance(p, str) and p.startswith("/")
+    return True
+
+
+def precommit_report_problems(report: Any, *, task: Any,
+                              claims: "Sequence[Mapping[str, Any]] | None" = None
+                              ) -> "list[str]":
+    """提交前的**结构与类型**预检（Plan §3.2；不解析证据、不给答案）。
+
+    任何一条命中都返回字段路径；调用方必须在写 claim/推进终态**之前**拒绝，
+    标 ``side_effect=NONE``，允许同 lane 在剩余预算内自修。
+    """
+    problems: "list[str]" = []
+    if not isinstance(report, Mapping):
+        return ["report:not_object"]
+    unknown = sorted(set(report) - set(RR.TOP_KEYS))
+    missing = sorted(set(RR.TOP_KEYS) - set(report))
+    if unknown:
+        problems.append(f"report:unknown_keys:{unknown}")
+    if missing:
+        problems.append(f"report:missing_keys:{missing}")
+    if report.get("schema") != "simpraxis.rsi_r13.research_report.v1":
+        problems.append("report.schema")
+    if report.get("schema_version") != 1:
+        problems.append("report.schema_version")
+    if str(report.get("task_id")) != str(getattr(task, "task_id", "")):
+        problems.append("report.task_id")
+    for key in ("question_and_hypotheses",
+                "methods_and_assignment_responsibility"):
+        value = report.get(key)
+        if not isinstance(value, str) or not value.strip():
+            problems.append(f"{key}:type_or_empty")
+    primary = report.get("primary_results")
+    if not isinstance(primary, list) or not primary:
+        problems.append("primary_results:type_or_empty")
+    else:
+        for i, row in enumerate(primary):
+            if not isinstance(row, Mapping) or set(row) != {
+                    "contrast_id", "analysis_receipt_sha", "result_locator"}:
+                problems.append(f"primary_results[{i}]:keys")
+                continue
+            if str(row["contrast_id"]) != str(getattr(task, "primary").id):
+                problems.append(
+                    f"primary_results[{i}].contrast_id(expect={getattr(task, 'primary').id})")
+            if not _is_hex64(row["analysis_receipt_sha"]):
+                problems.append(f"primary_results[{i}].analysis_receipt_sha")
+            if not _locator_ok(row["result_locator"]):
+                problems.append(f"primary_results[{i}].result_locator")
+    hetero = report.get("heterogeneity_and_scope")
+    if not isinstance(hetero, list) or not hetero:
+        problems.append("heterogeneity_and_scope:type_or_empty")
+    else:
+        for i, row in enumerate(hetero):
+            if not isinstance(row, Mapping) or set(row) != {
+                    "claim", "evidence_refs", "applicability"}:
+                problems.append(f"heterogeneity[{i}]:keys")
+                continue
+            for key in ("claim", "applicability"):
+                if not isinstance(row[key], str) or not row[key].strip():
+                    problems.append(f"heterogeneity[{i}].{key}")
+            refs = row.get("evidence_refs")
+            if not isinstance(refs, list) or not refs or not all(
+                    _locator_ok(r) for r in refs):
+                problems.append(f"heterogeneity[{i}].evidence_refs")
+    comp = report.get("explore_confirm_comparison")
+    if not isinstance(comp, Mapping) or set(comp) != {
+            "estimands", "comparable", "explanation", "evidence_refs"}:
+        problems.append("explore_confirm_comparison:keys")
+    else:
+        for key in ("estimands", "explanation"):
+            if not isinstance(comp[key], str) or not comp[key].strip():
+                problems.append(f"explore_confirm_comparison.{key}")
+        if not isinstance(comp["comparable"], bool):
+            problems.append("explore_confirm_comparison.comparable")
+        if not isinstance(comp["evidence_refs"], list) or not comp[
+                "evidence_refs"] or not all(_locator_ok(r) for r in comp[
+                "evidence_refs"]):
+            problems.append("explore_confirm_comparison.evidence_refs")
+    alternatives = report.get("alternative_explanations")
+    if not isinstance(alternatives, list) or not alternatives or not all(
+            isinstance(x, str) and x.strip() for x in alternatives):
+        problems.append("alternative_explanations")
+    limits = report.get("limitations")
+    if not isinstance(limits, list) or not limits:
+        problems.append("limitations:type_or_empty")
+    else:
+        for i, row in enumerate(limits):
+            if not isinstance(row, Mapping) or set(row) != {
+                    "statement", "evidence_refs", "consequence"}:
+                problems.append(f"limitations[{i}]:keys")
+                continue
+            for key in ("statement", "consequence"):
+                if not isinstance(row[key], str) or not row[key].strip():
+                    problems.append(f"limitations[{i}].{key}")
+            refs = row.get("evidence_refs")
+            if not isinstance(refs, list) or not refs or not all(
+                    _locator_ok(r) for r in refs):
+                problems.append(f"limitations[{i}].evidence_refs")
+    steps = report.get("next_steps")
+    if not isinstance(steps, list) or not steps:
+        problems.append("next_steps:type_or_empty")
+    else:
+        for i, row in enumerate(steps):
+            if not isinstance(row, Mapping) or set(row) != {
+                    "unresolved_question", "discriminating_experiment",
+                    "possible_outcomes"}:
+                problems.append(f"next_steps[{i}]:keys")
+                continue
+            for key in ("unresolved_question", "discriminating_experiment"):
+                if not isinstance(row[key], str) or not row[key].strip():
+                    problems.append(f"next_steps[{i}].{key}")
+            outcomes = row.get("possible_outcomes")
+            if not isinstance(outcomes, list) or len(outcomes) < 2 or not all(
+                    isinstance(x, str) and x.strip() for x in outcomes):
+                problems.append(f"next_steps[{i}].possible_outcomes")
+    if claims is not None and (not isinstance(claims, list) or not claims):
+        problems.append("claims:type_or_empty")
+    return problems
+
+
+def _report_refs(report: Mapping[str, Any]) -> "list[Mapping[str, Any]]":
+    refs: "list[Any]" = []
+    for row in report.get("primary_results") or []:
+        if isinstance(row, Mapping):
+            refs.append(row.get("result_locator"))
+    for row in report.get("heterogeneity_and_scope") or []:
+        if isinstance(row, Mapping):
+            refs.extend(list(row.get("evidence_refs") or []))
+    comp = report.get("explore_confirm_comparison") or {}
+    if isinstance(comp, Mapping):
+        refs.extend(list(comp.get("evidence_refs") or []))
+    for row in report.get("limitations") or []:
+        if isinstance(row, Mapping):
+            refs.extend(list(row.get("evidence_refs") or []))
+    return [r for r in refs if isinstance(r, Mapping)]
+
+
+def _packet_file_doc(packet: Mapping[str, Any],
+                     file: str) -> "Any | None":
+    """报告引用文件 → 审查包内的对应文档（reviewer 实际收到的字节面）。"""
+    if file == "analysis/output.json":
+        return packet.get("analysis_output")
+    if file == "analysis/explore_comparison.json":
+        return packet.get("explore_confirm_comparison")
+    if file == "analysis/raw_block_values.json":
+        blocks = packet.get("block_table") or []
+        return {"values": {row["block_id"]: row.get("values")
+                           for row in blocks if isinstance(row, Mapping)}}
+    if file == "analysis/block_effects.json":
+        blocks = packet.get("block_table") or []
+        effects: "dict[str, dict[str, Any]]" = {}
+        for row in blocks:
+            if not isinstance(row, Mapping):
+                continue
+            for cid, value in (row.get("effects") or {}).items():
+                effects.setdefault(cid, {})[row["block_id"]] = value
+        return {"contrasts": effects}
+    if file == "confirm/blocks.json":
+        return {"blocks": [{"block_id": row["block_id"],
+                            "values": row.get("values")}
+                           for row in packet.get("block_table") or []
+                           if isinstance(row, Mapping)]}
+    if file == "analysis/assignments.json":
+        return {"blocks": [{"block_id": row["block_id"],
+                            **(row.get("nuisance") or {})}
+                           for row in packet.get("block_table") or []
+                           if isinstance(row, Mapping)]}
+    return None
+
+
+def _packet_report_refs_problems(packet: Mapping[str, Any]) -> "list[str]":
+    problems: "list[str]" = []
+    model = packet.get("model_report")
+    if not isinstance(model, Mapping):
+        return problems
+    report = model.get("report")
+    if not isinstance(report, Mapping):
+        return ["model_report.report"]
+    for i, ref in enumerate(_report_refs(report)):
+        file = str(ref.get("file") or "")
+        doc = _packet_file_doc(packet, file)
+        if doc is None:
+            problems.append(f"ref[{i}]:file_not_in_packet:{file}")
+            continue
+        pointer = ref.get("pointer") or ref.get("json_pointer")
+        if ref.get("kind") == "json_pointer" and isinstance(pointer, str):
+            try:
+                G2_resolve(doc, pointer)
+            except (KeyError, IndexError, TypeError, ValueError):
+                problems.append(f"ref[{i}]:pointer_unresolved:{file}#{pointer}")
+    return problems
 
 
 def _stats_claim(packet: Mapping[str, Any]) -> str:

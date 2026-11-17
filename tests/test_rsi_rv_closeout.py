@@ -150,3 +150,41 @@ def test_gates_require_claim_match_and_real_container_reads():
                        claim=claim, state=state, parts=parts,
                        source_valid=True)
     assert gates["request_fidelity"] is False
+
+
+def test_packet_error_makes_review_instrument_blocked(tmp_path, monkeypatch):
+    from tests.fixtures import rv_synthetic as RS
+    from orchestrator.rsi_r1 import rv_review as RVW
+    from orchestrator.rsi_r1 import rv_runtime as RT
+    root = RS.build_initialized_root(tmp_path)
+    manifest = RV.read_json(root / "manifest" / "rv_sources.json")
+    prereg = RV.read_json(root / "contract" / "prereg.json")
+    RT.materialize_rv_study(root, manifest, "A")
+    base = RVW.build_rv_packet(root=root, study="A", report=None)
+    report = RVW._case_report("valid_positive", base)
+    receipt_sha = str((base.get("analysis_receipt_public") or {}).get(
+        "output_sha256"))
+    report["limitations"][0]["evidence_refs"][0]["pointer"] = "/nope"
+    RV.write_json_private(root / "studies" / "A" / "result.json", {
+        "schema": f"{RV.SCHEMA_PREFIX}.study_result.v1", "schema_version": 1,
+        "study": "A", "state": "MODEL_REPORT_VALID", "gates": {}, "problems": []})
+    RV.write_json_private(root / "submit" / "A" / "report.json", {
+        "schema": f"{RV.SCHEMA_PREFIX}.sealed_report.v1", "schema_version": 1,
+        "study": "A", "report": report, "report_text": "正文",
+        "lineage": {"producer": RT.RV_PRODUCER,
+                    "analysis_receipt_sha": receipt_sha}})
+    permit = RV.build_permit(
+        round_id=root.name, kind="suffix_and_review", prereg=prereg,
+        closure_sha256="a" * 64, worker_policy_sha="b" * 64,
+        prompt_sha="c" * 64, schema_sha="d" * 64, tokenizer_sha="e" * 64,
+        rubric_sha="f" * 64, config_sha="1" * 64,
+        calibration_report_sha="2" * 64)
+    RV.write_json_private(root / "contract" / "permit_suffix.json", permit)
+    monkeypatch.setenv("SIMPRAXIS_ALLOW_PAID", "1")
+    assert CLI.main(["review", "--root", str(root), "--study", "A"]) == 1
+    doc = RV.read_json(root / "review" / "final_A.json")
+    assert doc["verdict"] == "INSTRUMENT_BLOCKED"
+    assert not (root / "quota" / "ledger.jsonl").exists()
+    assert CLI.main(["closeout", "--root", str(root)]) == 1
+    close = RV.read_json(root / "closeout" / "rv_closeout.json")
+    assert close["overall"] == "INSTRUMENT_BLOCKED"

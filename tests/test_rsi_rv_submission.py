@@ -226,3 +226,38 @@ def test_judge_evidence_map_includes_published_artifacts(tmp_path):
         assert f"analysis/{name}" in evidence
         data = (root / "public" / "A" / name).read_bytes()
         assert evidence[f"analysis/{name}"] == data
+
+
+def test_precommit_rejects_real_b_reply_without_sealing(tmp_path):
+    import json
+    from pathlib import Path
+    from orchestrator.rsi_r1 import loop as L
+    root = _root(tmp_path)
+    manifest = RV.read_json(root / "manifest" / "rv_sources.json")
+    prereg = RV.read_json(root / "contract" / "prereg.json")
+    material = RT.materialize_rv_study(root, manifest, "B")
+    budget = RT.RVBudget(envelope_id=root.name,
+                         posts_by_lane=dict(RV.RV_LANE_POST_CAPS))
+    lanes = RT.RVSlotBook(RT.RVContext(root), budget, prefix="offline")
+    parts = RT.build_rv_parts(
+        root=root, study="B", manifest=manifest, material=material,
+        prereg=prereg, budget=budget, lanes=lanes, ledger=type(
+            "L", (), {"_read_rows": lambda self: []})(),
+        permits={}, closure_reader=lambda: {}, public_verifier=lambda: {},
+        sender=object(), lane="suffix_B", policy=RT.W.WorkerPolicy(),
+        scripted=True)
+    fixture = json.loads((Path("tests/fixtures") /
+                          "rv_b_real_report_20261116.json").read_text())
+    doc = {"action": "submit_claim", "claims": fixture["claims"],
+           "report_text": fixture["report_text"],
+           "research_report": fixture["research_report"]}
+    parts.store.record_reply(response_id="rv-real-b", text="x",
+                             phase="explore", nonce="1234567890abcdef")
+    parts.store.record_action(response_id="rv-real-b", action=doc)
+    action = L.parse_action(json.dumps(doc))
+    result = parts.dispatcher.execute_once(action, parts.store)
+    assert result["code"] == "REPORT_PRECOMMIT_INVALID"
+    assert result["side_effect_status"] == "NONE"
+    claims = [e for e in parts.state.journal.events() if e.event == "claim"]
+    assert claims == []
+    assert parts.state.study_state("B") == "RESULTS_RELEASED"

@@ -947,6 +947,7 @@ def build_rv_parts(*, root: "str | Path", study: str, manifest: Mapping[str, Any
         closure_reader=closure_reader, public_verifier=public_verifier,
         offline=scripted)
     admission.enter_lane(lane)
+    from orchestrator.rsi_r1 import rv_review as _RVW  # 延迟导入避免循环
     dispatcher = A.CampaignDispatcher(
         ctx=ctx, state=state, admission=admission, budget=budget,
         study=study, runner=G2.FailIfCalled("sandbox_runner"), image="",
@@ -957,7 +958,9 @@ def build_rv_parts(*, root: "str | Path", study: str, manifest: Mapping[str, Any
         claim_producer=(SCRIPTED_PRODUCER if scripted else RV_PRODUCER),
         artifact_reader=reader, report_representation="model_text",
         submit_gate=lambda: [] if "analysis/output.json" in reader.completed
-        else ["analysis/output.json"])
+        else ["analysis/output.json"],
+        precommit=lambda report, claims: _RVW.precommit_report_problems(
+            report, task=task, claims=claims))
     brief_doc = JSON_load(round_root / "public" / study / "brief.json")
     system = _rv_system(study, brief_doc, scripted=scripted)
     counter = _token_counter()

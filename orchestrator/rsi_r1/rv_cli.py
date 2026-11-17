@@ -818,9 +818,25 @@ def cmd_review(args: argparse.Namespace) -> int:
     payload = RV.read_json(report_path)
     report = payload.get("report")
     lineage = payload.get("lineage") or {}
-    packet = RVW.build_rv_packet(root=root, study=study, report=report,
-                                 report_text=str(payload.get("report_text") or ""),
-                                 model_lineage=lineage)
+    try:
+        packet = RVW.build_rv_packet(
+            root=root, study=study, report=report,
+            report_text=str(payload.get("report_text") or ""),
+            model_lineage=lineage)
+    except (RVW.ReviewError, RV.RVError) as exc:
+        # 审查包事实/引用/容量不守恒 ⇒ 仪器阻断，不把包错误记成候选科学 FAIL。
+        doc = {"schema": f"{RV.SCHEMA_PREFIX}.final_review.v1",
+               "schema_version": 1, "created_at_utc": RV.utc_now(),
+               "study": study, "verdict": "INSTRUMENT_BLOCKED",
+               "items": {}, "slots": [],
+               "problems": [f"{getattr(exc, 'code', type(exc).__name__)}: "
+                            f"{getattr(exc, 'detail', '')}"],
+               "permit_sha256": permit.get("permit_sha256")}
+        RV.write_json_private(root / "review" / f"final_{study}.json", doc)
+        print(json.dumps({"study": study, "verdict": "INSTRUMENT_BLOCKED",
+                          "problems": doc["problems"]},
+                         ensure_ascii=False, sort_keys=True))
+        return 1
     gateway, ledger = _gateway(root)
     slots: "list[dict[str, Any]]" = []
     for channel in (1, 2):
@@ -1075,6 +1091,9 @@ def cmd_closeout(args: argparse.Namespace) -> int:
             row["gates"]["review_verdict"] = (
                 review.get("verdict") == "REVIEW_PASS")
             row["review_verdict"] = review.get("verdict")
+            if review.get("verdict") == "INSTRUMENT_BLOCKED":
+                row["state"] = "INSTRUMENT_BLOCKED"
+                row["instrument_blocked"] = True
         else:
             row = dict(row)
             row["review_verdict"] = "REVIEW_NOT_RUN"

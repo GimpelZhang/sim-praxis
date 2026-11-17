@@ -1,0 +1,300 @@
+{
+ "action_sha256": "bc5809fa4bd91d39cd805a0e5ac5bd94326e95910c7d638589bb55e4dac3c42b",
+ "claims": [
+  {
+   "delta": 0.01,
+   "estimate": 0.10267914979126613,
+   "hypothesis_id": "h_interaction",
+   "lower": -0.11525227534240161,
+   "metric_id": "normalized_tracking_rmse",
+   "n_blocks": 32,
+   "proposition": "increase_gt",
+   "upper": 0.3117777573673893
+  },
+  {
+   "delta": 0.01,
+   "estimate": 0.10267914979126613,
+   "hypothesis_id": "h_additive",
+   "lower": -0.11525227534240161,
+   "metric_id": "normalized_tracking_rmse",
+   "n_blocks": 32,
+   "proposition": "increase_gt",
+   "upper": 0.3117777573673893
+  }
+ ],
+ "report_text": "研究问题：在 B_sampling_integration 的给定确认设计下，tc_x_inertia（difference-in-differences，metric=normalized_tracking_rmse，proposition=increase_gt，delta=0.01）是否成立。\n\n设计与职责：4 个条件（s_low/s_high 为 tc_s=0.008；l_low/l_high 为 tc_s=0.032；惯量比 0.5 与 2.0）× 32 个宿主 block = 128 次 run，unique_design_count=128，覆盖率 32/32 block、dropped=0。目标频率 target_freq_hz∈[0.2,2.0] Hz 为宿主分配、块内同频（nuisance_owner=host），我们只对给定分配做解释，不对抽样机制负责。主对比按预登记等权 mean 聚合，区间水平 0.95。\n\n主结果：估计 0.10268，95% 区间 [−0.11525, +0.31178]，n_blocks=32，science_status=INCONCLUSIVE。区间同时跨过 0 与 ±δ，因此 increase_gt 的预登记判据既未被满足（下界为负），也未被彻底否证（上界远大于 δ）。h_interaction 因此只能是“证据不足”，h_additive 所要求的“差值落在 ±δ 内”同样不成立——区间远宽于 ±δ，且分析只给出双侧 95% CI，并未执行等价性（TOST 型）检验。两条预登记假设共用同一对比 component_single_factor，也意味着它们不可能在同一份数据上被分离地确证。\n\n异质性与范围：块级效应呈双峰、重尾。threshold_counts 显示 26 个 block 效应 >+δ、5 个 <−δ、1 个落在 ±δ 内；最负的是 b09=−1.4003、b19=−1.2568、b27=−1.2522、b32=−0.2840，最大的正向是 b22=+1.4733、b21=+1.1363、b31=+1.1172、b12=+1.0440、b11=+0.9461。仅五个最大正向效应合计就约 +5.72，超过 32 块总和（约 +3.29）：均值由少数极端 block 主导，去掉少数几块就会翻转符号。因此 0.1027 不能被读作“典型 block 的 Tc×惯量差值”，只能作为“宿主 32 block 等权抽样均值”的估计，适用范围严格限于登记的 registered_distribution 与 observed_blocks 覆盖，不能外推到未抽样的频率或其它工况。区间之宽不是缺失造成的（无 dropped），而是真实块间方差。\n\n探索-确认比较：phase_comparability.relation=different_target——探索覆盖的是设计空间网格，确认是宿主抽样的 32 个 block，两者估计对象登记不同，可比性为否，不应合并或直接互证。\n\n替代解释：块内同频但块间频率混杂于 0.2–2.0 Hz，频率本身是跟踪难度的强工况变量，因此异质性与均值完全可能由 Tc/惯量与频率的联合作用、而非 Tc×惯量的可加/交互结构产生；本文未对该 nuisance 分层或配对。另一个未被排除的解释是仿真实现在高 Tc/高惯量极限处的数值伪影——但本设计没有阴性对照（negative_control=null），没有等效证据可用于排除，也无法据此宣称已排除所有替代解释。\n\n下一步应做频带分层/配对的预登记对比、独立宿主 block 再抽样以检验均值稳健性，以及带 δ 的等价性检验，而不是从现有宽区间推出任何方向性结论。",
+ "research_report": {
+  "alternative_explanations": [
+   {
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/contrasts/0/block_effects",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/input_sha256",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "块间 nuisance target_freq_hz 在 0.2–2.0 Hz 变动且未被分层或配对；频率是跟踪难度的强工况变量，双峰块效应与均值完全可能来自 Tc/惯量与频率的联合作用，而非 Tc×惯量本身的可加/交互结构。"
+   },
+   {
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/summaries",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/contrasts/0/estimate",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "本设计没有阴性对照（envelope 与 brief 均为 negative_control=null），因此不存在可用于排除系统偏移的等效证据；高 Tc/高惯量极端运行处的实现级伪影或未登记联合效应未被排除，不能声称所有替代解释已被排除。"
+   },
+   {
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/contrasts/0/block_effects/21/effect",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/contrasts/0/block_effects/8/effect",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "均值型估计在重尾块分布上会被极端块支配：五个最大正向块合计超过全部块效应总和，点估计 0.1027 与典型块的量级不对应。"
+   }
+  ],
+  "explore_confirm_comparison": {
+   "comparable": false,
+   "estimands": [
+    "confirm：宿主抽样的 32 个 block 上的等权 mean 差中差（tc_x_inertia，target=32 host blocks）",
+    "explore：设计空间网格上的效应（target=explore grid）"
+   ],
+   "evidence_refs": [
+    {
+     "file": "analysis/output.json",
+     "kind": "json_pointer",
+     "pointer": "/diagnostics/phase_comparability",
+     "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+    }
+   ],
+   "explanation": "分析自报 phase_comparability.relation=different_target：探索阶段覆盖设计空间，确认阶段是宿主 32 block 抽样，两者估计对象不同，因此不可合并、不可用探索结果直接互证确认结论；本报告只解释确认阶段数值。"
+  },
+  "heterogeneity_and_scope": [
+   {
+    "applicability": "仅适用于本确认抽样 32 个宿主 block 的等权均值；不得外推为“典型块的 Tc×惯量效应”，也不得外推到未抽样的 target_freq_hz 取值或其它惯性比。",
+    "claim": "块级效应双峰重尾：26 块 > +δ、5 块 < −δ、1 块在 ±δ 内；最负 b09=−1.4003、b19=−1.2568、b27=−1.2522、b32=−0.2840，最大正向 b22=+1.4733、b21=+1.1363、b31=+1.1172、b12=+1.0440、b11=+0.9461。五个最大正向效应合计约 +5.72，超过 32 块总和（约 +3.29），均值由少数极端 block 主导，剔除少数块即翻转符号。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/contrasts/0/block_effects",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/threshold_counts/0",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ]
+   },
+   {
+    "applicability": "结论的范围限定为 registered_distribution 下的 observed_blocks 等权聚合；完整性不提升外部效度。",
+    "claim": "覆盖率完整、无删失：32/32 block observed，128 run，128 unique design，dropped={count:0}；因此区间之宽来自真实块间方差而非缺失或补值。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/coverage",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/contrasts/0/n_blocks",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ]
+   },
+   {
+    "applicability": "适用于该单一预登记对比；不构成对任何方向性机制的支持。",
+    "claim": "主对比区间 [−0.11525, +0.31178] 同时跨过 0 与 ±δ=0.01，increase_gt 判据未满足，science_status=INCONCLUSIVE；区间宽度（约 0.43）远超 ±δ，故 h_additive 的“等效”也未被该区间支持。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/contrasts/0/lower",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/contrasts/0/upper",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/contrasts/0/status",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ]
+   }
+  ],
+  "limitations": [
+   {
+    "consequence": "不能说任一条假设被证实或证伪；h_additive 的“±δ 内等效”仍只是未检验的预测。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/contrasts/0",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "两条预登记假设（h_interaction、h_additive）指向同一对比 component_single_factor，分析只输出一个双侧 95% CI，没有针对 δ 的等价性（TOST 型）检验，也没有对 h_interaction 的方向性单侧判据做专门校准。"
+   },
+   {
+    "consequence": "0.1027 与其区间不应被读作典型块的效应量；符号与宽度都依赖少数 block。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/threshold_counts/0",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     },
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/contrasts/0/block_effects",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "块效应为双峰重尾（26/5/1 的三分计数），n_blocks=32，均值与基于 t 的区间对重尾与少量极端块不稳健。"
+   },
+   {
+    "consequence": "不能声称替代解释已被排除，任何阳性方向的解释都只能保持在假设层面。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/summaries",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "无阴性对照（negative_control=null），缺少可用于剔除系统性伪影或负向偏移的等效参照。"
+   },
+   {
+    "consequence": "估计量只能声明为“该工况混合下的等权均值”，不能解释为纯净的 Tc×惯量机制量。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/phase_comparability",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "nuisance target_freq_hz 由宿主在 0.2–2.0 Hz 变动，块内同频但块间未分层/未配对，与 Tc×惯量效应无法分离。"
+   },
+   {
+    "consequence": "结论不可通过合并探索结果加强，也不能宣称对 registered_distribution 之外总体成立。",
+    "evidence_refs": [
+     {
+      "file": "analysis/output.json",
+      "kind": "json_pointer",
+      "pointer": "/diagnostics/phase_comparability",
+      "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+     }
+    ],
+    "statement": "探索与确认的估计对象不同（different_target），确认样本仅为一次 32 block 宿主抽样。"
+   }
+  ],
+  "methods_and_assignment_responsibility": {
+   "assignment_responsibility": "target_freq_hz∈[0.2,2.0] Hz 的块间分配由宿主负责（nuisance_owner=host，块内同频）；本报告只解释给定分配与给定分析，不对抽样机制或未观测工况负责。",
+   "design": "4 条件（s_low/s_high: tc_s=0.008；l_low/l_high: tc_s=0.032；惯量比 0.5/2.0，PD controller，dt_s=0.001，kp=5，kd=0.1，amplitude 0.2 rad）× 32 宿主 block，共 128 run，unique_design_count=128。",
+   "estimand": "按 block 计算的 Tc 效应（l_high vs l_low 的差中差）在惯量水平上的对比，等权 mean 聚合，coverage=observed_blocks，censoring_rule=非有限/缺失 block 记 dropped 不补值（实际 dropped=0）。",
+   "interval": "95% 双侧区间，无多重比较校正（仅 1 个必需对比）。",
+   "negative_control": "无（negative_control=null）。"
+  },
+  "next_steps": [
+   {
+    "discriminating_experiment": "用已登记的 32 block 数据做预登记的分频带亚组对比（按 block 的 target_freq_hz 二分，比较两亚组的 tc_x_inertia 均值与区间，不做数据驱动的分组搜索）。",
+    "possible_outcomes": [
+     "两个亚组均值得符号相反且区间不重叠：说明主对比均值是频率混杂的加权产物，Tc×惯量不宜以单一均值报告。",
+     "两亚组同向且量级接近、合并区间仍跨 0：频率不是异质性来源，需转向实现级伪影解释。",
+     "亚组样本过小导致区间极宽：该问题在现有 32 block 上不可判定，必须新抽样。"
+    ],
+    "unresolved_question": "双峰块效应是否由 nuisance target_freq_hz（0.2 Hz vs 2.0 Hz）分层解释——即极端正/负 block 是否集中在某一频带？"
+   },
+   {
+    "discriminating_experiment": "以独立随机种子再抽一批 ≥32 个宿主 block（同 4 条件、同频率支持、同 δ 与区间水平），预登记 primary 仍为 tc_x_inertia 等权 mean，并同时报告剔除极端块的稳健化敏感性分析。",
+    "possible_outcomes": [
+     "新样本 95% 区间整体高于 δ：increase_gt 得到支持，且可评估稳健化估计是否同向。",
+     "新样本 95% 区间整体落在 ±δ 内：转向支持 h_additive（等效）。",
+     "新样本仍跨 0 且宽度未收窄：结论维持 INCONCLUSIVE，需要更多独立单元而非更多重复 run。"
+    ],
+    "unresolved_question": "0.1027 的均值及其跨 0/跨 δ 的 INCONCLUSIVE 状态是否为单次宿主抽样的偶然结果（对极端 block 的敏感性）？"
+   },
+   {
+    "discriminating_experiment": "在下一确认批次中登记一个阴性对照条件（例如 tc_s 与惯量在预期上无差异的占位对比或零效应 sham 设置），并对同一对比预登记 TOST 等价性检验（margin=δ=0.01，95%）。",
+    "possible_outcomes": [
+     "阴性对照对比的区间完全落在 ±δ 内：系统偏移可被排除，主对比的推断可信度上升。",
+     "阴性对照也出现 |effect|>δ：说明实现或工况层面存在偏移，主对比需重新归因。",
+     "TOST 拒绝等效且方向区间排除 0：h_interaction 获得支持，h_additive 被否证。"
+    ],
+    "unresolved_question": "是否存在可用于排除系统性偏移/实现伪影的阴性对照，以及 h_additive 的 ±δ 等效能否被正式检验？"
+   }
+  ],
+  "primary_results": [
+   {
+    "analysis_receipt_sha": "b4f8d63380f456005ce0db9a40d254427c9f33938420fc804539237ae7e405ff",
+    "contrast_id": "component_single_factor",
+    "result_locator": {
+     "file": "analysis/output.json",
+     "kind": "json_pointer",
+     "pointer": "/contrasts/0/estimate",
+     "sha256": "828d848ab5eb5656ce2a4273f0bb8f8146842eed0149c9fe245e85e3583cab46"
+    }
+   }
+  ],
+  "question_and_hypotheses": {
+   "hypotheses": [
+    {
+     "contrast_id": "component_single_factor",
+     "falsification": "95% 主区间完全落在 ±δ 之外（且方向为 increase_gt）",
+     "id": "h_interaction",
+     "mechanism": "Tc 效应随惯量比改变：Tc 增大对高惯量的归一化 RMSE 惩罚与低惯量不同，差值不为 δ 可忽略级",
+     "verdict": "NOT_SUPPORTED_BY_GIVEN_EVIDENCE（INCONCLUSIVE）"
+    },
+    {
+     "contrast_id": "component_single_factor",
+     "falsification": "交互对比的 95% 区间完全落在 ±δ 之外",
+     "id": "h_additive",
+     "mechanism": "Tc 与惯量的效应可加，Tc 效应在两个惯量水平相同（差值在 ±δ 内）",
+     "verdict": "NOT_SUPPORTED_BY_GIVEN_EVIDENCE（区间远宽于 ±δ，且未做等价性检验）"
+    }
+   ],
+   "research_question": "在 B_sampling_integration 的给定确认设计下，tc_x_inertia（difference-in-differences，metric=normalized_tracking_rmse，proposition=increase_gt，delta=0.01）是否成立？",
+   "unit": "block_id（独立单元）；每 block 4 次 run"
+  },
+  "schema": "simpraxis.rsi_r13.research_report.v1",
+  "schema_version": 1,
+  "task_id": "r13-b-tc-inertia-interaction"
+ },
+ "response_id": "rv-suffix_B-002-6a4606c9827c",
+ "source": "rv9-20261116T180442Z seq142 (real model reply, B case)"
+}

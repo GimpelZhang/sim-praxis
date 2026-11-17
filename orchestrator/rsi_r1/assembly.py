@@ -553,7 +553,9 @@ class CampaignDispatcher:
                  claim_producer: str = S.PRODUCER_CANDIDATE,
                  artifact_reader: "Callable[..., dict[str, Any]] | None" = None,
                  report_representation: str = "strict",
-                 submit_gate: "Callable[[], list[str]] | None" = None) -> None:
+                 submit_gate: "Callable[[], list[str]] | None" = None,
+                 precommit: "Callable[[Any, Any], list[str]] | None" = None
+                 ) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
@@ -614,6 +616,10 @@ class CampaignDispatcher:
         self.report_representation = report_representation
         # RV-07：提交前必须完成的预登记读取（缺件 ⇒ 可恢复的结构拒绝）。
         self.submit_gate = submit_gate
+        # RSI-R1-RV（Plan §3.2）：提交报告的**结构与类型**预检，必须在写 claim/
+        # 推进终态之前执行；不通过 ⇒ side_effect=NONE、同 lane 可自修。
+        # 默认 None ⇒ 旧路径逐字节不变。
+        self.precommit = precommit
         if self.g2:
             if scope_contract is None:
                 raise AssemblyError("POLICY_BINDING_MISSING",
@@ -1756,6 +1762,14 @@ class CampaignDispatcher:
             return self._fail("REPORT_MISSING",
                               "R1.3 提交必须携带 research_report",
                               side_effect_status="NONE")
+        if self.precommit is not None:
+            precommit_problems = list(self.precommit(report_doc, claims) or [])
+            if precommit_problems:
+                # 结构/类型/ID 错误：尚未写 claim、未推进终态，可恢复。
+                return self._fail(
+                    "REPORT_PRECOMMIT_INVALID",
+                    "; ".join(precommit_problems[:8]),
+                    side_effect_status="NONE")
         plan = self._current_plan(phase="confirm")
         manifest = self.confirm_manifest or self._frozen_manifest_raw()
         if manifest is None:
