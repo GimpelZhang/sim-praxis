@@ -168,10 +168,14 @@ CLOSURE_GROUPS_R13: "dict[str, tuple[str, ...]]" = {
     ),
 }
 
+#: 2026-11-17 R1-N：复用 R1.3 的闭包分组（同一仪器面；旧键逐字节不变）。
+CLOSURE_GROUPS_R1N: "dict[str, tuple[str, ...]]" = dict(CLOSURE_GROUPS_R13)
+
 CLOSURE_GROUPS_BY_KEY: "dict[str, dict[str, tuple[str, ...]]]" = {
     "legacy": CLOSURE_GROUPS,
     "r12": CLOSURE_GROUPS_R12,
     "r13": CLOSURE_GROUPS_R13,
+    "r1n": CLOSURE_GROUPS_R1N,
 }
 
 
@@ -468,10 +472,23 @@ def verify_paid_validation_binding(ctx: Any, doc: Mapping[str, Any], *,
                         "付费 LOCK 缺 validation_binding（T6 冻结须绑定 T5 报告与三签）")
     if binding.get("schema") != PAID_BINDING_SCHEMA:
         raise LockError("PAID_BINDING_SCHEMA", repr(binding.get("schema")))
-    family = Path(_RP.rsi_r12_root()).resolve(strict=False)
     rel_root = str(binding.get("validation_root") or "")
-    t5_root = (family / rel_root).resolve(strict=False) if rel_root else family
-    if not rel_root or t5_root == family or family not in t5_root.parents:
+    # 2026-11-17 R1-N：验证族有自己的根（同 profile 一活动成员约束）；
+    # 旧 profile 仍只认 rsi_r12 家族根。
+    profile_id = ""
+    try:
+        profile_id = str((ctx.read_json("contract/envelope.json") or {}).get(
+            "profile_id") or "")
+    except Exception:  # noqa: BLE001 —— 读不到即按旧口径
+        profile_id = ""
+    if profile_id == "rsi-r1-n":
+        families = [Path(_RP.rsi_r1n_root()).resolve(strict=False),
+                    Path(_RP.rsi_r1n_val_root()).resolve(strict=False)]
+    else:
+        families = [Path(_RP.rsi_r12_root()).resolve(strict=False)]
+    t5_root = (Path(rel_root).resolve(strict=False) if rel_root else families[0])
+    if not rel_root or any(t5_root == f for f in families) or not any(
+            f in t5_root.parents for f in families):
         raise LockError("PAID_BINDING_ROOT",
                         f"validation_root={rel_root!r} 不在家族根之内")
     if t5_root == Path(ctx.root).resolve(strict=False):
@@ -660,13 +677,14 @@ def freeze_lock(ctx: Any, *, repo_root: "Path | str | None" = None,
             "roles": list(VALIDATION_ROLES),
             "report_relpath": VALIDATION_REPORT_RELPATH,
         }
-    elif str(envelope.get("profile_id") or "") == _P.PROFILE_R13:
-        # R1.3 付费 LOCK 必须单向绑定 T5 validation LOCK 与 T5 报告（Plan §7）：
+    elif str(envelope.get("profile_id") or "") in (_P.PROFILE_R13,
+                                                   _P.PROFILE_R1N):
+        # R1.3/R1-N 付费 LOCK 必须单向绑定 T5 validation LOCK 与 T5 报告：
         # 绑定件只引用 T5 根字节/三签，T5 报告不引用 paid LOCK（无环）。
         if not isinstance(validation_binding, Mapping) or not validation_binding:
             raise LockError(
                 "PAID_BINDING_MISSING",
-                "R1.3 付费冻结必须绑定 T5 validation LOCK（--validation-root）")
+                "付费冻结必须绑定 T5 validation LOCK（--validation-root）")
         from orchestrator.rsi_r1 import lock_r13 as _L13
         _L13.verify_binding(validation_binding)
         doc["validation_binding"] = dict(validation_binding)

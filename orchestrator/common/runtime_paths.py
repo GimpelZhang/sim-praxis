@@ -1904,6 +1904,8 @@ def assert_rsi_rv_roots_isolated() -> None:
 
 _RSI_R1N_ROOT_ENV = "SIMPRAXIS_RSI_R1N_ROOT"
 _RSI_R1N_CAMPAIGN_ENV = "SIMPRAXIS_RSI_R1N_CAMPAIGN"
+#: T5 验证族的独立根（同 profile 一活动成员约束 ⇒ 与 paid 族分根）。
+_RSI_R1N_VAL_ROOT_ENV = "SIMPRAXIS_RSI_R1N_VAL_ROOT"
 
 
 class RsiR1NCampaignUnsetError(RuntimeError):
@@ -1938,6 +1940,14 @@ def rsi_r1n_root() -> Path:
     if root:
         return Path(root)
     return Path(DEFAULT_DATA_ROOT) / "rsi_r1_n"
+
+
+def rsi_r1n_val_root() -> Path:
+    """R1-N T5 验证族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_r1_n_val``。"""
+    root = os.environ.get(_RSI_R1N_VAL_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_r1_n_val"
 
 
 def rsi_r1n_campaign_id() -> str:

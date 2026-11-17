@@ -105,6 +105,20 @@ def _ctx(envelope: str, *, create: bool = False) -> CampaignContext:
                            protected_roots=protected)
 
 
+def _validation_ctx(value: str) -> CampaignContext:
+    """T5 验证根：接受绝对路径或 ``rsi_r1_n_val`` 下的 envelope 名。"""
+    raw = str(value)
+    if raw.startswith("/"):
+        root = Path(raw).resolve(strict=False)
+    else:
+        root = (RP.rsi_r1n_val_root() / raw).resolve(strict=False)
+    if not root.is_dir():
+        raise Cli13Error("ROOT_MISSING", str(root))
+    protected = tuple(RP.rsi_r1n_protected_write_roots().items())
+    return CampaignContext(envelope_id=root.name, root=root,
+                           protected_roots=protected)
+
+
 def _load_envelope(ctx: CampaignContext) -> dict:
     return C13.validate_envelope_v13(
         ctx.read_json("contract/envelope.json"), envelope_id=ctx.envelope_id)
@@ -476,7 +490,7 @@ def cmd_freeze(args: Any) -> int:
         raise Cli13Error("PURPOSE", "R1-N 只接受 purpose=paid")
     if not args.validation_root:
         raise Cli13Error("BINDING", "需要 --validation-root（T5 根）")
-    vctx = _ctx(str(args.validation_root))
+    vctx = _validation_ctx(str(args.validation_root))
     L13.verify_validation(vctx)
     binding = L13.build_binding(vctx)
     image = args.image or BASE_IMAGE
