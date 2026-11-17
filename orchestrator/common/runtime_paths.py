@@ -1998,6 +1998,16 @@ def rsi_r1n_gateway_state_path() -> Path:
     return rsi_r1n_gateway_state_dir() / "gateway_state.json"
 
 
+def rsi_r1n_baseline_dir() -> Path:
+    """T0 基线快照目录（家族根下 ``baseline/``；不隶属任何 campaign）。
+
+    2026-11-17 第二轮补口：``cli_r1n.cmd_t0_baseline`` 一直引用此函数但
+    首轮从未实跑（首轮的 T0 快照落在 ``runs/inventory/latest/``），
+    缺函数会让 ``t0-baseline`` 直接 AttributeError。
+    """
+    return ensure_private_dir(rsi_r1n_root() / "baseline")
+
+
 def rsi_r1n_protected_write_roots() -> "dict[str, Path]":
     """R1-N 写路径的不可写根集：封存期根 + 全部旧研究族根（含 RV）。"""
     roots = sealed_phase_roots()
