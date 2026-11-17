@@ -48,8 +48,10 @@ DEFAULT_ORACLE_V2 = Path(
     "private/calibration_private/oracle_v2.py")
 AUTHORIZATION_TEXT = (
     "用户 2026-11-17 指示：执行 ~/文档/RSI_R1-N_Plan_detailed.md；"
-    "实施期间可自行开轮修复/重预注册（除 commit author 与推送凭据安全外），"
-    "付费实跑另需用户批准（Plan 第 4 行）")
+    "实施期间可自行开轮修复/重预注册（除 commit author 与推送凭据安全外）。"
+    "同日用户选择『授权 T2 后付费执行』：T2 十面全过后，按 Plan §2.1 的 "
+    "132 POST 上限执行 T3–T8；端点按当前 env（tokenhub，与 2.8.1 快照一致）"
+    "使用，不换模型。")
 
 
 class Cli13Error(RuntimeError):
