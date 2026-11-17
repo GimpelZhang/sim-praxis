@@ -31,6 +31,26 @@ PERMIT_SCHEMA = f"{TS.P.SCHEMA_PREFIX_V13}.review_calibration_permit.v1"
 CALIB_REVIEW_SCHEMA = f"{TS.P.SCHEMA_PREFIX_V13}.calibration_review.v1"
 LANE_CAL = "review_calibration"
 LANE_FINAL = "review_final"
+
+#: RSI-R1-N 第二轮（2026-11-17 加固）声明：2907 账套每槽至多 3 次 HTTP 尝试、
+#: 单槽墙钟 300s（见公开合同 call_policy）。旧 2905 保持「恰好 1 次 / 120s」。
+#: 声明值不是隐式重试的挡箭牌：超过声明上限仍判 HIDDEN_RETRY。
+_R1N_PHASE = 2907
+_R1N_MAX_HTTP_ATTEMPTS = 3
+_R1N_SLOT_TIMEOUT_S = 300
+
+
+def _max_http_attempts(namespace: Any) -> int:
+    try:
+        phase = int(getattr(namespace, "phase", 0) or 0)
+    except (TypeError, ValueError):  # pragma: no cover - 防御
+        phase = 0
+    return _R1N_MAX_HTTP_ATTEMPTS if phase == _R1N_PHASE else 1
+
+
+def _worker_timeout_s(namespace: Any) -> int:
+    """审查 worker 子进程超时：R1-N 需容纳 3 次 300s 尝试 + 退避。"""
+    return 1000 if int(getattr(namespace, "phase", 0) or 0) == _R1N_PHASE else 300
 TASK_CAL = 4
 TASK_FINAL = 5
 
@@ -196,13 +216,17 @@ def _spawn(ctx: Any, *, packet: dict, slot: RN.ReviewSlot, lane: str,
             "--thread-id", f"rsi-r13-{lane}"]
     proc = subprocess.run(argv, cwd=str(Path(__file__).resolve().parents[2]),
                           env=_clean_env(), capture_output=True, text=True,
-                          timeout=300)
+                          timeout=_worker_timeout_s(namespace))
     if proc.returncode != 0:
         raise ReviewRunError("REVIEW_WORKER_FAILED",
                              proc.stderr[-400:] or str(proc.returncode))
     call = json.loads(out.read_text(encoding="utf-8"))
-    if call.get("attempts_http", 1) != 1:
-        raise ReviewRunError("HIDDEN_RETRY", str(call.get("attempts_http")))
+    attempts = int(call.get("attempts_http", 1) or 0)
+    declared = _max_http_attempts(namespace)
+    if attempts < 1 or attempts > declared:
+        raise ReviewRunError(
+            "HIDDEN_RETRY",
+            f"attempts_http={attempts}（本轮声明上限 {declared}）")
     request = (work / "request.bin").read_bytes()
     if _sha(request) != call.get("request_sha256"):
         raise ReviewRunError("REQUEST_DRIFT", slot.review_id)
