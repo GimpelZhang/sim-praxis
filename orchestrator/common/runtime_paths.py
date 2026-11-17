@@ -1767,3 +1767,126 @@ def assert_rsi_r13_roots_isolated() -> None:
         message=("R1.3 campaign 根必须与 Phase 1/2/2.5/2.6/2.7/2.8.1 封存根及 "
                  f"RSI-R0/R0.1/R0.2/R1/R1.2 家族根互异且互不嵌套（解析后）：campaign={campaign} "
                  f"protected={[str(p.resolve(strict=False)) for p in seals]}"))
+
+
+# ---------------------------------------------------------------------------
+# RSI-R1-RV：真实模型末段验证（2026-11-16；独立新族 + 独立账 2906）
+# ---------------------------------------------------------------------------
+#
+# Plan §5：单轮硬边界 24 POST（review_calibration 4 / suffix_A 8 / suffix_B 8 /
+# review_final 4）。族根与 rsi_g21/rsi_g2/rsi_r13/rsi_r12/rsi_r1/rsi_r0 各族根
+# 互不嵌套；旧账一律只读。campaign 由 ``SIMPRAXIS_RSI_RV_CAMPAIGN`` 选定，
+# 未设置即 fail-closed（绝不回退到别人的 campaign 账）。
+
+_RSI_RV_ROOT_ENV = "SIMPRAXIS_RSI_RV_ROOT"          # RV 家族根（campaign 父目录）
+_RSI_RV_CAMPAIGN_ENV = "SIMPRAXIS_RSI_RV_CAMPAIGN"  # RV campaign id（写路径必填）
+
+
+class RsiRvCampaignUnsetError(RuntimeError):
+    """未指定 RV campaign 就解析写路径——fail-closed。"""
+
+
+#: RV campaign 子目录（Plan §6 的产物面；quota/approvals 嵌套在 quota 下）。
+RSI_RV_CAMPAIGN_SUBDIRS: "tuple[str, ...]" = (
+    "manifest",       # source-map / RVSourceManifestV1 / source closure
+    "contract",       # prereg / permits / public allowlist / closures / tokenizer
+    "public",         # 候选可见公开包（A/B 分目录）
+    "private",        # 维护侧私有件（checker / expected；候选不可挂载）
+    "requests",       # 发网前 Request 原字节与 intent 日志
+    "replies",        # 原始回复字节与 response id 绑定
+    "actions",        # 解析后的动作规范件
+    "worker",         # 实际受限 worker 的逐页证据与隔离报告
+    "submit",         # 模型报告 / claim / 五面 sha / lineage
+    "review",         # 审查包、审查回复、收据、合并判决、校准
+    "studies",        # A/B 两个 study 的导入状态与运行报告
+    "ledger",         # 本轮只读镜像（权威账在 quota/）
+    "quota",          # 本 RV 独立账（2906）
+    "quota/approvals",  # 批次批准件
+    "quota/gateway_state",  # 本命名空间熔断件
+    "evidence",       # closeout 汇总证据
+    "closeout",       # 结案件
+)
+
+
+def rsi_rv_root() -> Path:
+    """RV 家族根：显式 env 优先；否则 ``$DATA_ROOT/rsi_r1_rv``。"""
+    root = os.environ.get(_RSI_RV_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_r1_rv"
+
+
+def rsi_rv_campaign_id() -> str:
+    campaign = os.environ.get(_RSI_RV_CAMPAIGN_ENV)
+    if not campaign:
+        raise RsiRvCampaignUnsetError(
+            f"{_RSI_RV_CAMPAIGN_ENV} 未设置：RV 写路径必须显式绑定 campaign")
+    _validate_campaign_id(campaign, error_cls=RsiRvCampaignUnsetError,
+                          label="RV")
+    return campaign
+
+
+def rsi_rv_campaign_root() -> Path:
+    return rsi_rv_root() / rsi_rv_campaign_id()
+
+
+def _rv_dir(name: str) -> Path:
+    if name not in RSI_RV_CAMPAIGN_SUBDIRS:
+        raise ValueError(f"未知 RV 子目录：{name!r}")
+    return ensure_private_dir(rsi_rv_campaign_root() / name)
+
+
+def rsi_rv_subdir(name: str) -> Path:
+    return _rv_dir(name)
+
+
+def rsi_rv_quota_dir() -> Path:
+    return _rv_dir("quota")
+
+
+def rsi_rv_ledger_path() -> Path:
+    return rsi_rv_quota_dir() / "ledger.jsonl"
+
+
+def rsi_rv_counters_path() -> Path:
+    return rsi_rv_quota_dir() / "counters.json"
+
+
+def rsi_rv_approvals_dir() -> Path:
+    return _rv_dir("quota/approvals")
+
+
+def rsi_rv_gateway_state_dir() -> Path:
+    return _rv_dir("quota/gateway_state")
+
+
+def rsi_rv_gateway_state_path() -> Path:
+    return rsi_rv_gateway_state_dir() / "gateway_state.json"
+
+
+def rsi_rv_protected_write_roots() -> "dict[str, Path]":
+    """RV 写路径的不可写根集：六份封存期根 + 旧研究族根 + G1/G2/G2.1 诊断族。"""
+    roots = sealed_phase_roots()
+    roots["rsi_r0"] = rsi_r0_root()
+    roots["rsi_r01"] = rsi_r01_root()
+    roots["rsi_r02"] = rsi_r02_root()
+    roots["rsi_r1"] = rsi_r1_root()
+    roots["rsi_r12"] = rsi_r12_root()
+    roots["rsi_r13"] = rsi_r13_root()
+    roots["rsi_g1"] = rsi_g1_root()
+    roots["rsi_g2"] = rsi_g2_root()
+    roots["rsi_g21"] = rsi_g21_root()
+    return roots
+
+
+def assert_rsi_rv_roots_isolated() -> None:
+    """RV campaign 根与所有旧族根两两互异且互不嵌套（写前 fail-fast）。"""
+    campaign = rsi_rv_campaign_root().resolve(strict=False)
+    protected = rsi_rv_protected_write_roots()
+    seals = tuple(protected.values())
+    _assert_roots_isolated(
+        rsi_rv_campaign_root(), seals,
+        label=_RSI_RV_CAMPAIGN_ENV,
+        message=("RV campaign 根必须与封存期根及 RSI-R0/R0.1/R0.2/R1/R1.2/R1.3/"
+                 f"G1/G2/G2.1 族根互异且互不嵌套（解析后）：campaign={campaign} "
+                 f"protected={[str(p.resolve(strict=False)) for p in seals]}"))

@@ -550,7 +550,10 @@ class CampaignDispatcher:
                  delivery_policy: str = RT.POLICY_LEGACY,
                  scope_contract: "G2.ScopeContractV1 | None" = None,
                  require_task_contrasts: bool = False,
-                 claim_producer: str = S.PRODUCER_CANDIDATE) -> None:
+                 claim_producer: str = S.PRODUCER_CANDIDATE,
+                 artifact_reader: "Callable[..., dict[str, Any]] | None" = None,
+                 report_representation: str = "strict",
+                 submit_gate: "Callable[[], list[str]] | None" = None) -> None:
         if study not in S.STUDIES:
             raise AssemblyError("STUDY_UNKNOWN", repr(study))
         # RSI-R1.2 接缝（T1）：传 profile rsi-r1.2 时必须同时给 campaign 级资源账；
@@ -599,6 +602,18 @@ class CampaignDispatcher:
         self.require_task_contrasts = bool(require_task_contrasts)
         # G2.1：脚本消费者提交的 claim 必须据实标 producer（默认仍 candidate）。
         self.claim_producer = str(claim_producer or S.PRODUCER_CANDIDATE)
+        # RSI-R1-RV（Plan §6 assembly.py 行）：read 动作可注入实际 worker reader，
+        # 默认 None ⇒ 旧 host 读取路径逐字节不变；RV 强制使用受限容器 reader，
+        # 不接受默默回落。``report_representation`` 同理：默认 strict 保留
+        # 「report_text 必须等于确定性 render」；RV 用 model_text（模型正文即正本，
+        # 不要求它复算宿主 render 排版）。
+        self.artifact_reader = artifact_reader
+        if report_representation not in ("strict", "model_text"):
+            raise AssemblyError("REPRESENTATION_UNKNOWN",
+                                repr(report_representation))
+        self.report_representation = report_representation
+        # RV-07：提交前必须完成的预登记读取（缺件 ⇒ 可恢复的结构拒绝）。
+        self.submit_gate = submit_gate
         if self.g2:
             if scope_contract is None:
                 raise AssemblyError("POLICY_BINDING_MISSING",
@@ -1623,12 +1638,21 @@ class CampaignDispatcher:
         for block in sorted(blocks):
             table["blocks"].append({"block_id": block,
                                     "values": blocks[block]})
-        return {
+        evidence = {
             "analysis/output.json": output_bytes,
             "analysis/receipt.json": receipt_bytes,
             "confirm/blocks.json": (json.dumps(table, sort_keys=True,
                                                ensure_ascii=False) + "\n").encode(),
         }
+        # RSI-R1-RV：envelope 已登记并发布的逐 block/分配/探索对比公开件，必须
+        # 同时进入判据 evidence 映射，否则模型对公开证据的合法引用会被判
+        # LOCATOR_UNRESOLVED（2026-11-16 轮 6 A 案实测）。
+        for _name in ("raw_block_values.json", "block_effects.json",
+                      "assignments.json", "explore_comparison.json"):
+            _rel = f"analysis/{self.study}/{_name}"
+            if self.ctx.exists(_rel):
+                evidence[f"analysis/{_name}"] = self.ctx.relative(_rel).read_bytes()
+        return evidence
 
     def _g2_confirm_payload(self, run_ids: "list[str]", result_sha: str,
                             plan: C.ResearchPlan, output: Mapping[str, Any],
@@ -1701,13 +1725,23 @@ class CampaignDispatcher:
                               side_effect_status="NONE")
         registry = G2.ArtifactRegistry(registry_doc.get("artifacts") or [])
         try:
-            page = G2.read_page(
-                registry=registry,
-                read_bytes=lambda rel: self.ctx.relative(rel).read_bytes(),
-                artifact_id=str(action.doc["artifact_id"]),
-                output_sha256=str(action.doc["output_sha256"]),
-                cursor=int(action.doc["cursor"]),
-                page_bytes=int(action.doc["page_bytes"]))
+            if self.artifact_reader is not None:
+                # RV：实际受限 worker 完成页读取；broker 只验证与记录，
+                # 不在宿主重读后替换 worker 返回（Plan §6.1）。
+                page = self.artifact_reader(
+                    registry=registry,
+                    artifact_id=str(action.doc["artifact_id"]),
+                    output_sha256=str(action.doc["output_sha256"]),
+                    cursor=int(action.doc["cursor"]),
+                    page_bytes=int(action.doc["page_bytes"]))
+            else:
+                page = G2.read_page(
+                    registry=registry,
+                    read_bytes=lambda rel: self.ctx.relative(rel).read_bytes(),
+                    artifact_id=str(action.doc["artifact_id"]),
+                    output_sha256=str(action.doc["output_sha256"]),
+                    cursor=int(action.doc["cursor"]),
+                    page_bytes=int(action.doc["page_bytes"]))
         except G2.G2Error as exc:
             return self._fail(exc.code, exc.detail, side_effect_status="NONE")
         return self._ok(**page)
@@ -1810,6 +1844,13 @@ class CampaignDispatcher:
             origin = {"producer": "candidate",
                       "reply_sha256": _sha_doc(action.to_doc()),
                       "assisted": False}
+        if self.submit_gate is not None:
+            missing_reads = list(self.submit_gate() or [])
+            if missing_reads:
+                return self._fail(
+                    "MANDATORY_READ_MISSING",
+                    f"提交前必须完整读取 {missing_reads}（page 到 next_cursor=null）",
+                    side_effect_status="NONE")
         report = JV.judge_study_v13(
             task=self.task, plan=plan, manifest=manifest,
             artifacts=self._confirm_artifacts(),
@@ -1822,7 +1863,11 @@ class CampaignDispatcher:
             evidence_files=evidence,
             design_counts=self.r13_design_counts,
             # G2 严格面：报告正文必须与确定性 render 逐字相等（旧路径不传）。
-            report_text=report_text if self.g2 else None)
+            # RV（model_text）：模型正文即正本，不再要求它复算宿主排版；
+            # report_doc 的结构/引用/数值仍由同一 judge 校验。
+            report_text=(report_text
+                         if self.g2 and self.report_representation == "strict"
+                         else None))
         self.state.submit_claim(study=self.study, claims=claims,
                                 report_text=report_text,
                                 response_id=response_id,

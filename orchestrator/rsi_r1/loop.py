@@ -825,7 +825,11 @@ class ResearchLoop:
                  dispatcher: Dispatcher, store: Store, messages: Callable[..., T.Request],
                  counter: Callable[[str], int], admission: Admission, budget: Budget,
                  envelope: Any, root_lock: Any, spend_contract: Any,
-                 phase: str = "explore", capture: "Any | None" = None):
+                 phase: str = "explore", capture: "Any | None" = None,
+                 retry_policy: str = "retry"):
+        if retry_policy not in ("retry", "none"):
+            raise LoopError("RETRY_POLICY_UNKNOWN", repr(retry_policy),
+                            terminal=True)
         self.sender = sender
         self.parser = parser
         self.dispatcher = dispatcher
@@ -838,6 +842,9 @@ class ResearchLoop:
         self.root_lock = root_lock
         self.spend_contract = spend_contract
         self.phase = phase
+        # RSI-R1-RV（Plan §6 loop.py 行）：显式 ``retry_policy=none`` 覆盖本层
+        # 空答重发；默认 ``retry`` ⇒ 旧路径逐字节不变。
+        self.retry_policy = retry_policy
         # RSI-G1（Plan §3 G1）：可选**旁路捕获**。缺省 None ⇒ 生产路径逐字节不变；
         # 捕获器只在四个边界记录事实，不改请求/结果对象。
         self.capture = capture
@@ -889,7 +896,7 @@ class ResearchLoop:
                 # 空回答零内容、零副作用：该次预留已占槽（账本已有 ok=false 行），
                 # **不能**调 resolve_or_pause（非可动作回复会写暂停件，把重发挡在
                 # 准入外——2026-11-13 轮 I 实测 PAUSED）。直接原样重发一次。
-                if attempt >= 2:
+                if self.retry_policy == "none" or attempt >= 2:
                     self.budget.resolve_or_pause(
                         Reply(text="", response_id="", is_actionable=False,
                               reason="EmptyResponseError"))
