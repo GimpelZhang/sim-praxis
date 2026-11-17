@@ -91,6 +91,9 @@ class GatewayTransport:
     stage: str = DEFAULT_STAGE
     temperature: float = DEFAULT_TEMPERATURE
     timeout: int = DEFAULT_TIMEOUT_S
+    #: 本轮声明的**每槽 HTTP 尝试上限**。旧轮一律 1（无重试）；RSI-R1-N
+    #: 2026-11-17 加固后为 3（1 次首发 + 2 次传输类重试，逐次落 retry 审计件）。
+    expected_attempts: int = 1
     _n: int = field(default=0, init=False)
     calls: "list[dict[str, Any]]" = field(default_factory=list, init=False)
 
@@ -98,10 +101,11 @@ class GatewayTransport:
         if self.lane not in LANES.LANE_TASK_ID:
             raise TransportError("LANE_UNKNOWN", repr(self.lane))
         attempts = getattr(self.gateway, "max_attempts", None)
-        if int(attempts or 0) != 1:
+        if int(attempts or 0) != int(self.expected_attempts):
             raise TransportError(
                 "HIDDEN_RETRY",
-                f"ModelGateway 必须以 max_attempts=1 构造，实为 {attempts!r}")
+                f"ModelGateway 必须以 max_attempts={self.expected_attempts} 构造"
+                f"（本轮声明的每槽 HTTP 尝试上限），实为 {attempts!r}")
         if not str(self.batch_id).strip():
             raise TransportError("BATCH_MISSING", "batch_id 不得为空")
         billing = getattr(self.gateway, "_billing", None)
@@ -154,9 +158,18 @@ class GatewayTransport:
 
 
 def build_gateway(*, ledger: Any, pause_state_path: Any = None,
-                  stage_models_path: Any = None, stage: str = DEFAULT_STAGE
-                  ) -> Any:
-    """生产网关：``max_attempts=1`` + R1 账本 + 本命名空间熔断件。"""
+                  stage_models_path: Any = None, stage: str = DEFAULT_STAGE,
+                  max_attempts: int = 1,
+                  retry_log_path: Any = None,
+                  retry_budget: int = 30,
+                  retry_on_empty: bool = True) -> Any:
+    """生产网关：``max_attempts``（缺省 1） + R1 账本 + 本命名空间熔断件。
+
+    2026-11-17 RSI-R1-N 加固：缺省仍是旧行为（``max_attempts=1`` 且不写
+    retry 件）；R1-N campaign 传 ``max_attempts=3, retry_on_empty=False``，
+    传输类错误的重试由 gateway 逐次写入 ``retry_log_path`` 并受
+    ``retry_budget`` 轮级预算约束（见 ``ModelGateway._record_transport_retry``）。
+    """
     from orchestrator.gateway.router import ModelGateway
 
     # ``ledger=`` 必须以**具名关键字**出现：G-13 的 AST 红线扫描
@@ -167,7 +180,10 @@ def build_gateway(*, ledger: Any, pause_state_path: Any = None,
         optional["pause_state_path"] = pause_state_path
     if stage_models_path is not None:
         optional["stage_models_path"] = stage_models_path
-    gateway = ModelGateway(max_attempts=1, ledger=ledger, **optional)
+    gateway = ModelGateway(max_attempts=max_attempts, ledger=ledger,
+                           retry_log_path=retry_log_path,
+                           retry_budget=retry_budget,
+                           retry_on_empty=retry_on_empty, **optional)
     if gateway.model_id(stage) is None:
         raise TransportError("STAGE_UNRESOLVED",
                              f"stage={stage} 的 model_id 为 null（未实证）")
@@ -176,11 +192,15 @@ def build_gateway(*, ledger: Any, pause_state_path: Any = None,
 
 def build_transport(*, gateway: Any, lane: str, batch_id: str,
                     thread_id: str = "", env: "Mapping[str, str] | None" = None,
-                    stage: str = DEFAULT_STAGE) -> GatewayTransport:
+                    stage: str = DEFAULT_STAGE,
+                    timeout: int = DEFAULT_TIMEOUT_S,
+                    expected_attempts: int = 1) -> GatewayTransport:
     """付费传输的构造点：先过环境闸，再装配。"""
     require_paid_env(env)
     return GatewayTransport(gateway=gateway, lane=lane, batch_id=batch_id,
-                            thread_id=thread_id, stage=stage)
+                            thread_id=thread_id, stage=stage,
+                            timeout=timeout,
+                            expected_attempts=expected_attempts)
 
 
 def null_transport(request: T.Request) -> L.Reply:  # pragma: no cover - 防御性

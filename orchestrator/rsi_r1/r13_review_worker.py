@@ -49,11 +49,19 @@ def main(argv=None) -> int:
     if int(args.ledger_phase) == 2907:
         ledger = QuotaLedger.rsi_r1n()
         pause_path = RP.rsi_r1n_gateway_state_path()
+        # RSI-R1-N 传输加固（2026-11-17）：与候选链同款策略——每槽至多 3 次
+        # HTTP 尝试、只重试传输类错误、轮级重试预算 30、单槽墙钟 ≥300s。
+        gateway = ModelGateway(
+            max_attempts=3, ledger=ledger, pause_state_path=pause_path,
+            retry_log_path=RP.rsi_r1n_campaign_root() / "quota" / "retries.jsonl",
+            retry_budget=30, retry_on_empty=False)
+        timeout = max(int(args.timeout), 300)
     else:
         ledger = QuotaLedger.rsi_r13()
         pause_path = RP.rsi_r13_gateway_state_path()
-    gateway = ModelGateway(
-        max_attempts=1, ledger=ledger, pause_state_path=pause_path)
+        gateway = ModelGateway(
+            max_attempts=1, ledger=ledger, pause_state_path=pause_path)
+        timeout = int(args.timeout)
     capture: "dict[str, object]" = {}
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     messages = [{"role": "system", "content": system},
@@ -62,7 +70,7 @@ def main(argv=None) -> int:
                          thread_id=args.thread_id):
         text, tokens = gateway.call(
             STAGE, messages, max_tokens=int(P.RSI_R13_OUTPUT_TOKENS),
-            temperature=0.2, timeout=int(args.timeout), capture=capture)
+            temperature=0.2, timeout=timeout, capture=capture)
     ended = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     result = {
         "schema": "simpraxis.rsi_r13.review_call.v1", "schema_version": 1,

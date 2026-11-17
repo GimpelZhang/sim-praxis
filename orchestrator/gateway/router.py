@@ -687,13 +687,31 @@ class ModelGateway:
                  transport: Callable[..., Any] | None = None,
                  raw_transport: Callable[..., Any] | None = None,
                  ledger: Any = None, *, unguarded: bool = False,
-                 pause_state_path: "Path | None" = None):
+                 pause_state_path: "Path | None" = None,
+                 retry_log_path: "Path | str | None" = None,
+                 retry_budget: int = 30,
+                 retry_on_empty: bool = True):
         self.stage_models_path = Path(stage_models_path)
         self.max_attempts = max_attempts
         self.base_backoff = base_backoff
         self.max_backoff = max_backoff
         self.max_total_wait = max_total_wait
         self.quota_pause_sec = quota_pause_sec
+        # RSI-R1-N 加固（2026-11-17，用户裁决「新轮+加固」）：传输类错误的
+        # **显式**重试——每次重试逐行落 retry_log，并有轮级预算；空回答
+        # （HTTP 200 无正文）默认仍按旧语义重试，R1-N 传 retry_on_empty=False
+        # 以免把模型输出问题当成传输问题重发（不补考模型）。
+        self._retry_log_path = (Path(retry_log_path)
+                                if retry_log_path is not None else None)
+        self._retry_budget = int(retry_budget)
+        self._retry_on_empty = bool(retry_on_empty)
+        self._retry_used = 0
+        if self._retry_log_path is not None and self._retry_log_path.is_file():
+            try:
+                self._retry_used = sum(
+                    1 for _ in open(self._retry_log_path, encoding="utf-8"))
+            except OSError:
+                self._retry_used = 0
         # RSI-R0：暂停态跟随账套（缺省 None = 历史全局路径，行为不变）。
         self._pause_state_path = (Path(pause_state_path)
                                   if pause_state_path is not None else None)
@@ -850,6 +868,42 @@ class ModelGateway:
                 f"{detail}：累计退避 {wait_total + wait:.0f}s 超过等待预算 "
                 f"{self.max_total_wait:.0f}s，按重试耗尽处理（ok=false）")
 
+    def _record_transport_retry(self, stage: str, attempt: int,
+                                exc: BaseException) -> None:
+        """**显式**传输重试留痕 + 轮级预算（RSI-R1-N 加固 2026-11-17）。
+
+        只允许传输类分支调用（5xx/连接断开/超时/硬墙钟）。每次重试追加一行
+        ``quota/retries.jsonl``（schema ``simpraxis.gateway.retry.v1``），
+        便于审计「一个逻辑调用 = 最多 max_attempts 次 HTTP 尝试」；文件行数
+        就是本轮重试用量，超过 ``retry_budget`` 时立即失败（不再发网），
+        等价于把「传输重试」也纳入预算而不是无限续命。
+        """
+        self._retry_used += 1
+        line = {
+            "schema": "simpraxis.gateway.retry.v1",
+            "schema_version": 1,
+            "ts_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "stage": stage,
+            "attempt": attempt + 1,
+            "cause": type(exc).__name__,
+            "detail": _error_text(exc)[:300],
+        }
+        if self._retry_log_path is not None:
+            try:
+                ensure_private_dir(self._retry_log_path.parent)
+                with open(self._retry_log_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(line, ensure_ascii=False,
+                                        sort_keys=True) + "\n")
+                self._retry_used = sum(
+                    1 for _ in open(self._retry_log_path, encoding="utf-8"))
+            except OSError as exc2:  # noqa: BLE001 —— 审计写失败不吞真异常
+                logger.error("retry 审计写失败（不阻断）：%s", exc2)
+        if self._retry_used > self._retry_budget:
+            raise GatewayError(
+                f"RETRY_BUDGET_EXHAUSTED: 轮级传输重试预算 "
+                f"{self._retry_budget} 已用尽（stage={stage}, "
+                f"cause={type(exc).__name__}）")
+
     def call(self, stage: str, messages: list[dict[str, Any]], *,
              max_tokens: int = 512, temperature: float = 0.2,
              timeout: int = 120,
@@ -989,13 +1043,14 @@ class ModelGateway:
                 # 却被记 ok=true，账上"成功"但无答案可验收。按可重试错误处理——内部
                 # 退避重试不新增 ledger seq；耗尽抛 EmptyResponseError 由出口记一行 ok=false。
                 if not content or not content.strip():
-                    if attempt + 1 >= self.max_attempts:
+                    if (not self._retry_on_empty
+                            or attempt + 1 >= self.max_attempts):
                         choices = getattr(resp, "choices", None) or []
                         finish = (getattr(choices[0], "finish_reason", None)
                                   if choices else None)
                         usage = _litellm_usage(resp)
                         raise EmptyResponseError(
-                            f"stage={stage} 连续 {self.max_attempts} 次 HTTP 200 空回答"
+                            f"stage={stage} 连续 {attempt + 1} 次 HTTP 200 空回答"
                             f"（empty/thinking-only content；finish={finish!r}，"
                             f"tokens out={usage[1]}），按失败处理（ok=false）")
                     wait = self._retry_wait(attempt)
@@ -1059,6 +1114,8 @@ class ModelGateway:
                 if attempt + 1 >= self.max_attempts:
                     raise GatewayError(f"{type(exc).__name__} 重试 {self.max_attempts} 次仍失败："
                                        f"{_error_text(exc)}") from exc
+                # RSI-R1-N 加固：重试前先把这次重试写进审计件并过轮级预算。
+                self._record_transport_retry(stage, attempt, exc)
                 # m3：5xx/超时同样先尊重 Retry-After（响应头或错误体秒数），无头才指数退避
                 wait = self._retry_wait(attempt, exc=exc)
                 # G-6：与 429 共用同一累计 max_total_wait=300s 熔断，超限按重试耗尽
@@ -1191,6 +1248,7 @@ class ModelGateway:
                     HardDeadlineTimeout) as exc:
                 if attempt + 1 >= self.max_attempts:
                     raise GatewayError(f"连接错误重试 {self.max_attempts} 次仍失败：{exc}") from exc
+                self._record_transport_retry(stage, attempt, exc)
                 wait = self._retry_wait(attempt, exc=exc)
                 # G-6：连接/超时分支与 429 共用累计 max_total_wait=300s 熔断。
                 self._check_wait_budget(wait_total, wait,

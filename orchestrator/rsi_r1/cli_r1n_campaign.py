@@ -185,6 +185,20 @@ def cmd_init(args: Any) -> int:
         },
         "refusal_policy": {"fail_closed": True,
                            "instrument_defect": "INVALID_INSTRUMENT"},
+        # 2026-11-17 加固（用户裁决「新轮+加固」）：把传输重试策略写进公开合同，
+        # 不是隐式行为。首轮（r1n-paid-20261117a）24 POST 中 2 次传输失败，
+        # 原「每槽一次发送」规则下 132 槽几乎不可能跑完，故本轮显式登记。
+        "call_policy": {
+            "slot_timeout_s": R1N_SLOT_TIMEOUT_S,
+            "max_http_attempts_per_slot": R1N_MAX_HTTP_ATTEMPTS,
+            "retry_on": ["service_unavailable", "internal_server",
+                         "timeout", "connection", "hard_deadline"],
+            "retry_on_empty_response": False,
+            "round_retry_budget": R1N_RETRY_BUDGET,
+            "retry_audit": "quota/retries.jsonl",
+            "slot_accounting": ("一个逻辑调用=至多一行 ledger（seq 不因重试增加），"
+                                "重试次数逐行落 retry 审计件"),
+        },
         "units": {"post": "单次模型 HTTP POST；含 thinking token 的输出上限 32768"},
     }
     _write_json(ctx.relative("public/public_contract.json"), contract)
@@ -196,6 +210,7 @@ def cmd_init(args: Any) -> int:
           f"- 分析输出 schema: {contract['analysis_output']['output_schema']}\n"
           f"- 诊断 schema: {contract['analysis_output']['diagnostics_schema']}\n"
           f"- 科学: {json.dumps(contract['science'], ensure_ascii=False)}\n"
+          f"- 调用策略: {json.dumps(contract['call_policy'], ensure_ascii=False)}\n"
           f"- 家族: {json.dumps(contract['family'], ensure_ascii=False)}\n")
     atomic_write_text(ctx.relative("public/public_contract.md"), md, mode=0o600)
     atomic_write_text(ctx.relative("contract/public_contract.md"), md, mode=0o600)
@@ -565,12 +580,33 @@ def _paid(envelope: str):
     return ctx, doc, consent, lock, image, spend
 
 
-def _transport(lane: str, batch_id: str, thread_id: str):
+# ---- RSI-R1-N 传输加固（2026-11-17 用户裁决「新轮+加固」）----
+# 首轮 24 POST 中 2 次传输类失败（120s 硬墙钟 / Server disconnected），
+# 按原「每槽一次发送」规则几乎不可能跑完 132 槽。新轮显式登记：
+#   * 单槽硬墙钟 120s → 300s（两次失败都发生在 89–120s）；
+#   * 每槽最多 3 次 HTTP 尝试（1 首发 + 2 传输类重试），只对 5xx/断连/
+#     超时/硬墙钟重试；空回答不重试（不补考模型）；
+#   * 每次重试写 quota/retries.jsonl（schema simpraxis.gateway.retry.v1），
+#     轮级预算 30 次，超限即失败，不再发网；
+#   * 逻辑槽记账不变（一个逻辑调用 = 至多一行 ledger），重试次数经
+#     Reply.attempts_http 与 retry 审计件留痕。
+R1N_SLOT_TIMEOUT_S = 300
+R1N_MAX_HTTP_ATTEMPTS = 3
+R1N_RETRY_BUDGET = 30
+
+
+def _transport(ctx: CampaignContext, lane: str, batch_id: str, thread_id: str):
     gateway = GT.build_gateway(
         ledger=QL.QuotaLedger.rsi_r1n(),
-        pause_state_path=RP.rsi_r1n_gateway_state_path())
+        pause_state_path=RP.rsi_r1n_gateway_state_path(),
+        max_attempts=R1N_MAX_HTTP_ATTEMPTS,
+        retry_log_path=ctx.relative("quota/retries.jsonl"),
+        retry_budget=R1N_RETRY_BUDGET,
+        retry_on_empty=False)
     return GT.build_transport(gateway=gateway, lane=lane, batch_id=batch_id,
-                              thread_id=thread_id, env=os.environ)
+                              thread_id=thread_id, env=os.environ,
+                              timeout=R1N_SLOT_TIMEOUT_S,
+                              expected_attempts=R1N_MAX_HTTP_ATTEMPTS)
 
 
 def _record_family(ctx: CampaignContext) -> None:
@@ -596,7 +632,7 @@ def cmd_probe(args: Any) -> int:
     counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
     PT.ensure_approval(ctx, batch_id=batch, lane=lane, approved=12,
                        note=args.note or "", namespace=QL.RSI_R1N_NAMESPACE)
-    transport = _transport(lane, batch, f"rsi-r13-{lane}")
+    transport = _transport(ctx, lane, batch, f"rsi-r13-{lane}")
     report = PT.run_protocol(
         ctx, lane=lane, spend=spend, transport_factory=lambda: transport,
         runner=SB.DockerRunner(), image=image, batch_id=batch,
@@ -619,7 +655,7 @@ def cmd_practice(args: Any) -> int:
     counter = _tokenizer_counter(args.tokenizer, args.tokenizer_sha256)
     PT.ensure_approval(ctx, batch_id=batch, lane=lane, approved=16,
                        note=args.note or "", namespace=QL.RSI_R1N_NAMESPACE)
-    transport = _transport(lane, batch, f"rsi-r13-{lane}")
+    transport = _transport(ctx, lane, batch, f"rsi-r13-{lane}")
     report = PT.run_protocol(
         ctx, lane=lane, spend=spend, transport_factory=lambda: transport,
         runner=SB.DockerRunner(), image=image, batch_id=batch,
@@ -657,7 +693,7 @@ def cmd_study(args: Any) -> int:
     PT.ensure_approval(ctx, batch_id=batch, lane=f"study_{study}",
                        approved=48, note=args.note or "",
                        namespace=QL.RSI_R1N_NAMESPACE)
-    transport = _transport(f"study_{study}", batch, f"rsi-r1-n-study-{study}")
+    transport = _transport(ctx, f"study_{study}", batch, f"rsi-r1-n-study-{study}")
     report = STD.run_study(
         ctx, study=study, spend=spend,
         transport_factory=lambda: transport, runner=SB.DockerRunner(),
