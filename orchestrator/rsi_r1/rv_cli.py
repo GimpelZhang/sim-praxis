@@ -554,8 +554,28 @@ def _judge_report(study_ctx: RT.RVContext, study: str, plan: Any) -> dict[str, A
 # 许可
 # ---------------------------------------------------------------------------
 
+def _require_recovery_approval(root: Path) -> None:
+    """若本轮带 recovery 预注册，执行前必须有人工批准件；否则拒绝付费授权。"""
+    rp = root / "contract" / "recovery_prereg.json"
+    if not rp.is_file():
+        return
+    doc = RV.read_json(rp)
+    if doc.get("status") != "APPROVED":
+        raise CLIError("RECOVERY_NOT_APPROVED",
+                       "recovery 预注册仍为 PENDING_USER_APPROVAL")
+    consent_path = root / "contract" / "recovery_consent.json"
+    if not consent_path.is_file():
+        raise CLIError("RECOVERY_CONSENT_MISSING", str(consent_path))
+    consent = RV.read_json(consent_path)
+    if consent.get("approved") is not True:
+        raise CLIError("RECOVERY_NOT_APPROVED", "consent.approved != true")
+    if str(consent.get("prereg_sha256")) != RV.sha_file(rp):
+        raise CLIError("RECOVERY_CONSENT_STALE", "pre-registration sha mismatch")
+
+
 def cmd_authorize_calibration(args: argparse.Namespace) -> int:
     root = _round(args.root)
+    _require_recovery_approval(root)
     prereg = RV.verify_prereg(_prereg(root))
     closure = _closure(root)
     policy = W.WorkerPolicy()

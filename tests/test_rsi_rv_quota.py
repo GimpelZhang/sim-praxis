@@ -130,3 +130,22 @@ def test_slot_book_does_not_write_global_pause(tmp_path):
     assert not (root / "state" / "pause.json").exists()
     rows = (root / "quota" / "nonactionable.jsonl").read_text().splitlines()
     assert rows and "BUDGET_REFUSED" in rows[0]
+
+
+def test_recovery_prereg_requires_consent_before_paid_authorization(tmp_path):
+    from tests.fixtures import rv_synthetic as RS
+    from orchestrator.rsi_r1 import rv_cli as CLI
+    root = RS.build_initialized_root(tmp_path)
+    RV.write_json_private(root / "contract" / "recovery_prereg.json", {
+        "status": "PENDING_USER_APPROVAL", "posts_sent": 0})
+    assert CLI.main(["authorize-calibration", "--root", str(root)]) == 2
+    assert not (root / "contract" / "permit_calibration.json").exists()
+    # 人工批准：status=APPROVED + 绑定预注册 sha 的同意件
+    doc = RV.read_json(root / "contract" / "recovery_prereg.json")
+    doc["status"] = "APPROVED"
+    RV.write_json_private(root / "contract" / "recovery_prereg.json", doc)
+    assert CLI.main(["authorize-calibration", "--root", str(root)]) == 2
+    RV.write_json_private(root / "contract" / "recovery_consent.json", {
+        "approved": True, "approver": "user",
+        "prereg_sha256": RV.sha_file(root / "contract" / "recovery_prereg.json")})
+    assert CLI.main(["authorize-calibration", "--root", str(root)]) == 0
