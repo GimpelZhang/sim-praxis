@@ -89,8 +89,13 @@ def check_probe(root: Path) -> None:
         rows = []
         try:
             for line in ledger_path.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    rows.append(json.loads(line))
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    PROBLEMS.append(f"账本行不是对象：{line[:80]!r}")
+                    continue
+                rows.append(row)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             PROBLEMS.append(f"账本存在不可解析行：{exc}")
         calls = [row for row in rows
