@@ -44,9 +44,9 @@ mkdir -p "$STAGE/kb" "$STAGE/data"
 ln -s "$(cd "$BUNDLE" && pwd)/tables" "$STAGE/data/lancedb"
 ln -s "$(cd "$BUNDLE" && pwd)/content/knowledge" "$STAGE/kb/knowledge"
 ln -s "$(cd "$BUNDLE" && pwd)/content/solutions" "$STAGE/kb/solutions"
-ln -s "$STAGE/data" "$STAGE/kb/data"
 mv -T "$STAGE" "$TARGET"
 trap - EXIT
+ln -s "$TARGET/data" "$TARGET/kb/data"  # 指向最终路径（不是临时目录）
 
 echo "[bootstrap] 3/4 环境注入 -> $TARGET/env.sh"
 cat > "$TARGET/env.sh" <<EOF
@@ -78,6 +78,8 @@ for table, meta in manifest["tables"].items():
             raise SystemExit(f"[bootstrap FAIL] {table} 维度 {dim} != {meta['vector_dim']}")
 print(f"[bootstrap] 表对账 OK：{len(manifest['tables'])} 表")
 PYEOF
+
+test -e "$TARGET/kb/data/lancedb" || { echo "[bootstrap FAIL] kb/data 软链悬空" >&2; exit 2; }
 
 if [[ -n "$KB_ROOT_LIVE" ]]; then
   echo "[bootstrap] 内容层分层校验（check_solutions --kb-root $KB_ROOT_LIVE）"

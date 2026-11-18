@@ -118,7 +118,9 @@ def test_touchpoint_budget_is_enforced_per_run(tmp_path):
     stage = outcome["stages"]["s1"]
     assert stage["status"] == "human_failure"
     assert stage["code"] == "TOUCHPOINT_BUDGET_EXCEEDED"
-    # 预算按 run 重置：第二次打回场景在新 run 里仍放行（不是全局累计耗尽）
-    driver2 = _driver(tmp_path / "second", gate2=GateScript([reject("意见")]))
-    outcome2 = driver2.run_campaign({"goal": "A_N"}, {"s1": spec()})
-    assert outcome2["stages"]["s1"]["status"] == "done"
+    # 预算按 run 重置：同一个 driver 上第二次 run_stage 不应累计耗尽
+    driver3 = _driver(tmp_path / "third")
+    driver3.touchpoint_budget = 3  # 恰好等于一次 run 的触点数
+    first = driver3.run_stage("s1", spec())
+    second = driver3.run_stage("s2", spec())
+    assert first.status == "done" and second.status == "done", (first, second)

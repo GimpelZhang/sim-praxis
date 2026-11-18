@@ -22,3 +22,4 @@ orchestrator/gateway/state/
 
 # RSI-S0 起：运行期证据只落本地（/mnt 或 repo runs/），不入库
 /runs/
+/tests/_p27_ac_t0_9_probe/

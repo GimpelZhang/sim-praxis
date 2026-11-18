@@ -22,8 +22,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
 PROBLEMS: list[str] = []
 GAPS: list[str] = []
@@ -70,7 +75,13 @@ def check_probe(root: Path) -> None:
     if len(results) > 2:
         PROBLEMS.append(f"E2 小批次超过 2 呼：{len(results)}")
     # 不信任探针自述：直接重读账本复算（评审 HIGH 修复）
-    ledger_path = Path(str(e2.get("ledger_path") or ""))
+    from orchestrator.common.runtime_paths import rsi_s0_ledger_path
+
+    declared = Path(str(e2.get("ledger_path") or ""))
+    canonical = rsi_s0_ledger_path().resolve(strict=False)
+    if declared.resolve(strict=False) != canonical:
+        PROBLEMS.append(f"E2 账本路径非 2908 规范路径：{declared} != {canonical}")
+    ledger_path = declared
     if not ledger_path.is_file():
         PROBLEMS.append(f"E2 账本不可读：{ledger_path}")
     else:
@@ -82,9 +93,10 @@ def check_probe(root: Path) -> None:
                  if row.get("event") == "call" and isinstance(row.get("seq"), int)]
         seqs = [row["seq"] for row in calls]
         ts_ok = all(str(row.get("ts_iso", "")).endswith("Z") for row in calls)
-        batch = [row for row in calls if row.get("batch_id") == e2.get("batch_id")]
         new_rows = [row for row in calls
                     if row["seq"] > int(e2.get("before_seq") or 0)]
+        batch_new = [row for row in new_rows
+                     if row.get("batch_id") == e2.get("batch_id")]
         if seqs != list(range(1, len(seqs) + 1)):
             PROBLEMS.append(f"账本 seq 不连续：{seqs}")
         if not ts_ok:
@@ -93,8 +105,17 @@ def check_probe(root: Path) -> None:
             PROBLEMS.append(f"本轮新增账行 {len(new_rows)} != 逻辑调用 {len(results)}")
         if [bool(r.get("ok")) for r in new_rows] != [bool(x.get("ok")) for x in results]:
             PROBLEMS.append("本轮账行 ok 状态与调用结果不符")
-        if len(batch) != len(new_rows):
-            PROBLEMS.append(f"本批账行 {len(batch)} != 本轮新增 {len(new_rows)}")
+        if len(batch_new) != len(new_rows):
+            PROBLEMS.append(f"本轮新增中本批行 {len(batch_new)} != 全部新增 {len(new_rows)}")
+        # 批准件必须存在且覆盖本轮调用数
+        approvals = Path(str(e2.get("ledger_path"))).parent / "approvals"
+        approval = approvals / f"{e2.get('batch_id')}.json"
+        if not approval.is_file():
+            PROBLEMS.append(f"缺批次批准件：{approval}")
+        else:
+            approve_doc = json.loads(approval.read_text(encoding="utf-8"))
+            if int(approve_doc.get("approved") or 0) < len(results):
+                PROBLEMS.append("批准件次数小于本轮逻辑调用数")
         if e2.get("new_call_rows") != len(new_rows):
             PROBLEMS.append("探针自报新增行数与账本复算不符")
         if e2.get("seqs") != seqs:

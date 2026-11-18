@@ -2139,8 +2139,7 @@ def main(argv: "list[str] | None" = None) -> int:
                       if ns.phase in (LEDGER_PHASE26, LEDGER_PHASE27,
                                       LEDGER_PHASE281, LEDGER_RSI_R0,
                                       LEDGER_RSI_R01, LEDGER_RSI_R02,
-                                      LEDGER_RSI_R1, LEDGER_RSI_R12,
-                                      LEDGER_RSI_S0) else ()))
+                                      LEDGER_RSI_R1, LEDGER_RSI_R12) else ()))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:

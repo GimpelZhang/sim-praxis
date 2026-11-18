@@ -38,7 +38,12 @@ def closed_index(bundle: Path) -> dict[str, str]:
     manifest_path = bundle / "bundle_manifest.json"
     if not manifest_path.is_file():
         raise PushSurfaceError(f"缺 bundle_manifest.json：{manifest_path}")
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise PushSurfaceError(f"manifest 非法 JSON：{exc}") from exc
+    if not isinstance(manifest, dict):
+        raise PushSurfaceError("manifest 顶层必须是 JSON 对象")
     closed = manifest.get("closed_tiers")
     if not isinstance(closed, dict):
         raise PushSurfaceError(f"{bundle} 不是 product 包（缺 closed_tiers）")

@@ -118,8 +118,10 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
         raise BundleVerifyError(f"缺 bundle_manifest.json：{manifest_path}")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise BundleVerifyError(f"manifest 非法 JSON：{exc}") from exc
+    if not isinstance(manifest, dict):
+        raise BundleVerifyError("manifest 顶层必须是 JSON 对象")
 
     if manifest.get("schema") != BUNDLE_SCHEMA:
         problems.append(f"schema != {BUNDLE_SCHEMA}：{manifest.get('schema')!r}")
@@ -152,7 +154,16 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
         if not tdir.is_dir():
             problems.append(f"缺表目录：{tdir.relative_to(bundle)}")
             continue
-        listed = {f["relpath"]: f for f in meta.get("files", [])}
+        files_meta = meta.get("files", []) if isinstance(meta, dict) else None
+        if not isinstance(files_meta, list):
+            problems.append(f"{table}: manifest files 段必须是列表")
+            continue
+        listed = {}
+        for entry in files_meta:
+            if not isinstance(entry, dict) or not isinstance(entry.get("relpath"), str):
+                problems.append(f"{table}: manifest files 项缺 relpath")
+                continue
+            listed[entry["relpath"]] = entry
         actual = {}
         for p in sorted(tdir.rglob("*")):
             if p.is_symlink():
