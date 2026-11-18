@@ -50,6 +50,12 @@ BUNDLE_SCHEMA = "simpraxis.bundle_manifest.v1"
 CORE_TABLES = ("kb_chunks", "phase1_learnings")
 DEFAULT_OUT = Path("/mnt/artifacts/embodied-kb/data/bundles")
 
+# —— ProductBundle v1（S0-8 / WP-P）：闭源三 tier + 公开内容快照 ——
+PRODUCT_TIERS = ("core", "extended", "product")
+PRODUCT_CLOSED_TIERS = ("research_memory", "archives", "promoted_params")
+CONTENT_TREES = ("knowledge", "solutions")   # KB 公开面（脚本+知识文档）
+DEFAULT_CLOSED_ROOT = Path("/mnt/artifacts/simpraxis/s0_closed")
+
 
 class BundleError(RuntimeError):
     """打包前置失败：拒绝产生半成品包。"""
@@ -114,10 +120,58 @@ def copy_table(src_dir: Path, dst_dir: Path) -> list[dict]:
     return files
 
 
+def copy_tree_private(src: Path, dst: Path, *, label: str,
+                      allow_empty: bool = True) -> list[dict]:
+    """复制闭源/内容树（拒绝软链）；返回 relpath/size/sha256 清单。
+
+    与 copy_table 的区别：允许空目录（S0 闭源 archive 尚无内容时如实记 0 件），
+    但绝不跟随软链——软链既可能越界，也可能把闭源实体带进公开面。
+    """
+    files: list[dict] = []
+    if src.is_symlink():
+        raise BundleError(f"{label}: 源目录是软链（拒绝穿透）：{src}")
+    if not src.is_dir():
+        raise BundleError(f"{label}: 源目录不存在：{src}")
+    for p in sorted(src.rglob("*")):
+        rel = p.relative_to(src).as_posix()
+        if p.is_symlink():
+            raise BundleError(f"{label}: 拒绝把软链打入资产包：{rel}")
+        if any(part in PRODUCT_CLOSED_TIERS for part in Path(rel).parts):
+            raise BundleError(f"{label}: 路径含闭源 tier 名：{rel}")
+        if not p.is_file():
+            continue
+        target = dst / rel
+        ensure_private_dir(target.parent, mode=0o700)
+        shutil.copyfile(p, target)
+        os.chmod(target, 0o600)
+        digest = _sha256_file(target)
+        if _sha256_file(p) != digest:
+            raise BundleError(f"{label}: 复制字节不一致：{rel}")
+        files.append({"relpath": rel, "size": p.stat().st_size, "sha256": digest})
+    if not files and not allow_empty:
+        raise BundleError(f"{label}: 空目录拒绝打包：{src}")
+    return files
+
+
+def _closed_file_shas(closed: dict) -> set[str]:
+    return {f["sha256"] for meta in closed.values() for f in meta.get("files", [])}
+
+
+def assert_content_clean(content_files: list[dict], closed_shas: set[str]) -> None:
+    """防泄机判：公开内容面不得含闭源 tier 路径或闭源文件字节（sha 撞库即拒）。"""
+    for entry in content_files:
+        rel = entry["relpath"]
+        if any(part in PRODUCT_CLOSED_TIERS for part in Path(rel).parts):
+            raise BundleError(f"内容面出现闭源 tier 路径：{rel}")
+        if entry["sha256"] in closed_shas:
+            raise BundleError(f"内容面出现闭源文件字节（sha256 相同）：{rel}")
+
+
 def build_bundle(*, tier: str, uri: Path, out_root: Path,
-                 kb_root: Path, sim_root: Path) -> Path:
-    if tier not in ("core", "extended"):
-        raise BundleError(f"tier 必须是 core|extended，收到 {tier!r}")
+                 kb_root: Path, sim_root: Path,
+                 closed_root: Path | None = None) -> Path:
+    if tier not in PRODUCT_TIERS:
+        raise BundleError(f"tier 必须是 core|extended|product，收到 {tier!r}")
     if not uri.is_dir():
         raise BundleError(f"数据层不存在：{uri}（先跑 migrate_data_layer.py --apply）")
 
@@ -130,7 +184,7 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
     else:
         missing = [t for t in CORE_TABLES if t not in present]
         if missing:
-            raise BundleError(f"extended 必须包含 core 全部表，缺：{missing}")
+            raise BundleError(f"{tier} 必须包含 core 全部表，缺：{missing}")
         wanted = present
 
     # 锁内适配（Phase 2.5 换嵌入）：不再硬钉 mpnet/768；manifest 记录打包时
@@ -182,6 +236,34 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
         "source_uri": str(uri),
         "tables": tables_meta,
     }
+
+    # —— ProductBundle v1（WP-P）：闭源三 tier + 公开内容快照（仅 product tier）——
+    if tier == "product":
+        closed_root = Path(closed_root) if closed_root is not None else Path(
+            os.environ.get("SIMPRAXIS_S0_CLOSED_ROOT", str(DEFAULT_CLOSED_ROOT)))
+        closed_meta: dict[str, dict] = {}
+        for name in PRODUCT_CLOSED_TIERS:
+            source = closed_root / name
+            ensure_private_dir(bundle / "closed" / name, mode=0o700)  # 空 tier 也留目录
+            files = copy_tree_private(source, bundle / "closed" / name,
+                                      label=f"closed/{name}")
+            closed_meta[name] = {"files": files}
+            print(f"[bundle] product/closed/{name}: {len(files)} 文件")
+        closed_shas = _closed_file_shas(closed_meta)
+
+        content_meta: dict[str, dict] = {}
+        for name in CONTENT_TREES:
+            source = kb_root / name
+            files = copy_tree_private(source, bundle / "content" / name,
+                                      label=f"content/{name}", allow_empty=False)
+            assert_content_clean(files, closed_shas)
+            content_meta[name] = {"files": files}
+            print(f"[bundle] product/content/{name}: {len(files)} 文件")
+
+        manifest["closed_root"] = str(closed_root)
+        manifest["closed_tiers"] = closed_meta
+        manifest["content"] = content_meta
+
     atomic_write_text(
         bundle / "bundle_manifest.json",
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -195,20 +277,23 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
-    ap.add_argument("--tier", choices=("core", "extended", "both"),
+    ap.add_argument("--tier", choices=("core", "extended", "product", "both"),
                     default="both")
     ap.add_argument("--uri", type=Path, default=None)
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--kb-root", type=Path,
                     default=Path(os.environ.get("KB_ROOT", str(DEFAULT_KB_ROOT))))
     ap.add_argument("--sim-praxis-root", type=Path, default=_REPO_ROOT)
+    ap.add_argument("--closed-root", type=Path, default=None,
+                    help="product tier 的闭源数据层根（缺省 $SIMPRAXIS_S0_CLOSED_ROOT）")
     args = ap.parse_args()
     uri = args.uri or Path(default_uri())
     tiers = ("core", "extended") if args.tier == "both" else (args.tier,)
     try:
         for tier in tiers:
             build_bundle(tier=tier, uri=uri, out_root=args.out,
-                         kb_root=args.kb_root, sim_root=args.sim_praxis_root)
+                         kb_root=args.kb_root, sim_root=args.sim_praxis_root,
+                         closed_root=args.closed_root)
     except BundleError as exc:
         print(f"[BUNDLE STOP] {exc}", file=sys.stderr)
         return 2

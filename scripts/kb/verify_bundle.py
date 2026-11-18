@@ -40,6 +40,8 @@ from memory_flywheel import kb_pins  # noqa: E402
 
 BUNDLE_SCHEMA = "simpraxis.bundle_manifest.v1"
 CORE_TABLES = ("kb_chunks", "phase1_learnings")
+PRODUCT_CLOSED_TIERS = ("research_memory", "archives", "promoted_params")
+CONTENT_TREES = ("knowledge", "solutions")
 
 
 class BundleVerifyError(RuntimeError):
@@ -57,6 +59,42 @@ def _sha256_file(p: Path) -> str:
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(repo), *args],
                           capture_output=True, text=True)
+
+
+def _verify_tree(bundle: Path, prefix: str, meta: dict, problems: list[str]) -> set[str]:
+    """逐件复算 manifest 登记的树（content/closed）；返回 sha 集。"""
+    root = bundle / prefix
+    if not root.is_dir():
+        problems.append(f"缺目录：{prefix}/")
+        return set()
+    listed = {entry["relpath"]: entry for entry in meta.get("files", [])}
+    actual: dict[str, Path] = {}
+    for p in sorted(root.rglob("*")):
+        if p.is_symlink():
+            problems.append(f"{prefix}: 出现未登记软链：{p.relative_to(root)}")
+            continue
+        if p.is_file():
+            actual[p.relative_to(root).as_posix()] = p
+    for rel in sorted(set(listed) - set(actual)):
+        problems.append(f"{prefix}: manifest 登记文件缺失：{rel}")
+    for rel in sorted(set(actual) - set(listed)):
+        problems.append(f"{prefix}: 出现未登记文件：{rel}")
+    shas = set()
+    for rel, p in actual.items():
+        item = listed.get(rel)
+        if item is None:
+            continue
+        size = p.stat().st_size
+        if item.get("size") != size:
+            problems.append(f"{prefix}/{rel}: size {size} != {item.get('size')}")
+        digest = _sha256_file(p)
+        if item.get("sha256") != digest:
+            problems.append(f"{prefix}/{rel}: sha256 不符（{digest[:12]}）")
+        shas.add(digest)
+        if prefix.startswith("content/") and any(
+                part in PRODUCT_CLOSED_TIERS for part in Path(rel).parts):
+            problems.append(f"{prefix}/{rel}: 内容面出现闭源 tier 路径")
+    return shas
 
 
 def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
@@ -77,7 +115,7 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
     if manifest.get("schema") != BUNDLE_SCHEMA:
         problems.append(f"schema != {BUNDLE_SCHEMA}：{manifest.get('schema')!r}")
     tier = manifest.get("tier")
-    if tier not in ("core", "extended"):
+    if tier not in ("core", "extended", "product"):
         problems.append(f"tier 非法：{tier!r}")
     # 锁内适配（Phase 2.5 换嵌入）：模型/维度以 manifest 自描述为准——
     # 历史 mpnet/768 包与新 Qwen3/1024 包同规则可验，不硬钉具体模型名。
@@ -95,8 +133,8 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
     table_names = sorted(tables)
     if tier == "core" and table_names != sorted(CORE_TABLES):
         problems.append(f"core 包表集必须恰为 {sorted(CORE_TABLES)}，实际 {table_names}")
-    if tier == "extended" and any(t not in table_names for t in CORE_TABLES):
-        problems.append(f"extended 包缺 core 表：{sorted(set(CORE_TABLES) - set(table_names))}")
+    if tier in ("extended", "product") and any(t not in table_names for t in CORE_TABLES):
+        problems.append(f"{tier} 包缺 core 表：{sorted(set(CORE_TABLES) - set(table_names))}")
 
     # --- 文件集 + sha256/size 复算 ---
     tables_dir = bundle / "tables"
@@ -148,6 +186,31 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
                     problems.append(
                         f"{table}: 维度 {dim} != manifest 顶层 vector_dim "
                         f"{manifest_dim}（混维度）")
+
+    # --- ProductBundle v1：闭源三 tier + 公开内容面（product）---
+    if tier == "product":
+        closed = manifest.get("closed_tiers")
+        content = manifest.get("content")
+        if not isinstance(closed, dict) or not isinstance(content, dict):
+            problems.append("product 包缺 closed_tiers/content 段")
+        else:
+            closed_shas: set[str] = set()
+            for name in PRODUCT_CLOSED_TIERS:
+                if name not in closed:
+                    problems.append(f"product 包缺闭源 tier：{name}")
+                    continue
+                closed_shas |= _verify_tree(bundle, f"closed/{name}", closed[name],
+                                            problems)
+            content_shas: set[str] = set()
+            for name in CONTENT_TREES:
+                if name not in content:
+                    problems.append(f"product 包缺内容树：{name}")
+                    continue
+                content_shas |= _verify_tree(bundle, f"content/{name}", content[name],
+                                             problems)
+            leaked = content_shas & closed_shas
+            if leaked:
+                problems.append(f"内容面含闭源文件字节（sha256 相同）：{sorted(leaked)[:3]}")
 
     # --- kb_sha 交叉核对：记录点必须是当前 HEAD 祖先（只增不改）---
     recorded_kb = manifest.get("kb_sha")
