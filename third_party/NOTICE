@@ -1,0 +1,16 @@
+Third-party notices
+===================
+
+physicalrsi 0.3.0
+-----------------
+Copyright HKU MMLab & Kinetix AI.
+Licensed under the Apache License, Version 2.0.
+Upstream: https://github.com/PhysicalRSI/PhysicalRSI
+
+Usage: pinned runtime dependency of the RSI outer-loop engine (independent
+Python 3.11 environment; see `orchestrator/hk/_physicalrsi.py` and
+`scripts/s0/audit_physicalrsi.py`). Installed unmodified; integration code
+lives in `orchestrator/rsi_bridge/` and `orchestrator/hk/` and uses only the
+public API. License text: https://www.apache.org/licenses/LICENSE-2.0
+
+No third-party code is copied into this repository.
