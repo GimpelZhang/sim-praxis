@@ -2058,6 +2058,8 @@ def _namespace_for_cli(phase: int) -> _LedgerNamespace:
         return RSI_R1_NAMESPACE
     if phase == LEDGER_RSI_R12:  # RSI-R1.2：2904（campaign 由 env 选定）
         return RSI_R12_NAMESPACE
+    if phase == LEDGER_RSI_S0:  # RSI-S0：2908（单阶段，无 campaign）
+        return RSI_S0_NAMESPACE
     return PHASE2_NAMESPACE
 
 
@@ -2072,7 +2074,7 @@ def main(argv: "list[str] | None" = None) -> int:
                    choices=(LEDGER_PHASE, LEDGER_PHASE25, LEDGER_PHASE26,
                             LEDGER_PHASE27, LEDGER_PHASE281, LEDGER_RSI_R0,
                             LEDGER_RSI_R01, LEDGER_RSI_R02, LEDGER_RSI_R1,
-                            LEDGER_RSI_R12),
+                            LEDGER_RSI_R12, LEDGER_RSI_S0),
                    help=("台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 "
                          "封存账，26=Phase 2.6 封存账，27=Phase 2.7 封存账，"
                          "281=Phase 2.8.1 封存账，2900=RSI-R0 封存账，"
@@ -2137,7 +2139,8 @@ def main(argv: "list[str] | None" = None) -> int:
                       if ns.phase in (LEDGER_PHASE26, LEDGER_PHASE27,
                                       LEDGER_PHASE281, LEDGER_RSI_R0,
                                       LEDGER_RSI_R01, LEDGER_RSI_R02,
-                                      LEDGER_RSI_R1, LEDGER_RSI_R12) else ()))
+                                      LEDGER_RSI_R1, LEDGER_RSI_R12,
+                                      LEDGER_RSI_S0) else ()))
     # G-14：只读 status 也要把损坏件显式报成 pause_corrupt，不许崩溃或当无暂停。
     pause_view: Any
     try:

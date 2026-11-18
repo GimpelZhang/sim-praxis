@@ -76,11 +76,20 @@ def test_sequence_execution_runs_full_chain():
 
 def test_default_analyzer_delegates_to_r1_statistics():
     manifest = fake_batch_runner({"conditions": ["c1", "c2"], "n_block": 4})
+    manifest["confirm_plan"] = {"pairs": {"c1v2": [0.1, 0.12, 0.08, 0.11]}}
     result = default_analyzer(manifest)
     contrast = result["contrasts"][0]
     assert contrast["n_blocks"] == 4
     assert contrast["ci_low"] <= contrast["estimate"] <= contrast["ci_high"]
     assert contrast["claim"] in ("SUPPORTED", "REFUTED", "INCONCLUSIVE")
+    assert result["confirm_plan"]["pairs"]
+
+
+def test_default_analyzer_without_confirm_plan_fails_honestly():
+    manifest = fake_batch_runner({"conditions": ["c1", "c2"], "n_block": 4})
+    with pytest.raises(SkillEngineNotWired) as excinfo:
+        default_analyzer(manifest)
+    assert "confirm_plan" in str(excinfo.value)
 
 
 def test_default_confirmer_requires_frozen_plan():

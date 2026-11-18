@@ -66,16 +66,39 @@ def check_probe(root: Path) -> None:
     e2 = _load(root / "e2_ledger_reconciliation.json", "E2 reconciliation") or {}
     if e2.get("pass") is not True:
         PROBLEMS.append("E2 对账未通过")
-    seqs = e2.get("seqs") or []
-    if seqs != list(range(1, len(seqs) + 1)):
-        PROBLEMS.append(f"E2 seq 不连续：{seqs}")
-    if e2.get("ts_all_z") is not True:
-        PROBLEMS.append("E2 ts_iso 非严格 Z")
     results = e2.get("results") or []
-    if len(results) != e2.get("batch_rows"):
-        PROBLEMS.append(f"E2 逻辑调用 {len(results)} != 账行 {e2.get('batch_rows')}")
     if len(results) > 2:
         PROBLEMS.append(f"E2 小批次超过 2 呼：{len(results)}")
+    # 不信任探针自述：直接重读账本复算（评审 HIGH 修复）
+    ledger_path = Path(str(e2.get("ledger_path") or ""))
+    if not ledger_path.is_file():
+        PROBLEMS.append(f"E2 账本不可读：{ledger_path}")
+    else:
+        rows = []
+        for line in ledger_path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                rows.append(json.loads(line))
+        calls = [row for row in rows
+                 if row.get("event") == "call" and isinstance(row.get("seq"), int)]
+        seqs = [row["seq"] for row in calls]
+        ts_ok = all(str(row.get("ts_iso", "")).endswith("Z") for row in calls)
+        batch = [row for row in calls if row.get("batch_id") == e2.get("batch_id")]
+        new_rows = [row for row in calls
+                    if row["seq"] > int(e2.get("before_seq") or 0)]
+        if seqs != list(range(1, len(seqs) + 1)):
+            PROBLEMS.append(f"账本 seq 不连续：{seqs}")
+        if not ts_ok:
+            PROBLEMS.append("账本 ts_iso 非严格 Z")
+        if len(new_rows) != len(results):
+            PROBLEMS.append(f"本轮新增账行 {len(new_rows)} != 逻辑调用 {len(results)}")
+        if [bool(r.get("ok")) for r in new_rows] != [bool(x.get("ok")) for x in results]:
+            PROBLEMS.append("本轮账行 ok 状态与调用结果不符")
+        if len(batch) != len(new_rows):
+            PROBLEMS.append(f"本批账行 {len(batch)} != 本轮新增 {len(new_rows)}")
+        if e2.get("new_call_rows") != len(new_rows):
+            PROBLEMS.append("探针自报新增行数与账本复算不符")
+        if e2.get("seqs") != seqs:
+            PROBLEMS.append("探针自报 seqs 与账本复算不符")
     if (e1.get("transcript") or {}).get("session_id"):
         GAPS.append("headless 会话的供应商消耗不在我方 ledger（E2 口径照计划仅覆盖 "
                     "PhysicalRSI 侧调用；roadmap §6.3 的 headless 记账面缺口转 S1 立项，"

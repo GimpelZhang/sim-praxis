@@ -38,11 +38,15 @@ echo "[bootstrap] 1/4 校验 $BUNDLE"
 
 echo "[bootstrap] 2/4 还原布局 -> $TARGET"
 umask 077
-mkdir -p "$TARGET/kb" "$TARGET/data"
-ln -s "$(cd "$BUNDLE" && pwd)/tables" "$TARGET/data/lancedb"
-ln -s "$(cd "$BUNDLE" && pwd)/content/knowledge" "$TARGET/kb/knowledge"
-ln -s "$(cd "$BUNDLE" && pwd)/content/solutions" "$TARGET/kb/solutions"
-ln -s "$TARGET/data" "$TARGET/kb/data"
+STAGE="$TARGET.tmp.$$"
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/kb" "$STAGE/data"
+ln -s "$(cd "$BUNDLE" && pwd)/tables" "$STAGE/data/lancedb"
+ln -s "$(cd "$BUNDLE" && pwd)/content/knowledge" "$STAGE/kb/knowledge"
+ln -s "$(cd "$BUNDLE" && pwd)/content/solutions" "$STAGE/kb/solutions"
+ln -s "$STAGE/data" "$STAGE/kb/data"
+mv -T "$STAGE" "$TARGET"
+trap - EXIT
 
 echo "[bootstrap] 3/4 环境注入 -> $TARGET/env.sh"
 cat > "$TARGET/env.sh" <<EOF

@@ -67,7 +67,16 @@ def _verify_tree(bundle: Path, prefix: str, meta: dict, problems: list[str]) -> 
     if not root.is_dir():
         problems.append(f"缺目录：{prefix}/")
         return set()
-    listed = {entry["relpath"]: entry for entry in meta.get("files", [])}
+    files_meta = meta.get("files", []) if isinstance(meta, dict) else None
+    if not isinstance(files_meta, list):
+        problems.append(f"{prefix}: manifest files 段必须是列表")
+        return set()
+    listed = {}
+    for entry in files_meta:
+        if not isinstance(entry, dict) or not isinstance(entry.get("relpath"), str):
+            problems.append(f"{prefix}: manifest files 项缺 relpath")
+            continue
+        listed[entry["relpath"]] = entry
     actual: dict[str, Path] = {}
     for p in sorted(root.rglob("*")):
         if p.is_symlink():

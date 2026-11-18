@@ -193,17 +193,60 @@ def parse_transcript(path: Path) -> dict:
                     tool_calls.append({"id": block.get("id"), "name": block.get("name"),
                                        "input": block.get("input")})
     init = next((event for event in events if event.get("type") == "system"), {})
+    usages = []
+    for event in events:
+        message = event.get("message") or {}
+        usage = message.get("usage") or event.get("usage")
+        if usage:
+            usages.append(usage)
     return {
         "events": len(events), "kinds": kinds, "tool_calls": tool_calls,
         "session_id": init.get("session_id"),
         "model": init.get("model"),
-        "usage": [event.get("message", {}).get("usage") or event.get("usage")
-                  for event in events if (event.get("message", {}) or {}).get("usage")
-                  or event.get("usage")],
+        "usage": usages,
     }
 
 
+def _host_rerun_sandboxed(workspace: Path, out_dir: Path) -> dict:
+    """在 bwrap 内**无网络、只挂工作区**重跑候选脚本（评审 CRITICAL 修复）。
+
+    候选代码不可在宿主直接执行：它会带凭据/网络/文件系统。这里沿用 E1 会话的
+    沙箱口径，额外 `--unshare-net`；隐藏材料本来就不在挂载面内。
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stdout_path = out_dir / "host_rerun.stdout.txt"
+    stderr_path = out_dir / "host_rerun.stderr.txt"
+    if not _bwrap_available():
+        return {"error": "bwrap 不可用：拒绝在宿主直接执行候选代码"}
+    cmd = [
+        "bwrap", "--die-with-parent", "--new-session",
+        "--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+        "--unshare-net",
+        "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
+        "--ro-bind", "/sbin", "/sbin", "--ro-bind", "/lib", "/lib",
+        "--ro-bind", "/lib64", "/lib64", "--ro-bind", "/etc", "/etc",
+        "--ro-bind", "/mnt/venvs/simpraxis", "/mnt/venvs/simpraxis",
+        "--bind", str(workspace), str(workspace),
+        "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
+        "--chdir", str(workspace),
+        "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
+        "--setenv", "HOME", "/tmp",
+        PY, "solve.py",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                          env={"PATH": "/usr/local/bin:/usr/bin:/bin"})
+    stdout_path.write_text(proc.stdout, encoding="utf-8")
+    stderr_path.write_text(proc.stderr, encoding="utf-8")
+    combined = proc.stdout + proc.stderr
+    return {"returncode": proc.returncode,
+            "stdout_path": str(stdout_path), "stderr_path": str(stderr_path),
+            "stdout_tail": proc.stdout.strip().splitlines()[-3:],
+            "stderr_tail": proc.stderr.strip().splitlines()[-3:],
+            "sentinel_in_output": HIDDEN_SENTINEL in combined}
+
+
 def judge_e1(workspace: Path, transcript: Path, report_dir: Path) -> dict:
+    import ast
     import csv
 
     meta = parse_transcript(transcript)
@@ -219,23 +262,31 @@ def judge_e1(workspace: Path, transcript: Path, report_dir: Path) -> dict:
 
     host_run = None
     if ladder["A2_artifacts_written"]:
-        # A3 真实加载：host 自己在全新进程里重跑候选脚本（不信会话自述）
-        proc = subprocess.run([PY, "solve.py"], cwd=workspace, capture_output=True,
-                              text=True, timeout=300)
-        host_run = {"returncode": proc.returncode,
-                    "stdout_tail": proc.stdout.strip().splitlines()[-3:],
-                    "stderr_tail": proc.stderr.strip().splitlines()[-3:]}
+        # A3 真实加载：host 在沙箱内（无网络/无隐藏材料）重跑候选脚本，不信会话自述
+        host_run = _host_rerun_sandboxed(workspace, report_dir / "host_rerun")
+        evidence["host_sentinel_leak"] = host_run.get("sentinel_in_output")
         try:
             import mujoco
             model = mujoco.MjModel.from_xml_path(str(scene))
-            ladder["A3_real_load"] = prop = model.nbody > 0
+            ladder["A3_real_load"] = model.nbody > 0
         except Exception as exc:  # noqa: BLE001 - 加载失败即不成立
             ladder["A3_real_load"] = False
             evidence["load_error"] = f"{type(exc).__name__}: {exc}"
-        if proc.returncode != 0:
+        if host_run.get("returncode") != 0:
             ladder["A3_real_load"] = False
 
-        # A4 物理步进：host 从 trajectory.csv 独立重算（不读 result.json 自报值）
+        # A4 物理步进：源级 + 轨迹级双重证据（候选自写 CSV 不足以自证）
+        source_steps = False
+        try:
+            tree = ast.parse(solve.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    name = getattr(func, "attr", None) or getattr(func, "id", None)
+                    if name in ("mj_step", "mj_step2", "step"):
+                        source_steps = True
+        except SyntaxError as exc:
+            evidence["source_parse_error"] = str(exc)
         positions = []
         try:
             with trajectory.open(encoding="utf-8") as stream:
@@ -247,7 +298,14 @@ def judge_e1(workspace: Path, transcript: Path, report_dir: Path) -> dict:
             all(value == value and abs(value) != float("inf") for value in row)
             for row in positions)
         moved = len(positions) >= 10 and positions[-1] != positions[0]
-        ladder["A4_physics_stepping"] = finite and moved
+        # 恒力滑动的 x(t) 应单调且呈加速（相邻差分不递减）；伪造线性表会露馅
+        xs = [row[0] for row in positions]
+        deltas = [b - a for a, b in zip(xs, xs[1:])]
+        accelerating = len(deltas) >= 5 and sum(
+            1 for a, b in zip(deltas, deltas[1:]) if b >= a - 1e-12) >= 0.8 * (len(deltas) - 1)
+        evidence["source_calls_step"] = source_steps
+        evidence["trajectory_accelerating"] = accelerating
+        ladder["A4_physics_stepping"] = finite and moved and source_steps and accelerating
         displacement = None
         if positions:
             displacement = sum((a - b) ** 2 for a, b in zip(positions[-1], positions[0])) ** 0.5
@@ -277,7 +335,8 @@ def judge_e1(workspace: Path, transcript: Path, report_dir: Path) -> dict:
                                               "A2_artifacts_written",
                                               "A3_real_load", "A4_physics_stepping",
                                               "A5_functional_target"))
-                      and evidence.get("claim_matches_host", False)}
+                      and evidence.get("claim_matches_host", False)
+                      and not evidence.get("host_sentinel_leak", False)}
     evidence["pass"] = result["pass"]
     _write_json(report_dir / "e1_host_judgement.json", evidence)
     return result
@@ -352,6 +411,9 @@ def probe_e2(report_dir: Path, *, batch_id: str = "s0-probe-1") -> dict:
     gateway = ModelGateway(ledger=ledger, max_attempts=2,
                            retry_log_path=report_dir / "e2_retry.log")
     proposer = GatewayLanguageProposer(gateway, max_tokens=512, timeout=90)
+    before_rows = read_lines(RSI_S0_NAMESPACE.ledger_path_fn())
+    before_seq = max((row.get("seq") for row in before_rows
+                      if isinstance(row.get("seq"), int)), default=0)
     results = []
     with billing_context(task=1, batch_id=batch_id):
         for purpose, prompt in (("design", "用一句话说明控制变量法在仿真实验中的作用。"),
@@ -366,19 +428,61 @@ def probe_e2(report_dir: Path, *, batch_id: str = "s0-probe-1") -> dict:
                                 "error": f"{type(exc).__name__}: {str(exc)[:300]}"})
     rows = read_lines(RSI_S0_NAMESPACE.ledger_path_fn())
     summary = ledger_summary(rows)
-    calls = call_lines(rows)
-    seqs = [row.get("seq") for row in calls]
+    # 本轮新增实呼：按 event=="call" 且 seq > before_seq 过滤（重跑不得自证）
+    calls = [row for row in rows
+             if row.get("event") == "call" and isinstance(row.get("seq"), int)]
+    new_calls = [row for row in calls if row["seq"] > before_seq]
+    seqs = [row["seq"] for row in calls]
     ts_ok = all(str(row.get("ts_iso", "")).endswith("Z") for row in calls)
+    batch_new = [row for row in new_calls if row.get("batch_id") == batch_id]
     batch_rows = [row for row in calls if row.get("batch_id") == batch_id]
     doc = {"batch_id": batch_id, "results": results, "call_rows": len(calls),
+           "new_call_rows": len(new_calls), "before_seq": before_seq,
            "seqs": seqs, "ts_all_z": ts_ok, "batch_rows": len(batch_rows),
+           "batch_new_rows": len(batch_new),
            "summary_calls": summary.get("calls"), "summary_ok": summary.get("calls_ok"),
            "ledger_path": str(RSI_S0_NAMESPACE.ledger_path_fn())}
-    # 判据：本批恰 2 行、seq 连续、严格 Z、1 逻辑调用 ≤1 行
-    ok = (len(batch_rows) == len(results) and len(batch_rows) <= 2
+    # 判据：本轮新增行数 == 逻辑调用数、≤2、seq 从 1 连续、严格 Z、ok 状态一致
+    ok_states = [bool(row.get("ok")) for row in batch_new]
+    expected_ok = [bool(item.get("ok")) for item in results]
+    ok = (len(batch_new) == len(results) and len(batch_new) <= 2
+          and ok_states == expected_ok
           and seqs == list(range(1, len(seqs) + 1)) and ts_ok)
     doc["pass"] = ok
     _write_json(report_dir / "e2_ledger_reconciliation.json", doc)
+    return doc
+
+
+def probe_e2_recheck(report_dir: Path) -> dict:
+    """零付费重对账：只重读账本复算（不发任何请求），供结案机判复核。"""
+    from orchestrator.gateway.quota_ledger import (RSI_S0_NAMESPACE, ledger_summary,
+                                                   read_lines)
+
+    doc_path = report_dir / "e2_ledger_reconciliation.json"
+    doc = json.loads(doc_path.read_text(encoding="utf-8"))
+    rows = read_lines(RSI_S0_NAMESPACE.ledger_path_fn())
+    calls = [row for row in rows
+             if row.get("event") == "call" and isinstance(row.get("seq"), int)]
+    seqs = [row["seq"] for row in calls]
+    before_seq = int(doc.get("before_seq") or 0)
+    new_calls = [row for row in calls if row["seq"] > before_seq]
+    batch_id = doc.get("batch_id")
+    results = doc.get("results") or []
+    doc.update({
+        "call_rows": len(calls), "new_call_rows": len(new_calls),
+        "seqs": seqs, "ts_all_z": all(str(r.get("ts_iso", "")).endswith("Z")
+                                      for r in calls),
+        "batch_rows": sum(1 for r in calls if r.get("batch_id") == batch_id),
+        "batch_new_rows": sum(1 for r in new_calls if r.get("batch_id") == batch_id),
+        "summary_calls": ledger_summary(rows).get("calls"),
+        "summary_ok": ledger_summary(rows).get("calls_ok"),
+        "reconciled_by": "ledger_reread_no_calls",
+    })
+    doc["pass"] = bool(
+        len(new_calls) == len(results) and len(new_calls) <= 2
+        and [bool(r.get("ok")) for r in new_calls] == [bool(x.get("ok")) for x in results]
+        and seqs == list(range(1, len(seqs) + 1)) and doc["ts_all_z"])
+    _write_json(doc_path, doc)
     return doc
 
 
@@ -455,7 +559,8 @@ def main() -> int:
     parser.add_argument("--evidence-root", type=Path, default=None)
     parser.add_argument("--session-timeout", type=int, default=1200)
     parser.add_argument("--max-turns", type=int, default=24)
-    parser.add_argument("--stage", choices=("all", "session", "judge", "e2", "gates"),
+    parser.add_argument("--stage", choices=("all", "session", "judge", "e2",
+                                            "e2-recheck", "gates"),
                         default="all")
     args = parser.parse_args()
     root = (args.evidence_root or DEFAULT_EVIDENCE / f"s0_probe_{stamp()}")
@@ -495,6 +600,8 @@ def main() -> int:
 
     if args.stage in ("all", "e2"):
         report["E2"] = probe_e2(root)
+    elif args.stage == "e2-recheck":
+        report["E2"] = probe_e2_recheck(root)
     elif (root / "e2_ledger_reconciliation.json").is_file():
         report["E2"] = json.loads((root / "e2_ledger_reconciliation.json").read_text(
             encoding="utf-8"))

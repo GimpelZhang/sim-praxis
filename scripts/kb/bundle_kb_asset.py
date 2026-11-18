@@ -208,7 +208,21 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
     # 以 mkdir 默认权限瞬态存在的窗口。
     ensure_private_dir(bundle, mode=0o700)
     ensure_private_dir(bundle / "tables", mode=0o700)
+    try:
+        return _fill_bundle(bundle=bundle, tier=tier, uri=uri, wanted=wanted,
+                            kb_root=kb_root, kb_sha=kb_sha, engine_sha=engine_sha,
+                            dirty=dirty, cfg=cfg, config_dim=config_dim,
+                            closed_root=closed_root)
+    except BundleError:
+        # 失败即删本函数刚创建的自有目录，拒绝留下半成品包（评审 LOW）
+        shutil.rmtree(bundle, ignore_errors=True)
+        raise
 
+
+def _fill_bundle(*, bundle: Path, tier: str, uri: Path, wanted: list[str],
+                 kb_root: Path, kb_sha: str, engine_sha: str, dirty: bool,
+                 cfg: dict, config_dim: int,
+                 closed_root: Path | None) -> Path:
     db = lancedb.connect(str(uri))
     tables_meta = {}
     for table in wanted:
@@ -239,8 +253,8 @@ def build_bundle(*, tier: str, uri: Path, out_root: Path,
 
     # —— ProductBundle v1（WP-P）：闭源三 tier + 公开内容快照（仅 product tier）——
     if tier == "product":
-        closed_root = Path(closed_root) if closed_root is not None else Path(
-            os.environ.get("SIMPRAXIS_S0_CLOSED_ROOT", str(DEFAULT_CLOSED_ROOT)))
+        closed_root = (Path(closed_root) if closed_root is not None else Path(
+            os.environ.get("SIMPRAXIS_S0_CLOSED_ROOT", str(DEFAULT_CLOSED_ROOT))))
         closed_meta: dict[str, dict] = {}
         for name in PRODUCT_CLOSED_TIERS:
             source = closed_root / name

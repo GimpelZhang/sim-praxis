@@ -78,6 +78,13 @@ def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
         raise SkillError("run_manifest.runs 必须是非空列表")
     if not isinstance(contrasts, list) or not contrasts:
         raise SkillError("run_manifest.contrasts 必须是非空列表")
+    # K6 需要冻结的确认分配（私有 block 配对）；S0 未接线确认批生成时诚实失败，
+    # 不产出注定在 K6 崩掉的半成品（评审 MEDIUM）。
+    confirm_plan = document.get("confirm_plan")
+    if not isinstance(confirm_plan, Mapping) or not confirm_plan.get("pairs"):
+        raise SkillEngineNotWired(
+            "confirm_plan 未接线：K5 默认适配器只做开发批分析；确认批私有配对在 "
+            "S1 由冻结分配器生成（禁止伪造 pairs）")
     results = []
     for contrast in contrasts:
         c = _require_mapping(contrast, "contrast")
@@ -103,7 +110,7 @@ def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
             "claim": statistics.classify(
                 c["proposition"], c["delta"], estimated["lower"], estimated["upper"]),
         })
-    return {"contrasts": results}
+    return {"contrasts": results, "confirm_plan": dict(confirm_plan)}
 
 
 def default_confirmer(confirm_plan: Mapping[str, Any], context=None) -> dict:

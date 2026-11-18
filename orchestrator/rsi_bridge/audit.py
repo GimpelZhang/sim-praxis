@@ -44,6 +44,9 @@ def _record(checks: list[dict], cid: str, name: str, ok: bool, detail: Any) -> b
 def check_imports(checks: list[dict]) -> bool:
     from importlib.metadata import version as dist_version
 
+    # 显式载入 pin 加载器（py3.10 的 tomllib 垫片 + 源码根入 sys.path），
+    # 不让本检查依赖别的测试模块先导入它（评审 MEDIUM：单跑必须成立）
+    from orchestrator.hk import _physicalrsi  # noqa: F401
     import physicalrsi
 
     installed = dist_version("physicalrsi")

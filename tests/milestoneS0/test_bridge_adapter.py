@@ -42,7 +42,7 @@ def test_run_returns_receipt_with_sha_and_status_tracks_run_idx():
     adapter, calls = _adapter()
     out = adapter.run({"n": 2})
     receipt = out["receipt"]
-    assert receipt["schema"] == "physicalrsi.experiment-receipt/v2"
+    assert receipt["schema"] == "simpraxis.s0.run-receipt.v1"
     assert len(receipt["sha256"]) == 64
     assert receipt["run_idx"] == 1
     assert calls == [{"n": 2}]
@@ -61,6 +61,16 @@ def test_run_failure_is_recorded_then_reraised():
     with pytest.raises(RuntimeError):
         adapter.run({"n": 1})
     assert adapter.status()["runs"][0]["state"] == "fail"
+
+
+def test_run_receipt_is_not_mistaken_for_experiment_receipt():
+    """run 收据与 experiment-receipt/v2 形状不同，不得被互证函数当同一契约。"""
+    from orchestrator.rsi_bridge.receipts import ReceiptMismatch, crosscheck_receipt
+
+    adapter, _ = _adapter()
+    receipt = adapter.run({"n": 1})["receipt"]
+    with pytest.raises(ReceiptMismatch):
+        crosscheck_receipt(receipt, {"whatever": "0" * 64})
 
 
 def test_evolve_exposes_only_parameter_space_fields():

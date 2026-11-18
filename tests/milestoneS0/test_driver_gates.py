@@ -112,13 +112,13 @@ def test_gate1_empty_notes_closes_without_engine(tmp_path):
 
 
 def test_touchpoint_budget_is_enforced_per_run(tmp_path):
-    def runaway_actor(name, contract, value):
-        # 每次调用都要求再诊断一次，模拟触点膨胀
-        raise RuntimeError("actor 不应被调用到第 5 次")
-
     driver = _driver(tmp_path, actor=fake_actor([]))
-    driver.touchpoint_budget = 2  # 3 个触点 > 预算 2
+    driver.touchpoint_budget = 2  # 3 个触点（K1/K4/K8）> 预算 2
     outcome = driver.run_campaign({"goal": "A_N"}, {"s1": spec()})
     stage = outcome["stages"]["s1"]
     assert stage["status"] == "human_failure"
     assert stage["code"] == "TOUCHPOINT_BUDGET_EXCEEDED"
+    # 预算按 run 重置：第二次打回场景在新 run 里仍放行（不是全局累计耗尽）
+    driver2 = _driver(tmp_path / "second", gate2=GateScript([reject("意见")]))
+    outcome2 = driver2.run_campaign({"goal": "A_N"}, {"s1": spec()})
+    assert outcome2["stages"]["s1"]["status"] == "done"

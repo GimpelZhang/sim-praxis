@@ -84,7 +84,9 @@ class SimPraxisTaskAdapter:
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True,
                           separators=(",", ":")).encode("utf-8")
         receipt = {
-            "schema": "physicalrsi.experiment-receipt/v2",
+            # 单批 run 收据，**不是** experiment-receipt/v2（后者由 receipts.py
+            # 与证据包 manifest 逐件互证；两者形状不同，不可混用）
+            "schema": "simpraxis.s0.run-receipt.v1",
             "task_id": self.task_id,
             "run_idx": run_idx,
             "sha256": hashlib.sha256(body).hexdigest(),

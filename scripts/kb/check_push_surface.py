@@ -44,7 +44,12 @@ def closed_index(bundle: Path) -> dict[str, str]:
         raise PushSurfaceError(f"{bundle} 不是 product 包（缺 closed_tiers）")
     index: dict[str, str] = {}
     for tier, meta in closed.items():
-        for entry in meta.get("files", []):
+        files = meta.get("files", []) if isinstance(meta, dict) else None
+        if not isinstance(files, list):
+            raise PushSurfaceError(f"closed_tiers[{tier}].files 必须是列表")
+        for entry in files:
+            if not isinstance(entry, dict) or "relpath" not in entry or "sha256" not in entry:
+                raise PushSurfaceError(f"closed_tiers[{tier}] 文件项缺 relpath/sha256")
             index[f"closed/{tier}/{entry['relpath']}"] = entry["sha256"]
     return index
 
