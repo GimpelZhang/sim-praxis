@@ -366,7 +366,10 @@ Phase 2.6 的产物口径：Task 0–3 全闭 + Task 4 两次预注册负结论�
 
 计划 `~/文档/RSI_S0_Plan_detailed.md` v1.0，台账 `~/文档/RSI_S0_Plan_Complete.md`
 （与计划冲突以 Complete 为准）。四出口探针**全绿**（机判 `check_s0_closure.py`
-problems=0 gaps=2），HEAD `017b4ff`（本地，未推送；推送仍是人工 STOP 门）。
+problems=0 gaps=2）。**推送状态（2026-11-18 用户指示）**：S0 的 14 条提交
+（`4aa2d82..5a74562`）已推送到远端分支 **`origin/rsi-s0`**（人工 STOP 门由用户在本次
+会话显式指示跳过；`origin/main` 未动，仍在 `4aa2d82`；本分支与 main 同点）。
+后续推送仍按人工 STOP 门。
 
 - **依赖准入**：`physicalrsi==0.3.0` 不在 PyPI（404）→ 锁内适配为从已审计克隆
   `/mnt/assets/simpraxis/PhysicalRSI/PhysicalRSI` 安装同版本源码；外环引擎独立
