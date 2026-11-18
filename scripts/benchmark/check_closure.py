@@ -108,6 +108,15 @@ AUTHORIZED_PUSH_HEADS = (
     # 精确集合；不登记则 Phase 2.8.1 的两条基线守卫（F2 与 p280 终判）在干净
     # 树上恒红。取值来自 ``git rev-parse origin/main`` 的完整 40 hex，非构造。
     "2f4a581a1af0b82f8db59c1db35c6545148e2fe8",
+    # *锁内适配*（RSI-S0 开工基线，2026-11-18）：本会话开工时 ``origin/main``
+    # 已停在 ``4aa2d82``（RSI-R1-N 收口批经前一次推送窗口上远端；本会话
+    # ``git status -sb`` 显示 ``main...origin/main`` 无分歧），但该头未登记，
+    # 导致 P281 F2 与 2.8.0 终判两条基线守卫在**干净树上恒红**（S0 冷跑实测）。
+    # 处置同 ``5895fe0``/``82a1427``/``065231b``/``0796027``/``f19889a``/
+    # ``0066878``/``2f4a581`` 先例：只登记**已推上去的**完整 sha，集合仍是
+    # 精确集合，未登记的新 sha 照样判红（负例断言不变）。取值来自
+    # ``git rev-parse origin/main`` 的完整 40 hex，非构造。
+    "4aa2d82542c1bfaa6b98d6c4e2ae71ab653406c3",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
