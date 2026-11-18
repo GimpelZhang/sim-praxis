@@ -366,7 +366,7 @@ Phase 2.6 的产物口径：Task 0–3 全闭 + Task 4 两次预注册负结论�
 
 计划 `~/文档/RSI_S0_Plan_detailed.md` v1.0，台账 `~/文档/RSI_S0_Plan_Complete.md`
 （与计划冲突以 Complete 为准）。四出口探针**全绿**（机判 `check_s0_closure.py`
-problems=0 gaps=1），HEAD `9dcc7e1`（本地，未推送；推送仍是人工 STOP 门）。
+problems=0 gaps=2），HEAD `017b4ff`（本地，未推送；推送仍是人工 STOP 门）。
 
 - **依赖准入**：`physicalrsi==0.3.0` 不在 PyPI（404）→ 锁内适配为从已审计克隆
   `/mnt/assets/simpraxis/PhysicalRSI/PhysicalRSI` 安装同版本源码；外环引擎独立
@@ -391,7 +391,8 @@ problems=0 gaps=1），HEAD `9dcc7e1`（本地，未推送；推送仍是人工 
   实呼 2 行（seq 1–2，ts 严格 Z，ok 2/2），批准件 `s0-probe-1.json`（自批）。
   headless 会话（`claude -p` in bubblewrap，`--share-net` 仅供应商连通）的供应商
   消耗**不在**我方 ledger：主跑 16,336 in / 7,143 out ≈ $0.334（价格 UNKNOWN），
-  如实登记为缺口（roadmap §6.3 记账面转 S1）。
+  如实登记为缺口（roadmap §6.3 记账面转 S1）；批 s0-probe-1 另有 2 次失败/拦截
+  POST 仅 `ledger.degraded.*` 留痕（2908 未登记窗口期），不补记、不改时间戳。
 - **四出口**（证据根 `/mnt/artifacts/simpraxis/s0_probe/s0_probe_20261118T105942Z`）：
   E1 fresh headless 会话在 MuJoCo 开发任务上 A1–A5 全真（host 在沙箱内重跑工作区
   副本：位移 0.519 m ≥ 0.05、50 步全 finite、二次拟合 R²=0.999999 且 a≈1.02 m/s²
