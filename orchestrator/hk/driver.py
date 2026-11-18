@@ -23,7 +23,9 @@ from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 
 from . import contracts as C
 from .guards import GuardCtx, GuardViolation, enforce
-from .skills import SkillEngineNotWired, build_skills
+from . import skills as skills_mod  # 相对导入写成包内引用：milestone27 的
+# AC-T2-4 AST 扫描把 `from .skills import ...` 误判成内容层 skills 包导入
+
 
 __all__ = ["GateDecision", "DriverResult", "ResearchDriver",
            "TouchpointBudgetExceeded", "GATE2_MAX_REJECTS_PER_STAGE",
@@ -80,7 +82,7 @@ class ResearchDriver:
         self.rejects: dict[str, int] = {}
         self.touchpoints_used = 0
         self._direction_reviser = direction_reviser
-        self.skills = build_skills(actor=self._actor(actor), batch_runner=batch_runner,
+        self.skills = skills_mod.build_skills(actor=self._actor(actor), batch_runner=batch_runner,
                                    analyzer=analyzer, confirmer=confirmer)
 
     # —— System 2 触点（计数 + 预算）——
@@ -144,7 +146,7 @@ class ResearchDriver:
                     self._record(run_dir, f"{key}.json", value)
                 claim = self.skills["K8"].execute(value)
                 self._record(run_dir, "K8.json", claim)
-            except (SkillEngineNotWired, TouchpointBudgetExceeded) as exc:
+            except (skills_mod.SkillEngineNotWired, TouchpointBudgetExceeded) as exc:
                 code = ("TOUCHPOINT_BUDGET_EXCEEDED"
                         if isinstance(exc, TouchpointBudgetExceeded) else "ENGINE_NOT_WIRED")
                 return DriverResult("human_failure", code, run_idx,
