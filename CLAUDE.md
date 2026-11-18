@@ -361,3 +361,48 @@ Task 9 对账按 `event != "call"` 排除），永不删除以保 seq 连续。
 （`12538e4..4b5d134`，共 34 条＝Phase 2.6 的 12 条 + Phase 2.7 的 22 条，经用户
 指示过人工 STOP 门）全部上 origin/main；`main...origin/main` 无分歧，HEAD `4b5d134`。
 Phase 2.6 的产物口径：Task 0–3 全闭 + Task 4 两次预注册负结论，**不得表述为「全部完成」**。
+
+## RSI-S0（2026-11-18 执行；基座与外环引擎就绪）
+
+计划 `~/文档/RSI_S0_Plan_detailed.md` v1.0，台账 `~/文档/RSI_S0_Plan_Complete.md`
+（与计划冲突以 Complete 为准）。四出口探针**全绿**（机判 `check_s0_closure.py`
+problems=0 gaps=1），HEAD `9dcc7e1`（本地，未推送；推送仍是人工 STOP 门）。
+
+- **依赖准入**：`physicalrsi==0.3.0` 不在 PyPI（404）→ 锁内适配为从已审计克隆
+  `/mnt/assets/simpraxis/PhysicalRSI/PhysicalRSI` 安装同版本源码；外环引擎独立
+  py3.11 venv `/mnt/venvs/physicalrsi`（simpraxis venv 冻结快照逐字节未变）。
+  审计五项过（18 类解析/compose 冒烟/clone pytest 原文/compileall/Apache-2.0）；
+  唯一豁免簇 `test_infrastructure_faults.py`（5ms 预算 vs 30ms sleep 宿主时序抖动，
+  重跑三次失败数非确定）。报告 `runs/inventory/s0_baseline/physicalrsi_audit.json`。
+- **H_k 骨架**（`orchestrator/hk/`，开源）：九 Contract 单一真值、八守卫（各绑事故）、
+  m_t 白名单/归档清零/永不入 KB、六字段 ParameterSpace（δ/α/置信水平结构性不可达）、
+  K0–K8 CallableSkill + compose、driver 打回循环（空意见结案、per-Stage 计数、
+  run_idx++、Gate1 批准前零实跑）。`physicalrsi` 在 py3.10 侧经
+  `hk/_physicalrsi.py` 载入（仅 tomllib→tomli 垫片，不 vendored、不改上游）。
+- **接缝层**（`orchestrator/rsi_bridge/`，开源）：`physicalrsi.task/v1` 四方法、
+  模型调用只回 `ModelGateway.call`（stage 钉死、无模型 ID 字面量、image 触网前拒）、
+  receipt↔bundle manifest 互证、闭源 ResearchMemory（append-only+哈希链）、
+  `select_survivor` 透传。
+- **ProductBundle v1**：`bundle_kb_asset.py --tier product` = core+extended 表 +
+  闭源 `research_memory/archives/promoted_params` + 公开内容快照；`verify_bundle.py`
+  校验；`check_push_surface.py` 防泄（闭源文件 0 件入 push 面）；`bootstrap.sh`
+  一键还原（校验→软链→env→自检）。core/extended manifest 形状不变。
+- **账套**：`QuotaLedger.rsi_s0()` 命名空间 **2908**（硬帽 12，task 1 = s0_probe）；
+  实呼 2 行（seq 1–2，ts 严格 Z，ok 2/2），批准件 `s0-probe-1.json`（自批）。
+  headless 会话（`claude -p` in bubblewrap，`--share-net` 仅供应商连通）的供应商
+  消耗**不在**我方 ledger：主跑 16,336 in / 7,143 out ≈ $0.334（价格 UNKNOWN），
+  如实登记为缺口（roadmap §6.3 记账面转 S1）。
+- **四出口**（证据根 `/mnt/artifacts/simpraxis/s0_probe/s0_probe_20261118T105942Z`）：
+  E1 fresh headless 会话在 MuJoCo 开发任务上 A1–A5 全真（host 在沙箱内重跑工作区
+  副本：位移 0.519 m ≥ 0.05、50 步全 finite、二次拟合 R²=0.999999 且 a≈1.02 m/s²
+  与 F=2N/μ=0.1 解析值一致、自报与 host 差 <1 mm）；E2 网关路由 2 呼逐行对账；
+  E3 11 次工具调用重放零不符、产者 session_id+model 就位；E4 隐藏材料沙箱外不可见
+  （会话尝试读 `../hidden/secret.txt` 得 ENOENT，哨兵零泄漏）+ 五门剧本逐项命中。
+- **收尾**：`gate_static.sh` OK；冷跑（`source 00_env.sh`、干净树、单进程）
+  **4740 passed / 17 failed / 17 skipped / 102 deselected**——17 红全部是开工前
+  既有（R0.2 9 + RV 8，基线 worktree `4aa2d82` 逐文件实测同数），S0 **零新增红**；
+  另登记开工前未记录的已推头 `4aa2d82` 进 `AUTHORIZED_PUSH_HEADS`（`dbb4c0c`）。
+  容器 0、显存 14 MiB、`/mnt` 正常；本地领先 origin/main（未推送）。
+- 评审三签：executor / reviewer×3 轮（13 项→2 HIGH 回归→APPROVE_WITH_COMMENTS）/
+  verifier（AC-01..18 现取数）；残尾：AST `mj_step` 可绕过、无逐点 host 仿真、
+  headless 记账面缺口——三条转 S1。
