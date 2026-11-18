@@ -205,3 +205,34 @@ def test_missing_original_is_a_driver_error_not_a_crash(tmp_path: Path) -> None:
         _replay(driver, "A")
     assert exc.value.code == "MANIFEST_MISSING"
     assert str(victim) in exc.value.detail
+
+
+def test_confirm_plan_validation_receives_profile(tmp_path: Path,
+                                                 monkeypatch) -> None:
+    """2026-11-18 回归：复跑重建 confirm 计划时必须与实时链同口径传 profile。
+
+    R1-N 第二轮 T6 暴露：``replay_driver._load_locked_confirm`` 曾裸调
+    ``validate_plan(plan)``，使 R1.3 遗留的 Study B「Tc/dt 可分离」门误拒
+    R1-N 的 kp×tc 2×2 计划（``DESIGN_NOT_SEPARABLE``）。本测试锁死 profile
+    必须被转发——不依赖具体任务语义。
+    """
+    from orchestrator.rsi_r1 import contracts as C
+    from orchestrator.rsi_r1 import lock as LK
+    from orchestrator.rsi_r1 import profiles as P
+
+    driver = _driver(tmp_path)
+    _study(driver, "A", batch="a-profile")
+    _study(driver, "B", batch="b-profile")
+    lock, _report = LK.require_frozen(driver.ctx)
+
+    seen: "dict[str, object]" = {}
+    original = C.validate_plan
+
+    def spy(plan, **kw):
+        seen["profile"] = kw.get("profile")
+        return original(plan, **kw)
+
+    monkeypatch.setattr(C, "validate_plan", spy)
+    RPD._load_locked_confirm(driver.ctx, "B", lock,
+                             profile=P.PROFILE_R1N_DEF)
+    assert seen["profile"] is P.PROFILE_R1N_DEF

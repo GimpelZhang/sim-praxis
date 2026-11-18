@@ -222,9 +222,14 @@ def _judge_block(ctx: Any, study: str) -> "dict[str, Any]":
         return {"present": False, "verdict": None, "claim_status": None}
     doc = dict(ctx.read_json(rel) or {})
     layers = doc.get("layers") or {}
+    # 2026-11-18：判据摘要补透 primary_status / negative_control —— closeout 的
+    # science_direction 与 NC 事实优先取宿主重算结果（第二轮实跑暴露摘要缺字段、
+    # science_direction 落空）。纯加法，旧报告逐字节不变。
     return {"present": True, "verdict": doc.get("verdict"),
             "claim_status": layers.get("claim_status"),
-            "evidence_valid": layers.get("evidence_valid")}
+            "evidence_valid": layers.get("evidence_valid"),
+            "primary_status": doc.get("primary_status"),
+            "negative_control": doc.get("negative_control")}
 
 
 def run_study(

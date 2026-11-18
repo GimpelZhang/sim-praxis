@@ -99,7 +99,8 @@ def _check_gate(ctx: Any, study: str) -> "tuple[LK.LockDocument, dict[str, Any]]
 
 
 def _load_locked_confirm(
-        ctx: Any, study: str, lock: LK.LockDocument
+        ctx: Any, study: str, lock: LK.LockDocument,
+        profile: Any = None
 ) -> "tuple[C.ResearchPlan, E.ConfirmManifest, str]":
     """从落盘件重建 confirm 计划与 manifest，并逐项核对与冻结事实一致。"""
     plan_rel = f"confirm/plan_{study}.json"
@@ -108,7 +109,10 @@ def _load_locked_confirm(
         if not ctx.exists(rel):
             raise ReplayDriverError("CONFIRM_MISSING", rel)
     plan = C.ResearchPlan.from_dict(ctx.read_json(plan_rel))
-    C.validate_plan(plan)
+    # 2026-11-18 修复（RSI-R1-N 第二轮 T6 暴露）：必须与实时链（state.py:629）
+    # 同口径传 profile —— 否则 R1.3 遗留的「Study B 必须存在 Tc/dt 可分离
+    # 单变量对」门会把 R1-N 的 kp×tc 2×2 确认计划误拒（DESIGN_NOT_SEPARABLE）。
+    C.validate_plan(plan, profile=profile)
     if plan.study_id != study:
         raise ReplayDriverError("STUDY_MISMATCH",
                                 f"confirm 计划 study={plan.study_id!r} != {study!r}")
@@ -429,7 +433,8 @@ def run_replay(
         raise ReplayDriverError("BATCH_MISSING", "batch_id 不得为空")
     lock, freeze_report = _check_gate(ctx, study)
     root_before = S.ResearchState(ctx).root_state()
-    plan, manifest, token = _load_locked_confirm(ctx, study, lock)
+    plan, manifest, token = _load_locked_confirm(ctx, study, lock,
+                                                profile=profile)
     specs = J.build_specs(plan, manifest)
     ordered = [specs[rid] for rid in sorted(specs)]
     try:

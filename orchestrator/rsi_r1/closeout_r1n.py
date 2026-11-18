@@ -96,7 +96,12 @@ def build_closeout_r1n(*, campaign: str, taskset_dir: "str | Path",
     t5 = _read(t5_summary)
     family = _read(family_doc)
     calibration = _read(calibration_report)
-    studies = [s for s in (_read(p) for p in study_reports) if s]
+    # 2026-11-18：保留 study 报告路径 —— judge 块缺 primary_status 时回退读
+    # 同 campaign 的 judge/report_<study>.json（第二轮 science_direction 为空
+    # 的根因；study 报告只是摘要，判据全件才有 primary_status/negative_control）。
+    study_docs = [(Path(p), d) for p in study_reports
+                  for d in (_read(p),) if d]
+    studies = [d for _p, d in study_docs]
     reviews = [r for r in (_read(p) for p in review_reports) if r]
     replays = [r for r in (_read(p) for p in replay_reports) if r]
     analysis_docs = [a for a in (_read(p) for p in analyses) if a]
@@ -108,9 +113,13 @@ def build_closeout_r1n(*, campaign: str, taskset_dir: "str | Path",
 
     # ---- 每 study 的工程/科学事实 ---------------------------------------
     per_study: "list[dict[str, Any]]" = []
-    for doc in studies:
+    for path, doc in study_docs:
         study = str(doc.get("study") or "")
         judge = doc.get("judge") or {}
+        if not judge.get("primary_status"):
+            full = _read(path.parent.parent / "judge" / f"report_{study}.json")
+            if full:
+                judge = {**full, **judge}
         task_id = str(doc.get("task_id") or "")
         cid = primary_ids.get(study) or (primary_ids.get(task_id) or "")
         analysis = None
