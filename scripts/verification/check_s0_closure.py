@@ -134,6 +134,25 @@ def check_probe(root: Path) -> None:
                 PROBLEMS.append("批准件次数小于本轮逻辑调用数")
         if e2.get("new_call_rows") != len(new_rows):
             PROBLEMS.append("探针自报新增行数与账本复算不符")
+        # 未入账的失败/拦截 POST：degraded 告警件是唯一留痕，如实挂 gaps
+        degraded = sorted(ledger_path.parent.glob("ledger.degraded.*.json"))
+        unledgered = []
+        for path in degraded:
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            meta = doc.get("call_meta") or {}
+            if meta.get("batch_id") == e2.get("batch_id"):
+                unledgered.append({"file": path.name,
+                                   "audit_event": meta.get("audit_event"),
+                                   "ok": meta.get("ok"),
+                                   "err": str(meta.get("err"))[:160]})
+        if unledgered:
+            GAPS.append(
+                f"{len(unledgered)} 次失败/拦截 POST 未入 ledger（2908 未登记写入路径期，"
+                f"仅 ledger.degraded 留痕）：{[u['file'] for u in unledgered]}；"
+                "不补记、不改时间戳")
         if e2.get("seqs") != seqs:
             PROBLEMS.append("探针自报 seqs 与账本复算不符")
     if (e1.get("transcript") or {}).get("session_id"):
