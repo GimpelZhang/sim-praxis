@@ -148,6 +148,13 @@ from orchestrator.common.runtime_paths import (
     rsi_r1n_gateway_state_path,
     rsi_r1n_ledger_path,
     rsi_r1n_quota_dir,
+    assert_rsi_s0_roots_isolated,  # RSI-S0：与封存/历史族根互异互斥
+    rsi_s0_approvals_dir,
+    rsi_s0_counters_path,
+    rsi_s0_gateway_state_dir,
+    rsi_s0_gateway_state_path,
+    rsi_s0_ledger_path,
+    rsi_s0_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -1043,6 +1050,27 @@ RSI_R1N_NAMESPACE = _LedgerNamespace(
 )
 
 
+# RSI-S0（2026-11-18）：基座与外环引擎就绪探针账；命名空间 2908（历史 2900–2907 已占用）。
+# 预算：硬帽 12 实呼（计划 §6：S0-0…S0-8 零付费；S0-9 四出口探针小付费批次）。
+LEDGER_RSI_S0 = 2908
+RSI_S0_HARD_CAP = 12
+RSI_S0_NORMAL_BUDGET = 12
+RSI_S0_TASK_CAPS = types.MappingProxyType({1: 12})  # task 1 = s0_probe 四出口探针
+
+RSI_S0_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_S0,
+    quota_dir_fn=rsi_s0_quota_dir,
+    ledger_path_fn=rsi_s0_ledger_path,
+    counters_path_fn=rsi_s0_counters_path,
+    approvals_dir_fn=rsi_s0_approvals_dir,
+    pause_dir_fn=rsi_s0_gateway_state_dir,
+    pause_path_fn=rsi_s0_gateway_state_path,
+    task_caps=RSI_S0_TASK_CAPS,
+    hard_cap=RSI_S0_HARD_CAP,
+    normal_budget=RSI_S0_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -1078,6 +1106,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_rv_roots_isolated()
     elif ns.phase == LEDGER_RSI_R1N:
         assert_rsi_r1n_roots_isolated()
+    elif ns.phase == LEDGER_RSI_S0:
+        assert_rsi_s0_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1370,6 +1400,11 @@ class QuotaLedger:
     def rsi_r1n(cls) -> "QuotaLedger":
         """RSI-R1-N 账（2907；campaign 由 SIMPRAXIS_RSI_R1N_CAMPAIGN 选定）。"""
         return cls(RSI_R1N_NAMESPACE)
+
+    @classmethod
+    def rsi_s0(cls) -> "QuotaLedger":
+        """RSI-S0 账（2908；单阶段无 campaign，硬帽 12 实呼）。"""
+        return cls(RSI_S0_NAMESPACE)
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":

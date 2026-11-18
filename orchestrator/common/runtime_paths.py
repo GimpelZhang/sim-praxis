@@ -2036,3 +2036,64 @@ def assert_rsi_r1n_roots_isolated() -> None:
                  f"R1.3/RV/G1/G2/G2.1 族根互异且互不嵌套（解析后）："
                  f"campaign={campaign} "
                  f"protected={[str(p.resolve(strict=False)) for p in seals]}"))
+
+
+# ---------------------------------------------------------------------------
+# RSI-S0（2026-11-18 立项，账套命名空间 2908）：基座与外环引擎就绪探针账。
+# S0 是单一阶段（无 campaign 分族）：根 = $SIMPRAXIS_RSI_S0_ROOT 或
+# $DATA_ROOT/rsi_s0；quota/ledger.jsonl 沿用现约定（0600、seq 连续、ts 严格 Z）。
+# ---------------------------------------------------------------------------
+
+_RSI_S0_ROOT_ENV = "SIMPRAXIS_RSI_S0_ROOT"
+
+
+def rsi_s0_root() -> Path:
+    """RSI-S0 根：显式 env 优先；否则 ``$DATA_ROOT/rsi_s0``。"""
+    root = os.environ.get(_RSI_S0_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_s0"
+
+
+def _s0_dir(name: str) -> Path:
+    if name not in ("quota", "quota/approvals", "quota/gateway_state"):
+        raise ValueError(f"未知 RSI-S0 子目录：{name!r}")
+    return ensure_private_dir(rsi_s0_root() / name)
+
+
+def rsi_s0_quota_dir() -> Path:
+    return _s0_dir("quota")
+
+
+def rsi_s0_ledger_path() -> Path:
+    return rsi_s0_quota_dir() / "ledger.jsonl"
+
+
+def rsi_s0_counters_path() -> Path:
+    return rsi_s0_quota_dir() / "counters.json"
+
+
+def rsi_s0_approvals_dir() -> Path:
+    return _s0_dir("quota/approvals")
+
+
+def rsi_s0_gateway_state_dir() -> Path:
+    return _s0_dir("quota/gateway_state")
+
+
+def rsi_s0_gateway_state_path() -> Path:
+    return rsi_s0_gateway_state_dir() / "gateway_state.json"
+
+
+def assert_rsi_s0_roots_isolated() -> None:
+    """RSI-S0 根与全部封存期根及历史研究族根互异且互不嵌套（写前 fail-fast）。"""
+    protected = rsi_r1n_protected_write_roots()
+    roots = dict(protected)
+    roots["rsi_r1n"] = rsi_r1n_root()
+    _assert_roots_isolated(
+        rsi_s0_root(),
+        tuple(roots.values()),
+        label=_RSI_S0_ROOT_ENV,
+        message=("RSI-S0 根必须与封存期根及 R0…R1-N 族根互异且互不嵌套（解析后）："
+                 f"rsi_s0={rsi_s0_root().resolve(strict=False)} "
+                 f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))
