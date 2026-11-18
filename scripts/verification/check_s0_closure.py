@@ -76,9 +76,10 @@ def check_probe(root: Path) -> None:
         PROBLEMS.append(f"E2 逻辑调用 {len(results)} != 账行 {e2.get('batch_rows')}")
     if len(results) > 2:
         PROBLEMS.append(f"E2 小批次超过 2 呼：{len(results)}")
-    if (report.get("session") or {}).get("returncode") is not None:
-        GAPS.append("headless 会话供应商消耗不在我方 ledger（E2 口径照计划仅覆盖 "
-                    "PhysicalRSI 侧调用；roadmap §6.3 记账面缺口转 S1 立项）")
+    if (e1.get("transcript") or {}).get("session_id"):
+        GAPS.append("headless 会话的供应商消耗不在我方 ledger（E2 口径照计划仅覆盖 "
+                    "PhysicalRSI 侧调用；roadmap §6.3 的 headless 记账面缺口转 S1 立项，"
+                    "价格记 UNKNOWN）")
 
     e3 = _load(root / "e3_reconstruction.json", "E3 reconstruction") or {}
     if not e3.get("session_id") or not e3.get("model"):

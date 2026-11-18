@@ -14,6 +14,13 @@ def test_namespace_is_2908_and_cap_is_12():
     assert dict(RSI_S0_NAMESPACE.task_caps) == {1: 12}
 
 
+def test_namespace_registered_for_write_paths():
+    """2908 必须登记进带守卫的追加路径与 blocked 占批次口径（否则落 degraded 件）。"""
+    assert RSI_S0_NAMESPACE.in_sealed_set() is True
+    assert RSI_S0_NAMESPACE.in_sealed_set_for_read() is True
+    assert RSI_S0_NAMESPACE.uses_batch_occupancy() is True
+
+
 def test_ledger_paths_under_s0_root(tmp_path, monkeypatch):
     monkeypatch.setenv("SIMPRAXIS_RSI_S0_ROOT", str(tmp_path / "rsi_s0"))
     ledger = QuotaLedger.rsi_s0()
