@@ -190,6 +190,8 @@ def verify_bundle(bundle: Path, *, kb_root: Path | None = None,
     if tables_dir.is_dir():
         db = lancedb.connect(str(tables_dir))
         for table, meta in tables.items():
+            if not isinstance(meta, dict):
+                continue  # 畸形 manifest 已在文件段报 problem
             if table not in db.table_names():
                 continue
             opened = db.open_table(table)

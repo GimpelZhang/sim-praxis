@@ -19,6 +19,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 BUNDLE="${1:?用法: bootstrap.sh <product-bundle> <target-root> [--kb-root <KB>]}"
 TARGET="${2:?用法: bootstrap.sh <product-bundle> <target-root> [--kb-root <KB>]}"
+BUNDLE="$(realpath -m "$BUNDLE")"
+TARGET="$(realpath -m "$TARGET")"
 shift 2
 KB_ROOT_LIVE=""
 while [[ $# -gt 0 ]]; do
@@ -44,9 +46,9 @@ mkdir -p "$STAGE/kb" "$STAGE/data"
 ln -s "$(cd "$BUNDLE" && pwd)/tables" "$STAGE/data/lancedb"
 ln -s "$(cd "$BUNDLE" && pwd)/content/knowledge" "$STAGE/kb/knowledge"
 ln -s "$(cd "$BUNDLE" && pwd)/content/solutions" "$STAGE/kb/solutions"
+ln -s "$TARGET/data" "$STAGE/kb/data"  # 指向最终绝对路径（不是临时目录）
 mv -T "$STAGE" "$TARGET"
 trap - EXIT
-ln -s "$TARGET/data" "$TARGET/kb/data"  # 指向最终路径（不是临时目录）
 
 echo "[bootstrap] 3/4 环境注入 -> $TARGET/env.sh"
 cat > "$TARGET/env.sh" <<EOF

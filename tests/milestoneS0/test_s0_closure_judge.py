@@ -122,3 +122,76 @@ def test_ledger_mismatch_against_probe_self_report_fails(tmp_path, monkeypatch):
     verdict = json.loads(report.read_text(encoding="utf-8"))
     assert proc.returncode == 1
     assert any("新增账行" in p or "seqs" in p or "seq" in p for p in verdict["problems"])
+
+
+def _green_probe(tmp_path, monkeypatch, *, ledger_lines: str, approved=2,
+                 declaration_override=None):
+    probe = tmp_path / "probe"
+    _write(probe / "report.json", {
+        "schema": "simpraxis.s0.probe_report.v1",
+        "exits": {"E1": True, "E2": True, "E3": True, "E4": True},
+    })
+    _write(probe / "e1_host_judgement.json", {
+        "ladder": {key: True for key in (
+            "A1_effective_response", "A2_artifacts_written", "A3_real_load",
+            "A4_physics_stepping", "A5_functional_target")},
+        "claim_matches_host": True, "host_displacement_m": 0.2,
+    })
+    ledger = _canonical_ledger(tmp_path, monkeypatch, ledger_lines, approved=approved)
+    e2 = {"pass": True, "seqs": [1, 2], "ts_all_z": True, "batch_rows": 2,
+          "batch_id": "b1", "before_seq": 0, "new_call_rows": 2,
+          "ledger_path": str(ledger), "results": [{"ok": True}, {"ok": True}]}
+    if declaration_override:
+        e2.update(declaration_override)
+    _write(probe / "e2_ledger_reconciliation.json", e2)
+    _write(probe / "e3_reconstruction.json", {
+        "session_id": "s", "model": "m", "tool_calls": [{"name": "Write"}],
+        "write_replay_mismatches": [],
+    })
+    _write(probe / "e4_isolation.json", {"pass": True})
+    _write(probe / "e4_gate_rehearsal.json", {"pass": True})
+    audit = tmp_path / "audit.json"
+    _write(audit, {"pass": True, "checks": [{"id": "imports", "pass": True}]})
+    return probe, audit
+
+
+def test_non_canonical_ledger_path_is_rejected(tmp_path, monkeypatch):
+    probe, audit = _green_probe(
+        tmp_path, monkeypatch, ledger_lines='{"event":"call","seq":1,"ts_iso":"2026-11-18T00:00:00Z",'
+        '"batch_id":"b1","ok":true}\n'
+        '{"event":"call","seq":2,"ts_iso":"2026-11-18T00:00:01Z",'
+        '"batch_id":"b1","ok":true}\n',
+        declaration_override={"ledger_path": str(tmp_path / "elsewhere.jsonl")})
+    report = tmp_path / "judge.json"
+    proc = _run(probe, audit, report)
+    verdict = json.loads(report.read_text(encoding="utf-8"))
+    assert proc.returncode == 1
+    assert any("规范路径" in item for item in verdict["problems"])
+
+
+def test_under_approved_batch_is_rejected(tmp_path, monkeypatch):
+    probe, audit = _green_probe(
+        tmp_path, monkeypatch, ledger_lines='{"event":"call","seq":1,"ts_iso":"2026-11-18T00:00:00Z",'
+        '"batch_id":"b1","ok":true}\n'
+        '{"event":"call","seq":2,"ts_iso":"2026-11-18T00:00:01Z",'
+        '"batch_id":"b1","ok":true}\n',
+        approved=1)
+    report = tmp_path / "judge.json"
+    proc = _run(probe, audit, report)
+    verdict = json.loads(report.read_text(encoding="utf-8"))
+    assert proc.returncode == 1
+    assert any("批准件" in item for item in verdict["problems"])
+
+
+def test_missing_approval_is_rejected(tmp_path, monkeypatch):
+    probe, audit = _green_probe(
+        tmp_path, monkeypatch, ledger_lines='{"event":"call","seq":1,"ts_iso":"2026-11-18T00:00:00Z",'
+        '"batch_id":"b1","ok":true}\n'
+        '{"event":"call","seq":2,"ts_iso":"2026-11-18T00:00:01Z",'
+        '"batch_id":"b1","ok":true}\n')
+    (tmp_path / "rsi_s0" / "quota" / "approvals" / "b1.json").unlink()
+    report = tmp_path / "judge.json"
+    proc = _run(probe, audit, report)
+    verdict = json.loads(report.read_text(encoding="utf-8"))
+    assert proc.returncode == 1
+    assert any("缺批次批准件" in item for item in verdict["problems"])

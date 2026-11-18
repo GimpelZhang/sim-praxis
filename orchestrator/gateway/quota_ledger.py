@@ -2067,7 +2067,8 @@ def main(argv: "list[str] | None" = None) -> int:
     p = argparse.ArgumentParser(
         description="配额账本（批准凭据/恢复/计数；Phase 1/2/2.5/2.6/2.7/2.8.1、"
                     "RSI-R0/R0.1/R0.2 账已封存；2903 为 RSI-R1 旧账（R1.1 已结案，"
-                    "只读纪律）；--ledger-phase 2904 走 RSI-R1.2 独立新账）")
+                    "只读纪律）；--ledger-phase 2904 走 RSI-R1.2 独立新账；"
+                    "2908 为 RSI-S0 探针账（硬帽 12））")
     # 缺省 2：Phase 1/2 所有既有 CLI 用法逐字节不变；25/26/27/281/2900/2901/2902
     # 为封存账，2903 为 R1 独立新账（唯一可写）。
     p.add_argument("--ledger-phase", type=int, default=LEDGER_PHASE,

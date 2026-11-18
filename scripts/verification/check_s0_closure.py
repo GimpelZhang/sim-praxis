@@ -75,10 +75,11 @@ def check_probe(root: Path) -> None:
     if len(results) > 2:
         PROBLEMS.append(f"E2 小批次超过 2 呼：{len(results)}")
     # 不信任探针自述：直接重读账本复算（评审 HIGH 修复）
-    from orchestrator.common.runtime_paths import rsi_s0_ledger_path
+    from orchestrator.common.runtime_paths import rsi_s0_root
 
     declared = Path(str(e2.get("ledger_path") or ""))
-    canonical = rsi_s0_ledger_path().resolve(strict=False)
+    # 只算路径不建目录（判件必须只读）
+    canonical = (rsi_s0_root() / "quota" / "ledger.jsonl").resolve(strict=False)
     if declared.resolve(strict=False) != canonical:
         PROBLEMS.append(f"E2 账本路径非 2908 规范路径：{declared} != {canonical}")
     ledger_path = declared
@@ -86,9 +87,12 @@ def check_probe(root: Path) -> None:
         PROBLEMS.append(f"E2 账本不可读：{ledger_path}")
     else:
         rows = []
-        for line in ledger_path.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                rows.append(json.loads(line))
+        try:
+            for line in ledger_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    rows.append(json.loads(line))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            PROBLEMS.append(f"账本存在不可解析行：{exc}")
         calls = [row for row in rows
                  if row.get("event") == "call" and isinstance(row.get("seq"), int)]
         seqs = [row["seq"] for row in calls]
@@ -113,7 +117,14 @@ def check_probe(root: Path) -> None:
         if not approval.is_file():
             PROBLEMS.append(f"缺批次批准件：{approval}")
         else:
-            approve_doc = json.loads(approval.read_text(encoding="utf-8"))
+            try:
+                approve_doc = json.loads(approval.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                PROBLEMS.append(f"批次批准件不可解析：{approval}（{exc}）")
+                approve_doc = {}
+            if not isinstance(approve_doc, dict):
+                PROBLEMS.append(f"批次批准件顶层不是对象：{approval}")
+                approve_doc = {}
             if int(approve_doc.get("approved") or 0) < len(results):
                 PROBLEMS.append("批准件次数小于本轮逻辑调用数")
         if e2.get("new_call_rows") != len(new_rows):
