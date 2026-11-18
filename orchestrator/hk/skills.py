@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ._physicalrsi import CallableSkill, SkillDescriptor, compose_sequence
@@ -62,25 +63,131 @@ def r1n_task_builder(name: str, **kwargs) -> Any:
 
 
 def default_batch_runner(batch_plan: Mapping[str, Any], context=None):
-    raise SkillEngineNotWired(
-        "批量执行器未接线：S0 只落技能骨架；真实 MuJoCo 跑批在 S1 由容器适配器接入"
-        "（禁止返回假 run 产物）")
+    """K3 真实跑批（S1 接线）：任务构建器校验 → 受信物理服务执行。
+
+    锁内适配（计划 S1-2）：计划原文「K3=default_batch_runner 调 r1n_task_builder(name)
+    + physics_service」。条件矩阵由 K1/K2 提交，但**必须与登记任务逐值一致**
+    （id 与参数集；不一致即 ``CONDITIONS_DRIFT``——actor 不能自造条件）；私有 block
+    分配由 host 的 ``build_block_assignment`` 生成，actor 不可见种子。
+
+    需要 context 提供观测/证据根（``observations_root``/``evidence_root``）与
+    ``batch_id``；缺根时诚实抛 ``SkillEngineNotWired``（禁止假产物）。
+    """
+    from orchestrator.rsi_bridge.physics_service import (PhysicsService,
+                                                         build_block_assignment)
+
+    plan = _require_mapping(batch_plan, "batch_plan")
+    ctx = context if isinstance(context, Mapping) else {}
+    obs_root = ctx.get("observations_root")
+    ev_root = ctx.get("evidence_root")
+    if not obs_root or not ev_root:
+        raise SkillEngineNotWired(
+            "批量执行器需要受信服务根（context.observations_root/evidence_root）；"
+            "禁止返回假 run 产物")
+    study = str(plan.get("study") or "")
+    name = {"A_N": "a", "B_N": "b"}.get(study)
+    if name is None:
+        raise SkillEngineNotWired(f"未注册研究 {study!r}（只有 A_N/B_N）")
+    task = r1n_task_builder(name)
+    registered = {c.id: dict(c.params) for c in task.conditions}
+    given_docs = plan.get("conditions")
+    if not isinstance(given_docs, list) or not given_docs:
+        raise SkillError("batch_plan.conditions 必须是非空列表")
+    given = {str(c["id"]): dict(c.get("params") or {}) for c in given_docs}
+    if given != registered:
+        raise SkillError(
+            f"CONDITIONS_DRIFT: 提交条件与登记任务不一致（{sorted(given)} vs "
+            f"{sorted(registered)}）；actor 不得自造/篡改条件")
+    n_block = plan.get("n_block")
+    if isinstance(n_block, bool) or not isinstance(n_block, int) or n_block <= 0:
+        raise SkillError(f"n_block 必须是正整数，收到 {n_block!r}")
+    plan_sha = str(plan.get("plan_sha256") or "")
+    nuisance_docs = []
+    for param, spec in (task.nuisance_schema or {}).items():
+        if not isinstance(spec, Mapping):
+            continue
+        support = spec.get("support") or ["0", "0"]
+        nuisance_docs.append({"param": param, "low": str(support[0]),
+                              "high": str(support[-1]),
+                              "precision": "0.001" if study == "A_N" else "0.01"})
+    blocks = build_block_assignment(plan_sha, study=study, n_block=n_block,
+                                    nuisance=nuisance_docs)
+    service = PhysicsService(observations_root=Path(str(obs_root)),
+                             evidence_root=Path(str(ev_root)))
+    manifest = service.run_batch(
+        study=study, task=task.to_dict(), plan_sha256=plan_sha, blocks=blocks,
+        batch_id=str(ctx.get("batch_id") or "s1"))
+    manifest["confirm_plan"] = {
+        "study": study, "plan_sha256": plan_sha,
+        "conditions": [dict(c) for c in given_docs],
+        "blocks": blocks,
+        "contrasts": manifest["contrasts"],
+        "runs": manifest["runs"],
+    }
+    return manifest
+
+
+def _linear_contrast_values(rows, contrast):
+    """逐 block 线性对比值（DiD 四项 ±1 与 pairwise 两项 ±1 同式）。"""
+    from orchestrator.rsi_bridge.host_recompute import HostRecomputeError
+    from orchestrator.rsi_bridge.host_recompute import (
+        _linear_contrast_values as impl)
+
+    try:
+        return impl(rows, contrast)
+    except HostRecomputeError as exc:
+        raise SkillError(f"{exc.code}: {exc.detail}") from None
 
 
 def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
-    """冻结分析：逐对比配对差 + percentile 区间（委托 rsi_r1.statistics）。"""
+    """冻结分析：逐对比配对差 + percentile 区间（委托 rsi_r1.statistics）。
+
+    S1 真实路径（manifest 由 ``default_batch_runner`` 产出，含 runs+contrasts+confirm_plan）：
+    逐 block 计算**线性对比值**（DiD 四项 ±1 / pairwise 两项 ±1），再走
+    ``statistics.estimate`` 的 block 重抽样区间；equivalence 类主张用 90% 区间
+    （rubric 口径），其余 95%。
+    """
+    from orchestrator.rsi_r1 import rubric as R
     from orchestrator.rsi_r1 import statistics
 
     document = _require_mapping(run_manifest, "run_manifest")
+    # K4→K5 的 Contract 是 analysis_program；run_manifest 作为**句柄内嵌**随程序走
+    # （blob 引用同构：记录本体在盘上，程序只带引用与摘要），K5 在这里解引用。
+    if isinstance(document.get("run_manifest"), Mapping):
+        document = _require_mapping(document["run_manifest"], "run_manifest.ref")
     rows = document.get("runs")
     contrasts = document.get("contrasts")
     if not isinstance(rows, list) or not rows:
         raise SkillError("run_manifest.runs 必须是非空列表")
     if not isinstance(contrasts, list) or not contrasts:
         raise SkillError("run_manifest.contrasts 必须是非空列表")
-    # K6 需要冻结的确认分配（私有 block 配对）；S0 未接线确认批生成时诚实失败，
-    # 不产出注定在 K6 崩掉的半成品（评审 MEDIUM）。
     confirm_plan = document.get("confirm_plan")
+    if isinstance(confirm_plan, Mapping) and confirm_plan.get("blocks") \
+            and confirm_plan.get("runs"):
+        results = []
+        for contrast in contrasts:
+            c = _require_mapping(contrast, "contrast")
+            level = (str(R.CI_NEGATIVE) if c.get("proposition") == "equivalent"
+                     else str(R.CI_PRIMARY))
+            values = _linear_contrast_values(rows, c)
+            estimated = statistics.estimate(values, level=level)
+            results.append({
+                "id": c.get("id"),
+                "metric_id": c.get("metric_id"),
+                "proposition": c.get("proposition"),
+                "delta": c.get("delta"),
+                "level": level,
+                "estimate": estimated["effect"],
+                "ci_low": estimated["lower"],
+                "ci_high": estimated["upper"],
+                "n_blocks": estimated["n_blocks"],
+                "claim": statistics.classify(c.get("proposition"), c.get("delta"),
+                                             estimated["lower"], estimated["upper"]),
+            })
+        return {"contrasts": results, "confirm_plan": dict(confirm_plan)}
+    # 旧骨架路径（S0 假件/合成夹具）：confirm_plan.pairs 直接喂 estimate。
+    # K6 需要冻结的确认分配（私有 block 配对）；未接线时诚实失败，
+    # 不产出注定在 K6 崩掉的半成品（评审 MEDIUM）。
     if not isinstance(confirm_plan, Mapping) or not confirm_plan.get("pairs"):
         raise SkillEngineNotWired(
             "confirm_plan 未接线：K5 默认适配器只做开发批分析；确认批私有配对在 "
@@ -114,12 +221,42 @@ def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
 
 
 def default_confirmer(confirm_plan: Mapping[str, Any], context=None) -> dict:
-    """host 独立复跑：用冻结方法在全新配对数据上重算（委托同一统计器）。"""
+    """host 独立复跑。
+
+    * S1 真实路径（plan 带 ``runs``+``conditions``+``blocks``）：调
+      ``host_recompute.recompute`` 在全新根逐点重仿真并比对——不一致即停止码
+      （不重跑求解，计划 S1-1/停止规则）。
+    * 旧骨架路径（plan 带 ``pairs``）：同一统计器在冻结配对值上重算。
+    """
     from orchestrator.rsi_r1 import statistics
 
     plan = _require_mapping(confirm_plan, "confirm_plan")
     if plan.get("frozen") is not True:
         raise SkillEngineNotWired("confirm_plan 未冻结：拒绝在未冻结方法上复跑")
+    if plan.get("runs") and plan.get("conditions") and plan.get("blocks"):
+        from orchestrator.rsi_bridge import host_recompute
+
+        ctx = context if isinstance(context, Mapping) else {}
+        fresh_root = ctx.get("fresh_root")
+        if not fresh_root:
+            raise SkillEngineNotWired(
+                "S1 确认复跑需要 context.fresh_root（全新证据根；禁止复用原批根）")
+        try:
+            handle = host_recompute.recompute(plan, fresh_root=fresh_root,
+                                              batch_id=str(ctx.get("batch_id") or "confirm"))
+        except host_recompute.HostRecomputeError as exc:
+            raise SkillError(f"{exc.code}: {exc.detail}") from None
+        result = dict(handle.confirm_result)
+        result["recompute_report"] = {
+            "n_diffs": len(handle.diffs),
+            "fresh_root": str(handle.fresh_root),
+        }
+        if handle.diffs:
+            raise SkillError(
+                "RERUN_POINT_MISMATCH: "
+                + json.dumps([d.to_dict() for d in handle.diffs[:5]],
+                             ensure_ascii=False))
+        return result
     pairs_by_contrast = plan.get("pairs")
     if not isinstance(pairs_by_contrast, Mapping) or not pairs_by_contrast:
         raise SkillError("confirm_plan.pairs 必须是非空 mapping")
@@ -184,7 +321,12 @@ def build_skills(*, actor: Callable[[str, str, Mapping[str, Any]], Mapping[str, 
         if isinstance(n_block, bool) or not isinstance(n_block, int) or n_block <= 0:
             raise SkillError(f"n_block 必须是正整数，收到 {n_block!r}")
         allocations = [[i, b] for i in range(len(conditions)) for b in range(n_block)]
-        return {"conditions": list(conditions), "n_block": n_block,
+        # S1：study/plan_sha256 等计划元数据必须透传到 K3（跑批需要登记身份），
+        # 只重写形状字段；S0 骨架的额外键也原样保留。
+        return {**{k: v for k, v in plan.items()
+                   if k not in ("conditions", "n_block", "n_cond", "runs",
+                                "allocations")},
+                "conditions": list(conditions), "n_block": n_block,
                 "n_cond": len(conditions), "runs": len(allocations),
                 "allocations": allocations}
 
@@ -205,6 +347,8 @@ def build_skills(*, actor: Callable[[str, str, Mapping[str, Any]], Mapping[str, 
         if not isinstance(source, str) or not source.strip():
             raise SkillError("analysis_program.source 为空")
         program["sha256"] = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        # 数据句柄随程序走（S1）：K5 只读引用，不改 raw。
+        program["run_manifest"] = dict(_require_mapping(value, "run_manifest"))
         return program
 
     def k5_analyze(value, context=None):
@@ -221,8 +365,8 @@ def build_skills(*, actor: Callable[[str, str, Mapping[str, Any]], Mapping[str, 
             raise SkillError("analysis_result 缺少 confirm_plan（冻结分配表）")
         frozen = dict(plan)
         frozen.update(frozen=True, analysis_sha256=_sha(result))
-        if not frozen.get("pairs"):
-            raise SkillError("confirm_plan.pairs 为空：冻结后无确认批可跑")
+        if not frozen.get("pairs") and not frozen.get("runs"):
+            raise SkillError("confirm_plan.pairs/runs 为空：冻结后无确认批可跑")
         return frozen
 
     def k7_run_confirm(value, context=None):

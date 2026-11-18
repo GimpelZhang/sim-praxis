@@ -29,11 +29,18 @@ from . import skills as skills_mod  # 相对导入写成包内引用：milestone
 
 __all__ = ["GateDecision", "DriverResult", "ResearchDriver",
            "TouchpointBudgetExceeded", "GATE2_MAX_REJECTS_PER_STAGE",
-           "GATE1_MAX_REJECTS"]
+           "GATE1_MAX_REJECTS", "DIAGNOSE_BUDGET"]
 
 GATE2_MAX_REJECTS_PER_STAGE = 2
 GATE1_MAX_REJECTS = 2
 TOUCHPOINT_BUDGET = 4
+DIAGNOSE_BUDGET = 2
+
+
+def _require_mapping_dict(value: Any, what: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{what} 必须是 dict，收到 {type(value).__name__}")
+    return value
 
 
 class TouchpointBudgetExceeded(RuntimeError):
@@ -72,7 +79,9 @@ class ResearchDriver:
                  direction_reviser: Callable[[dict, str], dict] | None = None,
                  budget_remaining: int = 10_000,
                  touchpoint_budget: int = TOUCHPOINT_BUDGET,
-                 max_rejects_per_stage: int = GATE2_MAX_REJECTS_PER_STAGE):
+                 max_rejects_per_stage: int = GATE2_MAX_REJECTS_PER_STAGE,
+                 claim_guard: bool = False,
+                 diagnose_budget: int = DIAGNOSE_BUDGET):
         self.gate1_hook = gate1_hook
         self.gate2_hook = gate2_hook
         self.evidence_root = Path(evidence_root)
@@ -81,9 +90,17 @@ class ResearchDriver:
         self.max_rejects_per_stage = max_rejects_per_stage
         self.rejects: dict[str, int] = {}
         self.touchpoints_used = 0
+        self.diagnose_used = 0
+        # S1 生产链开启 G-CLAIM（自报 vs host 复算逐字段）；S0 骨架的假 actor 由
+        # 里程碑测试显式关着——S1 的 AC-17 负控覆盖「不符即 CLAIM_INVALID」。
+        self.claim_guard = bool(claim_guard)
+        self.diagnose_budget = int(diagnose_budget)
         self._direction_reviser = direction_reviser
-        self.skills = skills_mod.build_skills(actor=self._actor(actor), batch_runner=batch_runner,
-                                   analyzer=analyzer, confirmer=confirmer)
+        self._raw_actor = actor
+        self._counted_actor = self._actor(actor)
+        self.skills = skills_mod.build_skills(actor=self._counted_actor,
+                                              batch_runner=batch_runner,
+                                              analyzer=analyzer, confirmer=confirmer)
 
     # —— System 2 触点（计数 + 预算）——
     def _actor(self, actor):
@@ -91,6 +108,12 @@ class ResearchDriver:
             return None
 
         def counted(name: str, contract: str, value):
+            if name == "diagnose_fail":  # 诊断触点独立预算（≤2/研究，计划 S1-4）
+                if self.diagnose_used >= self.diagnose_budget:
+                    raise TouchpointBudgetExceeded(
+                        f"诊断触点预算 {self.diagnose_budget} 已用尽（试图 {name}）")
+                self.diagnose_used += 1
+                return actor(name, contract, value)
             if self.touchpoints_used >= self.touchpoint_budget:
                 raise TouchpointBudgetExceeded(
                     f"触点预算 {self.touchpoint_budget} 已用尽（试图 {name}）")
@@ -122,6 +145,7 @@ class ResearchDriver:
             return DriverResult("human_failure", exc.code, 0, detail=str(exc))
 
         run_idx = 0
+        diagnose_doc = None
         while True:
             run_idx += 1
             self.touchpoints_used = 0  # 触点预算按 run 计（打回重跑＝新 run_idx 的研究尝试）
@@ -131,6 +155,19 @@ class ResearchDriver:
             value: Any = dict(registered)
             if notes:
                 value = dict(value, human_notes=notes)
+            if diagnose_doc is not None:
+                # 打回意见的诊断结果进补救线程（K1 输入），与 human_notes 并列
+                value = dict(value, diagnose=diagnose_doc)
+            ctx = {"stage_id": stage_id, "run_idx": run_idx,
+                   "run_dir": str(run_dir), "evidence_root": str(self.evidence_root),
+                   "observations_root": str(self.evidence_root / "observations"),
+                   "fresh_root": str(self.evidence_root / "recompute"
+                                     / f"{stage_id}_run{run_idx:03d}"),
+                   "batch_id": f"{stage_id}-run{run_idx:03d}",
+                   "driver": self}
+            if diagnose_doc is not None:
+                ctx["diagnose"] = diagnose_doc
+            k7_value: Any = None
             try:
                 for key in ("K1", "K2", "K3", "K4", "K5", "K6", "K7"):
                     if key == "K3":
@@ -142,10 +179,25 @@ class ResearchDriver:
                             return DriverResult("human_failure", exc.code, run_idx,
                                                 rejects=dict(self.rejects),
                                                 detail=str(exc))
-                    value = self.skills[key].execute(value)
+                    value = self.skills[key].execute(value, ctx)
+                    if key == "K7":
+                        k7_value = value
                     self._record(run_dir, f"{key}.json", value)
-                claim = self.skills["K8"].execute(value)
+                claim = self.skills["K8"].execute(value, ctx)
                 self._record(run_dir, "K8.json", claim)
+                if self.claim_guard:
+                    # G-CLAIM（AC-17）：自报逐字段 vs host 复算；不符即 CLAIM_INVALID。
+                    # host 真值取 confirm_result 的**主张投影**（contrasts 行）——
+                    # 只比对可主张的数值面，信封元数据（时间戳/sha）不要求自报复制。
+                    host_truth = k7_value if isinstance(k7_value, Mapping) else {}
+                    if isinstance(host_truth.get("contrasts"), list):
+                        host_truth = {"contrasts": host_truth["contrasts"]}
+                    enforce(["G-CLAIM"], GuardCtx(stage=stage_id, claim_doc=claim,
+                                                  host_recomputed=dict(host_truth)))
+            except GuardViolation as exc:
+                # 守卫拒绝 = 协议级停止码（如 G-CLAIM 的 CLAIM_INVALID），原码上报
+                return DriverResult("human_failure", exc.code, run_idx,
+                                    rejects=dict(self.rejects), detail=str(exc))
             except (skills_mod.SkillEngineNotWired, TouchpointBudgetExceeded) as exc:
                 code = ("TOUCHPOINT_BUDGET_EXCEEDED"
                         if isinstance(exc, TouchpointBudgetExceeded) else "ENGINE_NOT_WIRED")
@@ -170,6 +222,22 @@ class ResearchDriver:
                 return DriverResult("human_failure", "REJECT_WITHOUT_NOTES", run_idx,
                                     rejects=dict(self.rejects),
                                     detail="打回未带审批意见，按 nodes.py L235 结案")
+            # 打回意见注入诊断触点（计划 S1-4：human_notes 原文进 diagnose prompt；
+            # 实质性算法修补 → claim 件标 human_cofix，结论降级人机共同改进）
+            diagnose_doc = None
+            if self.actor_available():
+                try:
+                    diagnose_doc = dict(_require_mapping_dict(
+                        self._actor_call("diagnose_fail", C.CLAIM.name,
+                                         {"human_notes": decision.human_notes,
+                                          "claim": claim, "run_idx": run_idx,
+                                          "evidence": str(run_dir)}),
+                        "diagnose"))
+                except TouchpointBudgetExceeded as exc:
+                    diagnose_doc = {"skipped": "DIAGNOSE_BUDGET_EXHAUSTED",
+                                    "detail": str(exc)}
+            if diagnose_doc is not None:
+                self._record(run_dir, "diagnose.json", diagnose_doc)
             self.rejects[stage_id] = self.rejects.get(stage_id, 0) + 1  # CR-20：per-Stage
             if self.rejects[stage_id] >= self.max_rejects_per_stage:
                 return DriverResult("human_failure", "REJECT_BUDGET_EXHAUSTED", run_idx,
@@ -177,6 +245,15 @@ class ResearchDriver:
                                     detail=f"{stage_id} 打回 {self.rejects[stage_id]} "
                                            f"次 > 上限 {self.max_rejects_per_stage}")
             notes = decision.human_notes  # 意见进补救线程（K1 输入）
+
+    # —— 诊断触点（独立预算；打回意见注入）——
+    def actor_available(self) -> bool:
+        return getattr(self, "_raw_actor", None) is not None
+
+    def _actor_call(self, name: str, contract: str, value: Any):
+        if self._counted_actor is None:
+            raise TouchpointBudgetExceeded("actor 未接线")
+        return self._counted_actor(name, contract, value)
 
     # —— Gate1：研究目标门（批准前零实跑）——
     def run_campaign(self, goal_card: dict,

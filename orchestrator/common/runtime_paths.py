@@ -2097,3 +2097,91 @@ def assert_rsi_s0_roots_isolated() -> None:
         message=("RSI-S0 根必须与封存期根及 R0…R1-N 族根互异且互不嵌套（解析后）："
                  f"rsi_s0={rsi_s0_root().resolve(strict=False)} "
                  f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))
+
+
+# ---------------------------------------------------------------------------
+# RSI-S1（2026-11-18 立项，账套命名空间 2909）：最小自主研究闭环账。
+# 根 = $SIMPRAXIS_RSI_S1_ROOT 或 $DATA_ROOT/rsi_s1。子目录：
+#   quota/{ledger.jsonl,counters.json,approvals/,gateway_state/} —— 网关面账
+#   prereg/    预注册件与双签 LOCK（付费前冻结，改一件即新批次）
+#   evidence/  研究证据根（driver 的 runs/<stage>_runNNN/ 落这里）
+#   sessions/  headless 会话账（外耗面；与网关门分列不混算）
+#   closeout/  结案判件与三签
+# 纪律：网关门与会话面双账并列（S0 残尾③），两者都从各自账本逐行复算。
+# ---------------------------------------------------------------------------
+
+_RSI_S1_ROOT_ENV = "SIMPRAXIS_RSI_S1_ROOT"
+
+_RSI_S1_SUBDIRS = frozenset({
+    "quota", "quota/approvals", "quota/gateway_state",
+    "prereg", "evidence", "sessions", "closeout",
+})
+
+
+def rsi_s1_root() -> Path:
+    """RSI-S1 根：显式 env 优先；否则 ``$DATA_ROOT/rsi_s1``。"""
+    root = os.environ.get(_RSI_S1_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_s1"
+
+
+def _s1_dir(name: str) -> Path:
+    if name not in _RSI_S1_SUBDIRS:
+        raise ValueError(f"未知 RSI-S1 子目录：{name!r}")
+    return ensure_private_dir(rsi_s1_root() / name)
+
+
+def rsi_s1_quota_dir() -> Path:
+    return _s1_dir("quota")
+
+
+def rsi_s1_ledger_path() -> Path:
+    return rsi_s1_quota_dir() / "ledger.jsonl"
+
+
+def rsi_s1_counters_path() -> Path:
+    return rsi_s1_quota_dir() / "counters.json"
+
+
+def rsi_s1_approvals_dir() -> Path:
+    return _s1_dir("quota/approvals")
+
+
+def rsi_s1_gateway_state_dir() -> Path:
+    return _s1_dir("quota/gateway_state")
+
+
+def rsi_s1_gateway_state_path() -> Path:
+    return rsi_s1_gateway_state_dir() / "gateway_state.json"
+
+
+def rsi_s1_prereg_dir() -> Path:
+    return _s1_dir("prereg")
+
+
+def rsi_s1_evidence_root() -> Path:
+    return _s1_dir("evidence")
+
+
+def rsi_s1_sessions_dir() -> Path:
+    return _s1_dir("sessions")
+
+
+def rsi_s1_closeout_dir() -> Path:
+    return _s1_dir("closeout")
+
+
+def assert_rsi_s1_roots_isolated() -> None:
+    """RSI-S1 根与封存期根及 R0…S0 族根互异且互不嵌套（写前 fail-fast）。"""
+    protected = rsi_r1n_protected_write_roots()
+    roots = dict(protected)
+    roots["rsi_r1n"] = rsi_r1n_root()
+    roots["rsi_s0"] = rsi_s0_root()
+    _assert_roots_isolated(
+        rsi_s1_root(),
+        tuple(roots.values()),
+        label=_RSI_S1_ROOT_ENV,
+        message=("RSI-S1 根必须与封存期根及 R0…S0 族根互异且互不嵌套（解析后）："
+                 f"rsi_s1={rsi_s1_root().resolve(strict=False)} "
+                 f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))

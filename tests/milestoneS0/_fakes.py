@@ -17,6 +17,8 @@ def fake_actor(log: list | None = None):
             return {"source": "raise SystemExit('frozen analysis program')\n"}
         if name == "submit_claim":
             return {"verdict": "INCONCLUSIVE", "statement": "s0 skeleton claim"}
+        if name == "diagnose_fail":  # S1 新增第 4 触点：打回意见注入诊断（stub）
+            return {"diagnosis": "stub", "notes": (value or {}).get("human_notes", "")}
         raise AssertionError(f"未知触点 {name}")
 
     return actor

@@ -155,6 +155,13 @@ from orchestrator.common.runtime_paths import (
     rsi_s0_gateway_state_path,
     rsi_s0_ledger_path,
     rsi_s0_quota_dir,
+    assert_rsi_s1_roots_isolated,  # RSI-S1：与封存/历史族根互异互斥
+    rsi_s1_approvals_dir,
+    rsi_s1_counters_path,
+    rsi_s1_gateway_state_dir,
+    rsi_s1_gateway_state_path,
+    rsi_s1_ledger_path,
+    rsi_s1_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -856,7 +863,8 @@ class _LedgerNamespace:
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
-                              LEDGER_RSI_R1N, LEDGER_RSI_S0)
+                              LEDGER_RSI_R1N, LEDGER_RSI_S0,
+                              LEDGER_RSI_S1)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
@@ -864,7 +872,8 @@ class _LedgerNamespace:
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
-                              LEDGER_RSI_R1N, LEDGER_RSI_S0)
+                              LEDGER_RSI_R1N, LEDGER_RSI_S0,
+                              LEDGER_RSI_S1)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
@@ -872,7 +881,8 @@ class _LedgerNamespace:
                               LEDGER_PHASE281, LEDGER_RSI_R0, LEDGER_RSI_R01,
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
-                              LEDGER_RSI_R1N, LEDGER_RSI_S0)
+                              LEDGER_RSI_R1N, LEDGER_RSI_S0,
+                              LEDGER_RSI_S1)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -1071,6 +1081,34 @@ RSI_S0_NAMESPACE = _LedgerNamespace(
 )
 
 
+# RSI-S1（2026-11-18）：最小自主研究闭环账；命名空间 2909（历史 2900–2908 已占用）。
+# 预算：硬帽 40 实呼（计划 §6：双审 4 + 审查校准 4 + 探针/冒烟 4 + 修复储备 8 +
+# 余量 20）。会话面（headless claude -p 外耗）另立 session_ledger，硬帽 20 会话，
+# 两面分列不混算（S0 残尾③）。
+LEDGER_RSI_S1 = 2909
+RSI_S1_HARD_CAP = 40
+RSI_S1_NORMAL_BUDGET = 40
+RSI_S1_TASK_CAPS = types.MappingProxyType({
+    1: 4,    # s1_probe：探针/冒烟
+    2: 8,    # s1_review：审查仪器校准 4 + 正式双审 4
+    3: 8,    # s1_repair：修复储备
+    4: 20,   # s1_margin：余量
+})
+
+RSI_S1_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_S1,
+    quota_dir_fn=rsi_s1_quota_dir,
+    ledger_path_fn=rsi_s1_ledger_path,
+    counters_path_fn=rsi_s1_counters_path,
+    approvals_dir_fn=rsi_s1_approvals_dir,
+    pause_dir_fn=rsi_s1_gateway_state_dir,
+    pause_path_fn=rsi_s1_gateway_state_path,
+    task_caps=RSI_S1_TASK_CAPS,
+    hard_cap=RSI_S1_HARD_CAP,
+    normal_budget=RSI_S1_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -1108,6 +1146,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_r1n_roots_isolated()
     elif ns.phase == LEDGER_RSI_S0:
         assert_rsi_s0_roots_isolated()
+    elif ns.phase == LEDGER_RSI_S1:
+        assert_rsi_s1_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1405,6 +1445,11 @@ class QuotaLedger:
     def rsi_s0(cls) -> "QuotaLedger":
         """RSI-S0 账（2908；单阶段无 campaign，硬帽 12 实呼）。"""
         return cls(RSI_S0_NAMESPACE)
+
+    @classmethod
+    def rsi_s1(cls) -> "QuotaLedger":
+        """RSI-S1 账（2909；单阶段无 campaign，硬帽 40 实呼）。"""
+        return cls(RSI_S1_NAMESPACE)
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":
@@ -2060,6 +2105,8 @@ def _namespace_for_cli(phase: int) -> _LedgerNamespace:
         return RSI_R12_NAMESPACE
     if phase == LEDGER_RSI_S0:  # RSI-S0：2908（单阶段，无 campaign）
         return RSI_S0_NAMESPACE
+    if phase == LEDGER_RSI_S1:  # RSI-S1：2909（单阶段，无 campaign）
+        return RSI_S1_NAMESPACE
     return PHASE2_NAMESPACE
 
 
@@ -2075,7 +2122,8 @@ def main(argv: "list[str] | None" = None) -> int:
                    choices=(LEDGER_PHASE, LEDGER_PHASE25, LEDGER_PHASE26,
                             LEDGER_PHASE27, LEDGER_PHASE281, LEDGER_RSI_R0,
                             LEDGER_RSI_R01, LEDGER_RSI_R02, LEDGER_RSI_R1,
-                            LEDGER_RSI_R12, LEDGER_RSI_S0),
+                            LEDGER_RSI_R12, LEDGER_RSI_S0,
+                            LEDGER_RSI_S1),
                    help=("台账期：2=Phase 2 封存前旧账（缺省），25=Phase 2.5 "
                          "封存账，26=Phase 2.6 封存账，27=Phase 2.7 封存账，"
                          "281=Phase 2.8.1 封存账，2900=RSI-R0 封存账，"
