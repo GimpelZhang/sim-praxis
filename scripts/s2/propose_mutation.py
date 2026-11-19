@@ -316,15 +316,27 @@ def _parse_transcript(stdout: str) -> "dict[str, Any]":
     return {"session_id": session_id, "model": model, "usage": usage}
 
 
-def _transcript_writes(transcript: Path) -> "dict[str, str]":
-    """从 transcript 提取提案者会话的 Write 工具调用：``basename → content``。
+def _transcript_writes(transcript: Path,
+                       context_dir: Path | None = None) -> "dict[str, str]":
+    """**重放**提案者会话的写盘动作，重建每个文件的最终内容（``basename → text``）。
 
-    这是"无代写"的**机器证据面**：包内文件必须与会话自己写下的字节一致，
-    而不是与工作区里可能被第三方改过的副本一致（评审 MEDIUM）。
+    2026-11-19 复评 HIGH：首版只收 ``Write``，Write-then-Edit 会假阳性、cp+Edit
+    会漏检。正确做法是按时序重放：
+
+    * ``Write``：整文件覆盖；
+    * ``Edit``：在已有内容上做一次 ``old_string → new_string``（不存在即记不可核）；
+    * ``MultiEdit``：按 edits 顺序逐条应用；
+    * ``Bash`` ``cp <src> <dst>``：源若在 ``context/``（宿主只读副本）则取该内容，
+      否则记不可核（fail-closed）。
+
+    任何不可核的文件都不会出现在返回表里，调用方据此拒绝（``PROPOSER_NO_TRANSCRIPT_WRITE``）。
     """
-    writes: "dict[str, str]" = {}
+    import re
+    import shlex
+
+    files: "dict[str, str]" = {}
     if not Path(transcript).is_file():
-        return writes
+        return files
     for line in Path(transcript).read_text(encoding="utf-8",
                                            errors="replace").splitlines():
         line = line.strip()
@@ -340,14 +352,65 @@ def _transcript_writes(transcript: Path) -> "dict[str, str]":
         for block in blocks:
             if not isinstance(block, Mapping) or block.get("type") != "tool_use":
                 continue
-            if block.get("name") not in ("Write", "Edit", "MultiEdit"):
-                continue
+            name = str(block.get("name") or "")
             payload = block.get("input") or {}
-            path = str(payload.get("file_path") or "")
-            content = payload.get("content")
-            if path and isinstance(content, str):
-                writes[Path(path).name] = content
-    return writes
+            if name == "Write":
+                path = str(payload.get("file_path") or "")
+                content = payload.get("content")
+                if path and isinstance(content, str):
+                    files[Path(path).name] = content
+                continue
+            if name == "Edit":
+                path = str(payload.get("file_path") or "")
+                old = payload.get("old_string")
+                new = payload.get("new_string")
+                name_key = Path(path).name
+                if not path or not isinstance(old, str) or not isinstance(new, str):
+                    continue
+                current = files.get(name_key)
+                if current is None or old not in current:
+                    files.pop(name_key, None)   # 不可核：撤销该文件的可信记录
+                    continue
+                files[name_key] = current.replace(old, new, 1)
+                continue
+            if name == "MultiEdit":
+                path = str(payload.get("file_path") or "")
+                name_key = Path(path).name
+                current = files.get(name_key)
+                if current is None:
+                    continue
+                edits = payload.get("edits") or []
+                for edit in edits if isinstance(edits, list) else []:
+                    old = (edit or {}).get("old_string")
+                    new = (edit or {}).get("new_string")
+                    if not isinstance(old, str) or not isinstance(new, str) \
+                            or old not in current:
+                        current = None
+                        break
+                    current = current.replace(old, new, 1)
+                if current is None:
+                    files.pop(name_key, None)
+                else:
+                    files[name_key] = current
+                continue
+            if name == "Bash":
+                command = str(payload.get("command") or "")
+                # 复合命令按 shell 分隔符拆段，**逐段**解析 cp（`a && b && c`）
+                for segment in re.split(r"&&|\|\||;|\|", command):
+                    try:
+                        parts = shlex.split(segment)
+                    except ValueError:
+                        continue
+                    if len(parts) < 3 or parts[0] != "cp":
+                        continue
+                    src, dst = Path(parts[1]), Path(parts[-1])
+                    # 相对路径（``cp context/guards.py candidate/guards.py``）与
+                    # 绝对路径都认：源必须是宿主只读副本 context/ 里的同名文件
+                    if context_dir is not None and src.parent.name == "context":
+                        source = Path(context_dir) / src.name
+                        if source.is_file():
+                            files[dst.name] = source.read_text(encoding="utf-8")
+    return files
 
 
 def _assert_package_matches_workspace(package: Mapping[str, Any],
@@ -357,7 +420,8 @@ def _assert_package_matches_workspace(package: Mapping[str, Any],
     file 式包件（``{"path": ..., "file": ...}``）以落盘文件为唯一真值——内容由
     提案者会话写盘，宿主只回读，不存在"包内副本"可比较。
     """
-    transcript_writes = _transcript_writes(workspace / "transcript.jsonl")
+    transcript_writes = _transcript_writes(workspace / "transcript.jsonl",
+                                            context_dir=workspace / "context")
     for item in package.get("files") or []:
         name = Path(str(item.get("file") or item.get("path"))).name
         copy = workspace / "candidate" / name
@@ -368,15 +432,15 @@ def _assert_package_matches_workspace(package: Mapping[str, Any],
         if isinstance(inline, str) and inline.strip() and on_disk != inline:
             raise ProposerError("PROPOSER_EVIDENCE_MISMATCH",
                                 f"{name} 内联内容与落盘不一致（疑似代写/回改）")
-        # 无代写的机器证据：落盘字节 == 会话 Write 调用字节
-        if transcript_writes:
-            authored = transcript_writes.get(name)
-            if authored is None:
-                raise ProposerError("PROPOSER_NO_TRANSCRIPT_WRITE",
-                                    f"{name} 无会话写盘记录（疑似代写）")
-            if authored != on_disk:
-                raise ProposerError("PROPOSER_GHOSTWRITING",
-                                    f"{name} 落盘与会话写入不一致（疑似代写）")
+        # 无代写的机器证据：落盘字节 == 会话重放重建的字节（**fail-closed**：
+        # transcript 缺失/不可核同样拒绝，不跳过）
+        authored = transcript_writes.get(name)
+        if authored is None:
+            raise ProposerError("PROPOSER_NO_TRANSCRIPT_WRITE",
+                                f"{name} 无会话写盘记录（疑似代写或 transcript 缺失）")
+        if authored != on_disk:
+            raise ProposerError("PROPOSER_GHOSTWRITING",
+                                f"{name} 落盘与会话写入不一致（疑似代写）")
 
 
 def _finalize(*, workspace: Path, package: "Mapping[str, Any]",

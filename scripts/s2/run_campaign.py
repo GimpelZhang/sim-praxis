@@ -584,6 +584,8 @@ def stage_trial(campaign_root: Path, *, arms: "list[str]",
         "validation_sha256": _sig_sha(validation),
         "mechanism_hypothesis_sha256": _hashlib.sha256(
             str(validation.get("mechanism_hypothesis") or "").encode()).hexdigest(),
+        # 试验前写锁 ⇒ 本时刻必然早于任何 trial 的 generated_at（判件按时间戳
+        # 复核，而非信这个布尔字面量——2026-11-19 复评 MEDIUM）。
         "locked_before_trial": True,
         "locked_at_utc": utc_now_iso_z(),
     }
@@ -727,7 +729,9 @@ def stage_review(campaign_root: Path) -> int:
     from orchestrator.gateway.quota_ledger import QuotaLedger
     used = len([r for r in QuotaLedger.rsi_s2()._read_rows()
                 if r.get("event", "call") == "call"])
-    remaining = 40 - used
+    from orchestrator.gateway.quota_ledger import RSI_S2_HARD_CAP
+
+    remaining = int(RSI_S2_HARD_CAP) - used
     pairs = len(PREREG.INSTANCES)
     while pairs > 1 and 2 * 2 * pairs > remaining:
         pairs -= 1

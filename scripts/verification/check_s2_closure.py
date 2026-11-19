@@ -163,9 +163,12 @@ def run(*, campaign_root: Path, report_path: Path | None = None) -> "dict[str, A
             if arm == "v0":
                 v0_outcomes[label] = {"status": stage.get("status"), "code": code,
                                       "rerun_skipped": rerun.get("skipped")}
-                if stage.get("status") != "human_failure" or not code.startswith("NC_"):
-                    if code != "STAGE_RUNTIME_ERROR":
-                        gaps.append(f"V0_UNEXPECTED: {label} {code}")
+                # 只接受**显式列名**的 NC 结构停止码；STAGE_RUNTIME_ERROR 等
+                # 通用崩溃一律记问题，不得被当成预期结局（2026-11-19 复评 MEDIUM）。
+                expected_v0 = {"NC_DEGENERATE", "NC_ABOVE_THRESHOLD",
+                               "NC_UNCALIBRATED", "NC_UNREGISTERED"}
+                if stage.get("status") != "human_failure" or code not in expected_v0:
+                    problems.append(f"V0_UNEXPECTED: {label} {code!r}")
                 trials[label] = {"status": stage.get("status"), "code": code}
                 continue
             # v1（候选臂）
@@ -244,7 +247,19 @@ def run(*, campaign_root: Path, report_path: Path | None = None) -> "dict[str, A
                 sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             if actual != lock.get("prediction_signature_sha256"):
                 problems.append("PREDICTION_LOCK_TAMPERED")
-            if lock.get("locked_before_trial") is not True:
+            # 时间戳派生：锁时刻必须早于所有 trial 报告的 generated_at
+            locked_at = str(lock.get("locked_at_utc") or "")
+            trial_times = []
+            for report in (root / "trial").glob("*/study_report.json"):
+                try:
+                    trial_times.append(str(_load(report).get("generated_at_utc")
+                                           or ""))
+                except Exception:  # noqa: BLE001
+                    continue
+            trial_times = [t for t in trial_times if t]
+            before = bool(locked_at) and bool(trial_times) and \
+                locked_at <= min(trial_times)
+            if not before:
                 gaps.append("PREDICTION_LOCK_POSTHOC: 预测签名锁定晚于试验"
                             "（篡改窗口存在，结论按保守方向采信）")
             checks["prediction_lock_sha256"] = lock.get(

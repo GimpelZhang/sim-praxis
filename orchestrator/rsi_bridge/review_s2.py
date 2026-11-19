@@ -161,19 +161,14 @@ def merge_channels(*, instance_id: str, arm: str,
                    channel_a: Mapping[str, Any],
                    channel_b: Mapping[str, Any]) -> "dict[str, Any]":
     """两票合并（无第三票）；核对两通道确实互异且包可复算。"""
-    def _content(pack: Mapping[str, Any]) -> str:
-        # 内容面去盐：pack_id 含通道盐，直接比 pack_sha256 是恒真式（评审 LOW）
-        body = {k: v for k, v in pack.items()
-                if k not in ("pack_id", "pack_sha256")}
-        return R1._sha(body)  # noqa: SLF001
-
-    pack_a = ((channel_a.get("_used_packs") or {}).get(channel_a["channel"])
-              or {})
-    pack_b = ((channel_b.get("_used_packs") or {}).get(channel_b["channel"])
-              or {})
-    if _content(pack_a) == _content(pack_b):
+    # 通道互异 = **审查参数**互异（温度/盐）+ 各自送审包 sha 可复算。
+    # 两通道共享同一盲包内容是**设计本意**（盲审），因此不能比内容面
+    # （2026-11-19 复评 CRITICAL：比去盐内容面恒相等 → 恒抛，双审阶段不可复现）。
+    params_a = (str(channel_a.get("temperature")), str(channel_a.get("salt")))
+    params_b = (str(channel_b.get("temperature")), str(channel_b.get("salt")))
+    if params_a == params_b:
         raise ReviewS2Error("CHANNELS_NOT_DISTINCT",
-                            "两通道送审内容面相同（同源偏差）")
+                            f"两通道参数相同 {params_a}（同源偏差）")
     for row in (channel_a, channel_b):
         pack = (row.get("_used_packs") or {}).get(row["channel"])
         if not isinstance(pack, Mapping):
