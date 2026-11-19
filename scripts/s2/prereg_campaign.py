@@ -344,13 +344,20 @@ def _repair_record(anchors: "dict[str, str]") -> "dict[str, Any]":
     if not path.is_file():
         return {"rules_repaired_at_utc": None, "repaired_modules": []}
     try:
-        old = json.loads(path.read_text(encoding="utf-8")).get(
-            "rule_anchors_sha256") or {}
+        old_doc = json.loads(path.read_text(encoding="utf-8"))
     except ValueError:
         return {"rules_repaired_at_utc": None, "repaired_modules": []}
+    old = old_doc.get("rule_anchors_sha256") or {}
     changed = sorted(k for k in anchors if old.get(k) != anchors[k])
-    return {"rules_repaired_at_utc": (utc_now_iso_z() if changed else None),
-            "repaired_modules": changed}
+    # 幂等：已记录的修复清单**追加保留**（第二次 build 不得清空历史修复记录）
+    previous = sorted({str(x) for x in (old_doc.get("repaired_modules") or [])
+                       if x})
+    recorded_at = old_doc.get("rules_repaired_at_utc")
+    merged = sorted(set(previous) | set(changed))
+    if not merged:
+        return {"rules_repaired_at_utc": None, "repaired_modules": []}
+    return {"rules_repaired_at_utc": recorded_at or utc_now_iso_z(),
+            "repaired_modules": merged}
 
 
 def build_rules_document() -> "dict[str, Any]":

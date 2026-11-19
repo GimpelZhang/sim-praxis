@@ -9,8 +9,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[2]
+#: 闭源数据层在 /mnt（硬规则 3）；产物缺失的机器上按 integration 口径 skip，
+#: 不把宿主依赖伪装成代码属性（2026-11-19 复评 MEDIUM）。
 _CAMPAIGN = Path("/mnt/artifacts/simpraxis/rsi_s2/evidence/s2-campaign-20261119T072947Z")
+_REQUIRES_ARTIFACTS = pytest.mark.skipif(
+    not _CAMPAIGN.is_dir(), reason="闭源证据层不在本机（/mnt 数据层）")
 
 #: 四类教训 → 绑定用例（文件存在 + 至少一条可执行断言）
 LESSON_BINDINGS = {
@@ -34,6 +40,7 @@ def test_four_lesson_regressions_are_bound():
             f"{lesson_id}: 用例 {test_name} 不在 {relpath}（回归未绑定）")
 
 
+@_REQUIRES_ARTIFACTS
 def test_memory_gate_artifact_passes_and_lists_lessons():
     gate = _CAMPAIGN / "memory_gate.json"
     assert gate.is_file(), "memory_gate.json 不在场"
@@ -44,6 +51,7 @@ def test_memory_gate_artifact_passes_and_lists_lessons():
     assert all(isinstance(name, str) and name for name in lessons)
 
 
+@_REQUIRES_ARTIFACTS
 def test_research_memory_lessons_are_present_in_closed_layer():
     path = Path("/mnt/artifacts/simpraxis/rsi_s2/closed/research_memory"
                 "/s2_lessons.jsonl")
