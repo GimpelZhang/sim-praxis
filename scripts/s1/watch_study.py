@@ -47,11 +47,13 @@ def _pid_alive(pid: int) -> bool:
 
 
 def watch(root: Path, *, pid: int | None, silence_s: float,
-          interval: float, max_rounds: int | None) -> int:
+          interval: float, max_rounds: int | None,
+          human_wait_note_s: float = 3600.0) -> int:
     progress = Path(root) / "progress.jsonl"
     alerts = Path(root) / "watchdog_alerts.jsonl"
     rounds = 0
     silent_alerted = False
+    human_note_sent = False
     while True:
         rounds += 1
         events = _events(progress)
@@ -69,9 +71,23 @@ def watch(root: Path, *, pid: int | None, silence_s: float,
                 fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             print(json.dumps(row, ensure_ascii=False))
             return 2
-        # 静默判定：以文件 mtime 为事件时钟（progress 每事件写一行）
+        # 静默判定：以文件 mtime 为事件时钟（progress 每事件写一行）。
+        # 人工门等待（gate*_sent 之后无新事件）不是仪器静默——进程存活即继续等，
+        # 只在超过 human_wait_note_s 时记一条 WAITING_FOR_HUMAN（一次）。
+        event = (last or {}).get("event")
+        waiting_human = event in ("gate1_sent", "gate2_sent")
         age = time.time() - progress.stat().st_mtime if progress.is_file() else None
-        if age is not None and age > silence_s and not silent_alerted:
+        if (waiting_human and age is not None and age > human_wait_note_s
+                and not human_note_sent):
+            row = {"ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                   "alert": "WAITING_FOR_HUMAN", "waited_s": round(age, 1),
+                   "gate": event}
+            with open(alerts, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+            print(json.dumps(row, ensure_ascii=False))
+            human_note_sent = True
+        if (age is not None and age > silence_s and not waiting_human
+                and not silent_alerted):
             row = {"ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                    "alert": "SILENT", "silent_s": round(age, 1),
                    "last_event": last}
@@ -93,10 +109,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--silence", type=float, default=900.0)
     parser.add_argument("--interval", type=float, default=30.0)
     parser.add_argument("--max-rounds", type=int, default=0)
+    parser.add_argument("--human-wait-note", type=float, default=3600.0)
     args = parser.parse_args(argv)
     return watch(Path(args.root), pid=args.pid or None,
                  silence_s=args.silence, interval=args.interval,
-                 max_rounds=args.max_rounds or None)
+                 max_rounds=args.max_rounds or None,
+                 human_wait_note_s=args.human_wait_note)
 
 
 if __name__ == "__main__":
