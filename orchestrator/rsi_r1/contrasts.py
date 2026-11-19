@@ -169,10 +169,12 @@ class ContrastV13:
         if self.proposition not in R.PROPOSITIONS:
             raise ContrastError("PROPOSITION_INVALID",
                                 f"proposition={self.proposition!r}")
-        if self.proposition == "equivalent" and self.metric != (
-                "displacement_x_m_negative_equivalence"):
-            raise ContrastError(
-                "METRIC_INVALID", "equivalent 主张只能用阴性等效指标")
+        # S2-1（计划 §2.1 第 2 行，撤销"DiD 等效不可注册"规则债）：
+        # `equivalent(δ)` 可在**任何已注册指标**上登记（正/负等效同规），δ 仍由
+        # 量表目录固定、候选不可扩界。S1 旧判件与旧预注册不受影响（只对新建
+        # 对比生效）；阴性等效指标仍限 pairwise（下表另一条不变）。
+        # `no_detectable_effect(δ)` 的语义由 v2 词表 EQUIVALENT 承载
+        # （orchestrator/hk/verdicts.py），不新增 proposition。
         if self.delta != fixed:
             raise ContrastError(
                 "DELTA_DRIFT", f"delta={self.delta} != 量表固定 {fixed}")
@@ -254,6 +256,9 @@ def public_schema() -> "dict[str, Any]":
             "difference_in_differences": "four conditions ±1",
             "delta": "取自公开量表，不可扩界",
             "equivalence_metric": "displacement_x_m_negative_equivalence（仅 A 阴性控制）",
+            "equivalence_registration": (
+                "S2 起 equivalent(δ) 可在任何已注册指标上登记（DiD 级等效同规）；"
+                "阴性等效指标仍限 pairwise"),
         },
         "method": ST.public_method_document() if hasattr(ST, "public_method_document")
         else {"note": "paired block bootstrap（见 statistics 模块）"},

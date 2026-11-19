@@ -80,18 +80,32 @@ def test_r1n_near_duplicate_gate_against_all_old_tasks():
     assert {r["new"] for r in rows} == {TS.R1N_A_TASK_ID, TS.R1N_B_TASK_ID}
 
 
-def test_did_equivalence_is_not_registrable():
-    """T0 核验：DiD + equivalent 不可注册（只用 pairwise 阴性指标可等效）。"""
+def test_did_equivalence_registrable_after_s2_rules():
+    """S2-1 规则变更：撤销「DiD 等效不可注册」规则债。
+
+    R1-N 时点的规则是"只能 pairwise 阴性指标做等效"；S2 双审指出这是把
+    「交互≈0 不可注册」的错误规则化，v2 起**任何已注册指标**上的
+    ``equivalent(δ)`` 均可登记（正/负等效同规）。A_N 旧判件只读不改写
+    （旧预注册 bundlen 仍绑旧规则面），本测试断言新规则面的行为。
+    """
     from orchestrator.rsi_r1 import contrasts as X
     from orchestrator.rsi_r1 import rubric as R
     a = TS.build_r1n_a()
     doc = a.primary.to_dict()
     doc["proposition"] = "equivalent"
-    with pytest.raises(X.ContrastError) as exc:
-        X.ContrastV13.from_dict(doc).validate()
-    assert exc.value.code == "METRIC_INVALID"
+    contrast = X.ContrastV13.from_dict(doc).validate()
+    assert contrast.proposition == "equivalent"
+    assert contrast.kind == X.KIND_DID
+    # δ 仍由量表钉死（等效登记不放宽边界）
+    assert contrast.delta == R.metric_delta("displacement_x_m")
     assert R.metric_delta("displacement_x_m") == R.metric_delta(
         "displacement_x_m_negative_equivalence")
+    # 阴性等效指标仍限 pairwise
+    bad = dict(doc)
+    bad["metric"] = "displacement_x_m_negative_equivalence"
+    with pytest.raises(X.ContrastError) as exc:
+        X.ContrastV13.from_dict(bad).validate()
+    assert exc.value.code == "METRIC_INVALID"
 
 
 def test_r1n_taskset_manifest_and_resource_plan(tmp_path):

@@ -41,7 +41,10 @@ POINT_FIELDS = ("time_s", "qpos", "qvel")
 #: 指标别名：阴性等效指标是**同一位移量**在不同 δ/区间语义下的登记名
 #: （rubric：「displacement_x_m_negative_equivalence」= 校准阴性控制专用）。
 #: 分析/复算按基础指标取值，禁止为它另造一份数值通道。
-METRIC_ALIASES = {"displacement_x_m_negative_equivalence": "displacement_x_m"}
+METRIC_ALIASES = {"displacement_x_m_negative_equivalence": "displacement_x_m",
+                  # S2-1：B 机制的亚阈阴性对照（计划 §2.1 第 3 行）
+                  "normalized_tracking_rmse_negative_equivalence":
+                      "normalized_tracking_rmse"}
 
 
 class HostRecomputeError(RuntimeError):
@@ -292,15 +295,19 @@ def recompute(confirm_plan: Mapping[str, Any], *, fresh_root: Path | str,
     for contrast in contrasts:
         values = _linear_contrast_values(replay_stat_rows, contrast)
         estimated = ST.estimate(values, level=contrast.get("level", "0.95"))
+        # S2 词表 v2（五值；与 default_analyzer 同一分类真值）
+        from orchestrator.hk import verdicts as V
+
         results.append({
             "id": contrast.get("id"),
             "estimate": estimated["effect"],
             "ci_low": estimated["lower"],
             "ci_high": estimated["upper"],
             "n_blocks": estimated["n_blocks"],
-            "claim": ST.classify(contrast.get("proposition"),
-                                 contrast.get("delta"),
-                                 estimated["lower"], estimated["upper"]),
+            "claim": V.classify_v2(contrast.get("proposition"),
+                                   contrast.get("delta"),
+                                   estimated["lower"], estimated["upper"],
+                                   n_blocks=estimated["n_blocks"]),
         })
     handle.confirm_result = {
         "schema": f"{SCHEMA}.confirm_result",

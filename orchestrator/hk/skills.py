@@ -50,6 +50,25 @@ def _require_mapping(value: Any, what: str) -> Mapping[str, Any]:
 # 默认引擎适配（薄包装，不复制实现）
 # ---------------------------------------------------------------------------
 
+#: S2 任务登记表（task_id 与 sha256 双键）：战役在开跑前登记 6 个实例，
+#: K3 的漂移核对据此取**登记任务**（而不是写死 S1 的 A_N/B_N 构建器）。
+_TASK_REGISTRY: "dict[str, Any]" = {}
+
+
+def register_task(task) -> Any:
+    """登记任务（幂等；键 = task_id 与 sha256 双份）。"""
+    _TASK_REGISTRY[str(task.task_id)] = task
+    _TASK_REGISTRY[str(task.sha256)] = task
+    return task
+
+
+def resolve_registered_task(*, task_id: str = "", plan_sha256: str = ""):
+    for key in (plan_sha256, task_id):
+        if key and key in _TASK_REGISTRY:
+            return _TASK_REGISTRY[key]
+    return None
+
+
 def r1n_task_builder(name: str, **kwargs) -> Any:
     """R1-N 任务构建器薄包装（A_N / B_N 忠实复用）。"""
     from orchestrator.rsi_r1 import task_specs
@@ -88,7 +107,10 @@ def default_batch_runner(batch_plan: Mapping[str, Any], context=None):
     name = {"A_N": "a", "B_N": "b"}.get(study)
     if name is None:
         raise SkillEngineNotWired(f"未注册研究 {study!r}（只有 A_N/B_N）")
-    task = r1n_task_builder(name)
+    # S2：登记实例优先（task_id/plan_sha 双键）；S1 回退到 R1-N 构建器。
+    task = resolve_registered_task(
+        task_id=str(plan.get("task_id") or ""),
+        plan_sha256=str(plan.get("plan_sha256") or "")) or r1n_task_builder(name)
     registered = {c.id: dict(c.params) for c in task.conditions}
     given_docs = plan.get("conditions")
     if not isinstance(given_docs, list) or not given_docs:
@@ -119,17 +141,52 @@ def default_batch_runner(batch_plan: Mapping[str, Any], context=None):
     blocks = build_block_assignment(plan_sha, study=study, n_block=n_block,
                                     nuisance=nuisance_docs,
                                     salt=ctx.get("assignment_salt"))
+    # S2-1（计划 §2.1 第 3 行/§2.2）：NC 由 K1 的 NC 设计技能在任务槽内**提名**
+    # base/sham，host 侧构造对照（actor 不写权重/δ）；无提名时退回槽的默认对照
+    # （v0 臂复现 S1 退化 sham）。槽本身来自登记任务，不来自 actor。
+    task_doc = task.to_dict()
+    nc_slot = task_doc.get("negative_control_spec")
+    nc_contrast: dict[str, Any] | None = None
+    nc_slot_v2 = (nc_slot if isinstance(nc_slot, Mapping)
+                  and nc_slot.get("schema") == "simpraxis.rsi_s2.nc_slot.v1"
+                  else None)
+    if nc_slot_v2 is not None:
+        from orchestrator.hk import nc_registration as N
+
+        planned = plan.get("negative_control")
+        if not isinstance(planned, Mapping):
+            planned = nc_slot_v2.get("default")
+        if isinstance(planned, Mapping):
+            try:
+                nc_contrast = N.build_nc_contrast(
+                    nc_slot_v2, base=str(planned.get("base")),
+                    sham=str(planned.get("sham")),
+                    conditions=task_doc["conditions"])
+            except N.NCRegistrationError as exc:
+                raise SkillError(f"{exc.code}: {exc.detail}") from None
+        task_doc["negative_control_spec"] = (
+            None if nc_contrast is None else {"contrast": nc_contrast})
     service = PhysicsService(observations_root=Path(str(obs_root)),
                              evidence_root=Path(str(ev_root)))
     manifest = service.run_batch(
-        study=study, task=task.to_dict(), plan_sha256=plan_sha, blocks=blocks,
+        study=study, task=task_doc, plan_sha256=plan_sha, blocks=blocks,
         batch_id=str(ctx.get("batch_id") or "s1"))
+    # S1 尾债 LOW（AC 计划 §1）：分类器按 contrasts[0] 取主对比，位置依赖
+    # 必须显式断言（run_batch 恒把登记 primary 放首位）。
+    if (manifest.get("contrasts") or [{}])[0].get("id") != task.primary.id:
+        raise SkillError(
+            f"PRIMARY_ORDER_DRIFT: contrasts[0]={ (manifest.get('contrasts') or [{}])[0].get('id')!r}"
+            f" != 登记 primary {task.primary.id!r}")
     manifest["confirm_plan"] = {
         "study": study, "plan_sha256": plan_sha,
         "conditions": [dict(c) for c in given_docs],
         "blocks": blocks,
         "contrasts": manifest["contrasts"],
         "runs": manifest["runs"],
+        "primary_id": task.primary.id,
+        "nc_slot": nc_slot_v2,
+        "nc_contrast": nc_contrast,
+        "nc_sensitivity": ctx.get("nc_sensitivity"),
     }
     return manifest
 
@@ -171,6 +228,15 @@ def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
     confirm_plan = document.get("confirm_plan")
     if isinstance(confirm_plan, Mapping) and confirm_plan.get("blocks") \
             and confirm_plan.get("runs"):
+        from orchestrator.hk import verdicts as V
+
+        # S1 尾债 LOW：verdict 绑定依赖 contrasts[0] 位置，显式断言登记主对比。
+        primary_id = confirm_plan.get("primary_id")
+        if primary_id is not None and contrasts and \
+                str(contrasts[0].get("id")) != str(primary_id):
+            raise SkillError(
+                f"PRIMARY_ORDER_DRIFT: contrasts[0]="
+                f"{contrasts[0].get('id')!r} != 登记 primary {primary_id!r}")
         results = []
         for contrast in contrasts:
             c = _require_mapping(contrast, "contrast")
@@ -188,10 +254,38 @@ def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
                 "ci_low": estimated["lower"],
                 "ci_high": estimated["upper"],
                 "n_blocks": estimated["n_blocks"],
-                "claim": statistics.classify(c.get("proposition"), c.get("delta"),
-                                             estimated["lower"], estimated["upper"]),
+                # S2 词表 v2（五值；跨零=NOT_DETECTED、带内=EQUIVALENT）
+                "claim": V.classify_v2(c.get("proposition"), c.get("delta"),
+                                       estimated["lower"], estimated["upper"],
+                                       n_blocks=estimated["n_blocks"]),
             })
-        return {"contrasts": results, "confirm_plan": dict(confirm_plan)}
+        # S2-1（计划 §2.1 第 3 行）：每研究强制注册 NC + 三连判据结构拒绝。
+        nc_evidence = None
+        nc_slot = confirm_plan.get("nc_slot")
+        if isinstance(nc_slot, Mapping):
+            from orchestrator.hk import nc_registration as N
+
+            nc_contrast = confirm_plan.get("nc_contrast")
+            if not isinstance(nc_contrast, Mapping):
+                raise SkillError(
+                    "NC_UNREGISTERED: 任务槽要求阴性对照，但计划未提名 base/sham")
+            nc_values = _linear_contrast_values(rows, nc_contrast)
+            nc_est = statistics.estimate(
+                nc_values, level=str(nc_slot.get("ci_level") or "0.90"))
+            try:
+                nc_evidence = N.validate_nc(
+                    contrast=nc_contrast,
+                    block_values=list(nc_values.values()),
+                    estimate=nc_est["effect"], ci_low=nc_est["lower"],
+                    ci_high=nc_est["upper"],
+                    sensitivity=confirm_plan.get("nc_sensitivity"))
+            except N.NCRegistrationError as exc:
+                # 结构拒绝 = 协议级停止码（driver 按 GuardViolation 原码上报）
+                from orchestrator.hk.guards import GuardViolation
+
+                raise GuardViolation("g_nc", exc.code, exc.detail) from None
+        return {"contrasts": results, "confirm_plan": dict(confirm_plan),
+                "negative_control": nc_evidence}
     # 旧骨架路径（S0 假件/合成夹具）：confirm_plan.pairs 直接喂 estimate。
     # K6 需要冻结的确认分配（私有 block 配对）；未接线时诚实失败，
     # 不产出注定在 K6 崩掉的半成品（评审 MEDIUM）。
@@ -391,9 +485,11 @@ def build_skills(*, actor: Callable[[str, str, Mapping[str, Any]], Mapping[str, 
             "submit_claim", C.CONFIRM_RESULT.name, result)
         claim = dict(_require_mapping(claim, "claim"))
         verdict = claim.get("verdict")
-        if verdict not in ("SUPPORTED", "REFUTED", "INCONCLUSIVE"):
+        from orchestrator.hk import verdicts as V
+
+        if verdict not in V.VERDICTS_V2:
             raise SkillError(
-                f"claim.verdict 必须是 SUPPORTED/REFUTED/INCONCLUSIVE，收到 {verdict!r}")
+                f"claim.verdict 必须是 v2 五值 {V.VERDICTS_V2}，收到 {verdict!r}")
         return claim
 
     return {

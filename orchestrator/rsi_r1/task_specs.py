@@ -272,6 +272,28 @@ class TaskSpecV13:
 
     def _validate_negative_control(self) -> None:
         spec = self.negative_control_spec or {}
+        # S2-1（计划 §2.1 第 3 行）：NC 槽（设计模式）。每研究强制注册 NC，
+        # 具体对照由 K1 的 NC 设计技能在槽内提名、host 构造（见
+        # orchestrator/hk/nc_registration.py）。A 的默认槽承载 S1 退化 sham
+        # （v0 臂复现该缺陷并被非退化判据结构拒绝）；B 的槽无默认（v0 臂
+        # 以 NC_UNREGISTERED 结案）。
+        if spec.get("schema") == "simpraxis.rsi_s2.nc_slot.v1":
+            from orchestrator.hk import nc_registration as N
+
+            slot = N.validate_slot(spec)
+            by_id = {c.id: c for c in self.conditions}
+            missing = sorted(set(str(c) for c in slot["candidates"]) - set(by_id))
+            if missing:
+                raise TaskSpecError("NEGATIVE_CONTROL_INVALID",
+                                    f"槽候选引用未登记条件 {missing}")
+            default = slot.get("default")
+            if default is not None:
+                # 默认对照也必须在槽内（它是 v0 臂的唯一路径）
+                N.build_nc_contrast(
+                    slot, base=str(default.get("base")),
+                    sham=str(default.get("sham")),
+                    conditions=[c.to_dict() for c in self.conditions])
+            return
         contrast = spec.get("contrast")
         if not isinstance(contrast, Mapping):
             raise TaskSpecError("NEGATIVE_CONTROL_INVALID", "缺 contrast")

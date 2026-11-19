@@ -82,7 +82,14 @@ class ResearchDriver:
                  max_rejects_per_stage: int = GATE2_MAX_REJECTS_PER_STAGE,
                  claim_guard: bool = False,
                  diagnose_budget: int = DIAGNOSE_BUDGET,
-                 assignment_salt: str | None = None):
+                 assignment_salt: str | None = None,
+                 harness: str = "v0",
+                 nc_sensitivity: "Mapping[str, Any] | None" = None):
+        if harness not in ("v0", "v1"):
+            raise ValueError(f"harness 必须是 v0/v1，收到 {harness!r}")
+        self.harness = harness
+        self.nc_sensitivity = (dict(nc_sensitivity)
+                               if isinstance(nc_sensitivity, Mapping) else None)
         self.gate1_hook = gate1_hook
         self.gate2_hook = gate2_hook
         self.evidence_root = Path(evidence_root)
@@ -146,9 +153,11 @@ class ResearchDriver:
         """
         if not isinstance(value, Mapping):
             return value
-        # 私有面不外泄：driver 对象与 block 分配 salt 不进入 actor 可见的 _ctx。
+        # 私有面不外泄：driver 对象、block 分配 salt、登记 spec 与 host 校准件
+        # 不进入 actor 可见的 _ctx。
         safe = {k: v for k, v in ctx.items()
-                if k not in ("driver", "assignment_salt")}
+                if k not in ("driver", "assignment_salt", "registered_spec",
+                             "nc_sensitivity")}
         return dict(value, _ctx=safe)
 
     def _record(self, run_dir: Path, name: str, payload: Any) -> str:
@@ -191,6 +200,8 @@ class ResearchDriver:
                        (registered.get("spec") or {}).get("plan_sha256")
                        if isinstance(registered, Mapping) else None),
                    "assignment_salt": self.assignment_salt,
+                   "registered_spec": registered,
+                   "nc_sensitivity": self.nc_sensitivity,
                    "driver": self}
             if diagnose_doc is not None:
                 ctx["diagnose"] = diagnose_doc
@@ -215,6 +226,30 @@ class ResearchDriver:
                 claim = self.skills["K8"].execute(
                     self._touchpoint_value(value, ctx), ctx)
                 claim = dict(claim)
+                if self.harness == "v1":
+                    # S2 变异面：G-REPORT 守卫 + **一次**修复触点（v1 臂专有）。
+                    # 缺段 → 把缺失清单交回 actor 重出 claim；二次仍缺 → 结构拒绝。
+                    from orchestrator.hk import report_contract as RC
+
+                    try:
+                        enforce(["G-REPORT"], GuardCtx(
+                            stage=stage_id, report_doc=claim.get("report")))
+                    except GuardViolation as exc:
+                        self._record(run_dir, "K8_report_violation.json",
+                                     {"code": exc.code, "detail": exc.detail,
+                                      "missing": RC.missing_sections(
+                                          claim.get("report"))})
+                        repair_value = dict(
+                            self._touchpoint_value(value, ctx),
+                            _repair={"code": exc.code, "detail": exc.detail,
+                                     "missing": RC.missing_sections(
+                                         claim.get("report"))})
+                        claim = dict(_require_mapping_dict(
+                            self._actor_call("submit_claim_repair",
+                                             C.CONFIRM_RESULT.name, repair_value),
+                            "claim"))
+                        enforce(["G-REPORT"], GuardCtx(
+                            stage=stage_id, report_doc=claim.get("report")))
                 if self.human_cofix.get(stage_id):
                     claim["human_cofix"] = True
                     claim["conclusion_grade"] = "human_machine_joint_improvement"

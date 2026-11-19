@@ -119,8 +119,22 @@ def test_g_noprog_rejects_stalled_rounds():
     _expect(g_noprog, GuardCtx(round_no_new_info=2, noprog_rounds=2), "NO_PROGRESS")
 
 
-def test_all_eight_guards_registered_and_enforce_order():
-    assert len(GUARDS) == 8
+#: S1 as-built 八守卫（契约真值；S2 变异面可在**运行时**注册新守卫，
+#: 但不改变八守卫本体——本测试先还原 as-built 注册表再断言，避免测试顺序耦合）。
+AS_BUILT_GUARDS = ("G-PREREG", "G-BUDGET", "G-SEND-ONCE", "G-FREEZE",
+                    "G-BYTES", "G-CLAIM", "G-UNIT", "G-NOPROG")
+
+
+def test_all_eight_guards_registered_and_enforce_order(monkeypatch):
+    import orchestrator.hk.guards as _guards_module
+
+    snapshot = dict(_guards_module.GUARDS)
+    assert set(AS_BUILT_GUARDS) <= set(snapshot)
+    monkeypatch.setattr(_guards_module, "GUARDS",
+                        {name: snapshot[name] for name in AS_BUILT_GUARDS})
+    # 注意：enforce 读的是**模块全局** GUARDS（monkeypatch 已换成 as-built 快照），
+    # 因此断言必须走模块属性，不能走文件顶部 `from ... import GUARDS` 的旧引用。
+    assert len(_guards_module.GUARDS) == 8
     with pytest.raises(GuardViolation) as excinfo:
         enforce(["G-PREREG", "G-NOPROG"],
                 GuardCtx(registered_spec_sha=None, round_no_new_info=0))

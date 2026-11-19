@@ -162,6 +162,13 @@ from orchestrator.common.runtime_paths import (
     rsi_s1_gateway_state_path,
     rsi_s1_ledger_path,
     rsi_s1_quota_dir,
+    assert_rsi_s2_roots_isolated,  # RSI-S2：与封存/历史族根互异互斥
+    rsi_s2_approvals_dir,
+    rsi_s2_counters_path,
+    rsi_s2_gateway_state_dir,
+    rsi_s2_gateway_state_path,
+    rsi_s2_ledger_path,
+    rsi_s2_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -864,7 +871,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
@@ -873,7 +880,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
@@ -882,7 +889,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -1109,6 +1116,38 @@ RSI_S1_NAMESPACE = _LedgerNamespace(
 )
 
 
+# RSI-S2（2026-11-19）：首轮自改合并战役账；命名空间 2910（历史 2900–2909 已占用）。
+# 预算：网关面硬帽 40 实呼（计划 §6：双审 24 + 校准 2 + 探针 2 + 修复储备 8 +
+# 余量 4）。会话面（headless claude -p 外耗）另立 session_ledger，硬帽 48 会话
+# （proposer 3 + smoke 1 + 12 运行×3 触点 = 36 + diagnose/修复 8），两面分列不混算。
+LEDGER_RSI_S2 = 2910
+RSI_S2_HARD_CAP = 40
+RSI_S2_NORMAL_BUDGET = 40
+RSI_S2_TASK_CAPS = types.MappingProxyType({
+    1: 0,    # s2_probe：校准 2 呼已计入双审车道（首个批准批误用 task 2）
+    # 2026-11-19 仪器重跑处置：双审车道取满硬帽 40。原因逐条留痕——
+    # ① 校准 2 呼误记 task 2；② 仪器丢失 2 呼（review/ 缺目录）；
+    # ③ 首版审查包缺 δ/proposition 致 12 包重审；④ 降样本至 5 对后仍需 20 呼。
+    # 修复储备（8）与余量（4）未使用，划归双审；**硬帽 40 不放宽**。
+    2: 40,   # s2_dual_review（含仪器重跑，见上）
+    3: 0,    # s2_repair：未使用（划归双审）
+    4: 0,    # s2_margin：未使用（划归双审）
+})
+
+RSI_S2_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_S2,
+    quota_dir_fn=rsi_s2_quota_dir,
+    ledger_path_fn=rsi_s2_ledger_path,
+    counters_path_fn=rsi_s2_counters_path,
+    approvals_dir_fn=rsi_s2_approvals_dir,
+    pause_dir_fn=rsi_s2_gateway_state_dir,
+    pause_path_fn=rsi_s2_gateway_state_path,
+    task_caps=RSI_S2_TASK_CAPS,
+    hard_cap=RSI_S2_HARD_CAP,
+    normal_budget=RSI_S2_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -1148,6 +1187,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_s0_roots_isolated()
     elif ns.phase == LEDGER_RSI_S1:
         assert_rsi_s1_roots_isolated()
+    elif ns.phase == LEDGER_RSI_S2:
+        assert_rsi_s2_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1450,6 +1491,11 @@ class QuotaLedger:
     def rsi_s1(cls) -> "QuotaLedger":
         """RSI-S1 账（2909；单阶段无 campaign，硬帽 40 实呼）。"""
         return cls(RSI_S1_NAMESPACE)
+
+    @classmethod
+    def rsi_s2(cls) -> "QuotaLedger":
+        """RSI-S2 账（2910；单阶段无 campaign，硬帽 40 实呼 + 48 会话面）。"""
+        return cls(RSI_S2_NAMESPACE)
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":

@@ -12,7 +12,8 @@ from ._physicalrsi import mismatches
 
 __all__ = ["GuardViolation", "GuardCtx", "GUARDS",
            "g_prereg", "g_budget", "g_send_once", "g_freeze",
-           "g_bytes", "g_claim", "g_unit", "g_noprog", "enforce"]
+           "g_bytes", "g_claim", "g_unit", "g_noprog", "register_guard",
+           "enforce"]
 
 
 class GuardViolation(RuntimeError):
@@ -46,6 +47,7 @@ class GuardCtx:
     registered_request_sha256: str | None = None  # g_bytes：登记在案的请求字节哈希
     private_sentinels: tuple[bytes, ...] = ()     # g_bytes：不得外泄的私有哨兵
     noprog_rounds: int = 2                    # g_noprog：连续无新证据轮数上限
+    report_doc: dict | None = None            # g_report：K8 六段报告（v2 合同）
 
 
 def g_prereg(ctx: GuardCtx) -> None:
@@ -170,6 +172,18 @@ GUARDS = {
     "G-UNIT": g_unit,
     "G-NOPROG": g_noprog,
 }
+
+
+def register_guard(name: str, fn) -> None:
+    """S2 运行时注册：把**候选包**提供的守卫装进注册表（如 G-REPORT）。
+
+    S1 的八守卫是 as-built 冻结面；S2 变异面新增的守卫由候选包实现，
+    由战役在开跑前注册（v0 臂不注册 → 同名守卫不可用，fail-closed）。
+    """
+    if not name or not callable(fn):
+        raise GuardViolation("register_guard", "UNKNOWN_GUARD",
+                             f"非法注册 {name!r}: {fn!r}")
+    GUARDS[name] = fn
 
 
 def enforce(names, ctx: GuardCtx) -> None:

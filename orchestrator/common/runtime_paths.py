@@ -2185,3 +2185,103 @@ def assert_rsi_s1_roots_isolated() -> None:
         message=("RSI-S1 根必须与封存期根及 R0…S0 族根互异且互不嵌套（解析后）："
                  f"rsi_s1={rsi_s1_root().resolve(strict=False)} "
                  f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))
+
+
+# ---------------------------------------------------------------------------
+# RSI-S2（2026-11-19 立项，账套命名空间 2910）：首轮自改合并战役账。
+# 根 = $SIMPRAXIS_RSI_S2_ROOT 或 $DATA_ROOT/rsi_s2。子目录：
+#   quota/{ledger.jsonl,counters.json,approvals/,gateway_state/} —— 网关面账
+#   prereg/rules/     规则面 LOCK（词表 v2/NC 规则/报告合同；先冻结）
+#   prereg/campaign/  战役 LOCK（实例×臂/统计/Gate/预算/降样本序）
+#   candidate/        候选变异面（proposer 产出；受 EvolutionSpec 机检）
+#   evidence/         研究证据根（driver 的 runs/<stage>_runNNN/）
+#   sessions/         headless 会话账（外耗面；与网关门分列不混算）
+#   closeout/         结案判件与三签
+# 纪律：双 LOCK 分签（规则先于任何候选 diff）；双面账不混算。
+# ---------------------------------------------------------------------------
+
+_RSI_S2_ROOT_ENV = "SIMPRAXIS_RSI_S2_ROOT"
+
+_RSI_S2_SUBDIRS = frozenset({
+    "quota", "quota/approvals", "quota/gateway_state",
+    "prereg", "prereg/rules", "prereg/campaign", "candidate",
+    "evidence", "sessions", "closeout",
+})
+
+
+def rsi_s2_root() -> Path:
+    """RSI-S2 根：显式 env 优先；否则 ``$DATA_ROOT/rsi_s2``。"""
+    root = os.environ.get(_RSI_S2_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_s2"
+
+
+def _s2_dir(name: str) -> Path:
+    if name not in _RSI_S2_SUBDIRS:
+        raise ValueError(f"未知 RSI-S2 子目录：{name!r}")
+    return ensure_private_dir(rsi_s2_root() / name)
+
+
+def rsi_s2_quota_dir() -> Path:
+    return _s2_dir("quota")
+
+
+def rsi_s2_ledger_path() -> Path:
+    return rsi_s2_quota_dir() / "ledger.jsonl"
+
+
+def rsi_s2_counters_path() -> Path:
+    return rsi_s2_quota_dir() / "counters.json"
+
+
+def rsi_s2_approvals_dir() -> Path:
+    return _s2_dir("quota/approvals")
+
+
+def rsi_s2_gateway_state_dir() -> Path:
+    return _s2_dir("quota/gateway_state")
+
+
+def rsi_s2_gateway_state_path() -> Path:
+    return rsi_s2_gateway_state_dir() / "gateway_state.json"
+
+
+def rsi_s2_rules_prereg_dir() -> Path:
+    return _s2_dir("prereg/rules")
+
+
+def rsi_s2_campaign_prereg_dir() -> Path:
+    return _s2_dir("prereg/campaign")
+
+
+def rsi_s2_candidate_dir() -> Path:
+    return _s2_dir("candidate")
+
+
+def rsi_s2_evidence_root() -> Path:
+    return _s2_dir("evidence")
+
+
+def rsi_s2_sessions_dir() -> Path:
+    return _s2_dir("sessions")
+
+
+def rsi_s2_closeout_dir() -> Path:
+    return _s2_dir("closeout")
+
+
+def assert_rsi_s2_roots_isolated() -> None:
+    """RSI-S2 根与封存期根及 R0…S1 族根互异且互不嵌套（写前 fail-fast）。"""
+    protected = rsi_r1n_protected_write_roots()
+    roots = dict(protected)
+    roots["rsi_r1n"] = rsi_r1n_root()
+    roots["rsi_s0"] = rsi_s0_root()
+    roots["rsi_s1"] = rsi_s1_root()
+    _assert_roots_isolated(
+        rsi_s2_root(),
+        tuple(roots.values()),
+        label=_RSI_S2_ROOT_ENV,
+        message=("RSI-S2 根必须与封存期根及 R0…S1 族根互异且互不嵌套（解析后）："
+                 f"rsi_s2={rsi_s2_root().resolve(strict=False)} "
+                 f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))

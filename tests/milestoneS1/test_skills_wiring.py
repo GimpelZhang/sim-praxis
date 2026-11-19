@@ -281,7 +281,10 @@ def test_claim_verdict_must_equal_host_primary_classification(tmp_path):
             return {"source": "# x\n"}
         if name == "submit_claim":
             host = (value.get("contrasts") or [{}])[0].get("claim")
-            flipped = {"REFUTED": "SUPPORTED", "SUPPORTED": "REFUTED"}.get(host, "INCONCLUSIVE")
+            # S2 词表 v2：翻转必须是**另一个**五值词（INCONCLUSIVE 与
+            # SUPPORTED/REFUTED 互异）——退化点区间在 v2 里恒 INCONCLUSIVE，
+            # 不能用旧三值的 .get 默认值（会与 host 相同而漏检）。
+            flipped = "SUPPORTED" if host != "SUPPORTED" else "REFUTED"
             return {"verdict": flipped, "statement": "s",
                     "contrasts": [{k: r[k] for k in ("id", "estimate", "ci_low",
                                                      "ci_high", "n_blocks", "claim")}

@@ -114,7 +114,9 @@ class HeadlessSessionRunner:
     def __init__(self, *, sessions_root: Path, ledger: SessionLedger,
                  claude_bin: Path | None = None,
                  claude_share: Path | None = None,
-                 timeout_s: int = 900, max_turns: int = 40):
+                 timeout_s: int = 900, max_turns: int = 40,
+                 instructions: "Mapping[str, str] | None" = None,
+                 toolkit_path: Path | None = None):
         self.sessions_root = Path(sessions_root)
         ensure_private_dir(self.sessions_root, mode=0o700)
         self.ledger = ledger
@@ -122,12 +124,17 @@ class HeadlessSessionRunner:
         self.claude_share = Path(claude_share or CLAUDE_SHARE)
         self.timeout_s = int(timeout_s)
         self.max_turns = int(max_turns)
+        # S2 变异面：v1 臂的触点模板由**候选包**提供（candidate/touchpoints.py 的
+        # TOUCHPOINT_INSTRUCTIONS_V2）；维护侧只提供注入点（v0 臂用 S1 原文）。
+        self.instructions = dict(instructions or TOUCHPOINT_INSTRUCTIONS)
+        # S2 变异面：v1 臂把候选的 NC 设计助手（nc_toolkit.py）放进 K1 工作区。
+        self.toolkit_path = Path(toolkit_path) if toolkit_path else None
 
     # -- 沙箱 ------------------------------------------------------------
     def _command(self, workspace: Path, home: Path, touchpoint: str) -> list[str]:
         brief = _FIXED_BRIEF.format(
             touchpoint=touchpoint, workspace=str(workspace),
-            instructions=TOUCHPOINT_INSTRUCTIONS[touchpoint])
+            instructions=self.instructions[touchpoint])
         inner = [str(self.claude_bin.resolve()), "-p", brief,
                  "--output-format", "stream-json", "--verbose",
                  "--max-turns", str(self.max_turns),
@@ -165,7 +172,7 @@ class HeadlessSessionRunner:
     # -- 执行 ------------------------------------------------------------
     def run(self, *, touchpoint: str, workspace: Path,
             request: Mapping[str, Any], host_label: str = "") -> TouchpointRecord:
-        if touchpoint not in SUPPORTED_TOUCHPOINTS:
+        if touchpoint not in self.instructions:
             raise TouchpointError("UNKNOWN_TOUCHPOINT", touchpoint)
         ws = ensure_private_dir(Path(workspace), mode=0o700)
         home = ensure_private_dir(ws / "home", mode=0o700)
@@ -173,7 +180,13 @@ class HeadlessSessionRunner:
                           json.dumps(dict(request), ensure_ascii=False,
                                      indent=2, sort_keys=True) + "\n", mode=0o600)
         atomic_write_text(ws / "INSTRUCTIONS.txt",
-                          TOUCHPOINT_INSTRUCTIONS[touchpoint] + "\n", mode=0o600)
+                          self.instructions[touchpoint] + "\n", mode=0o600)
+        if touchpoint == "propose_plan" and self.toolkit_path is not None:
+            # 候选的 NC 设计助手（变异面代码）随 K1 工作区进入沙箱；
+            # 只读副本（0600），宿主不写候选内容。
+            atomic_write_text(ws / "nc_toolkit.py",
+                              self.toolkit_path.read_text(encoding="utf-8"),
+                              mode=0o600)
         command = self._command(ws, home, touchpoint)
         transcript = ws / "transcript.jsonl"
         session_key = f"tp-{touchpoint}-{uuid.uuid4().hex[:12]}"
@@ -259,6 +272,7 @@ class HeadlessActor:
         "propose_plan": ("conditions", "n_block", "study", "plan_sha256"),
         "write_analysis": ("source",),
         "submit_claim": ("verdict", "statement", "contrasts"),
+        "submit_claim_repair": ("verdict", "statement", "contrasts"),
         "diagnose_fail": ("diagnosis",),
     }
 

@@ -75,6 +75,18 @@ METRICS: "Mapping[str, Mapping[str, Any]]" = {
         "description": ("按实际 dt 积分的跟踪误差，除以目标幅值 A；"
                         "时间窗 0.5–4 s；硬失稳 run 记 loss=10"),
     },
+    # S2-1（计划 §2.1 第 3 行）：B 机制的亚阈阴性对照专用等效指标。
+    # S1 的双审意见③指出 B_N 无注册 NC；v2 规则要求每研究强制注册，B 侧
+    # 用归一化跟踪 RMSE 的等效界（±0.01）承载。物理管线与主指标同源（别名映射
+    # 到 normalized_tracking_rmse），**不是**新测量面。
+    "normalized_tracking_rmse_negative_equivalence": {
+        "unit": "1",
+        "delta": Decimal("0.01"),
+        "study": "B",
+        "censoring": "none",
+        "description": ("校准阴性控制专用：基准 vs 亚阈微扰的归一化跟踪 RMSE 差；"
+                        "90% 区间须严格落 ±0.01 内"),
+    },
 }
 
 #: A 的阴性控制必须用 equivalent 主张 + 90% 区间 + 该界。
