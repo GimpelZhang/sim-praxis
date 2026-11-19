@@ -106,7 +106,8 @@ def _canonical_sha(doc: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def build_block_assignment(plan_sha256: str, *, study: str, n_block: int,
-                           nuisance: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+                           nuisance: Sequence[Mapping[str, Any]],
+                           salt: str | None = None) -> list[dict[str, Any]]:
     """确定性私有 block 分配：每 block 一个 nuisance 取值（块内同值）。
 
     ``nuisance`` 每项形如 ``{"param": "v0_mps", "low": "0.1", "high": "0.6",
@@ -130,12 +131,13 @@ def build_block_assignment(plan_sha256: str, *, study: str, n_block: int,
             step = Decimal(str(item.get("precision", "0.001")))
             if not (low < high) or step <= 0:
                 raise PhysicsServiceError("NUISANCE_RANGE", f"{param}: {low}..{high}")
-            material = f"{plan_sha256}|{study}|{block_id}|{param}".encode("utf-8")
+            material = f"{plan_sha256}|{study}|{block_id}|{param}|{salt or ''}".encode(
+                "utf-8")
             digest = hashlib.sha256(material).hexdigest()
             # 均匀落在 [low, high] 的 step 网格上；只由哈希决定，无 RNG 状态。
             span = int(((high - low) / step).to_integral_value())
             slot = int(digest[:16], 16) % (span + 1)
-            value = low + step * slot
+            value = min(low + step * slot, high)   # 非整除支撑上夹到 high（评审 LOW）
             values[param] = str(value.normalize())
         blocks.append({"block_id": block_id, "nuisance": values})
     return blocks
@@ -231,13 +233,18 @@ def mujoco_denial_probe(*, mode: str = "auto", python_exe: str | None = None,
                    "--bind", str(work), "/work",
                    "--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
                    "--chdir", "/work",
-                   exe, "-I", "-S", "/work/denial_probe.py"]
+                   # 评审 MEDIUM：bwrap 负控镜像 actor 运行时（site 开启），只禁
+                   # user-site/环境路径；isolated 模式才用 -S 模拟「无 site-packages」。
+                   exe, "-I", "/work/denial_probe.py"]
         else:
             exe = python_exe or sys.executable
             cmd = [exe, "-I", "-S", str(probe)]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
-                              env={"PATH": "/usr/local/bin:/usr/bin:/bin",
-                                   "LANG": "C.UTF-8"})
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                                  env={"PATH": "/usr/local/bin:/usr/bin:/bin",
+                                       "LANG": "C.UTF-8"})
+        except OSError as exc:  # 评审 LOW：坏解释器路径不得以 UnboundLocal 掩盖
+            raise PhysicsServiceError("DENIAL_PROBE_FAILED", str(exc)) from None
     finally:
         if workspace is None:
             shutil.rmtree(work, ignore_errors=True)
@@ -385,7 +392,9 @@ class PhysicsService:
             raise PhysicsServiceError("CONDITIONS_EMPTY", "conditions 为空")
         records_dir = ensure_private_dir(Path(record_root)
                                          if record_root else self.observations_root)
-        self.observations_root = records_dir
+        # 评审 LOW：不改实例状态；本批观测一律落 records_dir（run_one 用副本服务）。
+        batch_service = PhysicsService(observations_root=records_dir,
+                                       evidence_root=self.evidence_root)
         primary = task.get("primary")
         if not isinstance(primary, Mapping):
             raise PhysicsServiceError("PRIMARY_MISSING", "缺主对比定义")
@@ -404,7 +413,7 @@ class PhysicsService:
                     plan_sha256=plan_sha256, study_id=study_id,
                     condition_id=cid, block_id=bid,
                     scene_id=str(cond["scene_id"]), params=params)
-                result = self.run_one(spec=spec, batch_id=batch_id)
+                result = batch_service.run_one(spec=spec, batch_id=batch_id)
                 runs.append(result.row())
         contrasts = [self._contrast_doc(c) for c in contradictions]
         manifest = {

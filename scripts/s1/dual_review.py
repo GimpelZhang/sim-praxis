@@ -200,10 +200,24 @@ def run_review(gateway, *, evidence_root: Path,
             pack = build_pack(study, evidence_root, prereg_study)
             packs[study] = pack
             runs = {}
-            for channel in ("channel_a", "channel_b"):
-                run = RV.run_review(call, pack=pack, channel=channel)
+            # 评审 MEDIUM：两通道不得是同一次抽样。channel_b 用独立温度+提示盐，
+            # 参数入冻结报告（可审计、可复现的是"互异"，不是"逐位可复现"）。
+            for channel, temperature, salt in (
+                    ("channel_a", 0.0, "A"), ("channel_b", 0.7, "B")):
+                salted = RV.build_review_pack(
+                    study=study, question=pack["question"],
+                    methods=pack["methods"], results=pack["results"],
+                    claim=pack["claim"],
+                    negative_control=pack.get("negative_control", "") + f" [channel {salt}]")
+                run_call = (
+                    lambda prompt, t=temperature: gateway.call(
+                        "coding_debug", [{"role": "user", "content": prompt}],
+                        max_tokens=8192, temperature=t,
+                        thinking={"type": "disabled"}))
+                run = RV.run_review(run_call, pack=salted, channel=channel)
                 run.reviewed_at_utc = utc_now_iso_z()
-                runs[channel] = run.to_dict()
+                runs[channel] = dict(run.to_dict(), temperature=temperature,
+                                     prompt_salt=salt)
             channels[study] = runs
             truth[study] = RV.merge_truth_table(runs["channel_a"]["parsed"],
                                                 runs["channel_b"]["parsed"])

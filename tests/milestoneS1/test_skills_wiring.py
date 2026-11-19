@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import json
+
 from pathlib import Path
 
 import pytest
@@ -102,7 +104,8 @@ def _actor_for(claim_tamper: bool):
                              "ci_low": row["ci_low"], "ci_high": row["ci_high"],
                              "n_blocks": row["n_blocks"],
                              "claim": row.get("claim")})
-            return {"claim": "TEST", "contrasts": rows, "verdict": "INCONCLUSIVE"}
+            return {"claim": "TEST", "contrasts": rows,
+                    "verdict": (value.get("contrasts") or [{}])[0].get("claim")}
         if name == "diagnose_fail":
             return {"diagnosis": "stub"}
         raise AssertionError(name)
@@ -139,7 +142,8 @@ def test_g_claim_passes_when_self_report_matches_host(tmp_path):
         confirmer=default_confirmer, claim_guard=True)
     outcome = driver.run_campaign({"goal": "A_N"}, {"A_N": spec})
     assert outcome["status"] == "done", outcome
-    assert outcome["stages"]["A_N"]["claim"]["verdict"] == "INCONCLUSIVE"
+    # 判词由 host 主对比分类决定（不得自报）；A_N 主对比在 2 block 小样本下为 REFUTED
+    assert outcome["stages"]["A_N"]["claim"]["verdict"] == "REFUTED"
 
 
 def test_g_claim_rejects_transcription_mismatch(tmp_path):
@@ -183,7 +187,9 @@ def test_driver_passes_skill_context_and_diagnose(tmp_path):
                      "ci_low": r["ci_low"], "ci_high": r["ci_high"],
                      "n_blocks": r["n_blocks"], "claim": r["claim"]}
                     for r in value["contrasts"]]
-            return {"claim": "T", "verdict": "INCONCLUSIVE", "contrasts": rows}
+            return {"claim": "T",
+                    "verdict": (value.get("contrasts") or [{}])[0].get("claim"),
+                    "contrasts": rows}
         if name == "diagnose_fail":
             return {"diagnosis": "重查结算"}
         raise AssertionError(name)
@@ -203,3 +209,88 @@ def test_driver_passes_skill_context_and_diagnose(tmp_path):
     k1_inputs = [v for n, v in seen if n == "propose_plan"]
     assert k1_inputs[1].get("human_notes") == "请复核统计口径"
     assert k1_inputs[1].get("diagnose", {}).get("diagnosis") == "重查结算"
+
+
+def test_diagnose_budget_caps_and_human_cofix_marks_claim(tmp_path):
+    """AC-08/AC-13：诊断触点 ≤2；含算法修补意见时 claim 标 human_cofix。"""
+    from orchestrator.rsi_r1 import task_specs as TS
+
+    task = TS.build_r1n_a()
+    spec = {"schema": "x", "task_id": task.task_id, "study": "A_N",
+            "plan_sha256": "f" * 64, "n_block": 2,
+            "conditions": [c.to_dict() for c in task.conditions]}
+    diagnoses = []
+
+    def actor(name, contract, value):
+        if name == "propose_plan":
+            s = value.get("spec") or {}
+            return {"conditions": s.get("conditions"), "n_block": 2,
+                    "study": "A_N", "plan_sha256": s.get("plan_sha256")}
+        if name == "write_analysis":
+            return {"source": "# x\n"}
+        if name == "submit_claim":
+            return {"verdict": (value.get("contrasts") or [{}])[0].get("claim"),
+                    "statement": "s",
+                    "contrasts": [{k: r[k] for k in ("id", "estimate", "ci_low",
+                                                     "ci_high", "n_blocks", "claim")}
+                                  for r in value["contrasts"]]}
+        if name == "diagnose_fail":
+            diagnoses.append(value.get("run_idx"))
+            return {"diagnosis": "补统计", "algorithm_patch": True}
+        raise AssertionError(name)
+
+    gates = [GateDecision(approved=False, human_notes=f"第{i}次打回，请改方法")
+             for i in (1, 2, 3)]  # 第 3 次把 max_rejects=3 打满
+    driver = ResearchDriver(
+        gate1_hook=lambda card: GateDecision(approved=True),
+        gate2_hook=lambda card, stage: gates.pop(0),
+        actor=actor, evidence_root=tmp_path / "ev",
+        batch_runner=default_batch_runner, analyzer=default_analyzer,
+        confirmer=default_confirmer, claim_guard=True,
+        max_rejects_per_stage=3, diagnose_budget=2)
+    outcome = driver.run_campaign({"goal": "A_N"}, {"A_N": spec})
+    stage = outcome["stages"]["A_N"]
+    assert stage["status"] == "human_failure"
+    assert stage["code"] == "REJECT_BUDGET_EXHAUSTED"
+    assert diagnoses == [1, 2]                    # 诊断帽恰 2：第三轮超帽不再调用
+    k8 = json.loads((tmp_path / "ev" / "runs" / "A_N_run003" / "K8.json").read_text())
+    assert k8.get("human_cofix") is True
+    assert k8.get("conclusion_grade") == "human_machine_joint_improvement"
+
+
+def test_claim_verdict_must_equal_host_primary_classification(tmp_path):
+    """评审 HIGH-2 负控：数值行逐字正确但总判词翻转 → CLAIM_INVALID。"""
+    from orchestrator.rsi_r1 import task_specs as TS
+
+    task = TS.build_r1n_a()
+    spec = {"schema": "x", "task_id": task.task_id, "study": "A_N",
+            "plan_sha256": "9" * 64, "n_block": 2,
+            "conditions": [c.to_dict() for c in task.conditions]}
+
+    def actor(name, contract, value):
+        if name == "propose_plan":
+            s = value.get("spec") or {}
+            return {"conditions": s.get("conditions"), "n_block": 2,
+                    "study": "A_N", "plan_sha256": s.get("plan_sha256")}
+        if name == "write_analysis":
+            return {"source": "# x\n"}
+        if name == "submit_claim":
+            host = (value.get("contrasts") or [{}])[0].get("claim")
+            flipped = {"REFUTED": "SUPPORTED", "SUPPORTED": "REFUTED"}.get(host, "INCONCLUSIVE")
+            return {"verdict": flipped, "statement": "s",
+                    "contrasts": [{k: r[k] for k in ("id", "estimate", "ci_low",
+                                                     "ci_high", "n_blocks", "claim")}
+                                  for r in value["contrasts"]]}
+        if name == "diagnose_fail":
+            return {"diagnosis": "stub"}
+        raise AssertionError(name)
+
+    driver = ResearchDriver(
+        gate1_hook=lambda card: GateDecision(approved=True),
+        gate2_hook=lambda card, stage: GateDecision(approved=True),
+        actor=actor, evidence_root=tmp_path / "ev",
+        batch_runner=default_batch_runner, analyzer=default_analyzer,
+        confirmer=default_confirmer, claim_guard=True)
+    outcome = driver.run_campaign({"goal": "A_N"}, {"A_N": spec})
+    assert outcome["status"] == "human_failure"
+    assert outcome["stages"]["A_N"]["code"] == "CLAIM_INVALID"

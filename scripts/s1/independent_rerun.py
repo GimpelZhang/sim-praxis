@@ -43,18 +43,28 @@ def _contrast_map(rows) -> dict[str, dict[str, Any]]:
     return {str(r.get("id")): r for r in rows or [] if isinstance(r, Mapping)}
 
 
-def rerun_study(study_dir: Path, study: str, out_root: Path) -> dict[str, Any]:
+def rerun_study(study_dir: Path, study: str, out_root: Path,
+                stamp: str = "") -> dict[str, Any]:
     k6 = _load(study_dir / "K6.json")
     k7 = _load(study_dir / "K7.json")
     k4 = _load(study_dir / "K4.json")
     if k6.get("frozen") is not True:
         raise SystemExit(f"NOT_FROZEN: {study} K6")
-    fresh = ensure_private_dir(out_root / study, mode=0o700)
+    # 每次复跑独立根（RAW_EXISTS 是纪律：不覆盖、不删除旧证据）
+    fresh = ensure_private_dir(out_root / f"{study}-{stamp}", mode=0o700)
     handle = HR.recompute(k6, fresh_root=fresh, batch_id=f"rerun-{study}")
     diffs = [d.to_dict() for d in handle.diffs]
     recomputed = _contrast_map(handle.confirm_result.get("contrasts"))
     original = _contrast_map(k7.get("contrasts"))
+    k8 = _load(study_dir / "K8.json")
     mismatches = []
+    for cid in sorted(set(original) - set(recomputed)):
+        mismatches.append(f"{cid}: missing_in_rerun")
+    expected_verdict = None
+    if handle.confirm_result.get("contrasts"):
+        expected_verdict = handle.confirm_result["contrasts"][0].get("claim")
+    if expected_verdict is not None and k8.get("verdict") != expected_verdict:
+        mismatches.append(f"verdict: K8={k8.get('verdict')!r} != rerun={expected_verdict!r}")
     for cid, row in recomputed.items():
         other = original.get(cid)
         if other is None:
@@ -86,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     evidence = Path(args.evidence)
     out_root = ensure_private_dir(evidence / "independent_rerun")
+    stamp = utc_now_iso_z().replace(":", "").replace("-", "")
     results: dict[str, Any] = {}
     ok = True
     for study in args.studies:
@@ -94,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             results[study] = {"error": "STUDY_RUN_MISSING"}
             ok = False
             continue
-        row = rerun_study(runs[-1], study, out_root)
+        row = rerun_study(runs[-1], study, out_root, stamp=stamp)
         results[study] = row
         if row["n_diffs"] or not row["contrasts_match_K7"]:
             ok = False

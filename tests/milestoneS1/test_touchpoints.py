@@ -180,8 +180,9 @@ def test_driver_passes_run_context_to_headless_actor(tmp_path):
                 rows = [{k: r[k] for k in ("id", "estimate", "ci_low", "ci_high",
                                            "n_blocks", "claim")}
                         for r in (request.get("value") or {}).get("contrasts", [])]
-                self.response = {"verdict": "INCONCLUSIVE", "statement": "s",
-                                 "contrasts": rows}
+                host = (request.get("value") or {}).get("contrasts") or [{}]
+                self.response = {"verdict": host[0].get("claim"),
+                                 "statement": "s", "contrasts": rows}
             return super().run(touchpoint=touchpoint, workspace=workspace,
                                request=request, host_label=host_label)
 

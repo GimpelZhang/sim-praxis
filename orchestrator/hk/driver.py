@@ -81,7 +81,8 @@ class ResearchDriver:
                  touchpoint_budget: int = TOUCHPOINT_BUDGET,
                  max_rejects_per_stage: int = GATE2_MAX_REJECTS_PER_STAGE,
                  claim_guard: bool = False,
-                 diagnose_budget: int = DIAGNOSE_BUDGET):
+                 diagnose_budget: int = DIAGNOSE_BUDGET,
+                 assignment_salt: str | None = None):
         self.gate1_hook = gate1_hook
         self.gate2_hook = gate2_hook
         self.evidence_root = Path(evidence_root)
@@ -95,6 +96,11 @@ class ResearchDriver:
         # 里程碑测试显式关着——S1 的 AC-17 负控覆盖「不符即 CLAIM_INVALID」。
         self.claim_guard = bool(claim_guard)
         self.diagnose_budget = int(diagnose_budget)
+        # 评审 MEDIUM：block 分配的 host 私有 salt（run_study 以 os.urandom 生成并落
+        # 0600 私有件）；只进 ctx 的批处理路径，**绝不注入触点 _ctx**。
+        self.assignment_salt = assignment_salt
+        # AC-13：打回意见含实质性算法修补 → 结论降级「人机共同改进」（claim 件标注）
+        self.human_cofix: dict[str, bool] = {}
         self._direction_reviser = direction_reviser
         self._raw_actor = actor
         self._counted_actor = self._actor(actor)
@@ -140,7 +146,9 @@ class ResearchDriver:
         """
         if not isinstance(value, Mapping):
             return value
-        safe = {k: v for k, v in ctx.items() if k != "driver"}
+        # 私有面不外泄：driver 对象与 block 分配 salt 不进入 actor 可见的 _ctx。
+        safe = {k: v for k, v in ctx.items()
+                if k not in ("driver", "assignment_salt")}
         return dict(value, _ctx=safe)
 
     def _record(self, run_dir: Path, name: str, payload: Any) -> str:
@@ -179,6 +187,10 @@ class ResearchDriver:
                    "fresh_root": str(self.evidence_root / "recompute"
                                      / f"{stage_id}_run{run_idx:03d}"),
                    "batch_id": f"{stage_id}-run{run_idx:03d}",
+                   "registered_plan_sha256": (
+                       (registered.get("spec") or {}).get("plan_sha256")
+                       if isinstance(registered, Mapping) else None),
+                   "assignment_salt": self.assignment_salt,
                    "driver": self}
             if diagnose_doc is not None:
                 ctx["diagnose"] = diagnose_doc
@@ -202,16 +214,32 @@ class ResearchDriver:
                     self._record(run_dir, f"{key}.json", value)
                 claim = self.skills["K8"].execute(
                     self._touchpoint_value(value, ctx), ctx)
+                claim = dict(claim)
+                if self.human_cofix.get(stage_id):
+                    claim["human_cofix"] = True
+                    claim["conclusion_grade"] = "human_machine_joint_improvement"
                 self._record(run_dir, "K8.json", claim)
                 if self.claim_guard:
                     # G-CLAIM（AC-17）：自报逐字段 vs host 复算；不符即 CLAIM_INVALID。
                     # host 真值取 confirm_result 的**主张投影**（contrasts 行）——
                     # 只比对可主张的数值面，信封元数据（时间戳/sha）不要求自报复制。
                     host_truth = k7_value if isinstance(k7_value, Mapping) else {}
-                    if isinstance(host_truth.get("contrasts"), list):
-                        host_truth = {"contrasts": host_truth["contrasts"]}
+                    host_contrasts = host_truth.get("contrasts")
+                    if isinstance(host_contrasts, list):
+                        host_truth = {"contrasts": host_contrasts}
                     enforce(["G-CLAIM"], GuardCtx(stage=stage_id, claim_doc=claim,
                                                   host_recomputed=dict(host_truth)))
+                    # 评审 HIGH-2：总判词不得是纯自报——必须等于 host 对**主对比**
+                    # （contrasts[0]，预注册前已冻结顺序）的分类。
+                    if isinstance(host_contrasts, list) and host_contrasts:
+                        expected = host_contrasts[0].get("claim")
+                        declared = claim.get("verdict")
+                        if expected is not None and declared != expected:
+                            return DriverResult(
+                                "human_failure", "CLAIM_INVALID", run_idx,
+                                rejects=dict(self.rejects),
+                                detail=(f"claim.verdict={declared!r} 与 host 主对比分类 "
+                                        f"{expected!r} 不符（结论不得靠自述）"))
             except GuardViolation as exc:
                 # 守卫拒绝 = 协议级停止码（如 G-CLAIM 的 CLAIM_INVALID），原码上报
                 return DriverResult("human_failure", exc.code, run_idx,
@@ -256,6 +284,8 @@ class ResearchDriver:
                                     "detail": str(exc)}
             if diagnose_doc is not None:
                 self._record(run_dir, "diagnose.json", diagnose_doc)
+                if diagnose_doc.get("algorithm_patch") is True:
+                    self.human_cofix[stage_id] = True
             self.rejects[stage_id] = self.rejects.get(stage_id, 0) + 1  # CR-20：per-Stage
             if self.rejects[stage_id] >= self.max_rejects_per_stage:
                 return DriverResult("human_failure", "REJECT_BUDGET_EXHAUSTED", run_idx,

@@ -102,6 +102,12 @@ def default_batch_runner(batch_plan: Mapping[str, Any], context=None):
     if isinstance(n_block, bool) or not isinstance(n_block, int) or n_block <= 0:
         raise SkillError(f"n_block 必须是正整数，收到 {n_block!r}")
     plan_sha = str(plan.get("plan_sha256") or "")
+    # 评审 MEDIUM：plan_sha256 必须与登记 spec 一致（不能由 actor 换值移动 block 分配）
+    registered_plan_sha = ctx.get("registered_plan_sha256")
+    if registered_plan_sha and plan_sha != str(registered_plan_sha):
+        raise SkillError(
+            f"PLAN_SHA_DRIFT: 计划 plan_sha256={plan_sha[:12]}… 与登记 "
+            f"{str(registered_plan_sha)[:12]}… 不符")
     nuisance_docs = []
     for param, spec in (task.nuisance_schema or {}).items():
         if not isinstance(spec, Mapping):
@@ -111,7 +117,8 @@ def default_batch_runner(batch_plan: Mapping[str, Any], context=None):
                               "high": str(support[-1]),
                               "precision": "0.001" if study == "A_N" else "0.01"})
     blocks = build_block_assignment(plan_sha, study=study, n_block=n_block,
-                                    nuisance=nuisance_docs)
+                                    nuisance=nuisance_docs,
+                                    salt=ctx.get("assignment_salt"))
     service = PhysicsService(observations_root=Path(str(obs_root)),
                              evidence_root=Path(str(ev_root)))
     manifest = service.run_batch(

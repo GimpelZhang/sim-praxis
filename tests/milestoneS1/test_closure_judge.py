@@ -69,7 +69,8 @@ def _build_root(tmp: Path, monkeypatch) -> Path:
                             "stages": {s: {"status": "done", "code": "APPROVED"}
                                        for s in ("A_N", "B_N")}}})
         run_dir = evidence / "runs" / f"{study}_run001"
-        for i in range(9):
+        _write(run_dir / "stage_input.json", {"spec": {"registered": True}})  # K0 登记件
+        for i in range(1, 9):
             _write(run_dir / f"K{i}.json", {"stage": i})
         k7 = _k7(study)
         k8 = {"verdict": "SUPPORTED", "statement": "s",

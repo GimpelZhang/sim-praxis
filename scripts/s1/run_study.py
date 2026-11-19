@@ -283,8 +283,17 @@ def run(*, studies: list[str], max_wait: float, dry_run: bool,
         raise SystemExit("ISOLATION_FAILED: 沙箱内 mujoco 可导入（物理收权不成立）")
 
     progress = Progress(evidence_root)
+    # 评审 MEDIUM：block 分配的 host 私有 salt（CSPRNG），0600 落盘、不进 actor 视野。
+    import os as _os
+
+    salt = _os.urandom(16).hex()
+    atomic_write_text(evidence_root / "assignment_seed.json",
+                      json.dumps({"salt_sha256": __import__("hashlib").sha256(
+                          salt.encode()).hexdigest(),
+                          "generated_at_utc": utc_now_iso_z()},
+                          ensure_ascii=False, indent=2) + "\n", mode=0o600)
     progress.write("study_start", studies=studies, thread_id=thread,
-                   pid=__import__("os").getpid())
+                   pid=_os.getpid())
     ledger = SessionLedger(rsi_s1_sessions_dir() / "sessions.jsonl")
     runner = HeadlessSessionRunner(sessions_root=rsi_s1_sessions_dir() / "ws",
                                    ledger=ledger)
@@ -300,6 +309,7 @@ def run(*, studies: list[str], max_wait: float, dry_run: bool,
             analyzer=default_analyzer,
             confirmer=_wrap_runner("confirm", default_confirmer, progress),
             claim_guard=True,
+            assignment_salt=salt,
             touchpoint_budget=TOUCHPOINT_BUDGET,
             diagnose_budget=DIAGNOSE_BUDGET,
             max_rejects_per_stage=GATE2_MAX_REJECTS_PER_STAGE)

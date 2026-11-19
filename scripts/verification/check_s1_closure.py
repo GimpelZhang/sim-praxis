@@ -153,6 +153,13 @@ def _check_studies(problems: list[str], gaps: list[str]) -> dict[str, Any]:
             problems.append(f"STUDY_{study}_CONFIRM_EMPTY")
         claimed = {str(r.get("id")): r for r in (k8.get("contrasts") or [])
                    if isinstance(r, Mapping)}
+        # 评审 HIGH-2：总判词不得是纯自报——必须等于 host 对主对比（第一行）的分类。
+        if k7.get("contrasts"):
+            expected_verdict = k7["contrasts"][0].get("claim")
+            if expected_verdict is not None and k8.get("verdict") != expected_verdict:
+                problems.append(
+                    f"STUDY_{study}_VERDICT_MISMATCH: K8={k8.get('verdict')!r} "
+                    f"!= host={expected_verdict!r}")
         for row in k7.get("contrasts") or []:
             other = claimed.get(str(row.get("id")))
             if other is None:
@@ -245,9 +252,23 @@ def _check_gateway(problems: list[str], gaps: list[str]) -> dict[str, Any]:
         task = row.get("task")
         if isinstance(task, int):
             by_task[task] = by_task.get(task, 0) + 1
+    approvals_dir = rsi_s1_ledger_path().parent / "approvals"
     for task, used in by_task.items():
         if task not in caps or used > caps[task]:
             problems.append(f"GATEWAY_TASK_CAP: task={task} used={used}")
+        # 批准件覆盖检查（评审 MEDIUM：判件声称做过却没做）
+        approved_total = 0
+        for path in sorted(approvals_dir.glob("*.json")) if approvals_dir.is_dir() else []:
+            try:
+                doc = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                continue
+            if doc.get("task") == task and doc.get("stage") == "coding_debug":
+                approved_total += int(doc.get("approved") or 0)
+        if approved_total < used:
+            problems.append(
+                f"GATEWAY_APPROVAL_SHORT: task={task} used={used} "
+                f"approved={approved_total}")
     if len(calls) > 40:
         problems.append(f"GATEWAY_HARD_CAP: {len(calls)} > 40")
     return {"rows": len(rows), "calls": len(calls), "by_task": by_task}
@@ -288,8 +309,15 @@ def _check_review(problems: list[str], gaps: list[str]) -> dict[str, Any]:
     return {"calibration_ready": calib.get("ready"), "truth_table": truth}
 
 
-def _check_denial(problems: list[str]) -> "dict | None":
-    for directory in sorted(rsi_s1_evidence_root().glob("*/")):
+def _check_denial(problems: list[str],
+                  studies: "Mapping[str, Any] | None" = None) -> "dict | None":
+    # 评审 LOW：绑定到最新 study 证据根，避免旧轮的 all_denied 冒充本轮。
+    candidates = []
+    if studies:
+        candidates = sorted({Path(str(v.get("evidence")))
+                             for v in studies.values()
+                             if isinstance(v, Mapping) and v.get("evidence")})
+    for directory in candidates or sorted(rsi_s1_evidence_root().glob("*/")):
         audit = _load(directory / "mujoco_denial_probe.json")
         if isinstance(audit, dict):
             if audit.get("all_denied") is not True:
@@ -302,12 +330,13 @@ def _check_denial(problems: list[str]) -> "dict | None":
 def judge() -> dict[str, Any]:
     problems: list[str] = []
     gaps: list[str] = []
+    studies = _check_studies(problems, gaps)
     report = {
         "schema": SCHEMA,
         "prereg": _check_prereg(problems),
         "calibration": _check_calibration(problems, gaps),
-        "denial": _check_denial(problems),
-        "studies": _check_studies(problems, gaps),
+        "denial": _check_denial(problems, studies),
+        "studies": studies,
         "sessions": _check_sessions(problems),
         "gateway": _check_gateway(problems, gaps),
         "review": _check_review(problems, gaps),
@@ -315,7 +344,18 @@ def judge() -> dict[str, Any]:
         "gaps": sorted(set(gaps)),
         "pass": not problems,
     }
-    payload = json.dumps({k: v for k, v in report.items() if k != "judge_sha256"},
+    # 不动点：判件 sha 只覆盖稳定投影（递归剔除 *_at_utc 时间戳），
+    # 使同证据复判逐位相同（评审：live 时间戳会让 sha 每次漂移）。
+    def _stable(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {k: _stable(v) for k, v in value.items()
+                    if not str(k).endswith("_at_utc")}
+        if isinstance(value, list):
+            return [_stable(v) for v in value]
+        return value
+
+    payload = json.dumps(_stable({k: v for k, v in report.items()
+                                  if k != "judge_sha256"}),
                          ensure_ascii=False, sort_keys=True,
                          separators=(",", ":")).encode()
     report["judge_sha256"] = hashlib.sha256(payload).hexdigest()

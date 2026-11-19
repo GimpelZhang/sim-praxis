@@ -192,6 +192,16 @@ class HeadlessSessionRunner:
                                usage={"status": "UNKNOWN", "timeout": True},
                                exit_status="TIMEOUT")
             raise TouchpointError("SESSION_TIMEOUT", f">{self.timeout_s}s") from None
+        except BaseException as exc:  # 评审 MEDIUM：任何异常都必须结账，不留悬挂会话
+            try:
+                self.ledger.finish(session_id=session_key,
+                                   usage={"status": "UNKNOWN",
+                                          "error": f"{type(exc).__name__}"},
+                                   exit_status="ERROR")
+            except Exception:  # noqa: BLE001 - 结账失败不掩盖原始异常
+                pass
+            raise TouchpointError("SESSION_LAUNCH_FAILED",
+                                  f"{type(exc).__name__}: {exc}") from None
         elapsed = time.monotonic() - t0
         atomic_write_text(transcript, proc.stdout, mode=0o600)
         atomic_write_text(ws / "session.stderr.txt", proc.stderr, mode=0o600)

@@ -108,7 +108,10 @@ class SessionLedger:
         new_file = not self.path.exists() or self.path.stat().st_size == 0
         fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, payload + b"\n")
+            blob = payload + b"\n"
+            while blob:  # 评审 LOW：短写循环，避免半行落盘
+                written = os.write(fd, blob)
+                blob = blob[written:]
         finally:
             os.close(fd)
         if new_file:

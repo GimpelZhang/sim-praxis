@@ -285,8 +285,12 @@ def recompute(confirm_plan: Mapping[str, Any], *, fresh_root: Path | str,
     if not isinstance(contrasts, list):
         raise HostRecomputeError("CONFIRM_INVALID", "contrasts 必须是列表")
     results: list[dict[str, Any]] = []
+    # 评审 MEDIUM：对比值必须用**重放**指标（replay_value），否则"独立复算"是
+    # 拿原始值的重算（同义反复）。逐点零 Diff 时二者应逐位相等。
+    replay_stat_rows = [{**row, "value": row.get("replay_value")}
+                        for row in replay_rows]
     for contrast in contrasts:
-        values = _linear_contrast_values(replay_rows, contrast)
+        values = _linear_contrast_values(replay_stat_rows, contrast)
         estimated = ST.estimate(values, level=contrast.get("level", "0.95"))
         results.append({
             "id": contrast.get("id"),
