@@ -117,6 +117,14 @@ AUTHORIZED_PUSH_HEADS = (
     # 精确集合，未登记的新 sha 照样判红（负例断言不变）。取值来自
     # ``git rev-parse origin/main`` 的完整 40 hex，非构造。
     "4aa2d82542c1bfaa6b98d6c4e2ae71ab653406c3",
+    # *锁内适配*（RSI-S1 收尾，2026-11-19）：``origin/main=6d26a95`` 是 2026-11-18
+    # S0 推送窗口按用户逐字指示放行推送的结果（S0 Complete §7–8：先推
+    # ``origin/rsi-s0``，再 ff 到 ``origin/main``），但当时漏登记 → P281 F2 与
+    # 2.8.0 终判对 ``origin/main`` 恒红（S1 冷跑实测；``6d26a95`` 基线 worktree
+    # 逐 ID 复现同红）。处置同 ``5895fe0``…``4aa2d82`` 先例：只登记**已推上去的**
+    # 完整 sha，仍为精确集合、负例断言不变。**不登记本地未推送 HEAD**（b24cfaf）：
+    # 该守卫的 HEAD 半边按设计保持红，直到推送窗口放行后另行补登。
+    "6d26a95d7fda7bca177a7d99957f311c810c4a8b",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
