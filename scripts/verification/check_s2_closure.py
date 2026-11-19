@@ -321,6 +321,30 @@ def run(*, campaign_root: Path, report_path: Path | None = None) -> "dict[str, A
     else:
         problems.append("S2_LESSONS_MISSING")
 
+    # 8b) 过程性缺口如实挂牌（verifier 复评提出）
+    archived = sorted((campaign_root / "review_instrument_v1").glob("*.json"))
+    if len(archived) < 12:
+        gaps.append(f"REVIEW_ARCHIVE_LOSS: 归档仅 {len(archived)}/12 包"
+                    "（首轮同名 3 包被第二轮 rename 覆盖；判词与理由在 progress 留痕）")
+    try:
+        rules_doc = _load(Path("/mnt/artifacts/simpraxis/rsi_s2/prereg/rules"
+                                "/rules.json"))
+        if rules_doc.get("rules_repaired_at_utc"):
+            gaps.append(
+                "RULE_REPAIR_POSTHOC: 规则模块试验后被修 "
+                f"{rules_doc.get('repaired_modules')}（仪器面；统计结论不变）")
+    except FileNotFoundError:
+        pass
+    gate2_doc = {}
+    try:
+        gate2_doc = _load(campaign_root / "gate2_decision.json").get("decision") or {}
+    except FileNotFoundError:
+        pass
+    if not int((gate2_doc or {}).get("rejects") or 0):
+        gaps.append("GATE2_REJECT_LOOP: 打回循环未实战（首卡即 approve，不伪造）")
+    gaps.append("HUMAN_COIMPROVEMENT: 降级路径仅单测负控"
+                "（tests/milestoneS2/test_human_coimprovement.py），未在战役中触发")
+
     # 9) 双判词（分轴；互不替代）
     verdict = analysis.get("verdict") if analysis else None
     v1_reports = [r for r in (dual.get("reports") or []) if r.get("arm") == "v1"]
