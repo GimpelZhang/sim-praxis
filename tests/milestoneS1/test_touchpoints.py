@@ -145,3 +145,61 @@ def test_unknown_touchpoint_rejected(tmp_path):
     with pytest.raises(TouchpointError) as excinfo:
         runner.run(touchpoint="ghost", workspace=tmp_path / "ws", request={})
     assert excinfo.value.code == "UNKNOWN_TOUCHPOINT"
+
+
+# ---------------------------------------------------------------------------
+# 回归（2026-11-18 事故）：driver → HeadlessActor 的运行上下文必须到位
+# ---------------------------------------------------------------------------
+
+def test_driver_passes_run_context_to_headless_actor(tmp_path):
+    """事故形状：首个触点曾因 RUN_DIR_MISSING 崩掉（actor 只拿 value，拿不到 ctx）。
+
+    本测试用真 driver + 真 HeadlessActor + FakeRunner（不触网）：actor 必须能
+    从 ``value['_ctx']['run_dir']`` 取到本轮 run 目录，并把 meta 写进该目录。
+    """
+    from orchestrator.hk.driver import GateDecision, ResearchDriver
+    from orchestrator.hk.skills import (default_analyzer, default_batch_runner,
+                                        default_confirmer)
+    from orchestrator.rsi_r1 import task_specs as TS
+
+    ledger = SessionLedger(tmp_path / "sessions.jsonl")
+
+    class DynRunner(FakeRunner):
+        def run(self, *, touchpoint, workspace, request, host_label=""):
+            if touchpoint == "write_analysis":
+                self.response = {"source": "# x\n"}
+            if touchpoint == "diagnose_fail":
+                self.response = {"diagnosis": "stub"}
+            if touchpoint == "propose_plan":
+                spec = (request.get("value") or {}).get("spec") or {}
+                self.response = {"conditions": spec.get("conditions"),
+                                 "n_block": spec.get("n_block"),
+                                 "study": spec.get("study"),
+                                 "plan_sha256": spec.get("plan_sha256")}
+            if touchpoint == "submit_claim":
+                rows = [{k: r[k] for k in ("id", "estimate", "ci_low", "ci_high",
+                                           "n_blocks", "claim")}
+                        for r in (request.get("value") or {}).get("contrasts", [])]
+                self.response = {"verdict": "INCONCLUSIVE", "statement": "s",
+                                 "contrasts": rows}
+            return super().run(touchpoint=touchpoint, workspace=workspace,
+                               request=request, host_label=host_label)
+
+    runner = DynRunner(ledger, response={"source": "# x\n"})
+    actor = HeadlessActor(runner, evidence_root=tmp_path)
+    task = TS.build_r1n_a()
+    spec = {"schema": "x", "task_id": task.task_id, "study": "A_N",
+            "plan_sha256": "e" * 64, "n_block": 2,
+            "conditions": [c.to_dict() for c in task.conditions]}
+    driver = ResearchDriver(
+        gate1_hook=lambda card: GateDecision(approved=True),
+        gate2_hook=lambda card, stage: GateDecision(approved=True),
+        actor=actor, evidence_root=tmp_path / "ev",
+        batch_runner=default_batch_runner, analyzer=default_analyzer,
+        confirmer=default_confirmer, claim_guard=True)
+    outcome = driver.run_campaign({"goal": "A_N"}, {"A_N": spec})
+    assert outcome["status"] == "done", outcome
+    run_dir = tmp_path / "ev" / "runs" / "A_N_run001"
+    assert (run_dir / "touchpoint_propose_plan.meta.json").is_file()
+    assert (run_dir / "touchpoint_write_analysis.meta.json").is_file()
+    assert (run_dir / "touchpoint_submit_claim.meta.json").is_file()

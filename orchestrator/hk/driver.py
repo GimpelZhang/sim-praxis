@@ -128,6 +128,21 @@ class ResearchDriver:
         ensure_private_dir(root, mode=0o700)
         return root
 
+    @staticmethod
+    def _touchpoint_value(value: Any, ctx: Mapping[str, Any]) -> Any:
+        """触点输入附带可序列化运行上下文（``_ctx``）。
+
+        S1 事故（2026-11-18）：HeadlessActor 需要 run_dir 才能起 fresh 会话，
+        但 actor 协议只有 (name, contract, value)——run 级上下文在 driver 的
+        ctx 里，从未进入 value，导致首个触点即 RUN_DIR_MISSING。修复=在 K1/K4/K8
+        输入上注入 ``_ctx``（剔除不可序列化对象）；下游 HASH 面只对 source/结果
+        取值，不受影响。
+        """
+        if not isinstance(value, Mapping):
+            return value
+        safe = {k: v for k, v in ctx.items() if k != "driver"}
+        return dict(value, _ctx=safe)
+
     def _record(self, run_dir: Path, name: str, payload: Any) -> str:
         path = run_dir / name
         text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
@@ -179,11 +194,14 @@ class ResearchDriver:
                             return DriverResult("human_failure", exc.code, run_idx,
                                                 rejects=dict(self.rejects),
                                                 detail=str(exc))
-                    value = self.skills[key].execute(value, ctx)
+                    skill_input = (self._touchpoint_value(value, ctx)
+                                   if key in ("K1", "K4", "K8") else value)
+                    value = self.skills[key].execute(skill_input, ctx)
                     if key == "K7":
                         k7_value = value
                     self._record(run_dir, f"{key}.json", value)
-                claim = self.skills["K8"].execute(value, ctx)
+                claim = self.skills["K8"].execute(
+                    self._touchpoint_value(value, ctx), ctx)
                 self._record(run_dir, "K8.json", claim)
                 if self.claim_guard:
                     # G-CLAIM（AC-17）：自报逐字段 vs host 复算；不符即 CLAIM_INVALID。

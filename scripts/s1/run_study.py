@@ -57,6 +57,51 @@ def _load_json(path: Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+class Progress:
+    """运行进度流水（watchdog 的数据面）：append-only JSONL，逐事件落盘。
+
+    S1 事故教训（2026-11-18）：交出人工门后若不监测，instrument 崩溃会被误报为
+    "仍在等待"。此后每个关键事件都写一行，``scripts/s1/watch_study.py`` 以
+    "进程存活 + 事件新鲜度" 双条件报警。
+    """
+
+    def __init__(self, root: Path):
+        self.path = Path(root) / "progress.jsonl"
+
+    def write(self, event: str, **fields: Any) -> None:
+        row = {"ts_utc": utc_now_iso_z(), "event": event, **fields}
+        with open(self.path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        print(json.dumps(row, ensure_ascii=False), flush=True)
+
+
+class ProgressActor:
+    """触点进度 + 产者链（session/model）随事件落盘。"""
+
+    def __init__(self, inner, progress: Progress):
+        self.inner = inner
+        self.progress = progress
+
+    def __call__(self, name, contract, value):
+        self.progress.write("touchpoint_start", touchpoint=name)
+        out = self.inner(name, contract, value)
+        self.progress.write("touchpoint_end", touchpoint=name)
+        return out
+
+
+def _wrap_runner(kind: str, fn, progress: Progress):
+    def wrapped(value, context=None):
+        progress.write(f"{kind}_start")
+        out = fn(value, context)
+        fields: dict[str, Any] = {}
+        if kind == "batch":
+            fields["n_runs"] = len((out or {}).get("runs") or [])
+        progress.write(f"{kind}_end", **fields)
+        return out
+
+    return wrapped
+
+
 def _prereg_study(study: str) -> dict[str, Any]:
     return _load_json(rsi_s1_prereg_dir() / f"study_{study}.json")
 
@@ -117,7 +162,8 @@ def goal_card(studies: list[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 class FeishuGates:
-    def __init__(self, *, thread_id: str, evidence_root: Path, max_wait: float):
+    def __init__(self, *, thread_id: str, evidence_root: Path, max_wait: float,
+                 progress: Progress | None = None):
         from orchestrator.feishu_gateway.client import gateway_from_env
 
         self.evidence_root = ensure_private_dir(evidence_root)
@@ -127,6 +173,7 @@ class FeishuGates:
             db_path=str(self.evidence_root / "feishu_pending.sqlite3"),
             evidence_dir=str(self.evidence_root / "feishu"),
             run_dir=str(self.evidence_root))
+        self.progress = progress or Progress(self.evidence_root)
         self.gate1_decision: dict[str, Any] | None = None
         self.gate2_decisions: list[dict[str, Any]] = []
 
@@ -138,9 +185,12 @@ class FeishuGates:
 
     def gate1_hook(self, card: Mapping[str, Any]) -> GateDecision:
         payload = G.build_gate1_card_payload(card)
+        self.progress.write("gate1_sent", thread_id=self.thread_id)
         decision = self.gateway.request_gate1_approval(
             self.thread_id, payload["task_title"], payload["proposals"],
             max_wait=self.max_wait)
+        self.progress.write("gate1_decision", decision=str(decision.get("decision")),
+                            human_notes=str(decision.get("human_notes") or ""))
         self.gate1_decision = dict(decision, thread_id=self.thread_id,
                                    at_utc=utc_now_iso_z())
         atomic_write_text(self.evidence_root / "gate1_decision.json",
@@ -168,10 +218,14 @@ class FeishuGates:
                      "（包含 raw 记录/复算报告/触点 transcript）。"
                      "请批准或带意见打回（打回会注入诊断触点后重跑）。",
         }
+        self.progress.write("gate2_sent", stage_id=stage_id,
+                            run_idx=card.get("run_idx"))
         decision = self.gateway.request_gate2_approval(
             self.thread_id, f"RSI-S1 · {stage_id} 结果验收", metrics,
             intranet_url=str(card.get("evidence")), explanation=explanation,
             max_wait=self.max_wait)
+        self.progress.write("gate2_decision", stage_id=stage_id,
+                            decision=str(decision.get("decision")))
         record = dict(decision, stage_id=stage_id, run_idx=card.get("run_idx"),
                       thread_id=self.thread_id, at_utc=utc_now_iso_z())
         self.gate2_decisions.append(record)
@@ -228,24 +282,35 @@ def run(*, studies: list[str], max_wait: float, dry_run: bool,
     if denial.get("all_denied") is not True:
         raise SystemExit("ISOLATION_FAILED: 沙箱内 mujoco 可导入（物理收权不成立）")
 
+    progress = Progress(evidence_root)
+    progress.write("study_start", studies=studies, thread_id=thread,
+                   pid=__import__("os").getpid())
     ledger = SessionLedger(rsi_s1_sessions_dir() / "sessions.jsonl")
     runner = HeadlessSessionRunner(sessions_root=rsi_s1_sessions_dir() / "ws",
                                    ledger=ledger)
-    actor = HeadlessActor(runner, evidence_root=evidence_root,
-                          host_label=thread)
+    actor = ProgressActor(HeadlessActor(runner, evidence_root=evidence_root,
+                                        host_label=thread), progress)
     gates = FeishuGates(thread_id=thread, evidence_root=evidence_root,
-                        max_wait=max_wait)
+                        max_wait=max_wait, progress=progress)
     try:
         driver = ResearchDriver(
             gate1_hook=gates.gate1_hook, gate2_hook=gates.gate2_hook,
             actor=actor, evidence_root=evidence_root,
-            batch_runner=default_batch_runner, analyzer=default_analyzer,
-            confirmer=default_confirmer, claim_guard=True,
+            batch_runner=_wrap_runner("batch", default_batch_runner, progress),
+            analyzer=default_analyzer,
+            confirmer=_wrap_runner("confirm", default_confirmer, progress),
+            claim_guard=True,
             touchpoint_budget=TOUCHPOINT_BUDGET,
             diagnose_budget=DIAGNOSE_BUDGET,
             max_rejects_per_stage=GATE2_MAX_REJECTS_PER_STAGE)
         stages = {study: study_spec(study) for study in studies}
         outcome = driver.run_campaign(card, stages)
+        for study, row in (outcome.get("stages") or {}).items():
+            progress.write("stage_end", stage=study, status=row.get("status"),
+                           code=row.get("code"))
+    except BaseException as exc:  # noqa: BLE001 - 崩溃也要留 watchdog 终态
+        progress.write("study_crashed", error=f"{type(exc).__name__}: {exc}")
+        raise
     finally:
         gates.close()
 
@@ -268,6 +333,7 @@ def run(*, studies: list[str], max_wait: float, dry_run: bool,
     if gates.gate2_decisions and all(str(d.get("decision")) == "approve"
                                      for d in gates.gate2_decisions):
         report["gaps"].append("gate2_reject_loop_not_exercised")
+    progress.write("study_end", status=outcome.get("status"))
     atomic_write_text(evidence_root / "study_report.json",
                       json.dumps(report, ensure_ascii=False, indent=2,
                                  sort_keys=True) + "\n", mode=0o600)

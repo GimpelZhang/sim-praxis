@@ -260,7 +260,8 @@ class HeadlessActor:
 
     def __call__(self, name: str, contract: str, value: Mapping[str, Any]):
         ctx = value if isinstance(value, Mapping) else {}
-        raw_run_dir = ctx.get("run_dir")
+        run_ctx = ctx.get("_ctx") if isinstance(ctx.get("_ctx"), Mapping) else {}
+        raw_run_dir = run_ctx.get("run_dir") or ctx.get("run_dir")
         if not raw_run_dir:
             raise TouchpointError("RUN_DIR_MISSING", "context 未提供 run_dir")
         run_dir = Path(str(raw_run_dir))
