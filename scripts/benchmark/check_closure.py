@@ -125,6 +125,13 @@ AUTHORIZED_PUSH_HEADS = (
     # 完整 sha，仍为精确集合、负例断言不变。**不登记本地未推送 HEAD**（b24cfaf）：
     # 该守卫的 HEAD 半边按设计保持红，直到推送窗口放行后另行补登。
     "6d26a95d7fda7bca177a7d99957f311c810c4a8b",
+    # *锁内适配*（RSI-S2 收尾，2026-11-19）：S1 分支按用户逐字指示「把 rsi-s1
+    # 合入 main（远端/本地）」经人工 STOP 门 ff 推送，``origin/main`` 由此前移
+    # 至 ``ad08ca5``（S1 结案提交；S1 Complete §22–23），但未登记 → P281 F2 与
+    # 2.8.0 终判对 ``origin/main`` 恒红（S2 冷跑实测：22 红中 2 红即此）。
+    # 处置同 ``5895fe0``…``6d26a95`` 先例：只登记**已推上去的**完整 sha，仍为
+    # 精确集合、负例断言不变。**不登记本地未推送 HEAD**（b4e0f08）。
+    "ad08ca5d406ae1bb48d0ccb115ba2e93d89b9df1",
 )
 LEDGER_PHASES = ("phase1", "phase2", "phase25", "phase26", "phase27")
 ROLES = ("executor", "reviewer", "verifier")
