@@ -567,10 +567,32 @@ def stage_trial(campaign_root: Path, *, arms: "list[str]",
     nc_sensitivity = {"A_N": calibration["nc_sensitivity"]["A_N"],
                       "B_N": calibration["nc_sensitivity"]["B_N"]}
     validation = _load_json(rsi_s2_candidate_dir() / "validation.json")
+    # 评审 MEDIUM：预测签名必须在**试验前**冻结（计划 §3 S2-3「预测签名入 LOCK」），
+    # 否则事后改 validation.json 即可翻转 prediction_fulfilled。此处写签名锁，
+    # 判件复算 sha 并比对。
+    import hashlib as _hashlib
+
+    def _sig_sha(sig):
+        return _hashlib.sha256(json.dumps(sig, ensure_ascii=False, sort_keys=True,
+                                          separators=(",", ":")).encode()).hexdigest()
+
+    prediction_lock = {
+        "schema": "simpraxis.rsi_s2.prediction_lock.v1",
+        "prediction_signature": validation.get("prediction_signature"),
+        "prediction_signature_sha256": _sig_sha(
+            validation.get("prediction_signature")),
+        "validation_sha256": _sig_sha(validation),
+        "mechanism_hypothesis_sha256": _hashlib.sha256(
+            str(validation.get("mechanism_hypothesis") or "").encode()).hexdigest(),
+        "locked_before_trial": True,
+        "locked_at_utc": utc_now_iso_z(),
+    }
+    _write(campaign_root / "prediction_lock.json", prediction_lock)
     candidate = load_candidate(rsi_s2_candidate_dir() / "package",
                                diff_sha256=validation["diff_sha256"])
     _write(campaign_root / "candidate_ref.json",
-           {"validation": validation, "harness": candidate.to_dict()})
+           {"validation": validation, "harness": candidate.to_dict(),
+            "prediction_lock": prediction_lock})
     progress = Progress(campaign_root)
     ledger = SessionLedger(rsi_s2_sessions_dir() / "sessions.jsonl",
                            hard_cap_sessions=S2_SESSION_CAP)
@@ -648,8 +670,9 @@ def _pack_for(campaign_root: Path, instance: Mapping[str, Any],
                             / "study_report.json").get("outcome") or {}
                  ).get("stages") or {}
         code = (stage.get(family) or {}).get("code") or "NO_CLAIM"
+        # 中性别：不得写成「结构停止码」——那会告诉审稿人这是对照臂（盲审泄漏）
         claim = {"verdict": "INCONCLUSIVE",
-                 "statement": f"运行未到 K8（结构停止码 {code}），无可主张结果",
+                 "statement": "未产出可主张结果（无 K8 记录）",
                  "contrasts": []}
     k5 = _load_json(k5_path) if k5_path.is_file() else {}
     report = claim.get("report")
@@ -688,8 +711,10 @@ def stage_review(campaign_root: Path) -> int:
         progress.write("review_calibration_reused",
                        report_sha256=calibration.get("report_sha256"))
     else:
-        _approve(calib_batch, 2, "S2 双审仪器校准（6 例分 2 呼；自批）", task=1)
-        calibration = _calibrate_instrument(gateway, calib_batch, task=1)
+        # 校准与双审同车道（task=2）：台账记录的首个批准批即 task 2；task 1
+        # 帽为 0（未使用），新根上走 task 1 会被 preflight 直接拦死（评审 HIGH）。
+        _approve(calib_batch, 2, "S2 双审仪器校准（6 例分 2 呼；自批）", task=2)
+        calibration = _calibrate_instrument(gateway, calib_batch, task=2)
     _write(campaign_root / "review_calibration.json", calibration)
     progress.write("review_calibration", ready=calibration.get("ready"),
                    verdict=calibration.get("verdict"))
@@ -697,8 +722,18 @@ def stage_review(campaign_root: Path) -> int:
         raise SystemExit("REVIEW_INSTRUMENT_NOT_READY: 停付修仪器（不放宽）")
     # 预登记降样本序（预算触顶）：砍尾至 5 对（去掉 b3）；旧仪器（无 δ/proposition）
     # 的 12 包报告整目录留档，不改写、不删除。
-    selected = [str(i["instance_id"]) for i in PREREG.INSTANCES
-                if str(i["instance_id"]) in set(PREREG.SAMPLE_REDUCTION_ORDER[:5])]
+    # 降样本**按剩余预算门控**：全部 6 对 × 2 通道 = 24 呼；预算不足才按
+    # 预登记序砍尾（不是无条件 5 对——那会让 R2 主判在满预算下也不可达）。
+    from orchestrator.gateway.quota_ledger import QuotaLedger
+    used = len([r for r in QuotaLedger.rsi_s2()._read_rows()
+                if r.get("event", "call") == "call"])
+    remaining = 40 - used
+    pairs = len(PREREG.INSTANCES)
+    while pairs > 1 and 2 * 2 * pairs > remaining:
+        pairs -= 1
+    selected = list(PREREG.SAMPLE_REDUCTION_ORDER[:pairs])
+    progress.write("review_sample_plan", pairs=pairs, remaining_budget=remaining,
+                   order=selected)
     review_dir = ensure_private_dir(campaign_root / "review", mode=0o700)
     # 归档**幂等**：仅在首次切换仪器时执行一次（marker 文件防止二次覆盖证据）
     marker = campaign_root / ".review_instrument_v1_archived"
@@ -889,7 +924,13 @@ def stage_analyze(campaign_root: Path) -> int:
                        / max(1, len(dimension_scores["v1"][dim]))
                        - sum(dimension_scores["v0"][dim])
                        / max(1, len(dimension_scores["v0"][dim])))
-    validation = _load_json(rsi_s2_candidate_dir() / "validation.json")
+    lock_path = campaign_root / "prediction_lock.json"
+    if lock_path.is_file():
+        prediction_signature = _load_json(lock_path).get("prediction_signature")
+    else:
+        prediction_signature = None
+        progress.write("prediction_lock_missing",
+                       note="预注册预测签名未在试验前冻结（不得计入兑现）")
     non_inf = ANALYSIS.non_inferiority(
         v0={"completed": completed["v0"], "rerun_n_diffs": rerun_diffs["v0"],
             "g_claim_violations": claim_violations["v0"],
@@ -908,7 +949,7 @@ def stage_analyze(campaign_root: Path) -> int:
         instance_ids=instance_ids, v0_scores=v0_scores, v1_scores=v1_scores,
         v0_success=v0_success, v1_success=v1_success,
         non_inferiority_report=non_inf, upstream=upstream,
-        prediction_signature=validation.get("prediction_signature"),
+        prediction_signature=prediction_signature,
         dimension_deltas=deltas)
     analysis["dimension_deltas"] = deltas
     analysis["completed"] = completed

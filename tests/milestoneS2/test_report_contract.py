@@ -45,8 +45,9 @@ def test_dimension_floor_missing_scores_zero():
     del partial["negative_control_handling"]
     floor = RC.dimension_floor(partial)
     assert floor["negative_control"] == 0.0
-    assert floor["problem_hypothesis"] == 4.0
-    assert all(v == 4.0 for k, v in floor.items() if k != "negative_control")
+    # 结构面只给 1.0 地板（存在 ≠ 满分；内容分由模型审查在 0–4 上给出）
+    assert floor["problem_hypothesis"] == 1.0
+    assert all(v == 1.0 for k, v in floor.items() if k != "negative_control")
 
 
 def test_non_mapping_report_rejected():

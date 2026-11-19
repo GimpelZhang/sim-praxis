@@ -267,8 +267,13 @@ def default_analyzer(run_manifest: Mapping[str, Any], context=None) -> dict:
 
             nc_contrast = confirm_plan.get("nc_contrast")
             if not isinstance(nc_contrast, Mapping):
-                raise SkillError(
-                    "NC_UNREGISTERED: 任务槽要求阴性对照，但计划未提名 base/sham")
+                # 与 NC_DEGENERATE 同构：协议级停止码走 GuardViolation，
+                # 否则被驱动器的通用异常分支吞成 STAGE_RUNTIME_ERROR（评审 MEDIUM）。
+                from orchestrator.hk.guards import GuardViolation
+
+                raise GuardViolation(
+                    "g_nc", "NC_UNREGISTERED",
+                    "任务槽要求阴性对照，但计划未提名 base/sham")
             nc_values = _linear_contrast_values(rows, nc_contrast)
             nc_est = statistics.estimate(
                 nc_values, level=str(nc_slot.get("ci_level") or "0.90"))

@@ -78,6 +78,8 @@ def classify_v2(proposition: str, delta: Any, lower: Any, upper: Any, *,
         return "INCONCLUSIVE"
     if lo == hi:
         return "INCONCLUSIVE"
+    # 等效带按**开区间**判（lo > -δ 且 hi < δ）：恰好 [-δ, δ] 的 CI 不够
+    # SUPPORTED 的严格性，落 NOT_DETECTED/INCONCLUSIVE——边界口径显式登记。
     if proposition == "equivalent":
         if lo > -d and hi < d:
             return "SUPPORTED"

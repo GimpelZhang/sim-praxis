@@ -119,7 +119,10 @@ def run(*, campaign_root: Path, report_path: Path | None = None) -> "dict[str, A
         except FileNotFoundError:
             frozen_at = ""
         rules_signed = frozen_at or (rules_lock.get("signed_at_utc") or [""])[0]
-        if rules_signed and str(proposer.get("started_at_utc", "")) <= rules_signed:
+        started = str(proposer.get("started_at_utc") or "")
+        if not started:
+            gaps.append("AC-01: 候选会话开始时刻缺失（无法核时间戳序）")
+        elif rules_signed and started <= rules_signed:
             problems.append("AC-01: 候选 diff 早于规则面 LOCK")
 
     # 2) 校准 + denial
@@ -231,6 +234,21 @@ def run(*, campaign_root: Path, report_path: Path | None = None) -> "dict[str, A
                 f"PERMUTATION: n_pairs={stats.get('n_pairs')} != {len(reviewed_pairs)}")
         if stats.get("n_sign_patterns") != 2 ** len(reviewed_pairs):
             problems.append("PERMUTATION: 符号模式数不符")
+        lock_path = root / "prediction_lock.json"
+        if not lock_path.is_file():
+            problems.append("PREDICTION_NOT_LOCKED: 预测签名未在试验前冻结")
+        else:
+            lock = _load(lock_path)
+            actual = hashlib.sha256(json.dumps(
+                lock.get("prediction_signature"), ensure_ascii=False,
+                sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if actual != lock.get("prediction_signature_sha256"):
+                problems.append("PREDICTION_LOCK_TAMPERED")
+            if lock.get("locked_before_trial") is not True:
+                gaps.append("PREDICTION_LOCK_POSTHOC: 预测签名锁定晚于试验"
+                            "（篡改窗口存在，结论按保守方向采信）")
+            checks["prediction_lock_sha256"] = lock.get(
+                "prediction_signature_sha256")
         checks["analysis"] = {
             "verdict": analysis.get("verdict"),
             "p_two_sided": stats.get("p_two_sided"),

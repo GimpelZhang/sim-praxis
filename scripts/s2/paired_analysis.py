@@ -158,12 +158,18 @@ def adapter_to_physicalrsi(*, instances: Sequence[str],
                              if evidence_files else [])
                 evidence = {str(Path(path).relative_to(root)): _sha_file(path)
                             for path in files if Path(path).is_file()}
+                if not evidence:
+                    # 无真实证据文件即 BLOCKED——绝不拿合成哈希喂上游选择器
+                    # （评审 MEDIUM：那会产出无盘上依据的 inherit_child）。
+                    return {"status": "UPSTREAM_ADAPTER_BLOCKED",
+                            "detail": f"({arm}, {name}) 无证据文件可核",
+                            "selection_identity": SEL.selection_identity()}
                 episodes.append({
                     "task": name, "layout_sha256": layouts[name][0],
                     "state": "completed",
                     "success": bool(successes[arm][index]),
                     "score": float(scores[arm][index]),
-                    "evidence_sha256": evidence or {"claim.json": _sha({"arm": arm})},
+                    "evidence_sha256": evidence,
                 })
             results.append({
                 "candidate_id": arm,

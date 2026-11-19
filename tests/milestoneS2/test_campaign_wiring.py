@@ -203,5 +203,5 @@ def test_v0_b_family_rejected_without_nc(tmp_path):
     outcome = driver.run_campaign({"goal": "S2"}, {instance["family"]: spec})
     stage = outcome["stages"][instance["family"]]
     assert stage["status"] == "human_failure"
-    assert "NC_UNREGISTERED" in (stage.get("detail") or "") or \
-        stage["code"] == "STAGE_RUNTIME_ERROR"
+    # NC 未注册走协议级停止码（GuardViolation），不再被吞成 STAGE_RUNTIME_ERROR
+    assert stage["code"] == "NC_UNREGISTERED"

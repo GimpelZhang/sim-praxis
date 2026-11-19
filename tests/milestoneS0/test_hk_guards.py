@@ -134,7 +134,10 @@ def test_all_eight_guards_registered_and_enforce_order(monkeypatch):
                         {name: snapshot[name] for name in AS_BUILT_GUARDS})
     # 注意：enforce 读的是**模块全局** GUARDS（monkeypatch 已换成 as-built 快照），
     # 因此断言必须走模块属性，不能走文件顶部 `from ... import GUARDS` 的旧引用。
-    assert len(_guards_module.GUARDS) == 8
+    # 真实注册表 = 八守卫 + 运行时新增的 G-REPORT（S2 变异面）；不得有第三个多余项
+    assert set(_guards_module.GUARDS) - {"G-REPORT"} == set(AS_BUILT_GUARDS)
+    assert len(_guards_module.GUARDS) - (1 if "G-REPORT" in _guards_module.GUARDS
+                                        else 0) == 8
     with pytest.raises(GuardViolation) as excinfo:
         enforce(["G-PREREG", "G-NOPROG"],
                 GuardCtx(registered_spec_sha=None, round_no_new_info=0))

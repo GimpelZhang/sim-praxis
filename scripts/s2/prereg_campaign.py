@@ -333,12 +333,33 @@ def _frozen_at() -> str:
     return content_frozen
 
 
+def _repair_record(anchors: "dict[str, str]") -> "dict[str, Any]":
+    """评审修复轮登记：锚定模块在首次冻结后被改时，如实记录修复时刻与清单。
+
+    纪律：`rules_content_frozen_at_utc` 保持**首次冻结**时刻（AC-01 时间戳序的锚），
+    修复轮单独记 `rules_repaired_at_utc` 与 `repaired_modules`——规则内容变更不
+    改写历史，只追加修复记录。
+    """
+    path = rsi_s2_rules_prereg_dir() / "rules.json"
+    if not path.is_file():
+        return {"rules_repaired_at_utc": None, "repaired_modules": []}
+    try:
+        old = json.loads(path.read_text(encoding="utf-8")).get(
+            "rule_anchors_sha256") or {}
+    except ValueError:
+        return {"rules_repaired_at_utc": None, "repaired_modules": []}
+    changed = sorted(k for k in anchors if old.get(k) != anchors[k])
+    return {"rules_repaired_at_utc": (utc_now_iso_z() if changed else None),
+            "repaired_modules": changed}
+
+
 def build_rules_document() -> "dict[str, Any]":
     anchors = {path: _sha_file(_REPO / path) for path in RULE_MODULES}
     return {
         "schema": RULES_SCHEMA,
         "version": 2,
         "rules_content_frozen_at_utc": _frozen_at(),
+        **_repair_record(anchors),
         "verdict_vocabulary": {
             "values": list(V.VERDICTS_V2),
             "definitions": {

@@ -97,7 +97,8 @@ def dimension_floor(report: Any) -> "dict[str, float]":
     机器只保证缺段不冒充得分。
     """
     missing = set(missing_sections(report))
-    return {dim: (0.0 if section in missing else 4.0)
+    # 存在 ≠ 满分：结构面只给 1.0 地板（内容分由模型审查给出，0–4 是其上界）
+    return {dim: (0.0 if section in missing else 1.0)
             for section, dim in SECTION_TO_DIMENSION.items()}
 
 

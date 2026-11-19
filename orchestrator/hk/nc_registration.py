@@ -131,6 +131,21 @@ def build_nc_contrast(slot: Mapping[str, Any], *, base: str, sham: str,
             "NC_OUT_OF_SLOT", f"允许扰动 {allowed}，实际差异 {diff}")
     bounds = {str(k): _dec(v, where=f"slot.max_perturbation[{k}]")
               for k, v in dict(slot["max_perturbation"]).items()}
+    # 数值面比较：字符串差异（"0.60" vs "0.6"）不算真实扰动（评审 LOW）
+    numeric_diff = []
+    for key in diff:
+        try:
+            delta = abs(Decimal(str(b.get(key))) - Decimal(str(a.get(key))))
+        except Exception:  # noqa: BLE001
+            raise NCRegistrationError(
+                "NC_OUT_OF_SLOT", f"{key} 不是可比较的十进制值") from None
+        if delta == 0:
+            continue
+        numeric_diff.append(key)
+    if not numeric_diff:
+        raise NCRegistrationError("NC_OUT_OF_SLOT",
+                                  "提名对照的数值面为零（结构性 no-op）")
+    diff = numeric_diff
     for key in diff:
         try:
             delta = abs(Decimal(str(b.get(key))) - Decimal(str(a.get(key))))

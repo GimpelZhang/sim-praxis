@@ -316,6 +316,40 @@ def _parse_transcript(stdout: str) -> "dict[str, Any]":
     return {"session_id": session_id, "model": model, "usage": usage}
 
 
+def _transcript_writes(transcript: Path) -> "dict[str, str]":
+    """从 transcript 提取提案者会话的 Write 工具调用：``basename → content``。
+
+    这是"无代写"的**机器证据面**：包内文件必须与会话自己写下的字节一致，
+    而不是与工作区里可能被第三方改过的副本一致（评审 MEDIUM）。
+    """
+    writes: "dict[str, str]" = {}
+    if not Path(transcript).is_file():
+        return writes
+    for line in Path(transcript).read_text(encoding="utf-8",
+                                           errors="replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        message = event.get("message") or {}
+        blocks = message.get("content") if isinstance(message.get("content"),
+                                                       list) else []
+        for block in blocks:
+            if not isinstance(block, Mapping) or block.get("type") != "tool_use":
+                continue
+            if block.get("name") not in ("Write", "Edit", "MultiEdit"):
+                continue
+            payload = block.get("input") or {}
+            path = str(payload.get("file_path") or "")
+            content = payload.get("content")
+            if path and isinstance(content, str):
+                writes[Path(path).name] = content
+    return writes
+
+
 def _assert_package_matches_workspace(package: Mapping[str, Any],
                                       workspace: Path) -> None:
     """无代写：包内文件必须存在于工作区；内联 ``content`` 若给出须与落盘逐字节一致。
@@ -323,16 +357,26 @@ def _assert_package_matches_workspace(package: Mapping[str, Any],
     file 式包件（``{"path": ..., "file": ...}``）以落盘文件为唯一真值——内容由
     提案者会话写盘，宿主只回读，不存在"包内副本"可比较。
     """
+    transcript_writes = _transcript_writes(workspace / "transcript.jsonl")
     for item in package.get("files") or []:
         name = Path(str(item.get("file") or item.get("path"))).name
         copy = workspace / "candidate" / name
         if not copy.is_file():
             raise ProposerError("PROPOSER_EVIDENCE_MISSING", str(copy))
+        on_disk = copy.read_text(encoding="utf-8")
         inline = item.get("content")
-        if isinstance(inline, str) and inline.strip() \
-                and copy.read_text(encoding="utf-8") != inline:
+        if isinstance(inline, str) and inline.strip() and on_disk != inline:
             raise ProposerError("PROPOSER_EVIDENCE_MISMATCH",
                                 f"{name} 内联内容与落盘不一致（疑似代写/回改）")
+        # 无代写的机器证据：落盘字节 == 会话 Write 调用字节
+        if transcript_writes:
+            authored = transcript_writes.get(name)
+            if authored is None:
+                raise ProposerError("PROPOSER_NO_TRANSCRIPT_WRITE",
+                                    f"{name} 无会话写盘记录（疑似代写）")
+            if authored != on_disk:
+                raise ProposerError("PROPOSER_GHOSTWRITING",
+                                    f"{name} 落盘与会话写入不一致（疑似代写）")
 
 
 def _finalize(*, workspace: Path, package: "Mapping[str, Any]",
