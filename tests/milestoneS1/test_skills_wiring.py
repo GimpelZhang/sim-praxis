@@ -142,8 +142,13 @@ def test_g_claim_passes_when_self_report_matches_host(tmp_path):
         confirmer=default_confirmer, claim_guard=True)
     outcome = driver.run_campaign({"goal": "A_N"}, {"A_N": spec})
     assert outcome["status"] == "done", outcome
-    # 判词由 host 主对比分类决定（不得自报）；A_N 主对比在 2 block 小样本下为 REFUTED
-    assert outcome["stages"]["A_N"]["claim"]["verdict"] == "REFUTED"
+    # 判词由 host 主对比分类决定（不得自报）；在测试内重算 host 分类再断言，
+    # 不把活阈值字面量钉进断言（评审 LOW）。
+    import json as _json
+    from pathlib import Path as _Path
+    k7 = _json.loads((_Path(tmp_path) / "ev" / "runs" / "A_N_run001" / "K7.json")
+                     .read_text())
+    assert outcome["stages"]["A_N"]["claim"]["verdict"] == k7["contrasts"][0]["claim"]
 
 
 def test_g_claim_rejects_transcription_mismatch(tmp_path):

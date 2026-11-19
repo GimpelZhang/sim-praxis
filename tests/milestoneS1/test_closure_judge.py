@@ -93,8 +93,21 @@ def _build_root(tmp: Path, monkeypatch) -> Path:
     # 双审
     ready = RV.freeze_report({"ready": True, "misaccept": [], "verdict": "READY"})
     _write(tmp / "closeout" / "review" / "review_calibration.json", ready)
+    dual_channels = {}
+    for study in ("A_N", "B_N"):
+        pack = RV.build_review_pack(
+            study=study, question="q", methods="m",
+            results=[{"id": "primary", "estimate": 0.01, "ci_low": 0.005,
+                      "ci_high": 0.015, "n_blocks": 32}],
+            claim={"verdict": "SUPPORTED"}, negative_control="nc")
+        dual_channels[study] = {
+            "channel_a": {"pack_sha256": pack["pack_sha256"]},
+            "channel_b": {"pack_sha256": pack["pack_sha256"]},
+            "_used_packs": {"channel_a": pack, "channel_b": pack},
+        }
     dual = RV.freeze_report({"truth_table": {
-        s: {"verdict": "PASS", "rule": "two_accept"} for s in ("A_N", "B_N")}})
+        s: {"verdict": "PASS", "rule": "two_accept"} for s in ("A_N", "B_N")},
+        "channels": dual_channels})
     _write(tmp / "closeout" / "review" / "dual_review.json", dual)
     return tmp
 
@@ -132,6 +145,19 @@ def test_judge_red_on_prereg_tamper(judge):
     _write(study, doc)
     report = module.judge()
     assert any("PREREG_CHANGED" in p for p in report["problems"])
+
+
+def test_judge_red_on_review_pack_provenance_mismatch(judge):
+    """冻结报告记录的通道 pack_sha 必须与报告内实际使用包复算一致（评审回归面）。"""
+    module, tmp = judge
+    path = tmp / "closeout" / "review" / "dual_review.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    body = {k: v for k, v in doc.items() if k != "report_sha256"}
+    body["channels"]["A_N"]["channel_a"]["pack_sha256"] = "0" * 64
+    _write(path, RV.freeze_report(body))
+    report = module.judge()
+    assert any("DUAL_REVIEW_PACK_MISMATCH:A_N:channel_a" in p
+               for p in report["problems"])
 
 
 def test_judge_red_on_unready_review(judge):

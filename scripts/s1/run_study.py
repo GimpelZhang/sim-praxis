@@ -287,10 +287,13 @@ def run(*, studies: list[str], max_wait: float, dry_run: bool,
     import os as _os
 
     salt = _os.urandom(16).hex()
+    # salt 本体落闭源证据根（0600；actor 只挂自己的 touchpoint 工作区，看不到它），
+    # 使「plan+salt → 分配」可审计复现；salt 绝不进 actor _ctx。
     atomic_write_text(evidence_root / "assignment_seed.json",
-                      json.dumps({"salt_sha256": __import__("hashlib").sha256(
-                          salt.encode()).hexdigest(),
-                          "generated_at_utc": utc_now_iso_z()},
+                      json.dumps({"salt": salt,
+                                  "salt_sha256": __import__("hashlib").sha256(
+                                      salt.encode()).hexdigest(),
+                                  "generated_at_utc": utc_now_iso_z()},
                           ensure_ascii=False, indent=2) + "\n", mode=0o600)
     progress.write("study_start", studies=studies, thread_id=thread,
                    pid=_os.getpid())

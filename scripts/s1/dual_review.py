@@ -184,12 +184,9 @@ def run_review(gateway, *, evidence_root: Path,
     approvals = len(studies) * 2
     _approve(batch_id, approvals, "S1-7 正式双审（2 通道 × 2 研究；自批）",
              task=task)
-    call = lambda prompt: gateway.call(  # noqa: E731
-        "coding_debug", [{"role": "user", "content": prompt}],
-        max_tokens=8192, temperature=0.0,
-        # 2026-11-19 锁内适配：deepseek thinking 会把 1024 max_tokens 吃光
-        # （finish='length' 空回答，S0 同类事故）。审查只要 JSON 判定，关思考。
-        thinking={"type": "disabled"})
+    # 2026-11-19 锁内适配：deepseek thinking 会把小 max_tokens 吃光（finish='length'
+    # 空回答，S0 同类事故）。审查只要 JSON 判定：thinking 关闭 + max_tokens 8192；
+    # 每通道各自建调用（温度/盐不同），不再复用单一闭包。
     packs = {}
     channels: dict[str, dict[str, Any]] = {}
     truth: dict[str, Any] = {}
@@ -199,6 +196,7 @@ def run_review(gateway, *, evidence_root: Path,
                 (prereg_dir / f"study_{study}.json").read_text(encoding="utf-8"))
             pack = build_pack(study, evidence_root, prereg_study)
             packs[study] = pack
+            used_packs: dict[str, dict[str, Any]] = {}
             runs = {}
             # 评审 MEDIUM：两通道不得是同一次抽样。channel_b 用独立温度+提示盐，
             # 参数入冻结报告（可审计、可复现的是"互异"，不是"逐位可复现"）。
@@ -214,10 +212,12 @@ def run_review(gateway, *, evidence_root: Path,
                         "coding_debug", [{"role": "user", "content": prompt}],
                         max_tokens=8192, temperature=t,
                         thinking={"type": "disabled"}))
+                used_packs[channel] = salted
                 run = RV.run_review(run_call, pack=salted, channel=channel)
                 run.reviewed_at_utc = utc_now_iso_z()
                 runs[channel] = dict(run.to_dict(), temperature=temperature,
                                      prompt_salt=salt)
+            runs["_used_packs"] = used_packs
             channels[study] = runs
             truth[study] = RV.merge_truth_table(runs["channel_a"]["parsed"],
                                                 runs["channel_b"]["parsed"])

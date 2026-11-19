@@ -299,6 +299,23 @@ def _check_review(problems: list[str], gaps: list[str]) -> dict[str, Any]:
         except RV.ReviewError as exc:
             problems.append(f"DUAL_REVIEW_TAMPERED: {exc.code}")
         truth = dual.get("truth_table") or {}
+        # 冻结包自洽（评审 MEDIUM）：每通道记录的 pack_sha256 必须等于报告中该通道
+        # 实际使用的 salt 包复算值（不信任记录本身）。
+        for study, channels in (dual.get("channels") or {}).items():
+            used = channels.get("_used_packs") or {}
+            for name in ("channel_a", "channel_b"):
+                row = channels.get(name) or {}
+                pack = used.get(name)
+                if not isinstance(pack, Mapping):
+                    problems.append(f"DUAL_REVIEW_PACK_MISSING:{study}:{name}")
+                    continue
+                body = {k: v for k, v in pack.items() if k != "pack_sha256"}
+                recomputed = hashlib.sha256(json.dumps(
+                    body, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":")).encode()).hexdigest()
+                if row.get("pack_sha256") != recomputed:
+                    problems.append(
+                        f"DUAL_REVIEW_PACK_MISMATCH:{study}:{name}")
         for study in STUDIES:
             row = truth.get(study)
             if not isinstance(row, dict) or row.get("verdict") is None:
