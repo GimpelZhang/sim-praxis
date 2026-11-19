@@ -58,10 +58,23 @@ def _call(call_fn, prompt: str) -> "tuple[str, tuple[int | None, int | None]]":
     return call_fn(prompt)
 
 
-def _approve(batch_id: str, approved: int, note: str) -> Path:
-    return write_approval(batch_id=batch_id, task=TASK_ID, stage="coding_debug",
-                          approved=approved, beyond_normal=False, note=note,
-                          namespace=RSI_S1_NAMESPACE)
+def _approve(batch_id: str, approved: int, note: str, task: int = TASK_ID) -> Path:
+    from orchestrator.gateway.quota_ledger import QuotaError
+    from orchestrator.common.runtime_paths import rsi_s1_approvals_dir
+
+    try:
+        return write_approval(batch_id=batch_id, task=task, stage="coding_debug",
+                              approved=approved, beyond_normal=False, note=note,
+                              namespace=RSI_S1_NAMESPACE)
+    except QuotaError:
+        path = rsi_s1_approvals_dir() / f"{batch_id}.json"
+        if path.is_file():
+            doc = json.loads(path.read_text(encoding="utf-8"))
+            if (doc.get("approved", 0) >= approved
+                    and doc.get("task") == task
+                    and doc.get("stage") == "coding_debug"):
+                return path   # 同批重跑：复用既有票（不覆盖、不重复授权）
+        raise
 
 
 def _parse_array(text: str, *, expected_ids: list[str]) -> dict[str, str]:
@@ -93,9 +106,12 @@ def run_calibration(gateway) -> dict[str, Any]:
              "S1-7 审查仪器校准（6 例分 2 呼；自批）")
     results: dict[str, str] = {}
     raw_calls: list[dict[str, Any]] = []
-    call = lambda prompt: gateway.call("coding_debug",  # noqa: E731
-                                       [{"role": "user", "content": prompt}],
-                                       max_tokens=1024, temperature=0.0)
+    call = lambda prompt: gateway.call(  # noqa: E731
+        "coding_debug", [{"role": "user", "content": prompt}],
+        max_tokens=8192, temperature=0.0,
+        # 2026-11-19 锁内适配：deepseek thinking 会把 1024 max_tokens 吃光
+        # （finish='length' 空回答，S0 同类事故）。审查只要 JSON 判定，关思考。
+        thinking={"type": "disabled"})
     with billing_context(task=TASK_ID, batch_id=CALIBRATION_BATCH):
         for batch in batches:
             ids = [case["id"] for case in batch]
@@ -145,10 +161,10 @@ def build_pack(study: str, evidence_root: Path, prereg_study: Mapping[str, Any]
     pack = RV.build_review_pack(
         study=study,
         question=str(prereg_study["task"].get("public_question") or ""),
-        methods=("2×2 全因子 + %d 配对 block（宿主私有 nuisance 分配）；"
-                 "逐 block 线性对比；percentile bootstrap（10000 重抽样，固定 seed）；"
-                 "等效类主张用 90% 区间；主张由 host 逐点复算值经 G-CLAIM 校验。"
-                 % int(prereg_study["n_block"])),
+        methods=(f"2×2 全因子 + {int(prereg_study['n_block'])} 配对 block"
+                 "（宿主私有 nuisance 分配）；逐 block 线性对比；"
+                 "percentile bootstrap（10000 重抽样，固定 seed）；"
+                 "等效类主张用 90% 区间；主张由 host 逐点复算值经 G-CLAIM 校验。"),
         results=[{k: row.get(k) for k in ("id", "estimate", "ci_low", "ci_high",
                                           "n_blocks")}
                  for row in loaded["confirm_result"].get("contrasts", [])],
@@ -162,17 +178,22 @@ def build_pack(study: str, evidence_root: Path, prereg_study: Mapping[str, Any]
 
 
 def run_review(gateway, *, evidence_root: Path,
-               prereg_dir: Path) -> dict[str, Any]:
+               prereg_dir: Path, batch_id: str = REVIEW_BATCH,
+               task: int = TASK_ID) -> dict[str, Any]:
     studies = ("A_N", "B_N")
     approvals = len(studies) * 2
-    _approve(REVIEW_BATCH, approvals, "S1-7 正式双审（2 通道 × 2 研究；自批）")
-    call = lambda prompt: gateway.call("coding_debug",  # noqa: E731
-                                       [{"role": "user", "content": prompt}],
-                                       max_tokens=1024, temperature=0.0)
+    _approve(batch_id, approvals, "S1-7 正式双审（2 通道 × 2 研究；自批）",
+             task=task)
+    call = lambda prompt: gateway.call(  # noqa: E731
+        "coding_debug", [{"role": "user", "content": prompt}],
+        max_tokens=8192, temperature=0.0,
+        # 2026-11-19 锁内适配：deepseek thinking 会把 1024 max_tokens 吃光
+        # （finish='length' 空回答，S0 同类事故）。审查只要 JSON 判定，关思考。
+        thinking={"type": "disabled"})
     packs = {}
     channels: dict[str, dict[str, Any]] = {}
     truth: dict[str, Any] = {}
-    with billing_context(task=TASK_ID, batch_id=REVIEW_BATCH):
+    with billing_context(task=task, batch_id=batch_id):
         for study in studies:
             prereg_study = json.loads(
                 (prereg_dir / f"study_{study}.json").read_text(encoding="utf-8"))
@@ -200,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--review", action="store_true")
     parser.add_argument("--evidence", default="")
     parser.add_argument("--out", default="")
+    parser.add_argument("--batch", default="")
+    parser.add_argument("--task", type=int, default=TASK_ID)
     args = parser.parse_args(argv)
     if not (args.calibrate or args.review):
         parser.error("至少 --calibrate 或 --review")
@@ -224,7 +247,9 @@ def main(argv: list[str] | None = None) -> int:
         from orchestrator.common.runtime_paths import rsi_s1_prereg_dir
 
         report = run_review(gateway, evidence_root=evidence,
-                            prereg_dir=rsi_s1_prereg_dir())
+                            prereg_dir=rsi_s1_prereg_dir(),
+                            batch_id=args.batch or REVIEW_BATCH,
+                            task=args.task)
         target = out / "dual_review.json"
         atomic_write_text(target, json.dumps(report, ensure_ascii=False,
                                              indent=2, sort_keys=True) + "\n",

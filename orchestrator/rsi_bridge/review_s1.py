@@ -205,7 +205,7 @@ def merge_truth_table(channel_a: Mapping[str, Any], channel_b: Mapping[str, Any]
 # 审阅执行（注入 call 可调用）
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass
 class ReviewRun:
     channel: str
     pack_sha256: str

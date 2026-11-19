@@ -139,8 +139,10 @@ def _check_studies(problems: list[str], gaps: list[str]) -> dict[str, Any]:
             problems.append(f"STUDY_{study}_RUNS_MISSING")
             continue
         run_dir = run_dirs[-1]
-        missing = [f"K{i}.json" for i in range(9)
-                   if not (run_dir / f"K{i}.json").is_file()]
+        # 锁内适配（as-built）：driver 在 run_stage 开头落 ``stage_input.json``
+        # （含 K0 登记件 spec/registered/sha256），K1–K8 逐技能落文件；K0 不单列。
+        need = ["stage_input.json"] + [f"K{i}.json" for i in range(1, 9)]
+        missing = [name for name in need if not (run_dir / name).is_file()]
         if missing:
             problems.append(f"STUDY_{study}_CHAIN_MISSING: {missing}")
         k7 = _load(run_dir / "K7.json") or {}
