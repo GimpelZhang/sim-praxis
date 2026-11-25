@@ -1509,7 +1509,7 @@ class ModelGateway:
             "body": safe_body,
         }
 
-    def ping_text(self, stage: str, *, max_tokens: int = 8) -> dict:
+    def ping_text(self, stage: str, *, max_tokens: int = 512) -> dict:
         model_id = self.model_id(stage)
         t0 = time.time()
         resp, body = self._post_messages(
@@ -1552,7 +1552,7 @@ class ModelGateway:
             raise GatewayError(f"视觉校验失败：32x32 纯红图回答 {answer!r} 不含 red/红")
         return record
 
-    def validate_models(self, *, max_tokens: int = 8) -> dict:
+    def validate_models(self, *, max_tokens: int = 512) -> dict:
         # 花费契约（v4.1 M2，与铁律 9/§7.3 同口径）：非 null stage 各一次文本 ping
         # （max_tokens 取 CLI 值，默认 8）；visual_rollout 额外一次视觉 ping，其输出
         # 下限固定 16 token。一批 4 个付费请求，输出上限 3*8+16=40 token。
@@ -1648,7 +1648,7 @@ def main() -> int:
     parser.add_argument("--validate-models", action="store_true",
                         help="三阶段实呼校验：每 stage 一次 max_tokens=8 Messages ping，"
                              "visual_rollout 额外 32x32 视觉 ping；结果落 runs/model_validate/")
-    parser.add_argument("--max-tokens", type=int, default=8)
+    parser.add_argument("--max-tokens", type=int, default=512)
     parser.add_argument("--ignore-pause", action="store_true",
                         help="仅对 v1 瞬时限流窗口（resume_at_epoch 为未来时刻且 reason "
                              "非预算/硬顶类）人工清除 quota_pause.json；v2 预算/硬顶熔断、"

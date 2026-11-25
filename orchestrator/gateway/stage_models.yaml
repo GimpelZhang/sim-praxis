@@ -15,6 +15,13 @@ meta:
   endpoint: anthropic-messages
   base_url_env: ANTHROPIC_BASE_URL
 stage_models:
+  # 【2026-11-24 用户裁决（现行）】供应商以 ark.cn-beijing.volces.com/api/coding 为准；
+  # 下方 2026-11-02 的 tokenhub 换供段落降为**历史留档**。coding_debug / visual_rollout
+  # 的 model_id 已由 deepseek-v4.1-flash-1017 替换为 deepseek-v4.1-flash（本文件注释
+  # 与 model_id 行同步更新）；macro_ideation 仍为 glm-5.3（2026-11-24 裁决未涉及其 ID，
+  # 如需变更同样走硬规则 1 STOP→inventory→批准）。
+  #
+  # —— 以下为 2026-11-02 历史留档（tokenhub 时期）——
   # 2026-11-02 硬规则 1 换供（用户会话内逐字直接裁决）+ 换供应商：
   # 端点 env 实读为 Tencent tokenhub（https://tokenhub.tencentmaas.com/plan/anthropic，
   # 原火山方舟 /api/coding 不再使用，供应商切换系用户显式决定，非执行者行为）。
@@ -42,11 +49,13 @@ stage_models:
     # deepseek-v4.1-flash → 2026-10-24 用户裁决 mimo-v2.6-flash → 2026-10-27 用户
     # 逐字裁决 kimi-k3.1-pro → 2026-11-02 用户逐字裁决 deepseek-v4.1-flash-1017
     # （随供应商切换 tokenhub；见文件头注释）。
-    # 旧证据 runs/task6_ascent/coding_model_evidence_matrix.json seq42-47 保留可溯。
-    model_id: deepseek-v4.1-flash-1017
+    # 2026-11-24 用户裁决：供应商以 ark.cn-beijing.volces.com/api/coding 为准，
+    # 本 stage 的 model_id 由 deepseek-v4.1-flash-1017 替换为 deepseek-v4.1-flash
+    # （旧证据 runs/task6_ascent/coding_model_evidence_matrix.json seq42-47 保留可溯）。
+    model_id: deepseek-v4.1-flash
     capabilities: [text]
     purpose: "环境适配与代码编写（Coding & Debugging）"
   visual_rollout:
-    model_id: deepseek-v4.1-flash-1017   # 2026-11-02 用户逐字裁决（换供应商 tokenhub）
+    model_id: deepseek-v4.1-flash   # 2026-11-24 用户裁决（供应商换回 ark 后相应替换）
     capabilities: [text, vision]
     purpose: "闭环仿真评估与视频审阅（Visual & Rollout Evaluation）"
