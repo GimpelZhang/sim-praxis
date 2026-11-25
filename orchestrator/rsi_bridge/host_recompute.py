@@ -274,7 +274,7 @@ def recompute(confirm_plan: Mapping[str, Any], *, fresh_root: Path | str,
                   **dict(block.get("nuisance") or {})}
         spec = E.build_host_spec(
             plan_sha256=plan_sha,
-            study_id={"A_N": "A", "B_N": "B"}.get(study, study),
+            study_id={"A_N": "A", "B_N": "B", "C_N": "C", "D_N": "D"}.get(study, study),
             condition_id=key[0], block_id=key[1],
             scene_id=str(cond["scene_id"]), params=params)
         try:
