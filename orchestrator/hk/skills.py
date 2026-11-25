@@ -70,14 +70,15 @@ def resolve_registered_task(*, task_id: str = "", plan_sha256: str = ""):
 
 
 def r1n_task_builder(name: str, **kwargs) -> Any:
-    """R1-N 任务构建器薄包装（A_N / B_N 忠实复用）。"""
+    """R1-N/S2b 任务构建器薄包装（A_N / B_N / C_N / D_N）。"""
     from orchestrator.rsi_r1 import task_specs
 
-    builders = {"a": task_specs.build_r1n_a, "b": task_specs.build_r1n_b}
+    builders = {"a": task_specs.build_r1n_a, "b": task_specs.build_r1n_b,
+                "c": task_specs.build_s2b_c, "d": task_specs.build_s2b_d}
     try:
         builder = builders[name]
     except KeyError:
-        raise SkillError(f"未知任务族 {name!r}（只有 a/b）") from None
+        raise SkillError(f"未知任务族 {name!r}（只有 a/b/c/d）") from None
     return builder(**kwargs)
 
 
@@ -104,9 +105,9 @@ def default_batch_runner(batch_plan: Mapping[str, Any], context=None):
             "批量执行器需要受信服务根（context.observations_root/evidence_root）；"
             "禁止返回假 run 产物")
     study = str(plan.get("study") or "")
-    name = {"A_N": "a", "B_N": "b"}.get(study)
+    name = {"A_N": "a", "B_N": "b", "C_N": "c", "D_N": "d"}.get(study)
     if name is None:
-        raise SkillEngineNotWired(f"未注册研究 {study!r}（只有 A_N/B_N）")
+        raise SkillEngineNotWired(f"未注册研究 {study!r}（只有 A_N/B_N/C_N/D_N）")
     # S2：登记实例优先（task_id/plan_sha 双键）；S1 回退到 R1-N 构建器。
     task = resolve_registered_task(
         task_id=str(plan.get("task_id") or ""),
