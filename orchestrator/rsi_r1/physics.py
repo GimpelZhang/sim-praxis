@@ -144,9 +144,10 @@ def scene_b_xml(*, dt_s: Decimal, inertia_ratio: Decimal) -> str:
 
 def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
                 v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.9"),
-                ball_mass_kg: Decimal = Decimal("0.5")) -> str:
+                ball_mass_kg: Decimal = Decimal("0.5"),
+                solref_time_s: Decimal = Decimal("0.02")) -> str:
     """S2b C_N：球体碰撞反弹（接触阻尼比 × 撞击速度）。"""
-    solref = f"{_plain(C_SOLREF_TIME)} {_plain(solref_damping_ratio)}"
+    solref = f"{_plain(solref_time_s)} {_plain(solref_damping_ratio)}"
     solimp = f"0.9 {_plain(solimp_damping)} 0.0001"
     return (
         "<mujoco model=\"rsi_s2b_C\">"
@@ -214,7 +215,9 @@ def build_scene_xml(spec: ExperimentSpec) -> str:
                            solimp_damping=_dec(p.get("solimp_damping", "0.9"),
                                                "solimp_damping"),
                            ball_mass_kg=_dec(p.get("ball_mass_kg", "0.5"),
-                                             "ball_mass_kg"))
+                                             "ball_mass_kg"),
+                           solref_time_s=_dec(p.get("solref_time_s", "0.02"),
+                                              "solref_time_s"))
     if spec.study_id == "D":
         p = spec.physical_params
         return scene_d_xml(dt_s=dt_s,

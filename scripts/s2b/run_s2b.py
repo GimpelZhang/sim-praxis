@@ -165,15 +165,18 @@ def run_studies() -> int:
         rsi_s2b_sessions_dir() / "sessions.jsonl",
         hard_cap_sessions=24)
 
-    # NC 灵敏度（从校准报告取）
+    # NC 灵敏度（从校准报告取——validate_nc 要求 detected==True）
     cal_path = Path("/tmp/s2b_calibration.json")
     nc_sensitivity = {}
     if cal_path.exists():
         cal = json.loads(cal_path.read_text())
-        nc_sensitivity = {
-            "C_N": cal.get("C_N", {}).get("nc_non_degenerate", {}),
-            "D_N": cal.get("D_N", {}).get("nc_non_degenerate", {}),
-        }
+        for study in ("C_N", "D_N"):
+            cal_study = cal.get(study, {})
+            sens = cal_study.get("sensitivity", {})
+            nc_sensitivity[study] = {
+                "detected": bool(sens.get("ok", False)),
+                "did": sens.get("did"),
+            }
 
     tasks = {
         "C_N": TS.build_s2b_c(),
