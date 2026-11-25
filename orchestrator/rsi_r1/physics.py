@@ -143,7 +143,8 @@ def scene_b_xml(*, dt_s: Decimal, inertia_ratio: Decimal) -> str:
 
 
 def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
-                v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.9")) -> str:
+                v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.9"),
+                ball_mass_kg: Decimal = Decimal("0.5")) -> str:
     """S2b C_N：球体碰撞反弹（接触阻尼比 × 撞击速度）。"""
     solref = f"{_plain(C_SOLREF_TIME)} {_plain(solref_damping_ratio)}"
     solimp = f"0.9 {_plain(solimp_damping)} 0.0001"
@@ -157,7 +158,7 @@ def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
         f"<body name=\"ball\" pos=\"0 0 {_plain(C_DROP_HEIGHT)}\">"
         "<freejoint name=\"ball_free\"/>"
         f"<geom name=\"ball_geom\" type=\"sphere\" size=\"{_plain(C_BALL_RADIUS)}\" "
-        f"mass=\"{_plain(C_BALL_MASS)}\" condim=\"3\" "
+        f"mass=\"{_plain(ball_mass_kg)}\" condim=\"3\" "
         f"solref=\"{solref}\" solimp=\"{solimp}\"/>"
         "</body></worldbody>"
         "<contact>"
@@ -168,7 +169,8 @@ def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
 
 
 def scene_d_xml(*, dt_s: Decimal, drive_freq_hz: Decimal,
-                joint_damping: Decimal) -> str:
+                joint_damping: Decimal,
+                drive_amplitude_nm: Decimal = Decimal("1.0")) -> str:
     """S2b D_N：受迫振动（驱动频率 × 关节阻尼 → 稳态振幅）。"""
     inertia = D_INERTIA
     return (
@@ -210,12 +212,16 @@ def build_scene_xml(spec: ExperimentSpec) -> str:
                                                      "solref_damping_ratio"),
                            v0_mps=_dec(p["v0_mps"], "v0_mps"),
                            solimp_damping=_dec(p.get("solimp_damping", "0.9"),
-                                               "solimp_damping"))
+                                               "solimp_damping"),
+                           ball_mass_kg=_dec(p.get("ball_mass_kg", "0.5"),
+                                             "ball_mass_kg"))
     if spec.study_id == "D":
         p = spec.physical_params
         return scene_d_xml(dt_s=dt_s,
                            drive_freq_hz=_dec(p["drive_freq_hz"], "drive_freq_hz"),
-                           joint_damping=_dec(p["joint_damping"], "joint_damping"))
+                           joint_damping=_dec(p["joint_damping"], "joint_damping"),
+                           drive_amplitude_nm=_dec(p.get("drive_amplitude_nm", "1.0"),
+                                                   "drive_amplitude_nm"))
     raise PhysicsError("STUDY_UNKNOWN", f"study_id={spec.study_id!r}")
 
 
@@ -251,7 +257,8 @@ def build_spec_document(spec: ExperimentSpec) -> "dict[str, Any]":
             "kind": "D",
             "drive_freq_hz": spec.physical_params["drive_freq_hz"],
             "joint_damping": spec.physical_params["joint_damping"],
-            "drive_amplitude_nm": _plain(D_DRIVE_AMPLITUDE),
+            "drive_amplitude_nm": spec.physical_params.get("drive_amplitude_nm",
+                                                           _plain(D_DRIVE_AMPLITUDE)),
             "drive_phase_rad": spec.physical_params.get("drive_phase_rad", "0.0"),
         }
     else:
