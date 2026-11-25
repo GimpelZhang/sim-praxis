@@ -329,14 +329,22 @@ class PhysicsService:
             raise PhysicsServiceError(
                 "RAW_EXISTS", f"{record_path} 已存在；拒绝覆盖（换 batch_id 重跑）")
         O.write_record_jsonl(record_path, record)
-        metric_id = "displacement_x_m" if spec.study_id == "A" else "normalized_tracking_rmse"
+        _METRIC_BY_STUDY = {"A": "displacement_x_m", "B": "normalized_tracking_rmse",
+                            "C": "rebound_height_m", "D": "steady_state_amplitude_rad"}
+        metric_id = _METRIC_BY_STUDY.get(spec.study_id)
+        if metric_id is None:
+            raise PhysicsServiceError("STUDY_UNKNOWN", spec.study_id)
         if spec.study_id == "A":
             study_metrics = M.metrics_for(record, study_id="A",
                                          initial_x_m=float(extra["x0_m"]))
-        else:
+        elif spec.study_id == "B":
             study_metrics = M.metrics_for(
                 record, study_id="B",
                 amplitude_rad=float(spec.physical_params["target_amplitude_rad"]))
+        elif spec.study_id == "C":
+            study_metrics = M.metrics_for(record, study_id="C")
+        elif spec.study_id == "D":
+            study_metrics = M.metrics_for(record, study_id="D")
         value = study_metrics.values.get(metric_id)
         if value is None:
             raise PhysicsServiceError("METRIC_CENSORED",
@@ -388,8 +396,8 @@ class PhysicsService:
         ``task`` 是 ``build_r1n_a``/``build_r1n_b`` 的 ``public_document`` 形状
         （conditions + primary + negative_control_spec + nuisance_schema）。
         """
-        study_id = {"A_N": "A", "B_N": "B"}.get(study, study)
-        if study_id not in ("A", "B"):
+        study_id = {"A_N": "A", "B_N": "B", "C_N": "C", "D_N": "D"}.get(study, study)
+        if study_id not in ("A", "B", "C", "D"):
             raise PhysicsServiceError("STUDY_UNKNOWN", str(study))
         if not blocks:
             raise PhysicsServiceError("BLOCKS_EMPTY", "block 分配为空")

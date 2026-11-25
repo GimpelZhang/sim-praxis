@@ -216,25 +216,26 @@ SCENE_C_DOC = SceneDoc(
     scene_id=SCENE_C,
     study="C",
     version=1,
-    title="球体碰撞反弹（接触刚度 × 撞击速度）",
+    title="球体碰撞反弹（接触阻尼比 × 撞击速度）",
     description=(
         "一个球体从给定高度以初速下落，撞击刚性地面后反弹。"
-        "接触刚度（solref 时间常数）与撞击速度的交互对反弹高度的影响。"
-        "NC 槽：亚阈微扰 solimp 阻尼。"),
+        "接触阻尼比（solref dampratio）与撞击速度的交互对反弹高度的影响。"
+        "NC 槽：亚阈微扰接触阻抗阻尼（solimp）。"),
     params=(
-        ParamSpec("solref_time_s", "s", "float", Decimal("0.005"), Decimal("0.05"),
-                  role="physical", description="接触刚度时间常数（solref[0]）"),
+        ParamSpec("solref_damping_ratio", "1", "float", Decimal("0.1"),
+                  Decimal("0.9"), role="physical",
+                  description="接触阻尼比（solref[1]）"),
         ParamSpec("v0_mps", "m/s", "float", Decimal("1.0"), Decimal("5.0"),
                   role="initial_state", description="初始下落速度"),
-        ParamSpec("solimp_damping", "1", "float", Decimal("0.999"),
-                  Decimal("0.9999"), role="physical",
+        ParamSpec("solimp_damping", "1", "float", Decimal("0.9"),
+                  Decimal("0.99"), role="physical",
                   description="接触阻抗阻尼（solimp[1]）"),
     ),
     fixed=(
         FixedSpec("ball_mass_kg", Decimal("0.5"), "kg", "球体质量固定"),
         FixedSpec("ball_radius_m", Decimal("0.05"), "m", "球体半径固定"),
         FixedSpec("drop_height_m", Decimal("1.0"), "m", "初始高度固定"),
-        FixedSpec("solref_damping_ratio", Decimal("1.0"), "1", "阻尼比固定"),
+        FixedSpec("solref_time_s", Decimal("0.02"), "s", "接触刚度时间常数固定"),
         FixedSpec("duration_s", DURATION_S, "s", "仿真时长"),
         FixedSpec("gravity_mps2", Decimal("9.81"), "m/s^2", "重力"),
         FixedSpec("solver", "mujoco_default_pinned", "1", "solver 由镜像固定"),
@@ -248,7 +249,7 @@ SCENE_C_NEGATIVE_CONTROL = {
     "scene_id": SCENE_C,
     "allowed_diff": ["solimp_damping"],
     "metric": "rebound_height_m_negative_equivalence",
-    "note": "sham 与基准只差 solimp 阻尼微扰（亚阈）；接触刚度和速度两边相同",
+    "note": "sham 与基准只差 solimp 阻尼微扰（亚阈）；质量和速度两边相同",
 }
 
 

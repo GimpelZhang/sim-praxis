@@ -208,8 +208,14 @@ class PhysicsBackend:
         }
         if spec.study_id == "A":
             self._fill_a(record, arrays, reply, params)
-        else:
+        elif spec.study_id == "B":
             self._fill_b(record, arrays, reply, params)
+        elif spec.study_id == "C":
+            self._fill_c(record, arrays, reply, params)
+        elif spec.study_id == "D":
+            self._fill_d(record, arrays, reply, params)
+        else:
+            raise BackendInfraError(f"STUDY_UNKNOWN {spec.study_id}")
         if record["nonfinite_count"] != 0:
             raise BackendInfraError(
                 f"NONFINITE_RAW {record['nonfinite_count']}")
@@ -285,6 +291,26 @@ class PhysicsBackend:
         record["control_update_index"] = index
         record["saturation_count"] = sat
         record["instability_events"] = [dict(e) for e in events]
+
+    def _fill_c(self, record: "dict[str, Any]", arrays: Mapping[str, Any],
+                reply: Mapping[str, Any], params: Mapping[str, str]) -> None:
+        """S2b C_N：碰撞反弹——基础校验 + extra 透传。"""
+        events = reply.get("extra", {}).get("instability_events") or []
+        if not isinstance(events, list):
+            raise BackendInfraError("INSTABILITY_EVENTS")
+        record["instability_events"] = [dict(e) for e in events]
+        record["max_rebound_height_m"] = reply.get("extra", {}).get(
+            "max_rebound_height_m", 0.0)
+
+    def _fill_d(self, record: "dict[str, Any]", arrays: Mapping[str, Any],
+                reply: Mapping[str, Any], params: Mapping[str, str]) -> None:
+        """S2b D_N：受迫振动——基础校验 + extra 透传。"""
+        events = reply.get("extra", {}).get("instability_events") or []
+        if not isinstance(events, list):
+            raise BackendInfraError("INSTABILITY_EVENTS")
+        record["instability_events"] = [dict(e) for e in events]
+        record["steady_state_amplitude_rad"] = reply.get("extra", {}).get(
+            "steady_state_amplitude_rad", 0.0)
 
     # -- 落盘 -----------------------------------------------------------
     def _paths(self, run_id: str) -> "dict[str, Path]":

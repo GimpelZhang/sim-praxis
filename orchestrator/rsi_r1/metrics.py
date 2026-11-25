@@ -165,6 +165,39 @@ def compute_study_b(record: Mapping[str, Any], *,
                  "dt_s": times[1] - times[0]})
 
 
+def compute_study_c(record: Mapping[str, Any]) -> StudyMetrics:
+    """S2b C_N：反弹高度 = 首次触地后 z 的最大值（相对地面）。"""
+    qpos = record["qpos"]
+    z = [float(row[2]) for row in qpos]  # free joint z 位置
+    # 找首次触地（z 从下降转上升的拐点），之后取 max z
+    rebound = 0.0
+    bounced = False
+    for i in range(1, len(z)):
+        if not bounced and z[i] > z[i - 1] and z[i] < 0.15:
+            bounced = True
+        if bounced:
+            rebound = max(rebound, z[i])
+    return StudyMetrics(study_id="C",
+                        values={"rebound_height_m": _dec(rebound)},
+                        censored={})
+
+
+def compute_study_d(record: Mapping[str, Any]) -> StudyMetrics:
+    """S2b D_N：稳态振幅 = 后 50% 时窗的 (max-min)/2。"""
+    qpos = record["qpos"]
+    q = [float(row[0]) for row in qpos]  # 单关节角度
+    half = len(q) // 2
+    if len(q) < 10:
+        return StudyMetrics(study_id="D",
+                            values={"steady_state_amplitude_rad": _dec(0.0)},
+                            censored={"steady_state_amplitude_rad": True})
+    q_window = q[half:]
+    amp = (max(q_window) - min(q_window)) / 2.0
+    return StudyMetrics(study_id="D",
+                        values={"steady_state_amplitude_rad": _dec(amp)},
+                        censored={})
+
+
 def metrics_for(record: Mapping[str, Any], *, study_id: str,
                 **kwargs: Any) -> StudyMetrics:
     """按 study 分派；study 之外的键一律拒绝（防止把 A 的 x0 传进 B）。"""
@@ -178,6 +211,10 @@ def metrics_for(record: Mapping[str, Any], *, study_id: str,
         if unknown or "amplitude_rad" not in kwargs:
             raise MetricError("PARAM_INVALID", f"B 需要 amplitude_rad，多余 {sorted(unknown)}")
         return compute_study_b(record, amplitude_rad=kwargs["amplitude_rad"])
+    if study_id == "C":
+        return compute_study_c(record)
+    if study_id == "D":
+        return compute_study_d(record)
     raise MetricError("STUDY_UNKNOWN", repr(study_id))
 
 

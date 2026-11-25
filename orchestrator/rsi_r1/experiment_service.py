@@ -223,7 +223,7 @@ def run_b(spec, model, data):
 
 
 def run_c(spec, model, data):
-    """S2b C_N：球体碰撞反弹。记录 z 轨迹，指标 = 首次反弹最大高度。"""
+    """S2b C_N：球体碰撞反弹。记录 qpos/qvel 轨迹，指标 = 首次反弹最大高度。"""
     run = spec["run"]
     nsteps = int(spec["nsteps"])
     dt = float(model.opt.timestep)
@@ -236,8 +236,8 @@ def run_c(spec, model, data):
 
     n_alloc = nsteps
     time_s = np.empty(n_alloc, dtype=np.float64)
-    z_pos = np.empty(n_alloc, dtype=np.float32)
-    z_vel = np.empty(n_alloc, dtype=np.float32)
+    qpos = np.empty((n_alloc, model.nq), dtype=np.float32)
+    qvel = np.empty((n_alloc, model.nv), dtype=np.float32)
     used = 0
     status, stop_index = "ok", None
     events = []
@@ -254,10 +254,9 @@ def run_c(spec, model, data):
             events.append({"time_s": t_end, "reason": "NONFINITE"})
             break
         time_s[used] = t_end
-        z_pos[used] = z
-        z_vel[used] = vz
+        qpos[used] = data.qpos
+        qvel[used] = data.qvel
         used += 1
-        # 检测反弹：之前 vz < 0（下落），现在 vz > 0（上升）
         if not bounced and vz > 0.0 and z < 0.1:
             bounced = True
         if bounced:
@@ -265,8 +264,8 @@ def run_c(spec, model, data):
 
     arrays = {
         "time_s": time_s[:used],
-        "z_pos": z_pos[:used],
-        "z_vel": z_vel[:used],
+        "qpos": qpos[:used],
+        "qvel": qvel[:used],
     }
     extra = {"max_rebound_height_m": float(max_z_after_bounce),
              "bounced": bounced, "instability_events": events}

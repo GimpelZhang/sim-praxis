@@ -23,7 +23,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from orchestrator.rsi_r1.scenes import SCENE_A, SCENE_B, scene_doc
+from orchestrator.rsi_r1.scenes import SCENE_A, SCENE_B, SCENE_C, SCENE_D, scene_doc
 
 SCHEMA_PREFIX = "simpraxis.rsi_r1"
 RAW_SCHEMA = f"{SCHEMA_PREFIX}.raw_run.v1"
@@ -53,6 +53,18 @@ STUDY_A_FIELDS: "tuple[str, ...]" = (
     "contact_force_n",          # 每步接触力
 )
 
+#: S2b Study C 专属。
+STUDY_C_FIELDS: "tuple[str, ...]" = (
+    "max_rebound_height_m",
+    "instability_events",
+)
+
+#: S2b Study D 专属。
+STUDY_D_FIELDS: "tuple[str, ...]" = (
+    "steady_state_amplitude_rad",
+    "instability_events",
+)
+
 #: Study B 专属。
 STUDY_B_FIELDS: "tuple[str, ...]" = (
     "target_q",
@@ -66,6 +78,8 @@ STUDY_B_FIELDS: "tuple[str, ...]" = (
 SCENE_FIELDS: "Mapping[str, tuple[str, ...]]" = {
     SCENE_A: STUDY_A_FIELDS,
     SCENE_B: STUDY_B_FIELDS,
+    SCENE_C: STUDY_C_FIELDS,
+    SCENE_D: STUDY_D_FIELDS,
 }
 
 
@@ -182,7 +196,7 @@ def validate_record(record: Mapping[str, Any], *, scene_id: str) -> "dict[str, A
             if d != 3:
                 raise ObservationError(
                     "CONTACT_DIM", f"step {i} 实际 condim={d!r} 不等于 3（暴露检查）")
-    else:
+    elif scene_id == SCENE_B:
         n_ctl = len(record["control_update_index"])
         if n_ctl != n:
             raise ObservationError("LENGTH_MISMATCH", "control_update_index 长度不符")

@@ -119,7 +119,7 @@ def _scene_params(scene_id: str, raw: Mapping[str, Any]) -> "dict[str, Any]":
 
 
 def _run_shape(scene_id: str, params: Mapping[str, Any]) -> "dict[str, int]":
-    if scene_id == S.SCENE_A:
+    if scene_id in (S.SCENE_A, S.SCENE_C, S.SCENE_D):
         dt = A_FIXED_DT_S
         tc = None
     else:

@@ -60,7 +60,7 @@ B_TORQUE_LIMIT = Decimal("2.0")
 C_BALL_MASS = Decimal("0.5")
 C_BALL_RADIUS = Decimal("0.05")
 C_DROP_HEIGHT = Decimal("1.0")
-C_SOLREF_DAMPING_RATIO = Decimal("1.0")
+C_SOLREF_TIME = Decimal("0.02")
 
 #: S2b D_N 固定量（scenes.SCENE_D_DOC.fixed 的镜像）。
 D_SPRING_STIFFNESS = Decimal("10.0")
@@ -142,11 +142,11 @@ def scene_b_xml(*, dt_s: Decimal, inertia_ratio: Decimal) -> str:
     )
 
 
-def scene_c_xml(*, dt_s: Decimal, solref_time_s: Decimal,
-                v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.999")) -> str:
-    """S2b C_N：球体碰撞反弹（solref 时间常数 × 撞击速度）。"""
-    solref = f"{_plain(solref_time_s)} {_plain(C_SOLREF_DAMPING_RATIO)}"
-    solimp = f"0.99 {_plain(solimp_damping)} 0.0001"
+def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
+                v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.9")) -> str:
+    """S2b C_N：球体碰撞反弹（接触阻尼比 × 撞击速度）。"""
+    solref = f"{_plain(C_SOLREF_TIME)} {_plain(solref_damping_ratio)}"
+    solimp = f"0.9 {_plain(solimp_damping)} 0.0001"
     return (
         "<mujoco model=\"rsi_s2b_C\">"
         f"<option timestep=\"{_plain(dt_s)}\" gravity=\"0 0 -9.81\" "
@@ -206,9 +206,10 @@ def build_scene_xml(spec: ExperimentSpec) -> str:
     if spec.study_id == "C":
         p = spec.physical_params
         return scene_c_xml(dt_s=dt_s,
-                           solref_time_s=_dec(p["solref_time_s"], "solref_time_s"),
+                           solref_damping_ratio=_dec(p["solref_damping_ratio"],
+                                                     "solref_damping_ratio"),
                            v0_mps=_dec(p["v0_mps"], "v0_mps"),
-                           solimp_damping=_dec(p.get("solimp_damping", "0.999"),
+                           solimp_damping=_dec(p.get("solimp_damping", "0.9"),
                                                "solimp_damping"))
     if spec.study_id == "D":
         p = spec.physical_params
@@ -243,7 +244,7 @@ def build_spec_document(spec: ExperimentSpec) -> "dict[str, Any]":
         payload = {
             "kind": "C",
             "initial_vz_mps": spec.physical_params["v0_mps"],
-            "solref_time_s": spec.physical_params["solref_time_s"],
+            "solref_damping_ratio": spec.physical_params["solref_damping_ratio"],
         }
     elif spec.study_id == "D":
         payload = {
