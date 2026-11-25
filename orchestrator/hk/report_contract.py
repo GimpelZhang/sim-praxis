@@ -25,7 +25,7 @@ from typing import Any, Mapping
 
 __all__ = ["SCHEMA", "SECTIONS", "SECTION_TO_DIMENSION", "ReportContractError",
            "missing_sections", "validate_report", "build_report",
-           "dimension_floor", "report_of_claim"]
+           "dimension_floor", "report_of_claim", "crosscheck_nc_section"]
 
 SCHEMA = "simpraxis.rsi_s2.report.v2"
 
@@ -107,3 +107,49 @@ def report_of_claim(claim: Any) -> Any:
     if isinstance(claim, Mapping):
         return claim.get("report")
     return None
+
+
+def crosscheck_nc_section(report: Any, nc_evidence: Any) -> "list[str]":
+    """S2b F2：negative_control_handling 段与 nc_evidence 交叉校验。
+
+    证据显示已注册/三连通过而报告写"未注册/未验证" ⇒ 返回违规描述列表
+    （空列表 = 一致）。这是把"自相矛盾"从审查拒提前为**结构拒**的关键：
+    G-REPORT_NC_MISMATCH → 一次修复触点 → 仍不符 ⇒ 结构终止。
+
+    检查逻辑：
+    1. nc_evidence 在场（非 None）而报告段声称"未注册/未验证/无 NC" ⇒ 矛盾；
+    2. nc_evidence 三连判据全过而报告段声称"退化/未通过" ⇒ 矛盾；
+    3. nc_evidence 缺失而报告段声称"已注册/三连通过" ⇒ 矛盾（编造）。
+    """
+    problems: "list[str]" = []
+    section = ""
+    if isinstance(report, Mapping):
+        section = _section_text(report.get("negative_control_handling"))
+    if not section:
+        return problems  # 缺段由 missing_sections 单独处理
+
+    lowered = section.lower()
+
+    # 报告声称"未注册/未验证/无 NC"的否定锚词
+    _DENY_ANCHORS = ("未注册", "未验证", "无 nc", "无nc", "未提供", "not registered",
+                     "not verified", "no negative", "nc 未", "nc未")
+    # 报告声称"已注册/三连通过/有效"的肯定锚词
+    _AFFIRM_ANCHORS = ("已注册", "三连", "非退化", "亚阈", "灵敏度", "通过",
+                       "registered", "non-degenerate", "sub-threshold", "sensitivity")
+
+    denies = any(a in lowered for a in _DENY_ANCHORS)
+    affirms = any(a in lowered for a in _AFFIRM_ANCHORS)
+
+    if nc_evidence is not None and denies:
+        problems.append(
+            "G-REPORT_NC_MISMATCH: nc_evidence 在场（NC 已注册/已验证），"
+            "但 negative_control_handling 段声称未注册/未验证")
+    if nc_evidence is not None and not affirms and not denies:
+        problems.append(
+            "G-REPORT_NC_MISMATCH: nc_evidence 在场但 negative_control_handling "
+            "段未如实引用 NC 证据（缺非退化/亚阈/灵敏度等锚词）")
+    if nc_evidence is None and affirms:
+        problems.append(
+            "G-REPORT_NC_MISMATCH: nc_evidence 缺失，但 negative_control_handling "
+            "段声称已注册/三连通过（编造证据）")
+    return problems

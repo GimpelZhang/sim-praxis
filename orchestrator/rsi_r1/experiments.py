@@ -252,7 +252,7 @@ def build_host_spec(*, plan_sha256: str, study_id: str, condition_id: str,
     只有一份实现。
     """
     _require_hex(plan_sha256, where="plan_sha256")
-    if study_id not in ("A", "B"):
+    if study_id not in ("A", "B", "C", "D"):
         raise _err("STUDY_UNKNOWN", f"study_id={study_id!r}")
     doc = S.scene_doc(scene_id)
     if doc.study != study_id:
@@ -266,7 +266,9 @@ def build_host_spec(*, plan_sha256: str, study_id: str, condition_id: str,
         bucket = physical if spec.role != "controller" else controller
         bucket[spec.id] = normalised[spec.id]
         units[spec.id] = spec.unit
-    if scene_id == S.SCENE_A:
+    if scene_id in (S.SCENE_A, S.SCENE_C):
+        dt_s, tc_s = str(A_FIXED_DT_S), None
+    elif scene_id == S.SCENE_D:
         dt_s, tc_s = str(A_FIXED_DT_S), None
     else:
         dt_s, tc_s = normalised["dt_s"], normalised["tc_s"]

@@ -85,8 +85,8 @@ class ResearchDriver:
                  assignment_salt: str | None = None,
                  harness: str = "v0",
                  nc_sensitivity: "Mapping[str, Any] | None" = None):
-        if harness not in ("v0", "v1"):
-            raise ValueError(f"harness 必须是 v0/v1，收到 {harness!r}")
+        if harness not in ("v0", "v1", "v2"):
+            raise ValueError(f"harness 必须是 v0/v1/v2，收到 {harness!r}")
         self.harness = harness
         self.nc_sensitivity = (dict(nc_sensitivity)
                                if isinstance(nc_sensitivity, Mapping) else None)
@@ -226,14 +226,18 @@ class ResearchDriver:
                 claim = self.skills["K8"].execute(
                     self._touchpoint_value(value, ctx), ctx)
                 claim = dict(claim)
-                if self.harness == "v1":
-                    # S2 变异面：G-REPORT 守卫 + **一次**修复触点（v1 臂专有）。
-                    # 缺段 → 把缺失清单交回 actor 重出 claim；二次仍缺 → 结构拒绝。
+                if self.harness in ("v1", "v2"):
+                    # S2 变异面 / S2b 维护侧：G-REPORT 守卫 + **一次**修复触点。
+                    # v2 额外启用 NC 交叉校验（F2：nc_evidence 与报告段对账）。
                     from orchestrator.hk import report_contract as RC
 
+                    # S2b F2：v2 传 nc_evidence 进守卫做交叉校验
+                    _nc_ev = value.get("negative_control") \
+                        if isinstance(value, Mapping) else None
                     try:
                         enforce(["G-REPORT"], GuardCtx(
-                            stage=stage_id, report_doc=claim.get("report")))
+                            stage=stage_id, report_doc=claim.get("report"),
+                            nc_evidence=_nc_ev if self.harness == "v2" else None))
                     except GuardViolation as exc:
                         self._record(run_dir, "K8_report_violation.json",
                                      {"code": exc.code, "detail": exc.detail,
@@ -249,7 +253,8 @@ class ResearchDriver:
                                              C.CONFIRM_RESULT.name, repair_value),
                             "claim"))
                         enforce(["G-REPORT"], GuardCtx(
-                            stage=stage_id, report_doc=claim.get("report")))
+                            stage=stage_id, report_doc=claim.get("report"),
+                            nc_evidence=_nc_ev if self.harness == "v2" else None))
                 if self.human_cofix.get(stage_id):
                     claim["human_cofix"] = True
                     claim["conclusion_grade"] = "human_machine_joint_improvement"
@@ -257,11 +262,17 @@ class ResearchDriver:
                 if self.claim_guard:
                     # G-CLAIM（AC-17）：自报逐字段 vs host 复算；不符即 CLAIM_INVALID。
                     # host 真值取 confirm_result 的**主张投影**（contrasts 行）——
-                    # 只比对可主张的数值面，信封元数据（时间戳/sha）不要求自报复制。
+                    # 只比对可主张的数值面（id/estimate/ci/n_blocks/claim），
+                    # 元数据（metric_id/proposition/delta/level）与信封时间戳/sha
+                    # 不要求自报复制（S2b F1.1 全字段扩展后的口径）。
                     host_truth = k7_value if isinstance(k7_value, Mapping) else {}
                     host_contrasts = host_truth.get("contrasts")
                     if isinstance(host_contrasts, list):
-                        host_truth = {"contrasts": host_contrasts}
+                        _CLAIM_FIELDS = ("id", "estimate", "ci_low", "ci_high",
+                                         "n_blocks", "claim")
+                        host_truth = {"contrasts": [
+                            {k: row.get(k) for k in _CLAIM_FIELDS}
+                            for row in host_contrasts if isinstance(row, Mapping)]}
                     enforce(["G-CLAIM"], GuardCtx(stage=stage_id, claim_doc=claim,
                                                   host_recomputed=dict(host_truth)))
                     # 评审 HIGH-2：总判词不得是纯自报——必须等于 host 对**主对比**

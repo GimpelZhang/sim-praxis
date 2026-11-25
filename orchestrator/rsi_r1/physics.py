@@ -56,6 +56,17 @@ B_INERTIA_BASE = Decimal("0.05")
 B_DAMPING = Decimal("0.05")
 B_TORQUE_LIMIT = Decimal("2.0")
 
+#: S2b C_N 固定量（scenes.SCENE_C_DOC.fixed 的镜像）。
+C_BALL_MASS = Decimal("0.5")
+C_BALL_RADIUS = Decimal("0.05")
+C_DROP_HEIGHT = Decimal("1.0")
+C_SOLREF_DAMPING_RATIO = Decimal("1.0")
+
+#: S2b D_N 固定量（scenes.SCENE_D_DOC.fixed 的镜像）。
+D_SPRING_STIFFNESS = Decimal("10.0")
+D_INERTIA = Decimal("0.05")
+D_DRIVE_AMPLITUDE = Decimal("1.0")
+
 _SERVICE_PATH = Path(__file__).with_name("experiment_service.py")
 
 
@@ -131,6 +142,49 @@ def scene_b_xml(*, dt_s: Decimal, inertia_ratio: Decimal) -> str:
     )
 
 
+def scene_c_xml(*, dt_s: Decimal, solref_time_s: Decimal,
+                v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.999")) -> str:
+    """S2b C_N：球体碰撞反弹（solref 时间常数 × 撞击速度）。"""
+    solref = f"{_plain(solref_time_s)} {_plain(C_SOLREF_DAMPING_RATIO)}"
+    solimp = f"0.99 {_plain(solimp_damping)} 0.0001"
+    return (
+        "<mujoco model=\"rsi_s2b_C\">"
+        f"<option timestep=\"{_plain(dt_s)}\" gravity=\"0 0 -9.81\" "
+        "integrator=\"implicitfast\" cone=\"elliptic\"/>"
+        "<worldbody>"
+        f"<geom name=\"floor\" type=\"plane\" size=\"3 3 0.1\" "
+        f"condim=\"3\" solref=\"{solref}\" solimp=\"{solimp}\"/>"
+        f"<body name=\"ball\" pos=\"0 0 {_plain(C_DROP_HEIGHT)}\">"
+        "<freejoint name=\"ball_free\"/>"
+        f"<geom name=\"ball_geom\" type=\"sphere\" size=\"{_plain(C_BALL_RADIUS)}\" "
+        f"mass=\"{_plain(C_BALL_MASS)}\" condim=\"3\" "
+        f"solref=\"{solref}\" solimp=\"{solimp}\"/>"
+        "</body></worldbody>"
+        "<contact>"
+        f"<pair name=\"ball_floor\" geom1=\"ball_geom\" geom2=\"floor\" "
+        f"condim=\"3\" solref=\"{solref}\" solimp=\"{solimp}\"/>"
+        "</contact></mujoco>"
+    )
+
+
+def scene_d_xml(*, dt_s: Decimal, drive_freq_hz: Decimal,
+                joint_damping: Decimal) -> str:
+    """S2b D_N：受迫振动（驱动频率 × 关节阻尼 → 稳态振幅）。"""
+    inertia = D_INERTIA
+    return (
+        "<mujoco model=\"rsi_s2b_D\">"
+        f"<option timestep=\"{_plain(dt_s)}\" gravity=\"0 0 0\" "
+        "integrator=\"implicitfast\"/>"
+        "<worldbody><body name=\"arm\" pos=\"0 0 0\">"
+        f"<inertial pos=\"0 0 0\" mass=\"1\" "
+        f"diaginertia=\"{_plain(inertia)} {_plain(inertia)} {_plain(inertia)}\"/>"
+        f"<joint name=\"hinge\" type=\"hinge\" axis=\"0 0 1\" "
+        f"damping=\"{_plain(joint_damping)}\" "
+        f"stiffness=\"{_plain(D_SPRING_STIFFNESS)}\"/>"
+        "</body></worldbody></mujoco>"
+    )
+
+
 def build_scene_xml(spec: ExperimentSpec) -> str:
     """按 spec 的 study/参数构造 MJCF（宿主可信；同一 spec 恒同字节）。"""
     dt_s = _dec(spec.dt_s, "dt_s")
@@ -149,6 +203,18 @@ def build_scene_xml(spec: ExperimentSpec) -> str:
         return scene_b_xml(dt_s=dt_s,
                            inertia_ratio=_dec(spec.physical_params["inertia_ratio"],
                                               "inertia_ratio"))
+    if spec.study_id == "C":
+        p = spec.physical_params
+        return scene_c_xml(dt_s=dt_s,
+                           solref_time_s=_dec(p["solref_time_s"], "solref_time_s"),
+                           v0_mps=_dec(p["v0_mps"], "v0_mps"),
+                           solimp_damping=_dec(p.get("solimp_damping", "0.999"),
+                                               "solimp_damping"))
+    if spec.study_id == "D":
+        p = spec.physical_params
+        return scene_d_xml(dt_s=dt_s,
+                           drive_freq_hz=_dec(p["drive_freq_hz"], "drive_freq_hz"),
+                           joint_damping=_dec(p["joint_damping"], "joint_damping"))
     raise PhysicsError("STUDY_UNKNOWN", f"study_id={spec.study_id!r}")
 
 
@@ -172,6 +238,20 @@ def build_spec_document(spec: ExperimentSpec) -> "dict[str, Any]":
             "kp": ctl["kp"],
             "kd": ctl["kd"],
             "torque_limit_nm": _plain(B_TORQUE_LIMIT),
+        }
+    elif spec.study_id == "C":
+        payload = {
+            "kind": "C",
+            "initial_vz_mps": spec.physical_params["v0_mps"],
+            "solref_time_s": spec.physical_params["solref_time_s"],
+        }
+    elif spec.study_id == "D":
+        payload = {
+            "kind": "D",
+            "drive_freq_hz": spec.physical_params["drive_freq_hz"],
+            "joint_damping": spec.physical_params["joint_damping"],
+            "drive_amplitude_nm": _plain(D_DRIVE_AMPLITUDE),
+            "drive_phase_rad": spec.physical_params.get("drive_phase_rad", "0.0"),
         }
     else:
         raise PhysicsError("STUDY_UNKNOWN", f"study_id={spec.study_id!r}")

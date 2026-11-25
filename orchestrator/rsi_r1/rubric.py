@@ -87,6 +87,40 @@ METRICS: "Mapping[str, Mapping[str, Any]]" = {
         "description": ("校准阴性控制专用：基准 vs 亚阈微扰的归一化跟踪 RMSE 差；"
                         "90% 区间须严格落 ±0.01 内"),
     },
+    # S2b-1（计划 §3 S2b-0）：C_N 碰撞域反弹高度。δ 沿 displacement_x_m 量级。
+    "rebound_height_m": {
+        "unit": "m",
+        "delta": Decimal("0.001"),
+        "study": "C",
+        "censoring": "none",
+        "description": ("球体碰撞后首次反弹的最大高度（z 方向，相对地面）；"
+                        "solref 时间常数 × 撞击速度交互 DiD 主指标"),
+    },
+    "rebound_height_m_negative_equivalence": {
+        "unit": "m",
+        "delta": Decimal("0.001"),
+        "study": "C",
+        "censoring": "none",
+        "description": ("校准阴性控制专用：基准 vs 亚阈 solimp 微扰的反弹高度差；"
+                        "90% 区间须严格落 ±0.001 m 内"),
+    },
+    # S2b-1（计划 §3 S2b-0）：D_N 受迫振动稳态振幅。δ 沿 normalized_tracking_rmse 量级。
+    "steady_state_amplitude_rad": {
+        "unit": "rad",
+        "delta": Decimal("0.01"),
+        "study": "D",
+        "censoring": "none",
+        "description": ("受迫振动稳态阶段（后 50% 时窗）的振幅（max-min)/2；"
+                        "驱动频率 × 关节阻尼交互 DiD 主指标"),
+    },
+    "steady_state_amplitude_rad_negative_equivalence": {
+        "unit": "rad",
+        "delta": Decimal("0.01"),
+        "study": "D",
+        "censoring": "none",
+        "description": ("校准阴性控制专用：基准 vs 亚阈驱动相位微扰的稳态振幅差；"
+                        "90% 区间须严格落 ±0.01 rad 内"),
+    },
 }
 
 #: A 的阴性控制必须用 equivalent 主张 + 90% 区间 + 该界。

@@ -1,7 +1,9 @@
-"""八守卫：一等变异面（WP-C″ 的进化素材），每条编译自真实事故（设计族 §3）。
+"""九守卫：一等变异面（WP-C″ 的进化素材），每条编译自真实事故（设计族 §3）。
 
 统一形态：`g_x(ctx)` 违规即 `raise GuardViolation`，通过静默。每守卫恰一个职责，
 不共享实现（S0-3 完成判据）。负控名称 = 事故出处，见 tests/milestoneS0/test_hk_guards.py。
+
+S2b 维护侧合并：G-REPORT（S2 候选守卫）+ NC 交叉校验（F2）入维护面。
 """
 from __future__ import annotations
 
@@ -12,8 +14,8 @@ from ._physicalrsi import mismatches
 
 __all__ = ["GuardViolation", "GuardCtx", "GUARDS",
            "g_prereg", "g_budget", "g_send_once", "g_freeze",
-           "g_bytes", "g_claim", "g_unit", "g_noprog", "register_guard",
-           "enforce"]
+           "g_bytes", "g_claim", "g_unit", "g_noprog", "g_report",
+           "register_guard", "enforce"]
 
 
 class GuardViolation(RuntimeError):
@@ -48,6 +50,7 @@ class GuardCtx:
     private_sentinels: tuple[bytes, ...] = ()     # g_bytes：不得外泄的私有哨兵
     noprog_rounds: int = 2                    # g_noprog：连续无新证据轮数上限
     report_doc: dict | None = None            # g_report：K8 六段报告（v2 合同）
+    nc_evidence: dict | None = None           # g_report F2：NC 证据（交叉校验用）
 
 
 def g_prereg(ctx: GuardCtx) -> None:
@@ -162,6 +165,58 @@ def g_noprog(ctx: GuardCtx) -> None:
                              f"{ctx.noprog_rounds}）；转诊断或停")
 
 
+#: negative_control_handling 段必须触及 NC 有效性判据的内容锚点。
+_NC_ANCHORS = ("非退化", "亚阈", "灵敏度", "non-degenerate", "sub-threshold",
+               "sensitivity", "有效性", "validity")
+#: limitations_next_steps 段必须给出方向性下一步。
+_NEXT_ANCHORS = ("下一步", "后续", "未来", "next", "follow", "future", "计划", "拟")
+
+
+def _mentions(text: str, anchors: "tuple[str, ...]") -> bool:
+    lowered = text.lower()
+    return any(anchor.lower() in lowered for anchor in anchors)
+
+
+def g_report(ctx: GuardCtx) -> None:
+    """G-REPORT（K8 出口）：六段报告合同 v2 的结构自检 + NC 交叉校验（S2b F2）。
+
+    三层，都是结构面、不做内容评分：
+
+    1. 六段存在且非空（委托冻结的 ``report_contract``，缺段即 ``REPORT_INCOMPLETE``）；
+    2. 两个 S1 实际缺段的**内容锚点**：``negative_control_handling`` 必须触及
+       NC 有效性判据（非退化/亚阈/灵敏度校准），``limitations_next_steps`` 必须
+       给出方向性下一步。只写段名或空话不能过关。
+    3. **NC 交叉校验**（S2b F2）：``negative_control_handling`` 段内容与
+       ``nc_evidence`` 对账——证据在场而报告写"未注册/未验证" ⇒
+       ``G-REPORT_NC_MISMATCH``（触发一次修复触点；二次仍不符 ⇒ 结构终止）。
+
+    违规码直接交给 driver 的修复触点（``submit_claim_repair``）：缺段清单来自
+    ``report_contract.missing_sections``，锚点/交叉校验问题由 ``detail`` 说明。
+    """
+    from orchestrator.hk import report_contract as RC
+
+    try:
+        sections = RC.validate_report(ctx.report_doc)
+    except RC.ReportContractError as exc:
+        raise GuardViolation("g_report", exc.code, exc.detail) from None
+    if not _mentions(sections["negative_control_handling"], _NC_ANCHORS):
+        raise GuardViolation(
+            "g_report", "NC_HANDLING_UNANCHORED",
+            "negative_control_handling 未处理有效性（非退化/亚阈/灵敏度校准），"
+            "不能只说“无异常”")
+    if not _mentions(sections["limitations_next_steps"], _NEXT_ANCHORS):
+        raise GuardViolation(
+            "g_report", "NEXT_STEPS_UNANCHORED",
+            "limitations_next_steps 未给出方向性下一步（六段合同 v2）")
+    # S2b F2：NC 交叉校验——报告段与 nc_evidence 对账
+    nc_evidence = getattr(ctx, "nc_evidence", None)
+    nc_problems = RC.crosscheck_nc_section(ctx.report_doc, nc_evidence)
+    if nc_problems:
+        raise GuardViolation(
+            "g_report", "G-REPORT_NC_MISMATCH",
+            "; ".join(nc_problems))
+
+
 GUARDS = {
     "G-PREREG": g_prereg,
     "G-BUDGET": g_budget,
@@ -171,6 +226,7 @@ GUARDS = {
     "G-CLAIM": g_claim,
     "G-UNIT": g_unit,
     "G-NOPROG": g_noprog,
+    "G-REPORT": g_report,   # S2b 维护侧合并（S2 候选 + F2 交叉校验）
 }
 
 

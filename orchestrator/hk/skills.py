@@ -362,6 +362,33 @@ def default_confirmer(confirm_plan: Mapping[str, Any], context=None) -> dict:
                 "RERUN_POINT_MISMATCH: "
                 + json.dumps([d.to_dict() for d in handle.diffs[:5]],
                              ensure_ascii=False))
+        # S2b F1.1：confirm_result 必须逐字含 negative_control（NC 注册行 +
+        # 三连判据结果 + estimate/CI）。host_recompute 的 replay_rows 有
+        # replay_value，NC 对比值从冻结计划的 nc_contrast/nc_slot 计算。
+        # 无 NC 槽时恒设 None（键在场，K8 结构检查通过；报告段如实写"未注册"）。
+        nc_slot = plan.get("nc_slot")
+        nc_contrast = plan.get("nc_contrast")
+        result["negative_control"] = None
+        if isinstance(nc_slot, Mapping) and isinstance(nc_contrast, Mapping):
+            from orchestrator.hk import nc_registration as N
+
+            replay_stat_rows = [{**row, "value": row.get("replay_value")}
+                                for row in handle.runs]
+            nc_values = _linear_contrast_values(replay_stat_rows, nc_contrast)
+            nc_est = statistics.estimate(
+                nc_values, level=str(nc_slot.get("ci_level") or "0.90"))
+            try:
+                nc_evidence = N.validate_nc(
+                    contrast=nc_contrast,
+                    block_values=list(nc_values.values()),
+                    estimate=nc_est["effect"], ci_low=nc_est["lower"],
+                    ci_high=nc_est["upper"],
+                    sensitivity=plan.get("nc_sensitivity"))
+            except N.NCRegistrationError as exc:
+                from orchestrator.hk.guards import GuardViolation
+
+                raise GuardViolation("g_nc", exc.code, exc.detail) from None
+            result["negative_control"] = nc_evidence
         return result
     pairs_by_contrast = plan.get("pairs")
     if not isinstance(pairs_by_contrast, Mapping) or not pairs_by_contrast:
@@ -446,8 +473,34 @@ def build_skills(*, actor: Callable[[str, str, Mapping[str, Any]], Mapping[str, 
         return manifest
 
     def k4_write_analysis(value, context=None):
+        manifest = _require_mapping(value, "run_manifest")
+        # S2b F3：K4 触点请求瘦身——run 摘要代替全量 manifest（S2 冒烟 41 轮
+        # 事故教训：223KB 全量 manifest 使 K4 会话耗尽 max_turns）。
+        # 摘要含记录路径（分析程序需要读数据）+ 对比定义 + NC 槽 + 条件/块表；
+        # 本体仍在盘上，程序只带引用与摘要（blob 引用同构）。
+        runs = manifest.get("runs") or []
+        run_summary = {
+            "n_runs": len(runs),
+            "run_records": [
+                {"condition_id": r.get("condition_id"),
+                 "block_id": r.get("block_id"),
+                 "record_path": r.get("record_path")}
+                for r in runs
+            ],
+            "contrasts": manifest.get("contrasts"),
+            "confirm_plan": manifest.get("confirm_plan"),
+            "nc_slot": (manifest.get("confirm_plan") or {}).get("nc_slot")
+            if isinstance(manifest.get("confirm_plan"), Mapping) else None,
+            "nc_contrast": (manifest.get("confirm_plan") or {}).get("nc_contrast")
+            if isinstance(manifest.get("confirm_plan"), Mapping) else None,
+            "conditions": manifest.get("conditions"),
+            "blocks": manifest.get("blocks"),
+        }
         program = touchpoint("K4")(  # System 2 触点②：诊断/写分析
-            "write_analysis", C.RUN_MANIFEST.name, _require_mapping(value, "run_manifest"))
+            "write_analysis", C.RUN_MANIFEST.name,
+            {"run_manifest_summary": run_summary,
+             "run_manifest": manifest,
+             **({k: v for k, v in value.items() if k == "_ctx"})})
         program = dict(_require_mapping(program, "analysis_program"))
         source = program.get("source")
         if not isinstance(source, str) or not source.strip():
@@ -486,8 +539,34 @@ def build_skills(*, actor: Callable[[str, str, Mapping[str, Any]], Mapping[str, 
 
     def k8_submit_claim(value, context=None):
         result = _require_mapping(value, "confirm_result")
+        # S2b F1.2：K8 触点请求强制装配 negative_control 证据与全字段 results。
+        # 缺任一 → SkillError 结构拒绝，不发触点（根因修复：K8 缺 NC 证据 →
+        # actor 编造"未注册/未验证" → 报告自相矛盾）。
+        if "negative_control" not in result:
+            raise SkillError(
+                "K8_INFO_SURFACE_INCOMPLETE: confirm_result 缺 negative_control"
+                "（NC 注册行 + 三连判据 + estimate/CI）；不发触点")
+        contrasts = result.get("contrasts")
+        if not isinstance(contrasts, list) or not contrasts:
+            raise SkillError(
+                "K8_INFO_SURFACE_INCOMPLETE: confirm_result 缺 contrasts 行")
+        _REQUIRED_RESULT_FIELDS = ("id", "metric_id", "proposition", "delta",
+                                   "estimate", "ci_low", "ci_high", "n_blocks",
+                                   "claim")
+        for i, row in enumerate(contrasts):
+            if not isinstance(row, Mapping):
+                raise SkillError(
+                    f"K8_INFO_SURFACE_INCOMPLETE: contrasts[{i}] 不是对象")
+            missing = [k for k in _REQUIRED_RESULT_FIELDS if k not in row]
+            if missing:
+                raise SkillError(
+                    f"K8_INFO_SURFACE_INCOMPLETE: contrasts[{i}] 缺 {missing}")
+        # 组装触点请求：results 全字段 + nc_evidence 显式在场
+        request_value = dict(result)
+        request_value["results"] = list(contrasts)  # 显式别名，触点指令引用
+        request_value["nc_evidence"] = result["negative_control"]
         claim = touchpoint("K8")(  # System 2 触点③：解释
-            "submit_claim", C.CONFIRM_RESULT.name, result)
+            "submit_claim", C.CONFIRM_RESULT.name, request_value)
         claim = dict(_require_mapping(claim, "claim"))
         verdict = claim.get("verdict")
         from orchestrator.hk import verdicts as V

@@ -307,8 +307,14 @@ class PhysicsService:
 
             if spec.study_id == "A":
                 status, stop, arrays, extra, warns = ES.run_a(doc, model, data)
-            else:
+            elif spec.study_id == "B":
                 status, stop, arrays, extra, warns = ES.run_b(doc, model, data)
+            elif spec.study_id == "C":
+                status, stop, arrays, extra, warns = ES.run_c(doc, model, data)
+            elif spec.study_id == "D":
+                status, stop, arrays, extra, warns = ES.run_d(doc, model, data)
+            else:
+                raise PhysicsServiceError("STUDY_UNKNOWN", spec.study_id)
             reply = self._materialise_reply(doc, status, stop, arrays, extra, warns,
                                             out_dir)
         finally:

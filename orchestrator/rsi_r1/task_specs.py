@@ -812,6 +812,172 @@ def build_r1n_b(*, commitment: "str | None" = None,
     return spec.validate()
 
 
+# ---------------------------------------------------------------------------
+# S2b C_N / D_N 任务构建器（计划 §3 S2b-0 两新机制实例）
+# ---------------------------------------------------------------------------
+
+S2B_C_TASK_ID = "s2b-c-collision-rebound"
+S2B_D_TASK_ID = "s2b-d-forced-vibration"
+
+
+def build_s2b_c(*, commitment: "str | None" = None,
+                resource_sha: "str | None" = None) -> TaskSpecV13:
+    """C_N：碰撞域——接触刚度 × 撞击速度 → 反弹高度（DiD + NC）。
+
+    - 干预：``solref_time_s∈{0.01,0.04}`` × ``v0_mps∈{1.5,4.0}`` 全因子；
+    - 主对比 ``stiffness_x_velocity``（DiD，``rebound_height_m``，δ=0.001）：
+      DiD = [solref 高速效应] − [solref 低速效应]；
+    - NC 槽：sham = cell(solref=0.04, v0=4.0) 克隆，仅 solimp 微扰；
+    - 无 nuisance（两因子全控）。
+    """
+    scene_id = S.SCENE_C
+    conditions = (
+        _condition("hi_stiff_hi_vel", scene_id,
+                   {"solref_time_s": "0.01", "v0_mps": "4.0",
+                    "solimp_damping": "0.999"}),
+        _condition("hi_stiff_lo_vel", scene_id,
+                   {"solref_time_s": "0.01", "v0_mps": "1.5",
+                    "solimp_damping": "0.999"}),
+        _condition("lo_stiff_hi_vel", scene_id,
+                   {"solref_time_s": "0.04", "v0_mps": "4.0",
+                    "solimp_damping": "0.999"}),
+        _condition("lo_stiff_lo_vel", scene_id,
+                   {"solref_time_s": "0.04", "v0_mps": "1.5",
+                    "solimp_damping": "0.999"}),
+        _condition("sham_solimp", scene_id,
+                   {"solref_time_s": "0.04", "v0_mps": "4.0",
+                    "solimp_damping": "0.9995"}),
+    )
+    primary = X.ContrastV13(
+        id="stiffness_x_velocity",
+        kind=X.KIND_DID,
+        metric="rebound_height_m",
+        proposition="decrease_gt",
+        delta=R.metric_delta("rebound_height_m"),
+        terms=X.did_terms(treatment_high="hi_stiff_hi_vel",
+                          treatment_low="lo_stiff_hi_vel",
+                          control_high="hi_stiff_lo_vel",
+                          control_low="lo_stiff_lo_vel"),
+    )
+    spec = TaskSpecV13(
+        task_id=S2B_C_TASK_ID,
+        mechanism_id=scene_id,
+        split=SPLIT_HOLDOUT,
+        scene_version=S.scene_doc(scene_id).version,
+        public_question=(
+            "球体碰撞中，接触刚度时间常数（0.01→0.04 s）对反弹高度的效应"
+            "是否随撞击速度（4.0→1.5 m/s）改变？主估计量 = 两速度水平下"
+            "该刚度效应之差。任何方向都是合法结果。"),
+        allowed_design_space=_allowed_space(scene_id),
+        estimand={
+            "metric_id": "rebound_height_m",
+            "contrast_ids": ["stiffness_x_velocity"],
+            "target_population": "32 个宿主分配的确认 block",
+            "aggregation": "paired_block_linear_contrast",
+            "weighting": "equal_block_weight",
+        },
+        nuisance_schema={},
+        negative_control_spec={
+            "schema": "simpraxis.rsi_s2.nc_slot.v1",
+            "allowed_diff": ["solimp_damping"],
+            "max_perturbation": {"solimp_damping": "0.0005"},
+            "delta": "0.001",
+            "ci_level": "0.90",
+            "equivalence_metric": "rebound_height_m_negative_equivalence",
+            "candidates": ["lo_stiff_hi_vel", "sham_solimp",
+                            "hi_stiff_hi_vel", "hi_stiff_lo_vel"],
+            "default": {"base": "lo_stiff_hi_vel", "sham": "sham_solimp"},
+        },
+        private_instance_commitment=commitment or ("0" * 64),
+        metric_method_sha=_metric_method_sha(),
+        resource_spec_sha=resource_sha or ("0" * 64),
+        conditions=conditions,
+        primary=primary,
+        fixed={**_fixed_of(scene_id),
+               "confirm_blocks": str(P.MAX_CONFIRM_BLOCKS)},
+    )
+    return spec.validate()
+
+
+def build_s2b_d(*, commitment: "str | None" = None,
+                resource_sha: "str | None" = None) -> TaskSpecV13:
+    """D_N：受迫振动域——驱动频率 × 关节阻尼 → 稳态振幅（DiD + NC）。
+
+    - 干预：``drive_freq_hz∈{1.0,2.5}`` × ``joint_damping∈{0.05,0.3}`` 全因子；
+    - 主对比 ``freq_x_damping``（DiD，``steady_state_amplitude_rad``，δ=0.01）：
+      DiD = [频率在高阻尼效应] − [频率在低阻尼效应]；
+    - NC 槽：sham = cell(freq=2.5, damping=0.3) 克隆，仅驱动相位微扰；
+    - 无 nuisance。
+    """
+    scene_id = S.SCENE_D
+    conditions = (
+        _condition("hi_freq_hi_damp", scene_id,
+                   {"drive_freq_hz": "2.5", "joint_damping": "0.3",
+                    "drive_phase_rad": "0.0"}),
+        _condition("hi_freq_lo_damp", scene_id,
+                   {"drive_freq_hz": "2.5", "joint_damping": "0.05",
+                    "drive_phase_rad": "0.0"}),
+        _condition("lo_freq_hi_damp", scene_id,
+                   {"drive_freq_hz": "1.0", "joint_damping": "0.3",
+                    "drive_phase_rad": "0.0"}),
+        _condition("lo_freq_lo_damp", scene_id,
+                   {"drive_freq_hz": "1.0", "joint_damping": "0.05",
+                    "drive_phase_rad": "0.0"}),
+        _condition("sham_phase", scene_id,
+                   {"drive_freq_hz": "2.5", "joint_damping": "0.3",
+                    "drive_phase_rad": "0.01"}),
+    )
+    primary = X.ContrastV13(
+        id="freq_x_damping",
+        kind=X.KIND_DID,
+        metric="steady_state_amplitude_rad",
+        proposition="decrease_gt",
+        delta=R.metric_delta("steady_state_amplitude_rad"),
+        terms=X.did_terms(treatment_high="hi_freq_hi_damp",
+                          treatment_low="lo_freq_hi_damp",
+                          control_high="hi_freq_lo_damp",
+                          control_low="lo_freq_lo_damp"),
+    )
+    spec = TaskSpecV13(
+        task_id=S2B_D_TASK_ID,
+        mechanism_id=scene_id,
+        split=SPLIT_HOLDOUT,
+        scene_version=S.scene_doc(scene_id).version,
+        public_question=(
+            "受迫振动中，驱动频率（2.5→1.0 Hz）对稳态振幅的效应是否随"
+            "关节阻尼（0.3→0.05 Nm·s/rad）改变？主估计量 = 两阻尼水平下"
+            "该频率效应之差。任何方向都是合法结果。"),
+        allowed_design_space=_allowed_space(scene_id),
+        estimand={
+            "metric_id": "steady_state_amplitude_rad",
+            "contrast_ids": ["freq_x_damping"],
+            "target_population": "32 个宿主分配的确认 block",
+            "aggregation": "paired_block_linear_contrast",
+            "weighting": "equal_block_weight",
+        },
+        nuisance_schema={},
+        negative_control_spec={
+            "schema": "simpraxis.rsi_s2.nc_slot.v1",
+            "allowed_diff": ["drive_phase_rad"],
+            "max_perturbation": {"drive_phase_rad": "0.01"},
+            "delta": "0.01",
+            "ci_level": "0.90",
+            "equivalence_metric": "steady_state_amplitude_rad_negative_equivalence",
+            "candidates": ["hi_freq_hi_damp", "sham_phase",
+                            "lo_freq_hi_damp", "hi_freq_lo_damp"],
+            "default": {"base": "hi_freq_hi_damp", "sham": "sham_phase"},
+        },
+        private_instance_commitment=commitment or ("0" * 64),
+        metric_method_sha=_metric_method_sha(),
+        resource_spec_sha=resource_sha or ("0" * 64),
+        conditions=conditions,
+        primary=primary,
+        fixed={**_fixed_of(scene_id),
+               "confirm_blocks": str(P.MAX_CONFIRM_BLOCKS)},
+    )
+    return spec.validate()
+
+
 def assert_r1n_not_near_duplicate() -> "list[dict[str, Any]]":
     """R1-N 两题对全部旧任务的近重复机判证据（Plan §1.1 / AC R1N-02）。"""
     new = {"A": build_r1n_a(), "B": build_r1n_b()}

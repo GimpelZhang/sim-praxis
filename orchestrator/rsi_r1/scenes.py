@@ -206,9 +206,101 @@ SCENE_B_DOC = SceneDoc(
 )
 
 
+# ---------------------------------------------------------------------------
+# S2b C_N：碰撞域（接触刚度 × 撞击速度 → 反弹高度）
+# ---------------------------------------------------------------------------
+
+SCENE_C = "C_collision_rebound"
+
+SCENE_C_DOC = SceneDoc(
+    scene_id=SCENE_C,
+    study="C",
+    version=1,
+    title="球体碰撞反弹（接触刚度 × 撞击速度）",
+    description=(
+        "一个球体从给定高度以初速下落，撞击刚性地面后反弹。"
+        "接触刚度（solref 时间常数）与撞击速度的交互对反弹高度的影响。"
+        "NC 槽：亚阈微扰 solimp 阻尼。"),
+    params=(
+        ParamSpec("solref_time_s", "s", "float", Decimal("0.005"), Decimal("0.05"),
+                  role="physical", description="接触刚度时间常数（solref[0]）"),
+        ParamSpec("v0_mps", "m/s", "float", Decimal("1.0"), Decimal("5.0"),
+                  role="initial_state", description="初始下落速度"),
+        ParamSpec("solimp_damping", "1", "float", Decimal("0.999"),
+                  Decimal("0.9999"), role="physical",
+                  description="接触阻抗阻尼（solimp[1]）"),
+    ),
+    fixed=(
+        FixedSpec("ball_mass_kg", Decimal("0.5"), "kg", "球体质量固定"),
+        FixedSpec("ball_radius_m", Decimal("0.05"), "m", "球体半径固定"),
+        FixedSpec("drop_height_m", Decimal("1.0"), "m", "初始高度固定"),
+        FixedSpec("solref_damping_ratio", Decimal("1.0"), "1", "阻尼比固定"),
+        FixedSpec("duration_s", DURATION_S, "s", "仿真时长"),
+        FixedSpec("gravity_mps2", Decimal("9.81"), "m/s^2", "重力"),
+        FixedSpec("solver", "mujoco_default_pinned", "1", "solver 由镜像固定"),
+    ),
+    metrics=("rebound_height_m",),
+)
+
+#: C_N 阴性对照：亚阈微扰 solimp 阻尼（对反弹高度亚阈）
+SCENE_C_NEGATIVE_CONTROL = {
+    "schema": f"{SCHEMA_PREFIX}.negative_control.v1",
+    "scene_id": SCENE_C,
+    "allowed_diff": ["solimp_damping"],
+    "metric": "rebound_height_m_negative_equivalence",
+    "note": "sham 与基准只差 solimp 阻尼微扰（亚阈）；接触刚度和速度两边相同",
+}
+
+
+# ---------------------------------------------------------------------------
+# S2b D_N：受迫振动域（驱动频率 × 关节阻尼 → 稳态振幅）
+# ---------------------------------------------------------------------------
+
+SCENE_D = "D_forced_vibration"
+
+SCENE_D_DOC = SceneDoc(
+    scene_id=SCENE_D,
+    study="D",
+    version=1,
+    title="受迫振动（驱动频率 × 关节阻尼 → 稳态振幅）",
+    description=(
+        "单关节弹簧-质量-阻尼系统，受谐波驱动力。驱动频率与关节阻尼的交互"
+        "对稳态振幅的影响。无接触，与 B_N 的 PD 跟踪机制互异。"
+        "NC 槽：亚阈微扰驱动相位。"),
+    params=(
+        ParamSpec("drive_freq_hz", "Hz", "float", Decimal("0.5"), Decimal("3.0"),
+                  role="physical", description="驱动频率"),
+        ParamSpec("joint_damping", "Nm·s/rad", "float", Decimal("0.01"),
+                  Decimal("0.5"), role="physical", description="关节粘性阻尼"),
+        ParamSpec("drive_phase_rad", "rad", "float", Decimal("0.0"),
+                  Decimal("0.1"), role="physical", description="驱动相位偏移"),
+    ),
+    fixed=(
+        FixedSpec("spring_stiffness_nm_rad", Decimal("10.0"), "Nm/rad", "弹簧刚度"),
+        FixedSpec("inertia_kgm2", Decimal("0.05"), "kg·m^2", "关节惯量"),
+        FixedSpec("drive_amplitude_nm", Decimal("1.0"), "Nm", "驱动力幅值"),
+        FixedSpec("duration_s", DURATION_S, "s", "仿真时长"),
+        FixedSpec("gravity", "off", "1", "重力关闭（纯受迫振动）"),
+        FixedSpec("solver", "mujoco_default_pinned", "1", "solver 由镜像固定"),
+    ),
+    metrics=("steady_state_amplitude_rad",),
+)
+
+#: D_N 阴性对照：亚阈微扰驱动相位（对稳态振幅亚阈）
+SCENE_D_NEGATIVE_CONTROL = {
+    "schema": f"{SCHEMA_PREFIX}.negative_control.v1",
+    "scene_id": SCENE_D,
+    "allowed_diff": ["drive_phase_rad"],
+    "metric": "steady_state_amplitude_rad_negative_equivalence",
+    "note": "sham 与基准只差驱动相位微扰（亚阈）；频率和阻尼两边相同",
+}
+
+
 SCENE_REGISTRY: "Mapping[str, SceneDoc]" = {
     SCENE_A: SCENE_A_DOC,
     SCENE_B: SCENE_B_DOC,
+    SCENE_C: SCENE_C_DOC,
+    SCENE_D: SCENE_D_DOC,
 }
 
 

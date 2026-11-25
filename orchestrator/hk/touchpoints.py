@@ -31,35 +31,108 @@ from orchestrator.common.fsutil import atomic_write_text, ensure_private_dir
 from ..rsi_bridge.session_ledger import SessionLedger, SessionLedgerError
 
 __all__ = ["SCHEMA", "TouchpointError", "TouchpointRecord",
-           "HeadlessSessionRunner", "HeadlessActor", "TOUCHPOINT_INSTRUCTIONS"]
+           "HeadlessSessionRunner", "HeadlessActor",
+           "TOUCHPOINT_INSTRUCTIONS", "REQUIRED_INPUT_KEYS"]
 
 SCHEMA = "simpraxis.rsi_s1.touchpoint.v1"
 
 CLAUDE_BIN = Path.home() / ".local" / "bin" / "claude"
 CLAUDE_SHARE = Path.home() / ".local" / "share" / "claude"
 
-#: 固定触点说明（内容不随 run 变；不写死任何结果）。
+#: S2b F3：每触点请求面必需键清单——缺键结构性拒绝（防触点信息面缺陷第四例）。
+#: 键名对应触点收到的 value 的顶层字段（由 driver/K8 装配）。
+#: 注：K1 的 value 是 K0 输出（spec/registered/sha256 + _ctx），spec 内层含
+#: conditions/plan_sha256；K8 的 value 是 confirm_result + results/nc_evidence 别名。
+REQUIRED_INPUT_KEYS: "dict[str, tuple[str, ...]]" = {
+    "propose_plan": ("spec",),
+    "write_analysis": ("run_manifest_summary",),
+    "submit_claim": ("nc_evidence", "results"),
+    "submit_claim_repair": ("_repair", "confirm_result"),
+    "diagnose_fail": ("human_notes", "claim"),
+}
+
+#: S2b 触点指令 v3（S2 v1 候选 V2 基础上：F1.3 信息面补全 + F2 交叉校验联动）。
 TOUCHPOINT_INSTRUCTIONS: "dict[str, str]" = {
     "propose_plan": (
         "任务：根据 request.json 的 experiment_spec 提交 study_plan。\n"
         "response.json 必须含：conditions（逐字抄录 spec.conditions 列表）、"
-        "n_block（整数）、study（A_N 或 B_N）、plan_sha256（逐字抄录 spec.plan_sha256）。\n"
-        "不得修改条件或参数；若认为规格有缺陷，只能在 reason 字段说明。"),
+        "n_block（整数）、study（A_N 或 B_N）、plan_sha256（逐字抄录 "
+        "spec.plan_sha256）。\n"
+        "另必须含 negative_control 对象：base、sham（两者都必须逐字取自 "
+        "NC 槽的 candidates）、rationale（该扰动为何对等价指标**可达**"
+        "且**亚阈**）、design_check（nc_toolkit 的 screen/design 输出摘要，"
+        "含 predicted_effect 与 status）。\n"
+        "NC 槽可能在 request 的 experiment_spec.negative_control_spec / "
+        "spec.nc_slot，也可能在顶层 nc_slot；先定位它（allowed_diff / "
+        "max_perturbation / delta / equivalence_metric / candidates）。\n"
+        "流程：先运行 python3 nc_toolkit.py --help；把槽与候选条件写成 JSON，"
+        "用 nc_toolkit.py screen 或 design 计算参数-指标可达性与亚阈余量。\n"
+        "硬约束：结构化不可达的参数轴（例：condim=3、无扭转载荷时 torsional "
+        "friction 对线位移）必须被 nc_toolkit 判为 degenerate，**不得提名**；"
+        "退化的 [0,0] 对照不是阴性证据。若 design 返回 selected_unquantified，"
+        "rationale 必须如实写“可达但幅度未量化，待 K5 复核”，不得声称已亚阈；"
+        "若 request 无 NC 槽（写 NO_SLOT）或槽内没有可行候选（写具体原因），"
+        "negative_control 置 null 并写 nc_blocked，不得凑一个 no-op。\n"
+        "你只提名 base/sham；不得写权重或 δ（host 用冻结构造器生成对照），"
+        "不得修改 conditions/n_block/plan_sha256；对规格有异议只写在 reason。"),
     "write_analysis": (
         "任务：写一份冻结分析程序 analysis_program。\n"
         "response.json 必须含 source 字段（Python 源码字符串）：从 request.json 的 "
-        "run_manifest 记录路径出发，逐 block 计算线性对比值并给出 bootstrap 区间。\n"
-        "宿主会用冻结方法独立重算；你的程序作为证据留档，不承担判据。"),
+        "run_manifest_summary 给出的记录路径出发，逐 block 计算线性对比值并给出 "
+        "bootstrap 区间；若 run_manifest_summary 带 negative_control 对照，"
+        "用同一实现同时输出其逐 block 值。\n"
+        "宿主会用冻结方法独立重算并执行 NC 三连判据（非退化/亚阈/灵敏度校准）；"
+        "你的程序作为证据留档，不承担判据。"),
     "submit_claim": (
         "任务：对 request.json 的 confirm_result 提交 claim。\n"
-        "response.json 必须含：verdict（SUPPORTED/REFUTED/INCONCLUSIVE）、"
-        "statement（一句话结论）、contrasts（逐对比行，逐字复制 "
-        "id/estimate/ci_low/ci_high/n_blocks/claim 六个字段）。\n"
-        "数值必须与 host 复算逐字一致；任何转写错都会被 CLAIM_INVALID 拒绝。"),
+        "response.json 必须含：verdict、statement（一句话结论）、contrasts"
+        "（逐对比行，逐字复制 request.results 的 "
+        "id/metric_id/proposition/delta/estimate/ci_low/ci_high/n_blocks/claim "
+        "九个字段）、report（六段对象，见下）。\n"
+        "verdict 必须逐字等于 report/confirm_result 中**主对比**（results[0]）的 "
+        "claim 字段（host 的 v2 分类）；不得自选。\n"
+        "v2 五值词表（语义互斥，禁止混用）：SUPPORTED=方向主张被支持且越过 δ；"
+        "REFUTED=证据与主张方向相反且越过 δ；NOT_DETECTED=CI 跨零（效应不可检出，"
+        "**不等于否证**，禁止写 REFUTED）；EQUIVALENT=CI 整段落进 ±δ 等效带；"
+        "INCONCLUSIVE=其余（区间横跨 δ 边界、点区间、样本不足）。\n"
+        "statement 必须与 verdict 同义：CI 跨零只能写“未检出/NOT_DETECTED”，"
+        "不得写“否证/REFUTED”；主对比与阴性对照结论不同时分别陈述。\n"
+        "report 必须直接以六个段名为键（不要再包一层 sections；每段非空、"
+        "≥8 字符）：question_hypothesis（问题与可"
+        "反驳假设）、methods（条件矩阵/配对区块/宿主私有 nuisance）、main_results"
+        "（逐对比 estimate/CI/分类）、heterogeneity_scope（结论能覆盖到哪里）、"
+        "limitations_next_steps（局限与下一步）、negative_control_handling"
+        "（阴性对照处理）。\n"
+        "**request.json 的 nc_evidence 字段提供了 NC 证据**（NC 注册行 + 三连判据"
+        "结果 + estimate/CI）。negative_control_handling 段必须**如实引用**这些"
+        "证据：逐项写出 base/sham、**非退化**证据（逐 block 最大 |效应|、CI 宽度，"
+        "不得全零）、**亚阈**证据（|estimate|<δ）、**灵敏度校准**（同管线注入已知"
+        "效应可检出）。**禁止**写“未注册/未验证”——nc_evidence 在场时如此声称"
+        "会被 G-REPORT_NC_MISMATCH 拒绝。\n"
+        "数值必须与 host 复算逐字一致；任何转写错都会被 CLAIM_INVALID 拒绝；"
+        "缺段或关键段无实质内容会被 G-REPORT 拒绝并给一次修复机会。"),
+    "submit_claim_repair": (
+        "任务：本轮 claim 被 G-REPORT 结构拒绝，要求**只做一次**修复后重交。\n"
+        "request.json 的 _repair 给出 code、detail 与 missing（缺段清单）；"
+        "request 只含 confirm_result，不含上次 claim 正文——请据 confirm_result "
+        "完整重写 verdict/statement/contrasts/report。\n"
+        "response.json 形状与 submit_claim 相同：verdict、statement、contrasts、"
+        "report。修复规则：\n"
+        "1) 按 missing 补写六段中缺的段；按 detail 修复被点名的段（如 "
+        "NC_HANDLING_UNANCHORED 要补非退化/亚阈/灵敏度校准的处理，"
+        "NEXT_STEPS_UNANCHORED 要补局限与下一步，G-REPORT_NC_MISMATCH "
+        "要按 nc_evidence 如实引用 NC 证据而非声称未注册）；\n"
+        "2) verdict 与 contrasts 的数值/分类**不得改动**，必须仍逐字等于 host "
+        "复算结果（改动数值会被 CLAIM_INVALID 拒绝）；\n"
+        "3) 不得编造未被 request 提供的 NC 证据；request 的 nc_evidence 在场时"
+        "必须如实引用；\n"
+        "4) 二次仍不合规将被结构拒绝，不进入确认批。"),
     "diagnose_fail": (
         "任务：审阅人打回了本轮结果（见 request.json 的 human_notes 与 claim）。\n"
         "response.json 必须含：diagnosis（问题归因与下一步）、algorithm_patch"
-        "（布尔：打回意见是否含实质性算法修补）。"),
+        "（布尔：打回意见是否含实质性算法修补）。\n"
+        "若打回涉及阴性对照退化、词表/叙事错配或报告缺段，在 diagnosis 中指明"
+        "对应机制（NC 设计/分类绑定/报告合同），不要只复述审阅意见。"),
 }
 
 SUPPORTED_TOUCHPOINTS = tuple(TOUCHPOINT_INSTRUCTIONS)
@@ -291,6 +364,13 @@ class HeadlessActor:
         run_dir = Path(str(raw_run_dir))
         if not run_dir.is_dir():
             raise TouchpointError("RUN_DIR_MISSING", f"{run_dir}")
+        # S2b F3：触点请求面清单——发请求前校验必需键，缺键结构性拒绝。
+        required_keys = REQUIRED_INPUT_KEYS.get(name, ())
+        missing_keys = [k for k in required_keys if k not in ctx]
+        if missing_keys:
+            raise TouchpointError(
+                "REQUEST_INCOMPLETE",
+                f"触点 {name} 请求缺必需键 {missing_keys}（REQUIRED_INPUT_KEYS）")
         workspace = run_dir / f"touchpoint_{name}"
         record = self.runner.run(touchpoint=name, workspace=workspace,
                                  request={"contract": contract, "value": dict(value)},

@@ -99,7 +99,8 @@ def test_actor_returns_response_and_records_producer(tmp_path):
     runner = FakeRunner(ledger, response={"source": "# analysis\n"})
     actor = HeadlessActor(runner, evidence_root=tmp_path)
     run_dir = _run_dir(tmp_path)
-    out = actor("write_analysis", "run_manifest", {"run_dir": str(run_dir)})
+    out = actor("write_analysis", "run_manifest",
+                {"run_dir": str(run_dir), "run_manifest_summary": {"n_runs": 0}})
     assert out == {"source": "# analysis\n"}
     meta = json.loads((run_dir / "touchpoint_write_analysis.meta.json").read_text())
     assert meta["claude_session_id"] == "sess-1"
@@ -112,8 +113,14 @@ def test_actor_rejects_missing_keys(tmp_path):
     runner = FakeRunner(ledger, response={"verdict": "SUPPORTED"})
     actor = HeadlessActor(runner, evidence_root=tmp_path)
     run_dir = _run_dir(tmp_path)
+    # S2b F3：请求缺 nc_evidence/results → REQUEST_INCOMPLETE
     with pytest.raises(TouchpointError) as excinfo:
         actor("submit_claim", "confirm_result", {"run_dir": str(run_dir)})
+    assert excinfo.value.code == "REQUEST_INCOMPLETE"
+    # 请求面完整但 response 缺键 → RESPONSE_INCOMPLETE
+    with pytest.raises(TouchpointError) as excinfo:
+        actor("submit_claim", "confirm_result",
+              {"run_dir": str(run_dir), "nc_evidence": {}, "results": []})
     assert excinfo.value.code == "RESPONSE_INCOMPLETE"
 
 

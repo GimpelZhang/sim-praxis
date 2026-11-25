@@ -300,6 +300,10 @@ def recompute(confirm_plan: Mapping[str, Any], *, fresh_root: Path | str,
 
         results.append({
             "id": contrast.get("id"),
+            "metric_id": contrast.get("metric_id"),
+            "proposition": contrast.get("proposition"),
+            "delta": contrast.get("delta"),
+            "level": contrast.get("level", "0.95"),
             "estimate": estimated["effect"],
             "ci_low": estimated["lower"],
             "ci_high": estimated["upper"],

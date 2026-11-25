@@ -222,6 +222,117 @@ def run_b(spec, model, data):
     return status, stop_index, arrays, extra, _warnings_total(data)
 
 
+def run_c(spec, model, data):
+    """S2b C_N：球体碰撞反弹。记录 z 轨迹，指标 = 首次反弹最大高度。"""
+    run = spec["run"]
+    nsteps = int(spec["nsteps"])
+    dt = float(model.opt.timestep)
+    v0 = float(run["initial_vz_mps"])
+    _require(np.isfinite(v0), "SPEC_FIELD", "初始速度非有限")
+
+    # 设置初始下落速度（z 方向负 = 向下）
+    data.qvel[:] = 0.0
+    data.qvel[2] = -abs(v0)
+
+    n_alloc = nsteps
+    time_s = np.empty(n_alloc, dtype=np.float64)
+    z_pos = np.empty(n_alloc, dtype=np.float32)
+    z_vel = np.empty(n_alloc, dtype=np.float32)
+    used = 0
+    status, stop_index = "ok", None
+    events = []
+    bounced = False
+    max_z_after_bounce = 0.0
+
+    for i in range(nsteps):
+        mujoco.mj_step(model, data)
+        t_end = (i + 1) * dt
+        z = float(data.qpos[2])
+        vz = float(data.qvel[2])
+        if not (np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all()):
+            status = "nonfinite"
+            events.append({"time_s": t_end, "reason": "NONFINITE"})
+            break
+        time_s[used] = t_end
+        z_pos[used] = z
+        z_vel[used] = vz
+        used += 1
+        # 检测反弹：之前 vz < 0（下落），现在 vz > 0（上升）
+        if not bounced and vz > 0.0 and z < 0.1:
+            bounced = True
+        if bounced:
+            max_z_after_bounce = max(max_z_after_bounce, z)
+
+    arrays = {
+        "time_s": time_s[:used],
+        "z_pos": z_pos[:used],
+        "z_vel": z_vel[:used],
+    }
+    extra = {"max_rebound_height_m": float(max_z_after_bounce),
+             "bounced": bounced, "instability_events": events}
+    return status, stop_index, arrays, extra, _warnings_total(data)
+
+
+def run_d(spec, model, data):
+    """S2b D_N：受迫振动。记录 q 轨迹，指标 = 稳态振幅（后 50% 时窗）。"""
+    run = spec["run"]
+    nsteps = int(spec["nsteps"])
+    dt = float(model.opt.timestep)
+    freq = float(run["drive_freq_hz"])
+    drive_amp = float(run["drive_amplitude_nm"])
+    phase = float(run.get("drive_phase_rad", 0.0))
+    two_pi = 2.0 * np.pi
+
+    n_alloc = nsteps
+    time_s = np.empty(n_alloc, dtype=np.float64)
+    qpos = np.empty((n_alloc, model.nq), dtype=np.float32)
+    qvel = np.empty((n_alloc, model.nv), dtype=np.float32)
+    applied = np.empty(n_alloc, dtype=np.float32)
+    used = 0
+    status, stop_index = "ok", None
+    events = []
+
+    for i in range(nsteps):
+        t = i * dt
+        # 谐波驱动力：F = A * sin(2π f t + φ)
+        force = drive_amp * np.sin(two_pi * freq * t + phase)
+        data.qfrc_applied[:] = 0.0
+        data.qfrc_applied[0] = force
+        mujoco.mj_step(model, data)
+        t_end = (i + 1) * dt
+        if not (np.isfinite(data.qpos).all() and np.isfinite(data.qvel).all()):
+            status = "nonfinite"
+            events.append({"time_s": t_end, "reason": "NONFINITE"})
+            break
+        time_s[used] = t_end
+        qpos[used] = data.qpos
+        qvel[used] = data.qvel
+        applied[used] = force
+        used += 1
+        if abs(float(data.qpos[0])) > 4.0:
+            status = "instability"
+            stop_index = i
+            events.append({"time_s": t_end, "reason": "ABS_Q_GT_4"})
+            break
+
+    arrays = {
+        "time_s": time_s[:used],
+        "qpos": qpos[:used],
+        "qvel": qvel[:used],
+        "applied_force": applied[:used],
+    }
+    # 稳态振幅：后 50% 时窗的 (max-min)/2
+    if used > 10:
+        half = used // 2
+        q_window = qpos[half:used, 0]
+        steady_amp = float((q_window.max() - q_window.min()) / 2.0)
+    else:
+        steady_amp = 0.0
+    extra = {"steady_state_amplitude_rad": steady_amp,
+             "instability_events": events}
+    return status, stop_index, arrays, extra, _warnings_total(data)
+
+
 def write_outputs(spec, status, stop_index, arrays, extra, warnings):
     total = sum(int(a.nbytes) for a in arrays.values())
     _require(total <= DUMP_SIZE_CAP, "OUTPUT_TOO_LARGE", "数组 %d B" % total)
@@ -282,6 +393,14 @@ def main():
             _require(model.nq == 1 and model.nv == 1, "SCENE_SHAPE",
                      "B 期望单 hinge 1/1，实为 %d/%d" % (model.nq, model.nv))
             out = run_b(spec, model, data)
+        elif kind == "C":
+            _require(model.nq == 7 and model.nv == 6, "SCENE_SHAPE",
+                     "C 期望 free joint 7/6，实为 %d/%d" % (model.nq, model.nv))
+            out = run_c(spec, model, data)
+        elif kind == "D":
+            _require(model.nq == 1 and model.nv == 1, "SCENE_SHAPE",
+                     "D 期望单 hinge 1/1，实为 %d/%d" % (model.nq, model.nv))
+            out = run_d(spec, model, data)
         else:
             raise Rejected("STUDY_UNKNOWN", repr(kind))
         write_outputs(spec, *out)

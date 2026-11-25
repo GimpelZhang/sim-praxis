@@ -48,8 +48,18 @@ def fake_analyzer(run_manifest, context=None):
 
 
 def fake_confirmer(confirm_plan, context=None):
-    return {"contrasts": [{"id": "c1v2", "estimate": 0.1025,
-                           "ci_low": 0.05, "ci_high": 0.15, "n_blocks": 4}]}
+    # S2b F1.1：confirm_result 必须含 negative_control + 全字段 results 行。
+    return {
+        "contrasts": [{"id": "c1v2", "metric_id": "m1",
+                       "proposition": "decrease_gt", "delta": "0.01",
+                       "level": "0.95", "estimate": 0.1025,
+                       "ci_low": 0.05, "ci_high": 0.15, "n_blocks": 4,
+                       "claim": "INCONCLUSIVE"}],
+        "negative_control": {"registered": True, "base": "c1", "sham": "c1_sham",
+                             "non_degenerate": True, "sub_threshold": True,
+                             "sensitivity_calibrated": True,
+                             "estimate": 0.0, "ci_low": -0.001, "ci_high": 0.001},
+    }
 
 
 def spec():

@@ -169,6 +169,13 @@ from orchestrator.common.runtime_paths import (
     rsi_s2_gateway_state_path,
     rsi_s2_ledger_path,
     rsi_s2_quota_dir,
+    assert_rsi_s2b_roots_isolated,  # RSI-S2b：与封存/历史族根互异互斥
+    rsi_s2b_approvals_dir,
+    rsi_s2b_counters_path,
+    rsi_s2b_gateway_state_dir,
+    rsi_s2b_gateway_state_path,
+    rsi_s2b_ledger_path,
+    rsi_s2b_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -1148,6 +1155,33 @@ RSI_S2_NAMESPACE = _LedgerNamespace(
 )
 
 
+# RSI-S2b（2026-11-25）：K8 信息面修复 + R1 重验轮账；命名空间 2911。
+# 预算：网关面硬帽 40 实呼（双审 4 + 校准 2 + 探针 2 + 修复储备 8 + 余量 24）；
+# 会话面硬帽 24（2 研究×3 触点=6 + smoke 1 + 修复触点 2 + 余量 15），双面分列不混算。
+LEDGER_RSI_S2B = 2911
+RSI_S2B_HARD_CAP = 40
+RSI_S2B_NORMAL_BUDGET = 40
+RSI_S2B_TASK_CAPS = types.MappingProxyType({
+    1: 2,    # s2b_probe：校准探针
+    2: 4,    # s2b_dual_review：双审 2 通道 × 2 研究
+    3: 8,    # s2b_repair：修复储备（G-REPORT_NC_MISMATCH 修复触点等）
+    4: 26,   # s2b_margin：余量
+})
+
+RSI_S2B_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_S2B,
+    quota_dir_fn=rsi_s2b_quota_dir,
+    ledger_path_fn=rsi_s2b_ledger_path,
+    counters_path_fn=rsi_s2b_counters_path,
+    approvals_dir_fn=rsi_s2b_approvals_dir,
+    pause_dir_fn=rsi_s2b_gateway_state_dir,
+    pause_path_fn=rsi_s2b_gateway_state_path,
+    task_caps=RSI_S2B_TASK_CAPS,
+    hard_cap=RSI_S2B_HARD_CAP,
+    normal_budget=RSI_S2B_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -1189,6 +1223,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_s1_roots_isolated()
     elif ns.phase == LEDGER_RSI_S2:
         assert_rsi_s2_roots_isolated()
+    elif ns.phase == LEDGER_RSI_S2B:
+        assert_rsi_s2b_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1496,6 +1532,11 @@ class QuotaLedger:
     def rsi_s2(cls) -> "QuotaLedger":
         """RSI-S2 账（2910；单阶段无 campaign，硬帽 40 实呼 + 48 会话面）。"""
         return cls(RSI_S2_NAMESPACE)
+
+    @classmethod
+    def rsi_s2b(cls) -> "QuotaLedger":
+        """RSI-S2b 账（2911；硬帽 40 网关实呼 + 24 会话面）。"""
+        return cls(RSI_S2B_NAMESPACE)
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":
