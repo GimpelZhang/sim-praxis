@@ -119,7 +119,8 @@ def build_block_assignment(plan_sha256: str, *, study: str, n_block: int,
     if isinstance(n_block, bool) or not isinstance(n_block, int) or n_block <= 0:
         raise PhysicsServiceError("N_BLOCK_INVALID", f"{n_block!r}")
     if not nuisance:
-        raise PhysicsServiceError("NUISANCE_EMPTY", "至少一个 nuisance 参数")
+        # S2b C_N/D_N 全因子设计无 nuisance——允许空 nuisance（块间无扰动）。
+        pass
     blocks: list[dict[str, Any]] = []
     for index in range(n_block):
         block_id = f"b{index + 1:02d}"
