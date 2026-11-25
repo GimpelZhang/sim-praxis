@@ -261,19 +261,23 @@ class ResearchDriver:
                 self._record(run_dir, "K8.json", claim)
                 if self.claim_guard:
                     # G-CLAIM（AC-17）：自报逐字段 vs host 复算；不符即 CLAIM_INVALID。
-                    # host 真值取 confirm_result 的**主张投影**（contrasts 行）——
-                    # 只比对可主张的数值面（id/estimate/ci/n_blocks/claim），
-                    # 元数据（metric_id/proposition/delta/level）与信封时间戳/sha
-                    # 不要求自报复制（S2b F1.1 全字段扩展后的口径）。
+                    # 两侧统一投影到核心主张面（id/estimate/ci/n_blocks/claim），
+                    # 元数据（metric_id/proposition/delta/level）不要求自报复制。
+                    _CLAIM_FIELDS = ("id", "estimate", "ci_low", "ci_high",
+                                     "n_blocks", "claim")
                     host_truth = k7_value if isinstance(k7_value, Mapping) else {}
                     host_contrasts = host_truth.get("contrasts")
                     if isinstance(host_contrasts, list):
-                        _CLAIM_FIELDS = ("id", "estimate", "ci_low", "ci_high",
-                                         "n_blocks", "claim")
                         host_truth = {"contrasts": [
                             {k: row.get(k) for k in _CLAIM_FIELDS}
                             for row in host_contrasts if isinstance(row, Mapping)]}
-                    enforce(["G-CLAIM"], GuardCtx(stage=stage_id, claim_doc=claim,
+                    # 投影 claim 的 contrasts 到同一字段面
+                    claim_projected = dict(claim)
+                    if isinstance(claim.get("contrasts"), list):
+                        claim_projected["contrasts"] = [
+                            {k: row.get(k) for k in _CLAIM_FIELDS}
+                            for row in claim["contrasts"] if isinstance(row, Mapping)]
+                    enforce(["G-CLAIM"], GuardCtx(stage=stage_id, claim_doc=claim_projected,
                                                   host_recomputed=dict(host_truth)))
                     # 评审 HIGH-2：总判词不得是纯自报——必须等于 host 对**主对比**
                     # （contrasts[0]，预注册前已冻结顺序）的分类。
