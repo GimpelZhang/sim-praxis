@@ -300,9 +300,11 @@ class ResearchDriver:
                 return DriverResult("human_failure", code, run_idx,
                                     rejects=dict(self.rejects), detail=str(exc))
             except Exception as exc:  # noqa: BLE001 - 仪器失败如实结案，不吞
+                import traceback as _tb
+                _tb_str = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
                 return DriverResult("human_failure", "STAGE_RUNTIME_ERROR", run_idx,
                                     rejects=dict(self.rejects),
-                                    detail=f"{type(exc).__name__}: {exc}")
+                                    detail=f"{type(exc).__name__}: {exc}\n{_tb_str}")
 
             card = {"stage_id": stage_id, "run_idx": run_idx, "claim": claim,
                     "evidence": str(run_dir), "rejects": dict(self.rejects)}
