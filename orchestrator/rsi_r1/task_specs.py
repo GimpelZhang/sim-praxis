@@ -880,7 +880,7 @@ def build_s2b_c(*, commitment: "str | None" = None,
         negative_control_spec={
             "schema": "simpraxis.rsi_s2.nc_slot.v1",
             "allowed_diff": ["solimp_damping"],
-            "max_perturbation": {"solimp_damping": "0.0005"},
+            "max_perturbation": {"solimp_damping": "0.01"},
             "delta": "0.001",
             "ci_level": "0.90",
             "equivalence_metric": "rebound_height_m_negative_equivalence",
