@@ -44,7 +44,12 @@ POINT_FIELDS = ("time_s", "qpos", "qvel")
 METRIC_ALIASES = {"displacement_x_m_negative_equivalence": "displacement_x_m",
                   # S2-1：B 机制的亚阈阴性对照（计划 §2.1 第 3 行）
                   "normalized_tracking_rmse_negative_equivalence":
-                      "normalized_tracking_rmse"}
+                      "normalized_tracking_rmse",
+                  # S2b：C_N/D_N 亚阈阴性对照
+                  "rebound_height_m_negative_equivalence":
+                      "rebound_height_m",
+                  "steady_state_amplitude_rad_negative_equivalence":
+                      "steady_state_amplitude_rad"}
 
 
 class HostRecomputeError(RuntimeError):

@@ -188,7 +188,7 @@ def run_studies() -> int:
 
         runner = HeadlessSessionRunner(
             sessions_root=rsi_s2b_sessions_dir() / "ws",
-            ledger=ledger, max_turns=90)
+            ledger=ledger, max_turns=90, timeout_s=1800)
         actor = HeadlessActor(runner, evidence_root=run_root, host_label=label)
 
         driver = ResearchDriver(
