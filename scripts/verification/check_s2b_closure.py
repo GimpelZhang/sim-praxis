@@ -66,13 +66,17 @@ def check_five_conditions() -> dict:
                     for nc in nc_results.values()),
     }
 
-    # 3. 独立复跑（n_diffs=0）
+    # 3. 独立复跑（n_diffs=0）——K7 的 recompute_report 即独立复跑记录
     rerun_results = {}
     for study in ("C_N", "D_N"):
-        rerun_path = evidence_root / "campaign" / "trial" / f"s2b-{study.lower()}" / "rerun.json"
-        if rerun_path.exists():
-            d = json.loads(rerun_path.read_text())
-            rerun_results[study] = {"n_diffs": d.get("n_diffs"), "pass": d.get("n_diffs") == 0}
+        k7_path = (evidence_root / "campaign" / "trial" / f"s2b-{study.lower()}"
+                   / "runs" / f"{study}_run001" / "K7.json")
+        if k7_path.exists():
+            k7 = json.loads(k7_path.read_text())
+            rr = k7.get("recompute_report") or {}
+            nd = rr.get("n_diffs")
+            rerun_results[study] = {"n_diffs": nd, "fresh_root": rr.get("fresh_root"),
+                                    "pass": nd == 0}
         else:
             rerun_results[study] = {"n_diffs": None, "pass": False}
     results["independent_rerun"] = {
@@ -120,11 +124,33 @@ def main() -> int:
         failed = [k for k, v in five.items() if not v.get("pass")]
         r1 = f"NOT_ESTABLISHED（{', '.join(failed)} 未过）"
 
+    # 过程缺口（如实挂牌，不计入 problems；与 S2 同构的 gaps 机制）
+    gaps = []
+    from orchestrator.common.runtime_paths import rsi_s2b_quota_dir
+    qdir = rsi_s2b_quota_dir()
+    degraded = sorted(qdir.glob("ledger.degraded.*.json")) if qdir.exists() else []
+    if degraded:
+        gaps.append({
+            "code": "LEDGER_ACCOUNTING_GAP",
+            "detail": (f"{len(degraded)} 次真实 POST 因命名空间/解析 bug 未入账或"
+                       f"tokens 未捕获；供应商消耗 > 账行计数（如 degraded "
+                       f"094854 C_N×a 3746/5680 ok=true）"),
+            "files": [p.name for p in degraded],
+        })
+    # 双审首轮丢失（2 呼结果因脚本 bug未持久化，seq1/2 task2 ok 但结果丢弃）
+    gaps.append({
+        "code": "REVIEW_ROUND1_RESULT_LOSS",
+        "detail": ("双审首轮 C_N×a/C_N×b（task2 seq1/2 ok=true）结果因脚本解析键错+"
+                   "未持久化丢失，重做批 task3 重跑；账行保留不删（证据只增不删）"),
+    })
+
     judge = {
         "schema": "simpraxis.s2b.closure.v1",
         "five_conditions": five,
         "all_pass": all_pass,
         "r1_verdict": r1,
+        "gaps": gaps,
+        "problems": [] if all_pass else [{"code": "CONDITIONS_FAILED"}],
     }
     judge_sha = _sha(judge)
     judge["judge_sha256"] = judge_sha
