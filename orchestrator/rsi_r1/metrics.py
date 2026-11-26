@@ -212,8 +212,12 @@ def metrics_for(record: Mapping[str, Any], *, study_id: str,
             raise MetricError("PARAM_INVALID", f"B 需要 amplitude_rad，多余 {sorted(unknown)}")
         return compute_study_b(record, amplitude_rad=kwargs["amplitude_rad"])
     if study_id == "C":
+        if kwargs:
+            raise MetricError("PARAM_INVALID", f"C 不接受额外参数，多余 {sorted(kwargs)}")
         return compute_study_c(record)
     if study_id == "D":
+        if kwargs:
+            raise MetricError("PARAM_INVALID", f"D 不接受额外参数，多余 {sorted(kwargs)}")
         return compute_study_d(record)
     raise MetricError("STUDY_UNKNOWN", repr(study_id))
 

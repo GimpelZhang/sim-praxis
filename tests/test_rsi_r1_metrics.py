@@ -141,6 +141,11 @@ def test_metrics_for_dispatch_rejects_cross_study_kwargs():
     with pytest.raises(M.MetricError) as exc:
         M.metrics_for(rec, study_id="B", initial_x_m=0.0)
     assert exc.value.code == "PARAM_INVALID"
+    # S2b：C/D 现为合法研究（无 kwargs），多余参数同样 PARAM_INVALID
     with pytest.raises(M.MetricError) as exc:
         M.metrics_for(rec, study_id="C", initial_x_m=0.0)
+    assert exc.value.code == "PARAM_INVALID"
+    # 真正未知研究（E）仍 STUDY_UNKNOWN
+    with pytest.raises(M.MetricError) as exc:
+        M.metrics_for(rec, study_id="E")
     assert exc.value.code == "STUDY_UNKNOWN"
