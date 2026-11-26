@@ -145,8 +145,13 @@ def scene_b_xml(*, dt_s: Decimal, inertia_ratio: Decimal) -> str:
 def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
                 v0_mps: Decimal, solimp_damping: Decimal = Decimal("0.9"),
                 ball_mass_kg: Decimal = Decimal("0.5"),
-                solref_time_s: Decimal = Decimal("0.02")) -> str:
-    """S2b C_N：球体碰撞反弹（接触阻尼比 × 撞击速度）。"""
+                solref_time_s: Decimal = Decimal("0.02"),
+                drop_height_m: Decimal = C_DROP_HEIGHT) -> str:
+    """S2b C_N：球体碰撞反弹（接触阻尼比 × 撞击速度）。
+
+    S2c R2 前置：``drop_height_m`` 由固定改为可变 regime 旋钮（默认
+    ``C_DROP_HEIGHT=1.0`` 使既有任务物理恒等）；撞击速度 = sqrt(v0^2+2g·h)。
+    """
     solref = f"{_plain(solref_time_s)} {_plain(solref_damping_ratio)}"
     solimp = f"0.9 {_plain(solimp_damping)} 0.0001"
     return (
@@ -156,7 +161,7 @@ def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
         "<worldbody>"
         f"<geom name=\"floor\" type=\"plane\" size=\"3 3 0.1\" "
         f"condim=\"3\" solref=\"{solref}\" solimp=\"{solimp}\"/>"
-        f"<body name=\"ball\" pos=\"0 0 {_plain(C_DROP_HEIGHT)}\">"
+        f"<body name=\"ball\" pos=\"0 0 {_plain(drop_height_m)}\">"
         "<freejoint name=\"ball_free\"/>"
         f"<geom name=\"ball_geom\" type=\"sphere\" size=\"{_plain(C_BALL_RADIUS)}\" "
         f"mass=\"{_plain(ball_mass_kg)}\" condim=\"3\" "
@@ -171,8 +176,14 @@ def scene_c_xml(*, dt_s: Decimal, solref_damping_ratio: Decimal,
 
 def scene_d_xml(*, dt_s: Decimal, drive_freq_hz: Decimal,
                 joint_damping: Decimal,
-                drive_amplitude_nm: Decimal = Decimal("1.0")) -> str:
-    """S2b D_N：受迫振动（驱动频率 × 关节阻尼 → 稳态振幅）。"""
+                drive_amplitude_nm: Decimal = Decimal("1.0"),
+                spring_stiffness_nm_rad: Decimal = D_SPRING_STIFFNESS) -> str:
+    """S2b D_N：受迫振动（驱动频率 × 关节阻尼 → 稳态振幅）。
+
+    S2c R2 前置：``spring_stiffness_nm_rad`` 由固定改为可变 regime 旋钮（默认
+    ``D_SPRING_STIFFNESS=10.0`` 使既有任务物理恒等）；它决定自然频率
+    sqrt(k/I)/2π，强调制 freq×damping 共振交互。
+    """
     inertia = D_INERTIA
     return (
         "<mujoco model=\"rsi_s2b_D\">"
@@ -183,7 +194,7 @@ def scene_d_xml(*, dt_s: Decimal, drive_freq_hz: Decimal,
         f"diaginertia=\"{_plain(inertia)} {_plain(inertia)} {_plain(inertia)}\"/>"
         f"<joint name=\"hinge\" type=\"hinge\" axis=\"0 0 1\" "
         f"damping=\"{_plain(joint_damping)}\" "
-        f"stiffness=\"{_plain(D_SPRING_STIFFNESS)}\"/>"
+        f"stiffness=\"{_plain(spring_stiffness_nm_rad)}\"/>"
         "</body></worldbody></mujoco>"
     )
 
@@ -217,14 +228,19 @@ def build_scene_xml(spec: ExperimentSpec) -> str:
                            ball_mass_kg=_dec(p.get("ball_mass_kg", "0.5"),
                                              "ball_mass_kg"),
                            solref_time_s=_dec(p.get("solref_time_s", "0.02"),
-                                              "solref_time_s"))
+                                              "solref_time_s"),
+                           drop_height_m=_dec(p.get("drop_height_m", "1.0"),
+                                              "drop_height_m"))
     if spec.study_id == "D":
         p = spec.physical_params
         return scene_d_xml(dt_s=dt_s,
                            drive_freq_hz=_dec(p["drive_freq_hz"], "drive_freq_hz"),
                            joint_damping=_dec(p["joint_damping"], "joint_damping"),
                            drive_amplitude_nm=_dec(p.get("drive_amplitude_nm", "1.0"),
-                                                   "drive_amplitude_nm"))
+                                                   "drive_amplitude_nm"),
+                           spring_stiffness_nm_rad=_dec(
+                               p.get("spring_stiffness_nm_rad", "10.0"),
+                               "spring_stiffness_nm_rad"))
     raise PhysicsError("STUDY_UNKNOWN", f"study_id={spec.study_id!r}")
 
 

@@ -54,6 +54,9 @@ class ParamSpec:
     values: "tuple[Any, ...]" = ()
     role: str = "physical"      # physical｜initial_state｜controller
     description: str = ""
+    #: S2c R2 前置：可选参数缺失时的默认值（None=必填，保持既有行为）。
+    #: 用于给既有场景**加**一个 regime 旋钮而不破坏旧任务的参数集。
+    default: "Decimal | None" = None
 
     def domain_text(self) -> str:
         if self.kind == "enum":
@@ -234,10 +237,16 @@ SCENE_C_DOC = SceneDoc(
                   role="physical", description="球体质量"),
         ParamSpec("solref_time_s", "s", "float", Decimal("0.015"), Decimal("0.025"),
                   role="physical", description="接触刚度时间常数（nuisance：块间变异）"),
+        # S2c R2 前置：下落高度改为可变 regime 旋钮（默认 1.0 保持既有物理恒等）。
+        # 撞击速度 = sqrt(v0^2 + 2g·h)，h 改变碰撞能量/回弹regime → 调制 damp×v0 等
+        # 交互，且**独立于** solimp/solref_time 的 NC 链（给 C 腾出第三个强调制器）。
+        ParamSpec("drop_height_m", "m", "float", Decimal("0.3"),
+                  Decimal("2.0"), role="initial_state",
+                  description="球体初始下落高度（regime 旋钮）",
+                  default=Decimal("1.0")),
     ),
     fixed=(
         FixedSpec("ball_radius_m", Decimal("0.05"), "m", "球体半径固定"),
-        FixedSpec("drop_height_m", Decimal("1.0"), "m", "初始高度固定"),
         FixedSpec("duration_s", DURATION_S, "s", "仿真时长"),
         FixedSpec("gravity_mps2", Decimal("9.81"), "m/s^2", "重力"),
         FixedSpec("solver", "mujoco_default_pinned", "1", "solver 由镜像固定"),
@@ -280,9 +289,15 @@ SCENE_D_DOC = SceneDoc(
         ParamSpec("drive_amplitude_nm", "Nm", "float", Decimal("0.9"),
                   Decimal("1.1"), role="physical",
                   description="驱动力幅值（nuisance：块间变异）"),
+        # S2c R2 前置：弹簧刚度改为可变 regime 旋钮（默认 10.0 保持既有物理恒等）。
+        # 自然频率 = sqrt(k/I)/2π，k∈[5,20] → 1.6–3.2 Hz，跨越驱动频段 → 强调制
+        # freq×damping 共振交互，且**独立于** drive_amplitude/phase 的 NC 链。
+        ParamSpec("spring_stiffness_nm_rad", "Nm/rad", "float", Decimal("5.0"),
+                  Decimal("20.0"), role="physical",
+                  description="关节弹簧刚度（regime 旋钮；决定共振位置）",
+                  default=Decimal("10.0")),
     ),
     fixed=(
-        FixedSpec("spring_stiffness_nm_rad", Decimal("10.0"), "Nm/rad", "弹簧刚度"),
         FixedSpec("inertia_kgm2", Decimal("0.05"), "kg·m^2", "关节惯量"),
         FixedSpec("duration_s", DURATION_S, "s", "仿真时长"),
         FixedSpec("gravity", "off", "1", "重力关闭（纯受迫振动）"),
@@ -379,6 +394,9 @@ def normalise_params(scene_id: str, params: Mapping[str, Any]) -> "dict[str, Any
     out: "dict[str, Any]" = {}
     for spec in doc.params:
         if spec.id not in params:
+            if spec.default is not None:
+                out[spec.id] = str(spec.default)
+                continue
             raise SceneError("MISSING_PARAM", f"{scene_id} 缺参数 {spec.id}")
         raw = params[spec.id]
         if spec.kind == "enum":

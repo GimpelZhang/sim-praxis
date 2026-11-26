@@ -72,7 +72,7 @@ def build_rules() -> dict:
                "orchestrator/hk/design_space.py", "orchestrator/hk/design_gate.py",
                "orchestrator/hk/design_compiler.py", "scripts/s2c/pool_open.py"]
     return {
-        "schema": "simpraxis.s2c.rules.v1", "version": 2, "lock_rev": 2,
+        "schema": "simpraxis.s2c.rules.v1", "version": 3, "lock_rev": 3,
         "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "frozen_discipline": FROZEN_DISCIPLINE,
         "frozen_disciple_module_anchors": {m: _sha_file(REPO / m) for m in modules},
@@ -105,13 +105,13 @@ def build_campaign(*, rules_sha: str) -> dict:
     briefs = build_briefs()
     q_briefs = {bid: b.public_document() for bid, b in briefs.items()}
     return {
-        "schema": "simpraxis.s2c.campaign.v1", "version": 2, "lock_rev": 2,
+        "schema": "simpraxis.s2c.campaign.v1", "version": 3, "lock_rev": 3,
         "rules_bundle_sha256": rules_sha,
         "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "p_pool": preset,
         "p_pool_labels": {k: v["label"] for k, v in preset.items()},
         "q_pool": {
-            "status": "frozen_rev2_separable_verified（AC-04 实测 6/6 可分且非退化）",
+            "status": "frozen_rev3_regime_decoupled_verified（regime 与 NC 链不同参；6/6 可分且非退化，R2 前置债已解）",
             "domains": ["rebound", "forced_vibration"],
             "n_briefs": len(briefs),
             "briefs": q_briefs,
@@ -137,11 +137,13 @@ def main() -> int:
     campaign_sha = hashlib.sha256(cb).hexdigest()
     (root / "rules_bundle.json").write_bytes(rb)
     (root / "campaign_bundle.json").write_bytes(cb)
-    lock = {"schema": "simpraxis.s2c.lock.v1", "lock_rev": 2,
+    lock = {"schema": "simpraxis.s2c.lock.v1", "lock_rev": 3,
             "rules_sha256": rules_sha, "campaign_sha256": campaign_sha,
             "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "lock_rev_note": "rev2：并入 Q 池 6 简报+私有世界变体（AC-04 改域重设计），"
-                             "G-LOCK-REV 授权设计变更后升 rev 重签"}
+            "lock_rev_note": ("rev3：解 Q 仪器冲突——scene C 加 drop_height_m、D 加 "
+                              "spring_stiffness_nm_rad 作独立 regime 旋钮（默认保物理恒等），"
+                              "regime 与 NC 链（C:solref_time/solimp、D:amplitude/phase）不同参；"
+                              "6/6 可分且非退化（G-LOCK-REV 授权升 rev 重签）")}
     (root / "lock.json").write_text(json.dumps(lock, indent=2, sort_keys=True))
     print(f"rules_sha256:    {rules_sha}")
     print(f"campaign_sha256: {campaign_sha}")

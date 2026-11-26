@@ -20,55 +20,62 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from orchestrator.hk.design_space import DomainBrief
 
-# brief → (scene_id, metric, axis0{scene_param,lo,hi}, axis1{scene_param,lo,hi}, knob{scene_param,lo,hi})
-# 全部取自 /tmp 枚举实测（DiD 非退化 且 ΔDiD>δ）。端点=场景合法区间端点，可复现。
+# brief → (scene_id, metric, axis0{scene_param,lo,hi}, axis1{...}, regime_knob{...})
+# 6 brief：C 3（强参数 trio {damp,v0,drop} 轮换轴/regime）+ D 3（{freq,damping,spring} 轮换）。
+# 关键：regime 旋钮与 NC 链**不同参数**——C NC=solref_time(nuisance)/solimp(sham)、
+# D NC=drive_amplitude(nuisance)/drive_phase(sham)，S2b 已验证非退化。故「世界判别力」
+# 与「非退化 NC」不再抢同一个强调制剂（R2 前置债已解）。
 _BRIEFS = {
-    # 域 C 回弹：4 份（damp/v0/solref_time/solimp 轮换轴与旋钮）
-    "rebound_ab": ("C_collision_rebound", "rebound_height_m",
-                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"},
-                   {"name": "v0", "scene_param": "v0_mps", "lo": "1.0", "hi": "5.0"},
-                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"}),
-    "rebound_va": ("C_collision_rebound", "rebound_height_m",
-                   {"name": "v0", "scene_param": "v0_mps", "lo": "1.0", "hi": "5.0"},
-                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"},
-                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"}),
-    "rebound_da": ("C_collision_rebound", "rebound_height_m",
-                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"},
-                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"},
-                   {"name": "v0", "scene_param": "v0_mps", "lo": "1.0", "hi": "5.0"}),
-    "rebound_ds": ("C_collision_rebound", "rebound_height_m",
-                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"},
-                   {"name": "solimp", "scene_param": "solimp_damping", "lo": "0.90", "hi": "0.99"},
-                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"}),
-    # 域 D 受迫振动：2 份（freq 与 damping/amplitude 轮换）
-    "forced_vib_fd": ("D_forced_vibration", "steady_state_amplitude_rad",
-                      {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"},
-                      {"name": "damp", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"},
-                      {"name": "amp", "scene_param": "drive_amplitude_nm", "lo": "0.9", "hi": "1.1"}),
-    "forced_vib_fa": ("D_forced_vibration", "steady_state_amplitude_rad",
-                      {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"},
-                      {"name": "amp", "scene_param": "drive_amplitude_nm", "lo": "0.9", "hi": "1.1"},
-                      {"name": "damp", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"}),
+    # 域 C 回弹：regime=drop_height_m（撞击速度 sqrt(v0^2+2gh) 调制交互，独立于 NC 链）
+    "rebound_damp_v0": ("C_collision_rebound", "rebound_height_m",
+                        {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.3", "hi": "0.8"},
+                        {"name": "v0", "scene_param": "v0_mps", "lo": "1.5", "hi": "4.5"},
+                        {"name": "drop", "scene_param": "drop_height_m", "lo": "0.3", "hi": "2.0"}),
+    "rebound_damp_drop": ("C_collision_rebound", "rebound_height_m",
+                          {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.3", "hi": "0.8"},
+                          {"name": "drop", "scene_param": "drop_height_m", "lo": "0.3", "hi": "2.0"},
+                          {"name": "v0", "scene_param": "v0_mps", "lo": "1.5", "hi": "4.5"}),
+    "rebound_v0_drop": ("C_collision_rebound", "rebound_height_m",
+                        {"name": "v0", "scene_param": "v0_mps", "lo": "1.5", "hi": "4.5"},
+                        {"name": "drop", "scene_param": "drop_height_m", "lo": "0.3", "hi": "2.0"},
+                        {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.3", "hi": "0.8"}),
+    # 域 D 受迫振动：regime=spring_stiffness_nm_rad（共振位置 sqrt(k/I)，独立于 NC 链）
+    "forced_freq_damping": ("D_forced_vibration", "steady_state_amplitude_rad",
+                            {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"},
+                            {"name": "damping", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"},
+                            {"name": "spring", "scene_param": "spring_stiffness_nm_rad", "lo": "5.0", "hi": "20.0"}),
+    "forced_freq_spring": ("D_forced_vibration", "steady_state_amplitude_rad",
+                           {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"},
+                           {"name": "spring", "scene_param": "spring_stiffness_nm_rad", "lo": "5.0", "hi": "20.0"},
+                           {"name": "damping", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"}),
+    "forced_damping_spring": ("D_forced_vibration", "steady_state_amplitude_rad",
+                              {"name": "damping", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"},
+                              {"name": "spring", "scene_param": "spring_stiffness_nm_rad", "lo": "5.0", "hi": "20.0"},
+                              {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"}),
 }
 
-# 场景默认（其余参数保持默认；与枚举脚本一致）
+# 场景默认（其余参数保持默认；含新 regime 参数的默认，与既有物理恒等）
 _DEFAULTS = {
     "C_collision_rebound": {"solref_damping_ratio": "0.5", "v0_mps": "3.0",
-                            "solimp_damping": "0.95", "ball_mass_kg": "0.5", "solref_time_s": "0.02"},
+                            "solimp_damping": "0.9", "ball_mass_kg": "0.5",
+                            "solref_time_s": "0.02", "drop_height_m": "1.0"},
     "D_forced_vibration": {"drive_freq_hz": "1.5", "joint_damping": "0.2",
-                           "drive_phase_rad": "0.05", "drive_amplitude_nm": "1.0"},
+                           "drive_phase_rad": "0.0", "drive_amplitude_nm": "1.0",
+                           "spring_stiffness_nm_rad": "10.0"},
 }
 
 
 def build_briefs() -> dict:
     briefs = {}
     for bid, (scene, metric, ax0, ax1, knob) in _BRIEFS.items():
-        expl = ({"id": "e_weak", "desc": f"{ax0['name']} 与 {ax1['name']} 交互弱（近可加，各自主效应主导）"},
-                {"id": "e_strong", "desc": f"{ax0['name']} 与 {ax1['name']} 交互显著（协同，存在非可加项）"})
+        expl = ({"id": "e_regime_invariant",
+                 "desc": f"{ax0['name']} 与 {ax1['name']} 的交互强度与 regime（{knob['name']}）无关（近似不变）"},
+                {"id": "e_regime_dependent",
+                 "desc": f"{ax0['name']} 与 {ax1['name']} 的交互强度随 regime（{knob['name']}）显著改变"})
         briefs[bid] = DomainBrief(
             brief_id=bid,
-            question=(f"{scene}：{ax0['name']} 与 {ax1['name']} 的交互强度是弱（近可加）还是显著（协同）？"
-                      f"设计实验判定，并给出能区分两者的主对比与阴性对照。"),
+            question=(f"{scene}：{ax0['name']} 与 {ax1['name']} 的交互强度是否随外部 regime 改变？"
+                      f"设计实验判定（给出能区分『交互 regime 无关』与『交互随 regime 改变』的主对比与阴性对照）。"),
             competing_explanations=expl,
             factor_axes=tuple([
                 {"name": ax0["name"], "values": [ax0["lo"], ax0["hi"]], "scene_param": ax0["scene_param"]},
@@ -81,17 +88,16 @@ def build_briefs() -> dict:
 
 
 def world_variants() -> dict:
-    """宿主私有世界变体（只进审查者通道）：每简报 2 套机制 = 旋钮 弱/强 两档。
+    """宿主私有世界变体（只进审查者通道）：每简报 2 套 regime = 旋钮 低/高 两档。
 
-    v_weak_interaction  → 旋钮取下界（弱交互机制）
-    v_strong_interaction→ 旋钮取上界（强交互机制）
-    判别力 = 同一参考设计在 2 变体下 DiD 差 > δ。
+    v_regime_lo → regime 取下界；v_regime_hi → regime 取上界。
+    判别力 = 同一参考设计在 2 变体下 DiD 差 > δ。regime 与 NC 链是不同参数。
     """
     wv = {}
     for bid, (_scene, _metric, ax0, ax1, knob) in _BRIEFS.items():
         wv[bid] = {
-            "v_weak_interaction": {knob["scene_param"]: knob["lo"]},
-            "v_strong_interaction": {knob["scene_param"]: knob["hi"]},
+            "v_regime_lo": {knob["scene_param"]: knob["lo"]},
+            "v_regime_hi": {knob["scene_param"]: knob["hi"]},
         }
     return wv
 
