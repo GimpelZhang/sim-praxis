@@ -103,7 +103,7 @@ def main() -> int:
                 nc_str = json.dumps(nc, ensure_ascii=False)
 
         pack = build_pack_v2(
-            instance_id=study, arm="v2", channel="A",
+            instance_id=study, arm="v2", channel="channel_a",
             question=data["claim"].get("statement", ""),
             methods="MuJoCo 物理仿真，2×2 DiD + NC",
             results=results_rows,
@@ -113,9 +113,64 @@ def main() -> int:
         print(f"\n{study} 审查包：{pack.get('pack_id')}")
         print(f"  pack_sha256: {pack.get('pack_sha256', '')[:16]}…")
 
-    # 双审需真实 LLM 调用（gateway POST）
-    print(f"\n共 {len(packs)} 个审查包 × 2 通道 = {len(packs)*2} 呼")
-    print("双审执行需 gateway 调用——请在预算内启动")
+    # 执行双审（gateway 付费调用）
+    from orchestrator.common.runtime_paths import rsi_s2b_approvals_dir
+    from orchestrator.gateway.quota_ledger import QuotaLedger
+    from orchestrator.gateway.router import ModelGateway
+
+    gateway = ModelGateway(max_attempts=1, ledger=QuotaLedger.rsi_s2b())
+
+    # 自批 4 呼
+    from orchestrator.gateway.quota_ledger import (RSI_S2B_NAMESPACE,
+                                                   billing_context, write_approval)
+    review_batch = "s2b-dual-review"
+    from orchestrator.gateway.quota_ledger import QuotaError
+    try:
+        write_approval(batch_id=review_batch, task=2, stage="coding_debug",
+                       approved=4, beyond_normal=False,
+                       note="S2b 双审 2 通道 × 2 研究（自批）",
+                       namespace=RSI_S2B_NAMESPACE)
+        print(f"批准件已写：{review_batch}（task 2, approved 4）")
+    except QuotaError as exc:
+        print(f"批准件已存在，复用：{exc}")
+
+    call = lambda prompt: gateway.call(  # noqa: E731
+        "coding_debug", [{"role": "user", "content": prompt}],
+        max_tokens=8192, temperature=0.0,
+        thinking={"type": "disabled"})
+
+    print(f"\n=== 执行双审（4 呼） ===")
+    reviews = []
+    with billing_context(task=2, batch_id=review_batch):
+        for study, pack in packs:
+            for channel in ("channel_a", "channel_b"):
+                print(f"\n  {study} × {channel} …")
+                result = run_channel(call, pack=pack, channel=channel)
+                verdict = result.get("verdict") or result.get("decision")
+                print(f"    → {verdict}")
+                reviews.append({"study": study, "channel": channel,
+                                "result": result})
+
+    # 合并通道
+    for study in ("C_N", "D_N"):
+        a = next(r for r in reviews if r["study"] == study and r["channel"] == "channel_a")
+        b = next(r for r in reviews if r["study"] == study and r["channel"] == "channel_b")
+        merged = merge_channels(instance_id=study, arm="v2",
+                                channel_a=a["result"], channel_b=b["result"])
+        merged_verdict = merged.get("verdict") or merged.get("merged_verdict")
+        print(f"\n  {study} 合并：{merged_verdict}")
+
+    # 落盘审查结果
+    review_path = evidence_root / "review" / "dual_review.json"
+    review_path.parent.mkdir(parents=True, exist_ok=True)
+    review_path.write_text(json.dumps({
+        "schema": "simpraxis.s2b.dual_review.v1",
+        "reviews": reviews,
+        "generated_at_utc": __import__("datetime").datetime.now(
+            __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }, ensure_ascii=False, indent=2, default=str))
+    print(f"\n审查结果已落盘：{review_path}")
+
     return 0
 
 

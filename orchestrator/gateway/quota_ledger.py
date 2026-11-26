@@ -878,7 +878,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1, LEDGER_RSI_S2)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
@@ -887,7 +887,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1, LEDGER_RSI_S2)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
@@ -896,7 +896,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1, LEDGER_RSI_S2)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
