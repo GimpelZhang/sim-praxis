@@ -134,31 +134,53 @@ def main() -> int:
     except QuotaError as exc:
         print(f"批准件已存在，复用：{exc}")
 
+    # deepseek-v4.1-flash 思考前缀型：8192 会被 thinking 耗尽（finish=length 空答）；
+    # 提到 16384 给 thinking + JSON 审查正文留余量。
     call = lambda prompt: gateway.call(  # noqa: E731
         "coding_debug", [{"role": "user", "content": prompt}],
-        max_tokens=8192, temperature=0.0,
+        max_tokens=16384, temperature=0.0,
         thinking={"type": "disabled"})
 
-    print(f"\n=== 执行双审（4 呼） ===")
+    retry_batch = "s2b-dual-review-r2"  # 修复储备批（仪器修复重做，task 3）
+    from orchestrator.gateway.quota_ledger import QuotaError
+    try:
+        write_approval(batch_id=retry_batch, task=3, stage="coding_debug",
+                       approved=4, beyond_normal=False,
+                       note="S2b 双审重做批（max_tokens 8192→16384 + 解析修复；task 3 修复储备）",
+                       namespace=RSI_S2B_NAMESPACE)
+        print(f"重做批批准件已写：{retry_batch}（task 3, approved 4）")
+    except QuotaError as exc:
+        print(f"重做批批准件已存在，复用：{exc}")
+
+    print(f"\n=== 执行双审（4 呼，重做） ===")
     reviews = []
-    with billing_context(task=2, batch_id=review_batch):
+    review_partial_path = evidence_root / "review" / "dual_review.partial.json"
+    review_partial_path.parent.mkdir(parents=True, exist_ok=True)
+    with billing_context(task=3, batch_id=retry_batch):
         for study, pack in packs:
             for channel in ("channel_a", "channel_b"):
                 print(f"\n  {study} × {channel} …")
                 result = run_channel(call, pack=pack, channel=channel)
-                verdict = result.get("verdict") or result.get("decision")
+                verdict = (result.get("parsed") or {}).get("verdict")
                 print(f"    → {verdict}")
                 reviews.append({"study": study, "channel": channel,
                                 "result": result})
+                # 增量持久化（防后续呼失败丢已成功结果）
+                review_partial_path.write_text(json.dumps({
+                    "schema": "simpraxis.s2b.dual_review.partial.v1",
+                    "reviews": reviews}, ensure_ascii=False, indent=2,
+                    default=str))
 
-    # 合并通道
+    # 合并通道（merge_channels 期望 ReviewRun 或含 parsed 的 dict）
+    merged_all = {}
     for study in ("C_N", "D_N"):
         a = next(r for r in reviews if r["study"] == study and r["channel"] == "channel_a")
         b = next(r for r in reviews if r["study"] == study and r["channel"] == "channel_b")
         merged = merge_channels(instance_id=study, arm="v2",
                                 channel_a=a["result"], channel_b=b["result"])
-        merged_verdict = merged.get("verdict") or merged.get("merged_verdict")
-        print(f"\n  {study} 合并：{merged_verdict}")
+        merged_all[study] = merged
+        print(f"\n  {study} 合并：{merged.get('verdict')} 规则={merged.get('rule')} "
+              f"(a={merged.get('channel_a')}, b={merged.get('channel_b')})")
 
     # 落盘审查结果
     review_path = evidence_root / "review" / "dual_review.json"
@@ -166,10 +188,13 @@ def main() -> int:
     review_path.write_text(json.dumps({
         "schema": "simpraxis.s2b.dual_review.v1",
         "reviews": reviews,
+        "merged": merged_all,
+        "all_pass": all(m.get("verdict") == "PASS" for m in merged_all.values()),
         "generated_at_utc": __import__("datetime").datetime.now(
             __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }, ensure_ascii=False, indent=2, default=str))
     print(f"\n审查结果已落盘：{review_path}")
+    print(f"双审总体：{'PASS' if all(m.get('verdict')=='PASS' for m in merged_all.values()) else 'FAIL/INCONCLUSIVE'}")
 
     return 0
 
