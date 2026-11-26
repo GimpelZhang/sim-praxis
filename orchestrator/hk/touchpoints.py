@@ -49,6 +49,9 @@ REQUIRED_INPUT_KEYS: "dict[str, tuple[str, ...]]" = {
     "submit_claim": ("nc_evidence", "results"),
     "submit_claim_repair": ("_repair", "confirm_result"),
     "diagnose_fail": ("human_notes", "claim"),
+    # S2c 开放设计
+    "propose_design": ("domain_brief",),
+    "propose_design_repair": ("domain_brief", "previous_design", "gate_report"),
 }
 
 #: S2b 触点指令 v3（S2 v1 候选 V2 基础上：F1.3 信息面补全 + F2 交叉校验联动）。
@@ -133,6 +136,23 @@ TOUCHPOINT_INSTRUCTIONS: "dict[str, str]" = {
         "（布尔：打回意见是否含实质性算法修补）。\n"
         "若打回涉及阴性对照退化、词表/叙事错配或报告缺段，在 diagnosis 中指明"
         "对应机制（NC 设计/分类绑定/报告合同），不要只复述审阅意见。"),
+    # —— S2c 开放设计（Q 池）：actor 只拿领域简报自提假设/因子/NC ----
+    "propose_design": (
+        "任务：根据 request.json 的 domain_brief 设计一个实验。\n"
+        "response.json 必须含：hypothesis（可反驳假设）、conditions（条件矩阵，"
+        "每个 {id, factors, scene_params}，factors 的值必须取自简报 factor_axes 的 values、"
+        "条件数 ≤ max_conditions）、primary_contrast（{id, treatment_high, treatment_low, "
+        "control_high, control_low, proposition}）、negative_control（{base, sham}）、"
+        "rationale（设计如何区分简报里的 ≥2 个竞争解释）。\n"
+        "metric 必须取自简报 metrics。不得超出简报界（因子/指标/条件数），越界会被 G-DESIGN "
+        "拒绝并给修复机会。竞争解释的区分方式是设计的核心——不能只求显著。"),
+    "propose_design_repair": (
+        "任务：上一版设计被 G-DESIGN 结构门拒绝（见 request.json 的 gate_report 公开部分）。\n"
+        "response.json 形状与 propose_design 相同。按 gate_report.code 修复："
+        "DESIGN_OUT_OF_SPACE→收进界内；DESIGN_SHAPE_INVALID→减条件/换格；"
+        "DESIGN_NC_INVALID→换有效 base/sham；DESIGN_PILOT_WEAK→加大主对比分辨力；"
+        "DESIGN_NON_DISCRIMINATIVE→让设计更区分竞争解释。最多一次修复即可再交，二次仍不过"
+        "即 DESIGN_NOT_READY 终态。不得靠猜参数或反复试到显著。"),
 }
 
 SUPPORTED_TOUCHPOINTS = tuple(TOUCHPOINT_INSTRUCTIONS)
