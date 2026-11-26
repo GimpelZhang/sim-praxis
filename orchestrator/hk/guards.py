@@ -14,7 +14,7 @@ from ._physicalrsi import mismatches
 
 __all__ = ["GuardViolation", "GuardCtx", "GUARDS",
            "g_prereg", "g_budget", "g_send_once", "g_freeze",
-           "g_bytes", "g_claim", "g_unit", "g_noprog", "g_report",
+           "g_bytes", "g_claim", "g_unit", "g_noprog", "g_report", "g_lock_rev",
            "register_guard", "enforce"]
 
 
@@ -51,6 +51,11 @@ class GuardCtx:
     noprog_rounds: int = 2                    # g_noprog：连续无新证据轮数上限
     report_doc: dict | None = None            # g_report：K8 六段报告（v2 合同）
     nc_evidence: dict | None = None           # g_report F2：NC 证据（交叉校验用）
+    # —— S2c G-LOCK-REV：LOCK 冻结后触及设计面的改动必须带递增 rev + 重签 ——
+    lock_rev: int = 0                         # 当前已登记的 LOCK 修订号
+    design_change: str | None = None          # 冻结后拟施加的设计面变更描述
+    proposed_lock_rev: int = 0                # 该变更对应的新修订号（须 > lock_rev）
+    lock_resigned: bool = False               # 该变更是否已重签
 
 
 def g_prereg(ctx: GuardCtx) -> None:
@@ -217,6 +222,31 @@ def g_report(ctx: GuardCtx) -> None:
             "; ".join(nc_problems))
 
 
+def g_lock_rev(ctx: GuardCtx) -> None:
+    """G-LOCK-REV（S2c）：LOCK 冻结后触及**设计面**的改动必须带递增 rev + 重签。
+
+    编译自 S2b 真实事故：LOCK（S2b-S0）冻结 19 个 SUT 文件后，实跑段 8 次仪器
+    适配改了其中 8 个，LOCK 的 SUT hash 实际 stale 而无人重签——判件基于跑过的
+    代码而非冻结点。本守卫把「冻结后改设计」形态化：
+    * 无 design_change（本次运行不改设计面）→ 放行；
+    * 有 design_change 但 proposed_lock_rev <= lock_rev → 拒绝（未递增）；
+    * 有 design_change 且递增但未重签 → 拒绝（未重签）；
+    * 有 design_change + rev 递增 + 已重签 → 放行（合法锁内适配）。
+    """
+    if ctx.design_change is None:
+        return
+    if ctx.proposed_lock_rev <= ctx.lock_rev:
+        raise GuardViolation(
+            "g_lock_rev", "FROZEN_DESIGN_CHANGE_NO_REV",
+            f"冻结后改设计（{ctx.design_change!r}）但 lock_rev 未递增"
+            f"（proposed={ctx.proposed_lock_rev} <= current={ctx.lock_rev}）")
+    if not ctx.lock_resigned:
+        raise GuardViolation(
+            "g_lock_rev", "FROZEN_DESIGN_CHANGE_UNSIGNED",
+            f"冻结后改设计（{ctx.design_change!r}）rev={ctx.proposed_lock_rev}"
+            f" 递增但未重签（须重签两签后方可运行）")
+
+
 GUARDS = {
     "G-PREREG": g_prereg,
     "G-BUDGET": g_budget,
@@ -227,6 +257,7 @@ GUARDS = {
     "G-UNIT": g_unit,
     "G-NOPROG": g_noprog,
     "G-REPORT": g_report,   # S2b 维护侧合并（S2 候选 + F2 交叉校验）
+    "G-LOCK-REV": g_lock_rev,   # S2c：冻结后改设计须递增 rev + 重签
 }
 
 

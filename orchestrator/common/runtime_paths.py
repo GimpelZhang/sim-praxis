@@ -2374,3 +2374,98 @@ def assert_rsi_s2b_roots_isolated() -> None:
         message=("RSI-S2b 根必须与封存期根及 R0…S2 族根互异且互不嵌套（解析后）："
                  f"rsi_s2b={rsi_s2b_root().resolve(strict=False)} "
                  f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))
+
+
+# ---------------------------------------------------------------------------
+# RSI-S2c（2026-11-26）：v2 余量调查 + 自主设计度调查（测量轮，不开 R2）。
+# 纪律：测量不改进系统；P 池不改 v2；Q 池放开实验设计权；一轮为限。
+# ---------------------------------------------------------------------------
+
+_RSI_S2C_ROOT_ENV = "SIMPRAXIS_RSI_S2C_ROOT"
+
+_RSI_S2C_SUBDIRS = frozenset({
+    "quota", "quota/approvals", "quota/gateway_state",
+    "prereg", "prereg/rules", "prereg/campaign",
+    "evidence", "sessions", "closeout", "briefs",
+})
+
+
+def rsi_s2c_root() -> Path:
+    """RSI-S2c 根：显式 env 优先；否则 ``$DATA_ROOT/rsi_s2c``。"""
+    root = os.environ.get(_RSI_S2C_ROOT_ENV)
+    if root:
+        return Path(root)
+    return Path(DEFAULT_DATA_ROOT) / "rsi_s2c"
+
+
+def _s2c_dir(name: str) -> Path:
+    if name not in _RSI_S2C_SUBDIRS:
+        raise ValueError(f"未知 RSI-S2c 子目录：{name!r}")
+    return ensure_private_dir(rsi_s2c_root() / name)
+
+
+def rsi_s2c_quota_dir() -> Path:
+    return _s2c_dir("quota")
+
+
+def rsi_s2c_ledger_path() -> Path:
+    return rsi_s2c_quota_dir() / "ledger.jsonl"
+
+
+def rsi_s2c_counters_path() -> Path:
+    return rsi_s2c_quota_dir() / "counters.json"
+
+
+def rsi_s2c_approvals_dir() -> Path:
+    return _s2c_dir("quota/approvals")
+
+
+def rsi_s2c_gateway_state_dir() -> Path:
+    return _s2c_dir("quota/gateway_state")
+
+
+def rsi_s2c_gateway_state_path() -> Path:
+    return rsi_s2c_gateway_state_dir() / "gateway_state.json"
+
+
+def rsi_s2c_rules_prereg_dir() -> Path:
+    return _s2c_dir("prereg/rules")
+
+
+def rsi_s2c_campaign_prereg_dir() -> Path:
+    return _s2c_dir("prereg/campaign")
+
+
+def rsi_s2c_evidence_root() -> Path:
+    return _s2c_dir("evidence")
+
+
+def rsi_s2c_sessions_dir() -> Path:
+    return _s2c_dir("sessions")
+
+
+def rsi_s2c_closeout_dir() -> Path:
+    return _s2c_dir("closeout")
+
+
+def rsi_s2c_briefs_dir() -> Path:
+    """Q 池领域简报 + 宿主私有世界变体落点（私有 0700）。"""
+    return _s2c_dir("briefs")
+
+
+def assert_rsi_s2c_roots_isolated() -> None:
+    """RSI-S2c 根与封存期根及 R0…S2b 族根互异且互不嵌套（写前 fail-fast）。"""
+    protected = rsi_r1n_protected_write_roots()
+    roots = dict(protected)
+    roots["rsi_r1n"] = rsi_r1n_root()
+    roots["rsi_s0"] = rsi_s0_root()
+    roots["rsi_s1"] = rsi_s1_root()
+    roots["rsi_s2"] = rsi_s2_root()
+    roots["rsi_s2b"] = rsi_s2b_root()
+    _assert_roots_isolated(
+        rsi_s2c_root(),
+        tuple(roots.values()),
+        label=_RSI_S2C_ROOT_ENV,
+        message=("RSI-S2c 根必须与封存期根及 R0…S2b 族根互异且互不嵌套（解析后）："
+                 f"rsi_s2c={rsi_s2c_root().resolve(strict=False)} "
+                 f"protected={[str(p.resolve(strict=False)) for p in roots.values()]}"))

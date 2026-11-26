@@ -176,6 +176,13 @@ from orchestrator.common.runtime_paths import (
     rsi_s2b_gateway_state_path,
     rsi_s2b_ledger_path,
     rsi_s2b_quota_dir,
+    assert_rsi_s2c_roots_isolated,  # RSI-S2c：与封存/历史族根互异互斥
+    rsi_s2c_approvals_dir,
+    rsi_s2c_counters_path,
+    rsi_s2c_gateway_state_dir,
+    rsi_s2c_gateway_state_path,
+    rsi_s2c_ledger_path,
+    rsi_s2c_quota_dir,
 )
 from orchestrator.common.validators import validate_batch_id
 from orchestrator.gateway.router import (
@@ -878,7 +885,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B, LEDGER_RSI_S2C)
 
     def uses_batch_occupancy(self) -> bool:
         """blocked 行是否占批次（2.5 起签收口径：含 seq=null 行）。"""
@@ -887,7 +894,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B, LEDGER_RSI_S2C)
 
     def in_sealed_set_for_read(self) -> bool:
         """读侧严格校验 + 放行开账 selfcheck 行（2.5/2.6/2.7 新账口径）。"""
@@ -896,7 +903,7 @@ class _LedgerNamespace:
                               LEDGER_RSI_R02, LEDGER_RSI_R1, LEDGER_RSI_R12,
                               LEDGER_RSI_R13, LEDGER_RSI_RV,
                               LEDGER_RSI_R1N, LEDGER_RSI_S0,
-                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B)
+                              LEDGER_RSI_S1, LEDGER_RSI_S2, LEDGER_RSI_S2B, LEDGER_RSI_S2C)
 
 
 PHASE2_NAMESPACE = _LedgerNamespace(
@@ -1182,6 +1189,33 @@ RSI_S2B_NAMESPACE = _LedgerNamespace(
 )
 
 
+# RSI-S2c（2026-11-26）：v2 余量调查 + 自主设计度调查账；命名空间 2912。
+# 预算：网关面硬帽 44 实呼（双审 24 = 2 通道 × 12 包 + 仪器校准 4 + 修复储备 8 + 余 8）；
+# 会话面硬帽 56（P 池 6×3=18 + Q 池 6×5=30 + smoke 1 + 余 7），双面分列不混算。
+LEDGER_RSI_S2C = 2912
+RSI_S2C_HARD_CAP = 44
+RSI_S2C_NORMAL_BUDGET = 44
+RSI_S2C_TASK_CAPS = types.MappingProxyType({
+    1: 4,    # s2c_calib：审查仪器校准（6 例 + 2 设计类）
+    2: 24,   # s2c_dual_review：双审 2 通道 × 12 包（P×6 + Q×6）
+    3: 8,    # s2c_repair：修复储备（仪器/重做批）
+    4: 8,    # s2c_margin：余量
+})
+
+RSI_S2C_NAMESPACE = _LedgerNamespace(
+    phase=LEDGER_RSI_S2C,
+    quota_dir_fn=rsi_s2c_quota_dir,
+    ledger_path_fn=rsi_s2c_ledger_path,
+    counters_path_fn=rsi_s2c_counters_path,
+    approvals_dir_fn=rsi_s2c_approvals_dir,
+    pause_dir_fn=rsi_s2c_gateway_state_dir,
+    pause_path_fn=rsi_s2c_gateway_state_path,
+    task_caps=RSI_S2C_TASK_CAPS,
+    hard_cap=RSI_S2C_HARD_CAP,
+    normal_budget=RSI_S2C_NORMAL_BUDGET,
+)
+
+
 def _now_iso() -> str:
     # P2：Phase 2 所有新行严格 UTC Z。
     return utc_now_iso_z()
@@ -1225,6 +1259,8 @@ def _assert_namespace_roots_isolated(ns: "_LedgerNamespace") -> None:
         assert_rsi_s2_roots_isolated()
     elif ns.phase == LEDGER_RSI_S2B:
         assert_rsi_s2b_roots_isolated()
+    elif ns.phase == LEDGER_RSI_S2C:
+        assert_rsi_s2c_roots_isolated()
     elif ns.phase == LEDGER_PHASE:
         # 历史 Phase 2 缺省命名空间自 2.5 起就不参与根隔离检查——此处显式列名，
         # 只为让「未知期号」fail-fast 能区分「已知但豁免」与「真未知」。
@@ -1537,6 +1573,11 @@ class QuotaLedger:
     def rsi_s2b(cls) -> "QuotaLedger":
         """RSI-S2b 账（2911；硬帽 40 网关实呼 + 24 会话面）。"""
         return cls(RSI_S2B_NAMESPACE)
+
+    @classmethod
+    def rsi_s2c(cls) -> "QuotaLedger":
+        """RSI-S2c 账（2912；硬帽 44 网关实呼 + 56 会话面）。"""
+        return cls(RSI_S2C_NAMESPACE)
 
     @classmethod
     def rsi_r12(cls) -> "QuotaLedger":
