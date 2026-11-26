@@ -52,9 +52,23 @@ def main() -> int:
     except QuotaError as e:
         print(f"批准件复用：{e}")
     gw = ModelGateway(max_attempts=1, ledger=QuotaLedger.rsi_s2c())
+    # 大审查包（16384 tokens）需 >120s；wall 提到 300s（transport 墙钟，非科学判断）
     call = lambda p: gw.call("coding_debug", [{"role": "user", "content": p}],
                              max_tokens=16384, temperature=0.0,
-                             thinking={"type": "disabled"})
+                             thinking={"type": "disabled"}, timeout=300)
+
+    # 续跑：读既有 partial，跳过已 PASS 的双通道实例
+    partial = ev / "review" / "pool_p_dual_review.partial.json"
+    partial.parent.mkdir(parents=True, exist_ok=True)
+    existing = {}
+    if partial.exists():
+        try:
+            existing = json.loads(partial.read_text())
+        except ValueError:
+            existing = {}
+    done_inst = {k for k, v in existing.items()
+                 if (v.get("merged") or {}).get("verdict") == "PASS"}
+    print(f"续跑：已完成 {sorted(done_inst)}，待审 {[s for s in INSTANCES if s not in done_inst]}")
 
     packs = {}
     for s in INSTANCES:
@@ -73,11 +87,12 @@ def main() -> int:
     if not packs:
         print("无可审实例"); return 1
 
-    partial = ev / "review" / "pool_p_dual_review.partial.json"
-    partial.parent.mkdir(parents=True, exist_ok=True)
-    reviews = {}
+    reviews = dict(existing)  # 续跑：已 PASS 实例保留
     with billing_context(task=2, batch_id=batch):
         for s, pack in packs.items():
+            if s in done_inst:
+                print(f"  {s} 已完成 PASS，跳过")
+                continue
             chans = {}
             for ch in ("channel_a", "channel_b"):
                 print(f"  {s} × {ch} …")
