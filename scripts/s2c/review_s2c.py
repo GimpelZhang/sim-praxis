@@ -43,12 +43,12 @@ def _load(study: str) -> dict:
 
 def main() -> int:
     ev = rsi_s2c_evidence_root()
-    batch = "s2c-p-dual-review"
+    batch = "s2c-p-dual-review-b"
     try:
-        write_approval(batch_id=batch, task=2, stage="coding_debug", approved=12,
-                       beyond_normal=False, note="S2c P 池双审 2×6（自批）",
+        write_approval(batch_id=batch, task=2, stage="coding_debug", approved=4,
+                       beyond_normal=False, note="S2c P 池双审续（nc_trap_C 收尾，自批）",
                        namespace=RSI_S2C_NAMESPACE)
-        print(f"批准件：{batch} task2 approved 12")
+        print(f"批准件：{batch} task2 approved 4")
     except QuotaError as e:
         print(f"批准件复用：{e}")
     gw = ModelGateway(max_attempts=1, ledger=QuotaLedger.rsi_s2c())
