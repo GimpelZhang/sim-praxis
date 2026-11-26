@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""S2c Q 池 6 份领域简报（3 域 × 2）+ 宿主私有世界变体 + 可行性预检（AC-04）。
+"""S2c Q 池 6 份领域简报（2 域 × 3，均经物理实测可分）+ 宿主私有世界变体 + 可行性预检。
 
-简报只含公开面（问题/竞争解释公开描述/因子轴/可选指标/约束/试点配额）；
-世界变体数值只落宿主私有 files（不进 DomainBrief.public_document）。
+设计要点（S2c-0 预检迭代后，AC-04）：
+- 旧版用「与识别无交互的微扰」当世界变体（torsional/solimp/phase 微抖），DiD 两两≈相同，
+  全 6 不可分——那是「漂移不是机制」（S2b 教训「凭直觉猜因子轴」重演）。
+- 现版只用**物理实测**证明「2×2 DiD 非退化且被一个宽区间自由旋钮调制」的轴对，
+  世界变体 = 该旋钮的 弱/强 两档（弱交互/强交互两套机制），参考设计端点可复现。
+- 竞争解释重定义为**交互强度**：e1=弱（近可加），e2=强（显著协同）；actor 须设计实验判定。
+- 简报只含公开面；旋钮数值（世界变体）只落宿主私有 files，不进 DomainBrief.public_document。
 
 用法：python scripts/s2c/pool_open.py [--verify]
 """
@@ -15,38 +20,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from orchestrator.hk.design_space import DomainBrief
 
-# 域 → (scene_id, metric, factor_axes)
-_DOMAINS = {
-    "contact_sliding_A": ("A_contact_friction", "displacement_x_m",
-                          [{"name": "mu", "values": ["0.2", "0.6"], "scene_param": "sliding_friction"},
-                           {"name": "mass", "values": ["0.3", "1.0"], "scene_param": "mass_kg"}]),
-    "contact_sliding_B": ("A_contact_friction", "stop_time_s",
-                          [{"name": "v0", "values": ["0.2", "0.5"], "scene_param": "v0_mps"},
-                           {"name": "mu", "values": ["0.2", "0.6"], "scene_param": "sliding_friction"}]),
-    "rebound_A": ("C_collision_rebound", "rebound_height_m",
-                  [{"name": "damp", "values": ["0.3", "0.8"], "scene_param": "solref_damping_ratio"},
-                   {"name": "v0", "values": ["1.5", "4.5"], "scene_param": "v0_mps"}]),
-    "rebound_B": ("C_collision_rebound", "rebound_height_m",
-                  [{"name": "mass", "values": ["0.46", "0.55"], "scene_param": "ball_mass_kg"},
-                   {"name": "damp", "values": ["0.3", "0.8"], "scene_param": "solref_damping_ratio"}]),
-    "forced_vib_A": ("D_forced_vibration", "steady_state_amplitude_rad",
-                     [{"name": "freq", "values": ["1.0", "2.5"], "scene_param": "drive_freq_hz"},
-                      {"name": "damp", "values": ["0.05", "0.4"], "scene_param": "joint_damping"}]),
-    "forced_vib_B": ("D_forced_vibration", "steady_state_amplitude_rad",
-                     [{"name": "freq", "values": ["0.6", "2.0"], "scene_param": "drive_freq_hz"},
-                      {"name": "amp", "values": ["0.9", "1.1"], "scene_param": "drive_amplitude_nm"}]),
+# brief → (scene_id, metric, axis0{scene_param,lo,hi}, axis1{scene_param,lo,hi}, knob{scene_param,lo,hi})
+# 全部取自 /tmp 枚举实测（DiD 非退化 且 ΔDiD>δ）。端点=场景合法区间端点，可复现。
+_BRIEFS = {
+    # 域 C 回弹：4 份（damp/v0/solref_time/solimp 轮换轴与旋钮）
+    "rebound_ab": ("C_collision_rebound", "rebound_height_m",
+                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"},
+                   {"name": "v0", "scene_param": "v0_mps", "lo": "1.0", "hi": "5.0"},
+                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"}),
+    "rebound_va": ("C_collision_rebound", "rebound_height_m",
+                   {"name": "v0", "scene_param": "v0_mps", "lo": "1.0", "hi": "5.0"},
+                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"},
+                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"}),
+    "rebound_da": ("C_collision_rebound", "rebound_height_m",
+                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"},
+                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"},
+                   {"name": "v0", "scene_param": "v0_mps", "lo": "1.0", "hi": "5.0"}),
+    "rebound_ds": ("C_collision_rebound", "rebound_height_m",
+                   {"name": "damp", "scene_param": "solref_damping_ratio", "lo": "0.1", "hi": "0.9"},
+                   {"name": "solimp", "scene_param": "solimp_damping", "lo": "0.90", "hi": "0.99"},
+                   {"name": "solref_time", "scene_param": "solref_time_s", "lo": "0.015", "hi": "0.025"}),
+    # 域 D 受迫振动：2 份（freq 与 damping/amplitude 轮换）
+    "forced_vib_fd": ("D_forced_vibration", "steady_state_amplitude_rad",
+                      {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"},
+                      {"name": "damp", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"},
+                      {"name": "amp", "scene_param": "drive_amplitude_nm", "lo": "0.9", "hi": "1.1"}),
+    "forced_vib_fa": ("D_forced_vibration", "steady_state_amplitude_rad",
+                      {"name": "freq", "scene_param": "drive_freq_hz", "lo": "0.5", "hi": "3.0"},
+                      {"name": "amp", "scene_param": "drive_amplitude_nm", "lo": "0.9", "hi": "1.1"},
+                      {"name": "damp", "scene_param": "joint_damping", "lo": "0.01", "hi": "0.5"}),
+}
+
+# 场景默认（其余参数保持默认；与枚举脚本一致）
+_DEFAULTS = {
+    "C_collision_rebound": {"solref_damping_ratio": "0.5", "v0_mps": "3.0",
+                            "solimp_damping": "0.95", "ball_mass_kg": "0.5", "solref_time_s": "0.02"},
+    "D_forced_vibration": {"drive_freq_hz": "1.5", "joint_damping": "0.2",
+                           "drive_phase_rad": "0.05", "drive_amplitude_nm": "1.0"},
 }
 
 
 def build_briefs() -> dict:
     briefs = {}
-    for bid, (scene, metric, axes) in _DOMAINS.items():
-        # ≥2 竞争解释（公开描述，id 对应宿主私有变体）
-        expl = ({"id": "e1", "desc": f"{axes[0]['name']} 主导效应"},
-                {"id": "e2", "desc": f"{axes[1]['name']} 主导效应"})
+    for bid, (scene, metric, ax0, ax1, knob) in _BRIEFS.items():
+        expl = ({"id": "e_weak", "desc": f"{ax0['name']} 与 {ax1['name']} 交互弱（近可加，各自主效应主导）"},
+                {"id": "e_strong", "desc": f"{ax0['name']} 与 {ax1['name']} 交互显著（协同，存在非可加项）"})
         briefs[bid] = DomainBrief(
-            brief_id=bid, question=f"{scene}：{axes[0]['name']}×{axes[1]['name']} 的交互及其主导机制？",
-            competing_explanations=expl, factor_axes=tuple(axes),
+            brief_id=bid,
+            question=(f"{scene}：{ax0['name']} 与 {ax1['name']} 的交互强度是弱（近可加）还是显著（协同）？"
+                      f"设计实验判定，并给出能区分两者的主对比与阴性对照。"),
+            competing_explanations=expl,
+            factor_axes=tuple([
+                {"name": ax0["name"], "values": [ax0["lo"], ax0["hi"]], "scene_param": ax0["scene_param"]},
+                {"name": ax1["name"], "values": [ax1["lo"], ax1["hi"]], "scene_param": ax1["scene_param"]},
+            ]),
             metrics=(metric,), scene_id=scene,
             constraints={"max_conditions": 6},
             pilot_quota={"max_iterations": 3, "runs_per_iteration": 16})
@@ -54,26 +81,19 @@ def build_briefs() -> dict:
 
 
 def world_variants() -> dict:
-    """宿主私有世界变体（只进审查者通道）：每个简报 2 个"真实机制"设定。
+    """宿主私有世界变体（只进审查者通道）：每简报 2 套机制 = 旋钮 弱/强 两档。
 
-    变体 = 让某因子成为真实主导者的物理设定；判别力检验 = 同一参考设计在两变体下
-    指标模式是否可分（min 两两差 > δ）。
+    v_weak_interaction  → 旋钮取下界（弱交互机制）
+    v_strong_interaction→ 旋钮取上界（强交互机制）
+    判别力 = 同一参考设计在 2 变体下 DiD 差 > δ。
     """
-    return {
-        # contact_sliding：变体A μ主导、变体B mass 主导（通过 torsional/v0 nuisance 区分）
-        "contact_sliding_A": {"v_mu_dominant": {"torsional_friction_m": "0.01"},
-                             "v_mass_dominant": {"torsional_friction_m": "0.05"}},
-        "contact_sliding_B": {"v_v0_dominant": {"torsional_friction_m": "0.01"},
-                             "v_mu_dominant": {"torsional_friction_m": "0.05"}},
-        "rebound_A": {"v_damp_dominant": {"solimp_damping": "0.9"},
-                     "v_v0_dominant": {"solimp_damping": "0.95"}},
-        "rebound_B": {"v_mass_dominant": {"solimp_damping": "0.9"},
-                     "v_damp_dominant": {"solimp_damping": "0.95"}},
-        "forced_vib_A": {"v_freq_dominant": {"drive_phase_rad": "0.0"},
-                        "v_damp_dominant": {"drive_phase_rad": "0.03"}},
-        "forced_vib_B": {"v_freq_dominant": {"drive_phase_rad": "0.0"},
-                        "v_amp_dominant": {"drive_phase_rad": "0.03"}},
-    }
+    wv = {}
+    for bid, (_scene, _metric, ax0, ax1, knob) in _BRIEFS.items():
+        wv[bid] = {
+            "v_weak_interaction": {knob["scene_param"]: knob["lo"]},
+            "v_strong_interaction": {knob["scene_param"]: knob["hi"]},
+        }
+    return wv
 
 
 def reference_design(brief: DomainBrief) -> dict:
@@ -93,12 +113,35 @@ def reference_design(brief: DomainBrief) -> dict:
                                  "control_low": "c_lo_lo", "proposition": "increase_gt"}}
 
 
-def verify_feasibility() -> dict:
-    """AC-04：每份简报的参考设计在各私有世界变体上两两可分（DiD 差 > δ）。"""
-    from scripts.s2b.calibrate_s2b import _run_one, _make_spec
+def _did_under(svc, scene, study, brief, ref, world_params, tag, n_block=3):
+    """在给定世界变体（额外参数）下跑参考设计 4 条件 × n_block，返回 DiD。"""
+    ax = brief.factor_axes
+    vals = {}
+    for c in ref["conditions"]:
+        params = dict(_DEFAULTS[scene])
+        for axis in ax:
+            params[axis["scene_param"]] = c["factors"][axis["name"]]
+        params.update(world_params)  # 旋钮覆盖（世界变体）
+        cid = c["id"]
+        for blk in range(n_block):
+            from scripts.s2b.calibrate_s2b import _run_one, _make_spec
+            spec = _make_spec(study_id=study, condition_id=cid, block_id=f"b{blk}",
+                              scene_id=scene, params=params)
+            r = _run_one(svc, spec, f"v-{brief.brief_id}-{tag}-{cid}-{blk}")
+            vals.setdefault(cid, []).append(r["metric_value"])
+    m = lambda c: sum(vals[c]) / len(vals[c])
+    return (m("c_hi_hi") - m("c_lo_hi")) - (m("c_hi_lo") - m("c_lo_lo"))
+
+
+def verify_feasibility(n_block: int = 3) -> dict:
+    """AC-04：每份简报的参考设计在各私有世界变体上 DiD 差 > δ（可分）。
+
+    同时报告参考 DiD 是否非退化（|DiD|>δ），防「漂移不是机制」。
+    """
+    from scripts.s2b.calibrate_s2b import _run_one, _make_spec  # noqa: F401
     from orchestrator.rsi_bridge.physics_service import PhysicsService
-    from orchestrator.rsi_r1 import scenes as S
-    import tempfile, json as _json
+    from orchestrator.rsi_r1 import rubric as R
+    import tempfile
 
     briefs = build_briefs()
     variants = world_variants()
@@ -107,53 +150,20 @@ def verify_feasibility() -> dict:
     report = {}
     for bid, brief in briefs.items():
         scene = brief.scene_id
-        study = {"A_contact_friction": "A", "C_collision_rebound": "C",
-                 "D_forced_vibration": "D"}[scene]
+        study = {"C_collision_rebound": "C", "D_forced_vibration": "D"}[scene]
         ref = reference_design(brief)
-        # 每变体跑参考设计 4 条件 × 3 block → 主对比 DiD
+        delta = float(R.metric_delta(brief.metrics[0]))
         dids = {}
         for vname, vparams in variants[bid].items():
-            ax = brief.factor_axes
-            vals = {}
-            for c in ref["conditions"]:
-                params = {}
-                for axis in ax:
-                    params[axis["scene_param"]] = c["factors"][axis["name"]]
-                # 变体注入（覆盖某些固定/额外参数）
-                params.update(vparams)
-                # 场景感知补默认（各场景边界内取值）
-                from orchestrator.rsi_r1.scenes import scene_doc
-                valid = {p.id for p in scene_doc(scene).params}
-                _sc_defaults = {
-                    "A_contact_friction": {"v0_mps": "0.4", "sliding_friction": "0.4",
-                                           "mass_kg": "0.6", "torsional_friction_m": "0.01"},
-                    "C_collision_rebound": {"v0_mps": "3.0", "solref_damping_ratio": "0.5",
-                                            "solimp_damping": "0.9", "ball_mass_kg": "0.5",
-                                            "solref_time_s": "0.02"},
-                    "D_forced_vibration": {"drive_freq_hz": "1.5", "joint_damping": "0.2",
-                                           "drive_phase_rad": "0.0", "drive_amplitude_nm": "1.0"},
-                }[scene]
-                for k, v in _sc_defaults.items():
-                    if k in valid:
-                        params.setdefault(k, v)
-                for b in range(3):
-                    spec = _make_spec(study_id=study, condition_id=c["id"],
-                                      block_id=f"b{b}", scene_id=scene, params=params)
-                    r = _run_one(svc, spec, f"f-{bid}-{vname}-{c['id']}")
-                    vals.setdefault((vname, c["id"]), []).append(r["metric_value"])
-            th, tl = "c_hi_hi", "c_lo_hi"
-            ch, cl = "c_hi_lo", "c_lo_lo"
-            mean = lambda v, cid: sum(vals[(v, cid)]) / len(vals[(v, cid)])
-            dids[vname] = ((mean(vname, th) - mean(vname, tl))
-                           - (mean(vname, ch) - mean(vname, cl)))
-        # 两两可分：变体间 DiD 差 > δ
-        from orchestrator.rsi_r1 import rubric as R
-        delta = float(R.metric_delta(brief.metrics[0]))
+            dids[vname] = _did_under(svc, scene, study, brief, ref, vparams, vname, n_block)
         vs = list(dids.values())
         min_pair = min((abs(vs[i] - vs[j]) for i in range(len(vs))
                         for j in range(i + 1, len(vs))), default=0.0)
-        report[bid] = {"dids": dids, "min_pair_diff": min_pair, "delta": delta,
-                       "separable": min_pair > delta}
+        # 非退化：任一变体下参考 DiD 显著偏离 0
+        max_abs_did = max(abs(v) for v in vs)
+        report[bid] = {"dids": dids, "min_pair_diff": min_pair, "max_abs_did": max_abs_did,
+                       "delta": delta, "separable": min_pair > delta,
+                       "nondegenerate": max_abs_did > delta}
     return report
 
 
@@ -167,14 +177,20 @@ def main() -> int:
     for bid, b in briefs.items():
         print(f"  {bid}: {b.scene_id} metric={b.metrics} axes={[a['name'] for a in b.factor_axes]}")
     if args.verify:
-        print("=== 可行性预检（参考设计跨世界变体两两可分）===")
+        print("=== 可行性预检（参考设计跨世界变体可分 & 非退化）===")
         rep = verify_feasibility()
+        ok = True
         for bid, r in rep.items():
+            sep, nd = r["separable"], r["nondegenerate"]
+            ok = ok and sep and nd
             print(f"  {bid}: min_pair_diff={r['min_pair_diff']:.4g} δ={r['delta']} "
-                  f"可分={r['separable']} dids={ {k: round(v,6) for k,v in r['dids'].items()} }")
+                  f"可分={sep} | max|DiD|={r['max_abs_did']:.4g} 非退化={nd} "
+                  f"dids={ {k: round(v, 6) for k, v in r['dids'].items()} }")
         out = Path("/mnt/artifacts/simpraxis/s2c_open_feasibility.json")
-        out.write_text(json.dumps(rep, indent=2))
+        out.write_text(json.dumps(rep, indent=2, ensure_ascii=False))
         print(f"报告：{out}")
+        print(f"全 6 可分且非退化：{ok}（{sum(1 for r in rep.values() if r['separable'] and r['nondegenerate'])}/{len(rep)}）")
+        return 0 if ok else 2
     return 0
 
 

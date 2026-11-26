@@ -67,9 +67,12 @@ def build_rules() -> dict:
                "orchestrator/rsi_bridge/host_recompute.py",
                "orchestrator/rsi_r1/rubric.py", "orchestrator/rsi_r1/scenes.py",
                "orchestrator/rsi_r1/physics.py",
-               "orchestrator/rsi_r1/task_specs.py", "orchestrator/rsi_r1/metrics.py"]
+               "orchestrator/rsi_r1/task_specs.py", "orchestrator/rsi_r1/metrics.py",
+               # Q 池仪器面（rev2 纳入冻结：设计三模块 + 简报/可行性脚本）
+               "orchestrator/hk/design_space.py", "orchestrator/hk/design_gate.py",
+               "orchestrator/hk/design_compiler.py", "scripts/s2c/pool_open.py"]
     return {
-        "schema": "simpraxis.s2c.rules.v1", "version": 1, "lock_rev": 1,
+        "schema": "simpraxis.s2c.rules.v1", "version": 2, "lock_rev": 2,
         "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "frozen_discipline": FROZEN_DISCIPLINE,
         "frozen_disciple_module_anchors": {m: _sha_file(REPO / m) for m in modules},
@@ -87,6 +90,7 @@ def build_campaign(*, rules_sha: str) -> dict:
     # 导入 P 池实例（脚本路径）
     sys.path.insert(0, str(REPO / "scripts" / "s2c"))
     from pool_preset import build_instances  # noqa: E402
+    from pool_open import build_briefs, world_variants  # noqa: E402
     insts = build_instances()
     preset = {}
     for name, (label, task) in insts.items():
@@ -98,15 +102,26 @@ def build_campaign(*, rules_sha: str) -> dict:
             "conditions": [c.to_dict() for c in task.conditions],
             "primary": task.primary.to_dict(),
         }
+    briefs = build_briefs()
+    q_briefs = {bid: b.public_document() for bid, b in briefs.items()}
     return {
-        "schema": "simpraxis.s2c.campaign.v1", "version": 1, "lock_rev": 1,
+        "schema": "simpraxis.s2c.campaign.v1", "version": 2, "lock_rev": 2,
         "rules_bundle_sha256": rules_sha,
         "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "p_pool": preset,
         "p_pool_labels": {k: v["label"] for k, v in preset.items()},
-        "q_pool": {"status": "pending_design_space_v1（S2c-2 落地后 lock_rev=2 重签）",
-                   "domains": ["contact_sliding", "rebound", "forced_vibration"],
-                   "briefs_per_domain": 2},
+        "q_pool": {
+            "status": "frozen_rev2_separable_verified（AC-04 实测 6/6 可分且非退化）",
+            "domains": ["rebound", "forced_vibration"],
+            "n_briefs": len(briefs),
+            "briefs": q_briefs,
+            # 私有世界变体（只进审查者通道；actor 永远只见 public_document）
+            "world_variants": world_variants(),
+            "feasibility_probe": "python scripts/s2c/pool_open.py --verify",
+            "domain_deviation": ("原计划 contact_sliding/rebound/forced_vibration 3 域×2；"
+                                 "物理实测 scene A 的位移/止动时仅 (v0,μ) 纯函数、mass 被消去，"
+                                 "无自由旋钮可调制交互（DiD 恒 0）→ 换域为 rebound 4 + forced_vib 2"),
+        },
         "one_round": ONE_ROUND,
     }
 
@@ -122,9 +137,11 @@ def main() -> int:
     campaign_sha = hashlib.sha256(cb).hexdigest()
     (root / "rules_bundle.json").write_bytes(rb)
     (root / "campaign_bundle.json").write_bytes(cb)
-    lock = {"schema": "simpraxis.s2c.lock.v1", "lock_rev": 1,
+    lock = {"schema": "simpraxis.s2c.lock.v1", "lock_rev": 2,
             "rules_sha256": rules_sha, "campaign_sha256": campaign_sha,
-            "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "lock_rev_note": "rev2：并入 Q 池 6 简报+私有世界变体（AC-04 改域重设计），"
+                             "G-LOCK-REV 授权设计变更后升 rev 重签"}
     (root / "lock.json").write_text(json.dumps(lock, indent=2, sort_keys=True))
     print(f"rules_sha256:    {rules_sha}")
     print(f"campaign_sha256: {campaign_sha}")

@@ -13,6 +13,12 @@ def test_no_design_change_passes():
     g_lock_rev(GuardCtx(stage="K0"))  # 无变更 → 放行
 
 
+def test_declared_false_design_change_passes():
+    # 回归：design_change=False（显式声明不改设计面）必须放行，不得误报 NO_REV。
+    g_lock_rev(GuardCtx(stage="K0", lock_rev=2, design_change=False,
+                        proposed_lock_rev=2, lock_resigned=False))
+
+
 def test_design_change_without_rev_rejected():
     ctx = GuardCtx(stage="K1", lock_rev=2, design_change="改因子水平",
                    proposed_lock_rev=2, lock_resigned=True)

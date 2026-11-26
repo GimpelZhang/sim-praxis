@@ -233,7 +233,9 @@ def g_lock_rev(ctx: GuardCtx) -> None:
     * 有 design_change 且递增但未重签 → 拒绝（未重签）；
     * 有 design_change + rev 递增 + 已重签 → 放行（合法锁内适配）。
     """
-    if ctx.design_change is None:
+    if not ctx.design_change:
+        # None（未声明，legacy 调用）或 False（显式声明本次不改设计面）→ 放行。
+        # 仅当真值 design_change 时才进入 rev/重签强制。
         return
     if ctx.proposed_lock_rev <= ctx.lock_rev:
         raise GuardViolation(
