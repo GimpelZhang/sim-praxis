@@ -71,8 +71,10 @@ def analyze() -> dict:
         "per_instance": per_instance,
         "n_instances": n, "n_pass": n_pass, "pass_rate": rate,
         "position": position, "r2_next_metric": r2,
-        "v_headroom": ("HAS_HEADROOM" if 0 < rate < n or n_pass == n
-                       else ("FLOOR" if n_pass == 0 else "PARTIAL")),
+        # 修正：原判据 `0 < rate < n` 把 rate(0..1)与计数 n 比，恒真；应三分——
+        # 全过=天花板（预置题无余量，CEILING_NO_HEADROOM）；全败=地板；其余=有余量。
+        "v_headroom": ("CEILING_NO_HEADROOM" if n_pass == n
+                       else ("FLOOR" if n_pass == 0 else "HAS_HEADROOM")),
     }
 
 
