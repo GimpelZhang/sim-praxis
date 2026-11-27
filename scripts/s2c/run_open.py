@@ -34,7 +34,7 @@ from orchestrator.rsi_r1 import rubric as R
 
 from open_tasks import build_open_task, scene_config
 from pool_open import _BRIEFS, build_briefs
-from q_callbacks import make_callbacks
+from q_callbacks import make_callbacks, _nc_id
 
 _STUDY = {"C_collision_rebound": "C_N", "D_forced_vibration": "D_N"}
 
@@ -133,8 +133,10 @@ def run_brief(bid: str, brief, *, fake: bool, ledger, campaign_root) -> dict:
         rec["code"] = "DESIGN_NOT_READY"
         (label_dir / "study_report.json").write_text(json.dumps(rec, ensure_ascii=False, indent=2))
         return rec
-    # 2) 设计 → 登记 open task
-    task = build_open_task(res["spec"], brief, true_regime=true_regime)
+    # 2) 设计 → 登记 open task（只取 primary 2×2 四单元 + host sham）
+    nc_base = _nc_id(res["design"]["negative_control"]["base"])
+    task = build_open_task(res["spec"], brief, true_regime=true_regime,
+                           nc_base_id=nc_base)
     register_task(task)
     study = _STUDY[brief.scene_id]
     spec = {"schema": "simpraxis.s2c.experiment_spec", "task_id": task.task_id,

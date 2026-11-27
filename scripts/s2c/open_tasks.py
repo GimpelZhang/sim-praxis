@@ -64,7 +64,12 @@ def _map_condition(cell: Mapping[str, Any], brief, scene_id: str,
     for axis in brief.factor_axes:
         if axis["name"] in cell.get("factors", {}):
             params[axis["scene_param"]] = str(cell["factors"][axis["name"]])
-    params.update({str(k): str(v) for k, v in (cell.get("scene_params") or {}).items()})
+    # 仅接受场景合法参数键（actor 可能过度指定 scene_params 的物理细节/元信息，
+    # 这些非法键会被物理层 UNKNOWN_PARAM 拒——过滤掉，不污染）。
+    valid = {p.id for p in S.scene_doc(scene_id).params}
+    for k, v in (cell.get("scene_params") or {}).items():
+        if str(k) in valid:
+            params[str(k)] = str(v)
     params.update({str(k): str(v) for k, v in true_regime.items()})  # 真实 regime（fixed）
     return params
 
@@ -72,44 +77,54 @@ def _map_condition(cell: Mapping[str, Any], brief, scene_id: str,
 def build_open_task(compiled: Mapping[str, Any], brief, *,
                     true_regime: Mapping[str, str],
                     task_id: str | None = None,
+                    nc_base_id: "str | None" = None,
                     commitment: "str | None" = None) -> TaskSpecV13:
-    """设计 → TaskSpecV13。compiled 来自 compile_design(study_design.v1)。"""
+    """设计 → TaskSpecV13。compiled 来自 compile_design(study_design.v1)。
+
+    只用 actor 的 **primary 2×2 四单元** + host 构建的物理 sham（忽略 actor 自由
+    多出的条件与其自造 seed-sham——确定性物理下 seed-sham 退化）。nc_base_id
+    由调用方从**原始设计**嵌套 negative_control 提取传入。
+    """
     scene_id = str(compiled["scene_id"])
     cfg = scene_config(scene_id)
     metric = str(compiled["metric"])
     cells = compiled.get("conditions")
     if not isinstance(cells, list) or not cells:
         raise OpenTaskError("NO_CONDITIONS", "compiled.conditions 为空")
-    cell_ids = [str(c["id"]) for c in cells]
     pc = compiled["primary_contrast"]
-    # compile_design 把 DiD 四项放在 primary_contrast["terms"]（兼容顶层直取）
     terms_src = pc["terms"] if isinstance(pc.get("terms"), Mapping) else pc
-    for k in ("treatment_high", "treatment_low", "control_high", "control_low"):
-        if str(terms_src[k]) not in cell_ids:
-            raise OpenTaskError("PRIMARY_CELL_MISSING",
-                                f"primary.{k}={terms_src[k]!r} 不在条件 {cell_ids}")
+    four = [str(terms_src[k]) for k in
+            ("treatment_high", "treatment_low", "control_high", "control_low")]
+    by_id = {str(c["id"]): c for c in cells}
+    missing = [i for i in four if i not in by_id]
+    if missing:
+        raise OpenTaskError("PRIMARY_CELL_MISSING", f"primary 单元缺 {missing}")
     nc = compiled["negative_control"]
-    base = str(nc["base"])
-    if base not in cell_ids:
-        raise OpenTaskError("NC_BASE_MISSING", f"NC base={base!r} 不在条件")
-
-    # 条件：actor 单元（映射）+ host 构建的 sham
-    base_params = _map_condition(next(c for c in cells if str(c["id"]) == base),
-                                 brief, scene_id, true_regime)
+    base = str(nc_base_id) if nc_base_id else (
+        str(nc["base"].get("condition_id")) if isinstance(nc["base"], Mapping)
+        else str(nc["base"]))
+    if base not in four:
+        # 若 base 不在 4 单元内，退回 treatment_low（一个真实单元）作 NC base
+        base = four[1]
+    # 条件 = 4 primary 单元（映射）+ host 构建的物理 sham
+    base_params = _map_condition(by_id[base], brief, scene_id, true_regime)
     sham_id = "host_sham"
-    if sham_id in cell_ids:
-        raise OpenTaskError("SHAM_ID_CLASH", "actor 不得占用 host_sham 条件 id")
     sham_params = dict(base_params)
     sp = cfg["sham_param"]
     sham_params[sp] = str(Decimal(sham_params[sp]) + cfg["sham_perturb"])
-    conditions = tuple(TS._condition(str(c["id"]), scene_id,
-                                     _map_condition(c, brief, scene_id, true_regime))
-                       for c in cells) + (TS._condition(sham_id, scene_id, sham_params),)
+    conditions = tuple(TS._condition(i, scene_id,
+                                     _map_condition(by_id[i], brief, scene_id, true_regime))
+                       for i in four) + (TS._condition(sham_id, scene_id, sham_params),)
 
-    # 主对比：actor DiD
+    # 主对比：actor DiD（proposition 合法化：actor 偶把命题写成叙事长文；
+    # 方向性 claim 不用于 R1-DESIGN 判词，regime 依赖由审查者+DiD 量级裁定）
+    _VALID_PROP = {"increase_gt", "decrease_gt", "equivalent"}
+    prop = str(pc.get("proposition", "decrease_gt"))
+    if prop not in _VALID_PROP:
+        prop = "decrease_gt"
     primary = X.ContrastV13(
         id=str(pc["id"]), kind=X.KIND_DID, metric=metric,
-        proposition=str(pc.get("proposition", "decrease_gt")),
+        proposition=prop,
         delta=R.metric_delta(metric),
         terms=X.did_terms(treatment_high=str(terms_src["treatment_high"]),
                           treatment_low=str(terms_src["treatment_low"]),
@@ -125,7 +140,7 @@ def build_open_task(compiled: Mapping[str, Any], brief, *,
         "delta": str(R.metric_delta(cfg["metric_ne"])),
         "ci_level": "0.90",
         "equivalence_metric": cfg["metric_ne"],
-        "candidates": [str(c["id"]) for c in cells] + [sham_id],
+        "candidates": four + [sham_id],
         "default": {"base": base, "sham": sham_id},
     }
 

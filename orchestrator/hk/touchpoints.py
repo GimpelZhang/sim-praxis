@@ -363,6 +363,8 @@ class HeadlessActor:
     #: 各触点 response 必填键（形状坏 = 诚实失败，不猜）。
     REQUIRED = {
         "propose_plan": ("conditions", "n_block", "study", "plan_sha256"),
+        "propose_design": ("conditions", "primary_contrast", "negative_control", "metric"),
+        "propose_design_repair": ("conditions", "primary_contrast", "negative_control", "metric"),
         "write_analysis": ("source",),
         "submit_claim": ("verdict", "statement", "contrasts"),
         "submit_claim_repair": ("verdict", "statement", "contrasts"),

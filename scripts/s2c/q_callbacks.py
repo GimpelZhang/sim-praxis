@@ -11,6 +11,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from decimal import Decimal
+from typing import Mapping
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "s2b"))
@@ -42,11 +43,19 @@ def _run_cells(svc, design, brief, scene, regime, n_block, tag):
     return vals
 
 
+def _nc_id(x):
+    """negative_control 的 base/sham：兼容 str 或嵌套 {condition_id,...}。"""
+    if isinstance(x, dict):
+        return str(x.get("condition_id"))
+    return str(x)
+
+
 def _did(design, vals):
     pc = design["primary_contrast"]
+    src = pc["terms"] if isinstance(pc.get("terms"), Mapping) else pc
     m = lambda c: sum(vals[c]) / len(vals[c])
-    return ((m(pc["treatment_high"]) - m(pc["treatment_low"]))
-            - (m(pc["control_high"]) - m(pc["control_low"])))
+    return ((m(src["treatment_high"]) - m(src["treatment_low"]))
+            - (m(src["control_high"]) - m(src["control_low"])))
 
 
 def make_callbacks(svc, brief, *, true_regime, regime_param, regime_lo, regime_hi,
@@ -79,7 +88,7 @@ def make_callbacks(svc, brief, *, true_regime, regime_param, regime_lo, regime_h
                              {"regime": regime_hi, "did": d_hi}]}
 
     def nc_check(design):
-        base = str(design["negative_control"]["base"])
+        base = _nc_id(design["negative_control"]["base"])
         base_cell = next(c for c in design["conditions"] if str(c["id"]) == base)
         sp = cfg["sham_param"]
         lo_n, hi_n = cfg["nuisance_support"]
