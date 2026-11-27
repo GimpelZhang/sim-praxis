@@ -42,7 +42,8 @@ def _load(bid: str) -> dict | None:
     results = (k7 or {}).get("contrasts", [])
     nc = (k7 or {}).get("negative_control")
     gate = rep.get("gate_reports", [{}])[-1]
-    return {"claim": claim, "report": report, "results": results, "nc": nc,
+    return {"status": "DESIGN_READY", "code": rep.get("code"),
+            "claim": claim, "report": report, "results": results, "nc": nc,
             "gate": gate, "rep": rep}
 
 
@@ -50,10 +51,10 @@ def main() -> int:
     ev = rsi_s2c_evidence_root()
     batch = "s2c-q-dual-review"
     try:
-        write_approval(batch_id=batch, task=3, stage="coding_debug", approved=16,
-                       beyond_normal=False, note="S2c Q 池双审 2×N（自批）",
+        write_approval(batch_id=batch, task=3, stage="coding_debug", approved=8,
+                       beyond_normal=False, note="S2c Q 池双审 2×4（自批）",
                        namespace=RSI_S2C_NAMESPACE)
-        print(f"批准件：{batch} task3 approved 16")
+        print(f"批准件：{batch} task3 approved 8")
     except QuotaError as e:
         print(f"批准件复用：{e}")
     gw = ModelGateway(max_attempts=1, ledger=QuotaLedger.rsi_s2c())
