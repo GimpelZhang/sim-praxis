@@ -88,7 +88,10 @@ def make_callbacks(svc, brief, *, true_regime, regime_param, regime_lo, regime_h
                              {"regime": regime_hi, "did": d_hi}]}
 
     def nc_check(design):
+        ids = {str(c["id"]) for c in design["conditions"]}
         base = _nc_id(design["negative_control"]["base"])
+        if base not in ids:  # actor 嵌套 base 可能指向不存在 id → 退到排序首单元
+            base = sorted(ids)[0]
         base_cell = next(c for c in design["conditions"] if str(c["id"]) == base)
         sp = cfg["sham_param"]
         lo_n, hi_n = cfg["nuisance_support"]
