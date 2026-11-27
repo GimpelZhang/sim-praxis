@@ -80,14 +80,21 @@ class _FakeActor:
         raise SystemExit(f"fake actor 未覆盖触点 {name}")
 
 
-def _frontend_actor(headless, ev_dir):
-    """前端（run_design）用：为 propose_design/repair 注入 run_dir 后调 HeadlessActor。"""
+def _frontend_actor(headless, ev_dir, brief):
+    """前端（run_design）用：为 propose_design/repair 注入 run_dir 后调 HeadlessActor。
+
+    brief 固定指标：actor 若漏填 metric，补 brief.metrics[0]（指标由 brief 钉死，
+    不因省略而失败）；其余靠 G-DESIGN/compile 自然判。
+    """
     ctr = {"n": 0}
     def a(name, contract, value):
         if name in ("propose_design", "propose_design_repair"):
             ctr["n"] += 1
             rd = ensure_private_dir(ev_dir / "design" / f"tp_{name}_{ctr['n']}", mode=0o700)
-            return headless(name, contract, {**dict(value), "run_dir": str(rd)})
+            resp = dict(headless(name, contract, {**dict(value), "run_dir": str(rd)}))
+            if not resp.get("metric"):
+                resp["metric"] = brief.metrics[0]
+            return resp
         raise SystemExit(f"前端未覆盖触点 {name}")
     return a
 
@@ -123,7 +130,7 @@ def run_brief(bid: str, brief, *, fake: bool, ledger, campaign_root) -> dict:
         runner = HeadlessSessionRunner(sessions_root=rsi_s2c_sessions_dir() / "ws",
                                        ledger=ledger, max_turns=90, timeout_s=1800)
         base = HeadlessActor(runner, evidence_root=label_dir, host_label=bid)
-        fe = _frontend_actor(base, label_dir)
+        fe = _frontend_actor(base, label_dir, brief)
     # 1) 设计前端 + G-DESIGN
     res = run_design(brief, fe, nc_check=nc, pilot_effect=pe, discriminability=di,
                      delta=float(R.metric_delta(brief.metrics[0])))
@@ -161,16 +168,29 @@ def run_brief(bid: str, brief, *, fake: bool, ledger, campaign_root) -> dict:
     return rec
 
 
-def run_open(*, fake: bool, only: str | None) -> int:
+def run_open(*, fake: bool, only: str | None, briefs_sel: "list[str] | None" = None) -> int:
     ev = rsi_s2c_evidence_root()
     campaign_root = ensure_private_dir(ev / "pool_q", mode=0o700)
-    ledger = SessionLedger(rsi_s2c_sessions_dir() / "sessions.jsonl", hard_cap_sessions=56)
+    ledger = SessionLedger(rsi_s2c_sessions_dir() / "sessions.jsonl", hard_cap_sessions=96)
     briefs = build_briefs()
-    ids = [only] if only else list(briefs)
+    if briefs_sel:
+        ids = briefs_sel
+    elif only:
+        ids = [only]
+    else:
+        ids = list(briefs)
     results = {}
     for bid in ids:
         print(f"\n=== {bid} ({briefs[bid].scene_id}) ===")
-        rec = run_brief(bid, briefs[bid], fake=fake, ledger=ledger, campaign_root=campaign_root)
+        try:
+            rec = run_brief(bid, briefs[bid], fake=fake, ledger=ledger, campaign_root=campaign_root)
+        except Exception as exc:  # noqa: BLE001 — 单 brief 失败隔离，不拖垮整批
+            import traceback as _tb
+            rec = {"brief_id": bid, "status": "CRASH", "error": f"{type(exc).__name__}: {exc}",
+                   "traceback": "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))}
+            (campaign_root / "trial" / bid).mkdir(parents=True, exist_ok=True)
+            (campaign_root / "trial" / bid / "study_report.json").write_text(
+                json.dumps(rec, ensure_ascii=False, indent=2, default=str))
         results[bid] = rec
         print(f"  {rec['status']} / {rec.get('outcome_status')} / "
               f"{rec.get('code')} verdict={rec.get('claim_verdict')}")
@@ -191,8 +211,10 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fake", action="store_true")
     ap.add_argument("--only", default=None)
+    ap.add_argument("--briefs", default=None, help="逗号分隔的 brief_id 列表")
     args = ap.parse_args()
-    return run_open(fake=args.fake, only=args.only)
+    sel = [b.strip() for b in args.briefs.split(",")] if args.briefs else None
+    return run_open(fake=args.fake, only=args.only, briefs_sel=sel)
 
 
 if __name__ == "__main__":

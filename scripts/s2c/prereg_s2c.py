@@ -72,14 +72,14 @@ def build_rules() -> dict:
                "orchestrator/hk/design_space.py", "orchestrator/hk/design_gate.py",
                "orchestrator/hk/design_compiler.py", "scripts/s2c/pool_open.py"]
     return {
-        "schema": "simpraxis.s2c.rules.v1", "version": 3, "lock_rev": 3,
+        "schema": "simpraxis.s2c.rules.v1", "version": 5, "lock_rev": 5,
         "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "frozen_discipline": FROZEN_DISCIPLINE,
         "frozen_disciple_module_anchors": {m: _sha_file(REPO / m) for m in modules},
         "verdict_thresholds": VERDICT_THRESHOLDS,
         "r2_decision_table": R2_DECISION_TABLE,
         "one_round": ONE_ROUND,
-        "budget": {"gateway_hard_cap": 44, "session_hard_cap": 56,
+        "budget": {"gateway_hard_cap": 44, "session_hard_cap": 96,
                    "task_caps": {"1": 4, "2": 24, "3": 8, "4": 8}},
         "touchpoint_caps": {"P_per_instance": 3, "Q_per_instance": 5,
                             "Q_design_repair": 2},
@@ -105,13 +105,13 @@ def build_campaign(*, rules_sha: str) -> dict:
     briefs = build_briefs()
     q_briefs = {bid: b.public_document() for bid, b in briefs.items()}
     return {
-        "schema": "simpraxis.s2c.campaign.v1", "version": 3, "lock_rev": 3,
+        "schema": "simpraxis.s2c.campaign.v1", "version": 5, "lock_rev": 5,
         "rules_bundle_sha256": rules_sha,
         "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "p_pool": preset,
         "p_pool_labels": {k: v["label"] for k, v in preset.items()},
         "q_pool": {
-            "status": "frozen_rev3_regime_decoupled_verified（regime 与 NC 链不同参；6/6 可分且非退化，R2 前置债已解）",
+            "status": "frozen_rev5_sessioncap_raised（regime 与 NC 链不同参；6/6 可分且非退化，R2 前置债已解）",
             "domains": ["rebound", "forced_vibration"],
             "n_briefs": len(briefs),
             "briefs": q_briefs,
@@ -137,7 +137,7 @@ def main() -> int:
     campaign_sha = hashlib.sha256(cb).hexdigest()
     (root / "rules_bundle.json").write_bytes(rb)
     (root / "campaign_bundle.json").write_bytes(cb)
-    lock = {"schema": "simpraxis.s2c.lock.v1", "lock_rev": 3,
+    lock = {"schema": "simpraxis.s2c.lock.v1", "lock_rev": 5,
             "rules_sha256": rules_sha, "campaign_sha256": campaign_sha,
             "frozen_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "lock_rev_note": ("rev3：解 Q 仪器冲突——scene C 加 drop_height_m、D 加 "
