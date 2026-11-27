@@ -89,10 +89,11 @@ def make_callbacks(svc, brief, *, true_regime, regime_param, regime_lo, regime_h
             p_base = _cell_params(design, brief, scene, reg, base_cell)
             p_sham = dict(p_base); p_sham[sp] = str(Decimal(p_sham[sp]) + cfg["sham_perturb"])
             study = _SCENE_NAME[scene]
+            tag = _tick("nc")
             rb = _run_one(svc, _make_spec(study_id=study, condition_id=base, block_id="nc_b",
-                                          scene_id=scene, params=p_base), f"nc-{base}-{nuis_val}")["metric_value"]
+                                          scene_id=scene, params=p_base), f"{tag}-{base}-{nuis_val}")["metric_value"]
             rs = _run_one(svc, _make_spec(study_id=study, condition_id="sham", block_id="nc_b",
-                                          scene_id=scene, params=p_sham), f"nc-sham-{nuis_val}")["metric_value"]
+                                          scene_id=scene, params=p_sham), f"{tag}-sham-{nuis_val}")["metric_value"]
             effs.append(rb - rs)
         sub = all(abs(e) < delta_ne for e in effs)
         nondeg = abs(effs[0] - effs[1]) > 1e-9
